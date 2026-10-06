@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Марс</string>
+    <string name="mobile_shell_title">Мобильная оболочка Марса</string>
+    <string name="connection_label">Подключение</string>
+    <string name="connection_state">Состояние подключения не проверяется</string>
+    <string name="sessions_label">Сессии</string>
+    <string name="sessions_state">Сессии пока недоступны</string>
+    <string name="shell_note">Это базовая оболочка приложения. Авторизация и чат ещё не подключены.</string>
+</resources>

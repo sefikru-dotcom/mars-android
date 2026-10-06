@@ -1,0 +1,7 @@
+<resources>
+    <color name="mars_background">#10131A</color>
+    <color name="mars_surface">#1B202B</color>
+    <color name="mars_text">#F5F7FA</color>
+    <color name="mars_muted">#AAB2C0</color>
+    <color name="mars_accent">#E76F51</color>
+</resources>
