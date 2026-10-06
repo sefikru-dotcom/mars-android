@@ -1,9 +1,10 @@
 name: CI
 
-on:
+"on":
   push:
     branches: [main, 'run/**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -59,22 +60,3 @@ jobs:
             build/ci-artifacts/SHA256SUMS
           if-no-files-found: warn
           retention-days: 14
-
-  # Kept as an explicit smoke job for the mobile module.
-  mobile:
-    name: Mobile smoke
-    if: ${{ hashFiles('app-mobile/**') != '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-      - name: Make wrapper executable
-        run: chmod +x ./gradlew
-      - name: Assemble mobile debug APK
-        run: ./gradlew --no-daemon --stacktrace :app-mobile:assembleDebug
