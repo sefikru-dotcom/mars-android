@@ -1,0 +1,21 @@
+# Android/Gradle
+.gradle/
+*/build/
+build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Local signing/secrets
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+.env
+.env.*
+
+# Reports
+reports/
+artifacts/
