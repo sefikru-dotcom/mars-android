@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'run/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wrapper-validation:
+    name: Gradle wrapper validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+
+  android:
+    name: Android checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Make wrapper executable
+        run: chmod +x ./gradlew
+      - name: Run core-network tests
+        run: ./gradlew --no-daemon --stacktrace :core-network:test
+      - name: Assemble TV debug APK
+        run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
+      - name: Generate artifact checksums
+        if: always()
+        run: |
+          mkdir -p build/ci-artifacts
+          find app-tv/build/outputs -type f -print0 2>/dev/null \
+            | sort -z \
+            | xargs -0 -r sha256sum > build/ci-artifacts/SHA256SUMS
+      - name: Upload build artifacts and checksums
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-${{ github.sha }}
+          path: |
+            app-tv/build/outputs/**/*.apk
+            build/ci-artifacts/SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 14
+
+  # No mobile module exists in the baseline. This remains skipped (not failing)
+  # until app-mobile is added; the condition makes its status explicit in CI.
+  mobile:
+    name: Mobile (pending module)
+    if: ${{ hashFiles('app-mobile/**') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mobile module is available
+        run: echo 'app-mobile module detected; add its build command here.'
