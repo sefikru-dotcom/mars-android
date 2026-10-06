@@ -2,8 +2,7 @@
     <application
         android:theme="@style/AppTheme"
         android:label="Марс"
-        android:icon="@drawable/ic_mars"
-        android:usesCleartextTraffic="true">
+        android:icon="@drawable/ic_mars">
         <activity
             android:name=".MainActivity"
             android:exported="true">

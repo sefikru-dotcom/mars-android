@@ -23,7 +23,7 @@ The client must keep `poll_secret` confidential and must not log, commit, upload
 - `status`: current pairing status.
 - `expires_at`: server expiration timestamp.
 
-The exact transport for the two parameters (query or otherwise) is owned by the server implementation and must not be inferred from this document. Clients must handle expiration and terminal statuses without treating polling as approval.
+The current Android implementation sends both parameters as URL query parameters. This is a read-only status poll; polling must not be treated as approval. Clients must handle expiration and terminal statuses without treating polling as approval.
 
 ## Approve pairing
 

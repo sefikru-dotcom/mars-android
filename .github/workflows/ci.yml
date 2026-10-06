@@ -39,6 +39,8 @@ jobs:
         run: ./gradlew --no-daemon --stacktrace :core-network:test
       - name: Assemble TV debug APK
         run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
+      - name: Assemble mobile debug APK
+        run: ./gradlew --no-daemon --stacktrace :app-mobile:assembleDebug
       - name: Generate artifact checksums
         if: always()
         run: |
@@ -53,18 +55,26 @@ jobs:
           name: android-build-${{ github.sha }}
           path: |
             app-tv/build/outputs/**/*.apk
+            app-mobile/build/outputs/**/*.apk
             build/ci-artifacts/SHA256SUMS
           if-no-files-found: warn
           retention-days: 14
 
-  # No mobile module exists in the baseline. This remains skipped (not failing)
-  # until app-mobile is added; the condition makes its status explicit in CI.
+  # Kept as an explicit smoke job for the mobile module.
   mobile:
-    name: Mobile (pending module)
+    name: Mobile smoke
     if: ${{ hashFiles('app-mobile/**') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Mobile module is available
-        run: echo 'app-mobile module detected; add its build command here.'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Make wrapper executable
+        run: chmod +x ./gradlew
+      - name: Assemble mobile debug APK
+        run: ./gradlew --no-daemon --stacktrace :app-mobile:assembleDebug

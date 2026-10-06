@@ -24,4 +24,4 @@ The workflow uploads debug APK outputs and `SHA256SUMS` as short-lived CI eviden
 
 ## Current baseline limitation
 
-There is no mobile module in the baseline. The `mobile` CI job is conditionally skipped until an `app-mobile` module exists; its absence must not make baseline CI fail.
+The repository now includes an `app-mobile` shell. CI builds both `app-tv` and `app-mobile`; this shell deliberately does not claim native auth or chat support.
