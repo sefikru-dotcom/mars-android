@@ -1,17 +1,27 @@
 package ru.mars.network
 
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.ByteString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.PlaybackStatus
 import ru.mars.network.repository.MusicRepository
 
@@ -53,6 +63,22 @@ class MusicRepositoryTest {
     }
 
     @Test
+    fun webSocketUrlMapsBothSchemes() {
+        // Kotlin's String.replaceFirst(String, String) is literal, so the previous
+        // "^http" regex pattern silently did nothing; the helper must map explicitly.
+        assertEquals(
+            "ws://marscore.ru/music/api/connect/ws",
+            MusicRepository.webSocketUrl("http://marscore.ru/music/api/connect/ws"),
+        )
+        assertEquals(
+            "wss://marscore.ru/music/api/connect/ws",
+            MusicRepository.webSocketUrl("https://marscore.ru/music/api/connect/ws"),
+        )
+        // Non-http schemes are left untouched.
+        assertEquals("ws://h/p", MusicRepository.webSocketUrl("ws://h/p"))
+    }
+
+    @Test
     fun statusReadsSessionRestore() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
@@ -71,6 +97,28 @@ class MusicRepositoryTest {
             assertEquals("tv-1", state.activeDeviceId)
             server.takeRequest() // the initial websocket HTTP upgrade request
             Unit
+        }
+    }
+
+    @Test
+    fun statusIgnoresDevicesUpdateAndUsesRealSessionRestore() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
+                override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                    // The live server broadcasts DEVICES_UPDATE (which also carries
+                    // globalSession) right after REGISTER; it must not be consumed
+                    // as the restore.
+                    webSocket.send("{\"type\":\"DEVICES_UPDATE\",\"devices\":[],\"globalSession\":{\"track\":{\"id\":\"stale\",\"title\":\"S\",\"artist\":\"A\"},\"queue\":[],\"currentIndex\":0,\"currentTime\":99.0,\"volume\":1.0,\"isPlaying\":true,\"activeDeviceId\":\"stale-device\"}}")
+                    webSocket.send("{\"type\":\"SESSION_RESTORE\",\"session\":{\"track\":{\"id\":\"real\",\"title\":\"R\",\"artist\":\"A\",\"duration\":\"2:00\"},\"queue\":[],\"currentIndex\":1,\"currentTime\":3.0,\"volume\":0.5,\"isPlaying\":true,\"activeDeviceId\":\"tv-real\"}}")
+                }
+                override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
+                }
+            }))
+            val state = MusicRepository(server.url("/").toString().removeSuffix("/")).getStatus()
+            assertEquals("real", state.track?.id)
+            assertEquals("tv-real", state.activeDeviceId)
+            assertEquals(3.0, state.positionSeconds, 0.0)
         }
     }
 
@@ -125,23 +173,159 @@ class MusicRepositoryTest {
     }
 
     @Test
-    fun controlCommandFallsBackToAllOnlyWithoutActiveDevice() = runBlocking {
+    fun duplicateSessionRestoreProducesSingleControlCommand() = runBlocking {
         MockWebServer().use { server ->
             val received = LinkedBlockingQueue<String>()
+            val serverSawClose = CountDownLatch(1)
+            val restore = "{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[],\"activeDeviceId\":\"tv-1\"}}"
             server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
                 override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                    webSocket.send(restore)
+                    webSocket.send(restore) // duplicate frames must be ignored
+                }
+                override fun onMessage(webSocket: okhttp3.WebSocket, text: String) { received.offer(text) }
+                override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
+                    serverSawClose.countDown()
+                    webSocket.close(1000, null)
+                }
+            }))
+            MusicRepository(server.url("/").toString().removeSuffix("/")).next()
+            assertTrue(serverSawClose.await(5, TimeUnit.SECONDS))
+
+            val texts = mutableListOf<String>()
+            received.drainTo(texts)
+            assertEquals("exactly one CONTROL_CMD for duplicated SESSION_RESTORE", 1, texts.count { it.contains("CONTROL_CMD") })
+        }
+    }
+
+    @Test
+    fun commandFailsWithoutActiveDeviceAndNeverBroadcasts() = runBlocking {
+        MockWebServer().use { server ->
+            val received = LinkedBlockingQueue<String>()
+            val serverDone = CountDownLatch(1)
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
+                override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                    // Restored session without activeDeviceId.
                     webSocket.send("{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[]}}")
                 }
                 override fun onMessage(webSocket: okhttp3.WebSocket, text: String) { received.offer(text) }
                 override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
+                override fun onClosed(webSocket: okhttp3.WebSocket, code: Int, reason: String) { serverDone.countDown() }
+                override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) { serverDone.countDown() }
             }))
-            MusicRepository(server.url("/").toString().removeSuffix("/")).play()
-            val controlCmd = awaitMessage(received, "CONTROL_CMD")
-            assertNotNull(controlCmd)
-            assertTrue(controlCmd!!.contains("\"targetDeviceId\":\"all\""))
-            assertTrue(controlCmd.contains("\"action\":\"playPause\""))
+            val error = runCatching {
+                MusicRepository(server.url("/").toString().removeSuffix("/")).play()
+            }.exceptionOrNull()
+
+            assertNotNull("command without an active device must fail, not broadcast", error)
+            assertTrue("expected IllegalStateException, got $error", error is IllegalStateException)
+            assertTrue(error!!.message!!.contains("activeDeviceId"))
+
+            assertTrue(serverDone.await(5, TimeUnit.SECONDS))
+            val texts = mutableListOf<String>()
+            received.drainTo(texts)
+            assertTrue("REGISTER must still be sent", texts.any { it.contains("REGISTER") })
+            assertFalse("no CONTROL_CMD may be sent without an active device", texts.any { it.contains("CONTROL_CMD") })
+            assertFalse(texts.any { it.contains("\"targetDeviceId\":\"all\"") })
         }
     }
+
+    @Test
+    fun serverCloseBeforeRestoreFailsInsteadOfHanging() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
+                override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                    webSocket.close(1000, "bye") // closes before SESSION_RESTORE ever arrives
+                }
+            }))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            // The outer withTimeout proves the call completes with an error instead
+            // of waiting forever for a restore that will never come.
+            val error = runBlocking {
+                withTimeout(5_000) { runCatching { repo.getStatus() }.exceptionOrNull() }
+            }
+            assertNotNull(error)
+            assertTrue("expected IOException about closing before restore, got $error", error is IOException)
+            assertTrue(error!!.message!!.contains("SESSION_RESTORE"))
+        }
+    }
+
+    @Test
+    fun restoreWaitIsBoundedAndCancellationClosesSocket() {
+        MockWebServer().use { server ->
+            val serverDone = CountDownLatch(1)
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
+                // Accepts the socket but never sends SESSION_RESTORE.
+                override fun onClosed(webSocket: okhttp3.WebSocket, code: Int, reason: String) { serverDone.countDown() }
+                override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) { serverDone.countDown() }
+            }))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"), restoreTimeoutMs = 300)
+            val error = runBlocking { runCatching { repo.getStatus() }.exceptionOrNull() }
+            assertNotNull(error)
+            assertTrue("expected TimeoutCancellationException, got $error", error is TimeoutCancellationException)
+            assertTrue(
+                "cancelling the timed-out wait must tear down the socket",
+                serverDone.await(5, TimeUnit.SECONDS),
+            )
+        }
+    }
+
+    @Test
+    fun rejectedControlCommandSendSurfacesAsFailure() {
+        val repo = MusicRepository("http://localhost/music")
+        val socket = FakeWebSocket(sendResult = false)
+        val action = MusicRepository.WsAction.Command("next", "{}")
+        val error = runBlocking {
+            runCatching {
+                suspendCancellableCoroutine<MusicPlayerState> { continuation ->
+                    repo.ConnectListener(action, continuation).onMessage(
+                        socket,
+                        "{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[],\"activeDeviceId\":\"tv-1\"}}",
+                    )
+                }
+            }.exceptionOrNull()
+        }
+        assertNotNull(error)
+        assertTrue("expected IOException from rejected send, got $error", error is IOException)
+        assertTrue(error!!.message!!.contains("CONTROL_CMD"))
+        assertTrue("failed command must cancel the socket", socket.cancelled)
+    }
+
+    @Test
+    fun rejectedRegisterSendSurfacesAsFailure() {
+        val repo = MusicRepository("http://localhost/music")
+        val socket = FakeWebSocket(sendResult = false)
+        val error = runBlocking {
+            runCatching {
+                suspendCancellableCoroutine<MusicPlayerState> { continuation ->
+                    repo.ConnectListener(MusicRepository.WsAction.Status, continuation).onOpen(socket, switchingProtocolsResponse())
+                }
+            }.exceptionOrNull()
+        }
+        assertNotNull(error)
+        assertTrue("expected IOException from rejected REGISTER send, got $error", error is IOException)
+        assertTrue(socket.cancelled)
+    }
+
+    private class FakeWebSocket(private val sendResult: Boolean) : WebSocket {
+        val sent = mutableListOf<String>()
+        var cancelled = false
+        var closed: Pair<Int, String?>? = null
+
+        override fun request(): Request = Request.Builder().url("http://fake/api/connect/ws").build()
+        override fun queueSize(): Long = 0L
+        override fun send(text: String): Boolean { sent += text; return sendResult }
+        override fun send(bytes: ByteString): Boolean = sendResult
+        override fun close(code: Int, reason: String?): Boolean { closed = code to reason; return true }
+        override fun cancel() { cancelled = true }
+    }
+
+    private fun switchingProtocolsResponse(): Response = Response.Builder()
+        .request(Request.Builder().url("http://fake/api/connect/ws").build())
+        .protocol(Protocol.HTTP_1_1)
+        .code(101)
+        .message("Switching Protocols")
+        .build()
 
     private fun awaitMessage(queue: LinkedBlockingQueue<String>, marker: String): String? {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
