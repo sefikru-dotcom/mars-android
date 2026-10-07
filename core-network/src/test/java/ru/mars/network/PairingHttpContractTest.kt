@@ -174,6 +174,19 @@ class PairingHttpContractTest {
     }
 
     @Test
+    fun repositoryExchangesApprovedPairingWithSecretOnlyInJsonBody() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"access_token\":\"opaque\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"device_id\":\"device-1\",\"scopes\":[\"chat:send\"]}"))
+            val result = PairingRepository(fixtureUrl(server)).exchangePairing("pair/1", "poll-secret").getOrThrow()
+            val request = server.takeRequest()
+            assertEquals("/api/v1/auth/device-pairings/pair%2F1/exchange", request.path)
+            assertEquals("POST", request.method)
+            assertEquals("{\"poll_secret\":\"poll-secret\"}", request.body.readUtf8())
+            assertEquals("opaque", result.accessToken)
+            assertFalse(request.path!!.contains("poll-secret"))
+        }
+    }
+    @Test
     fun repositoryRejectsRemoteCleartextAndUrlCredentials() {
         assertThrows(IllegalArgumentException::class.java) {
             PairingRepository("http://192.0.2.1/")
