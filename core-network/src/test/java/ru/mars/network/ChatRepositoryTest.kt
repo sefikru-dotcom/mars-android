@@ -11,6 +11,13 @@ import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.repository.ChatRepository
+import ru.mars.network.repository.MAX_UPLOAD_BYTES
+import ru.mars.network.repository.ModelsRepository
+import ru.mars.network.repository.UploadOutcome
+import ru.mars.network.repository.UploadTooLargeException
+import ru.mars.network.repository.readBoundedUploadPayload
+import java.io.ByteArrayInputStream
+import java.io.InputStream
 
 class ChatRepositoryTest {
     @Test
@@ -78,12 +85,15 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun uploadsAttachmentAsMultipartAndParsesResponse() {
+    fun uploadsAttachmentAsMultipartAndParsesResponse() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{\"filename\":\"photo.jpg\",\"path\":\"/uploads/photo.jpg\",\"size\":3,\"mime\":\"image/jpeg\",\"is_image\":true}"))
             val bytes = byteArrayOf(1, 2, 3)
-            val result = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "photo.jpg", "image/jpeg", bytes, "session-1")
-            assertEquals(ru.mars.network.model.ChatAttachment("photo.jpg", "/uploads/photo.jpg", "image/jpeg", 3L, true), result)
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "photo.jpg", "image/jpeg", bytes, "session-1")
+            assertEquals(
+                UploadOutcome.Success(ru.mars.network.model.ChatAttachment("photo.jpg", "/uploads/photo.jpg", "image/jpeg", 3L, true)),
+                outcome
+            )
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/api/upload", request.path)
@@ -93,6 +103,210 @@ class ChatRepositoryTest {
             assertTrue(body.contains("session-1"))
             assertTrue(body.contains("name=\"file\"; filename=\"photo.jpg\""))
             assertTrue(body.contains("Content-Type: image/jpeg"))
+        }
+    }
+
+    /** Real server rejection for an unknown session: 404 `{"error": "Session not found"}` (api/upload.py). */
+    @Test
+    fun uploadSessionNotFoundSurfacesServerMessage() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("{\"error\": \"Session not found\"}"))
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "a.txt", "text/plain", "hi".toByteArray(), "ghost")
+            assertEquals(UploadOutcome.Failure("Session not found"), outcome)
+        }
+    }
+
+    /** Real server limit response: 413 `{"error": "File too large (max 20MB)"}` (api/upload.py handle_upload). */
+    @Test
+    fun upload413SurfacesServerLimitMessage() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(413).setBody("{\"error\": \"File too large (max 20MB)\"}"))
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "big.bin", "application/octet-stream", ByteArray(1024), "session-1")
+            assertEquals(UploadOutcome.TooLarge("File too large (max 20MB)"), outcome)
+        }
+    }
+
+    @Test
+    fun uploadHttpFailureIsExplicitInsteadOfSilentNull() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500).setBody("{}"))
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "a.txt", "text/plain", "hi".toByteArray(), null)
+            assertEquals(UploadOutcome.Failure("HTTP 500"), outcome)
+        }
+    }
+
+    /** Client-side mirror of the server cap: oversized payloads never reach the network. */
+    @Test
+    fun oversizedUploadRejectedClientSideWithoutNetworkCall() = runBlocking {
+        MockWebServer().use { server ->
+            val outcome = ChatRepository().uploadAttachment(
+                server.url("/").toString(), credential(), "big.bin", "application/octet-stream",
+                ByteArray((MAX_UPLOAD_BYTES + 1).toInt()), null
+            )
+            assertTrue(outcome is UploadOutcome.TooLarge)
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun uploadCapMirrorsServerDefault() {
+        // api/config.py: MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
+        assertEquals(20L * 1024 * 1024, MAX_UPLOAD_BYTES)
+    }
+
+    @Test
+    fun malformedUploadSuccessIsExplicitFailure() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("not json"))
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "a.txt", "text/plain", "hi".toByteArray(), null)
+            assertEquals(UploadOutcome.Failure("Malformed upload response"), outcome)
+        }
+    }
+
+    @Test
+    fun uploadSuccessWithoutPathIsExplicitFailure() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"filename\":\"a.txt\",\"size\":2,\"mime\":\"text/plain\",\"is_image\":false}"))
+            val outcome = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "a.txt", "text/plain", "hi".toByteArray(), null)
+            assertEquals(UploadOutcome.Failure("Upload response missing path"), outcome)
+        }
+    }
+
+    @Test
+    fun readBoundedAcceptsPayloadAtTheCap() {
+        val bytes = ByteArray(4096) { (it % 251).toByte() }
+        assertTrue(bytes.contentEquals(readBoundedUploadPayload(ByteArrayInputStream(bytes), bytes.size.toLong())))
+        assertEquals(0, readBoundedUploadPayload(ByteArrayInputStream(ByteArray(0)), 16).size)
+    }
+
+    @Test
+    fun readBoundedStopsAtTheCapAndRejectsLargerStreams() {
+        val source = CountingInputStream(10_000_000)
+        val error = try {
+            readBoundedUploadPayload(source, maxBytes = 1024)
+            throw AssertionError("expected UploadTooLargeException")
+        } catch (expected: UploadTooLargeException) {
+            expected
+        }
+        assertEquals(1024L, error.maxBytes)
+        // Bounded: at most cap+1 bytes were pulled from the stream, never a full readBytes().
+        assertTrue("read ${source.delivered} bytes", source.delivered <= 1025)
+    }
+
+    @Test
+    fun chatStartCarriesSelectedModelAndProvider() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"stream_id\":\"st-1\",\"session_id\":\"s-1\"}"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: token\ndata: {\"text\":\"ok\"}\n\nevent: stream_end\ndata: {}\n\n"))
+
+            ChatRepository().sendMessage(
+                server.url("/").toString(), credential(), "Hi",
+                model = "gemini-3.8-flash", modelProvider = "custom:vertex-gemini", explicitModelPick = true
+            ).toList()
+
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"model\":\"gemini-3.8-flash\""))
+            assertTrue(body.contains("\"model_provider\":\"custom:vertex-gemini\""))
+            assertTrue(body.contains("\"explicit_model_pick\":true"))
+        }
+    }
+
+    /** A server-default (non user-picked) model is sent without the explicit_model_pick flag. */
+    @Test
+    fun chatStartSendsServerDefaultModelWithoutExplicitPick() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"stream_id\":\"st-1\"}"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: stream_end\ndata: {}\n\n"))
+
+            ChatRepository().sendMessage(
+                server.url("/").toString(), credential(), "Hi",
+                model = "@custom:plusvibe-api:gpt-6.1-sol", modelProvider = "custom:plusvibe-api"
+            ).toList()
+
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"model\":\"@custom:plusvibe-api:gpt-6.1-sol\""))
+            assertTrue(body.contains("\"model_provider\":\"custom:plusvibe-api\""))
+            assertFalse(body.contains("explicit_model_pick"))
+        }
+    }
+
+    /** Regression: the default request (no session, no model selection) keeps its exact JSON body. */
+    @Test
+    fun defaultChatStartRequestIsUnchanged() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"stream_id\":\"st-1\",\"session_id\":\"s-1\"}"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: stream_end\ndata: {}\n\n"))
+
+            ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/chat/start", request.path)
+            assertEquals("Bearer native-token", request.getHeader("Authorization"))
+            assertEquals("{\"message\":\"Hi\",\"attachments\":[]}", request.body.readUtf8())
+        }
+    }
+
+    /** Regression: with a session id the default request also carries no model keys. */
+    @Test
+    fun defaultChatStartWithSessionIdOmitsModelFields() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"stream_id\":\"st-1\",\"session_id\":\"s-9\"}"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: stream_end\ndata: {}\n\n"))
+
+            ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi", sessionId = "s-9").toList()
+
+            val body = server.takeRequest().body.readUtf8()
+            assertEquals("{\"message\":\"Hi\",\"session_id\":\"s-9\",\"attachments\":[]}", body)
+        }
+    }
+
+    /**
+     * Request-level parity with the real GET /api/models payload (captured fixture):
+     * the catalog's default row (id + group provider_id) flows into chat/start verbatim.
+     */
+    @Test
+    fun chatStartCarriesRealCatalogDefaultIntoRequest() = runBlocking {
+        val fixture = javaClass.classLoader!!.getResource("fixtures/api_models.json")!!.readText()
+        MockWebServer().use { modelsServer ->
+            modelsServer.enqueue(MockResponse().setBody(fixture))
+            val catalog = ModelsRepository().getModels(modelsServer.url("/").toString(), credential())
+            val defaultRow = catalog.models.first { it.id == catalog.defaultModel }
+            assertEquals("gemini-3.8-flash", defaultRow.id)
+            assertEquals("custom:vertex-gemini", defaultRow.providerId)
+
+            MockWebServer().use { chatServer ->
+                chatServer.enqueue(MockResponse().setBody("{\"stream_id\":\"st-1\",\"session_id\":\"s-1\"}"))
+                chatServer.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody("event: stream_end\ndata: {}\n\n"))
+
+                ChatRepository().sendMessage(
+                    chatServer.url("/").toString(), credential(), "Hi",
+                    model = defaultRow.id, modelProvider = defaultRow.providerId
+                ).toList()
+
+                val body = chatServer.takeRequest().body.readUtf8()
+                assertTrue(body.contains("\"model\":\"gemini-3.8-flash\""))
+                assertTrue(body.contains("\"model_provider\":\"custom:vertex-gemini\""))
+            }
+        }
+    }
+
+    /** InputStream that counts how many bytes were actually pulled, to prove bounded reads. */
+    private class CountingInputStream(private val total: Int) : InputStream() {
+        var delivered = 0
+            private set
+        override fun read(): Int =
+            if (delivered >= total) -1 else { delivered++; 'M'.code }
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (delivered >= total || len <= 0) return -1
+            val n = minOf(len, total - delivered)
+            delivered += n
+            return n
         }
     }
 

@@ -31,8 +31,10 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatEvent
@@ -42,6 +44,9 @@ import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.ModelsRepository
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.SessionRepository
+import ru.mars.network.repository.UploadOutcome
+import ru.mars.network.repository.UploadTooLargeException
+import ru.mars.network.repository.readBoundedUploadPayload
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var store: AndroidKeyStoreCredentialStore
@@ -55,7 +60,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
-    private var selectedModel: String = "gemini-3.8-flash"
+    private lateinit var modelSelection: ModelSelection
     private var modelBtn: Button? = null
     private lateinit var attachmentChips: LinearLayout
     private val attachments = mutableListOf<ChatAttachment>()
@@ -73,10 +78,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
+        modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         setContentView(buildView())
         MarsMusicPlayer.registerListener(this)
         loadSessions()
+        refreshModelCatalog()
     }
 
     override fun onDestroy() {
@@ -156,7 +163,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setTypeface(null, Typeface.BOLD)
         })
         modelBtn = Button(this).apply {
-            text = "⚡ $selectedModel"
+            text = modelSelection.buttonLabel()?.let { "⚡ $it" } ?: "⚡ Модель"
             textSize = 11f
             contentDescription = "Модель"
             background = null
@@ -374,7 +381,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         updateControls()
         stream = lifecycleScope.launch {
             try {
-                ChatRepository().sendMessage(BASE_URL, credential, text, currentSessionId, outgoingAttachments).collect { event ->
+                val choice = modelSelection.current
+                ChatRepository().sendMessage(
+                    BASE_URL, credential, text, currentSessionId, outgoingAttachments,
+                    model = choice?.modelId,
+                    modelProvider = choice?.providerId,
+                    explicitModelPick = choice?.explicitPick == true
+                ).collect { event ->
                     uiState.onEvent(event)
                     if (event is ChatEvent.SessionBound) currentSessionId = event.sessionId
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
@@ -810,24 +823,48 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun uploadAttachment(uri: Uri) {
         val credential = store.read() ?: return
+        statusView.text = "Прикрепляю файл…"
         lifecycleScope.launch {
-            val result = runCatching {
-                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                val mime = contentResolver.getType(uri) ?: "application/octet-stream"
-                val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                    if (c.moveToFirst()) c.getString(0) else null
-                } ?: "attachment"
-                ChatRepository().uploadAttachment(BASE_URL, credential, name, mime, bytes, currentSessionId)
-            }.getOrNull()
-            if (result != null) {
-                attachments += result
-                renderAttachmentChips()
-                statusView.text = "Прикреплено: ${result.name}"
-            } else {
-                statusView.text = "Не удалось прикрепить файл"
+            // Resolver reads and the OkHttp call all happen on IO — never a
+            // content:// read or a synchronous execute() on the Main thread.
+            // The stream is read with a hard cap (server limit mirrored from
+            // api/upload.py), so an oversized file is rejected before upload.
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val name = queryDisplayName(uri) ?: "attachment"
+                    val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+                    val bytes = contentResolver.openInputStream(uri)
+                        ?.use { readBoundedUploadPayload(it) }
+                        ?: return@runCatching UploadOutcome.Failure("Файл недоступен")
+                    ChatRepository().uploadAttachment(BASE_URL, credential, name, mime, bytes, currentSessionId)
+                }.getOrElse { error ->
+                    if (error is UploadTooLargeException) {
+                        UploadOutcome.TooLarge(error.message ?: "Файл слишком большой")
+                    } else {
+                        UploadOutcome.Failure(error.message ?: "Network error")
+                    }
+                }
+            }
+            when (outcome) {
+                is UploadOutcome.Success -> {
+                    attachments += outcome.attachment
+                    renderAttachmentChips()
+                    statusView.text = "Прикреплено: ${outcome.attachment.name}"
+                }
+                is UploadOutcome.TooLarge ->
+                    statusView.text = "Файл не прикреплён: ${outcome.message}"
+                is UploadOutcome.Failure ->
+                    statusView.text = "Не удалось прикрепить файл: ${outcome.message}"
             }
         }
     }
+
+    /** Display-name lookup for a content:// uri; only ever called from Dispatchers.IO. */
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull()
 
     private fun startVoiceInput() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -871,19 +908,48 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun chooseModel() {
         val c = store.read()
+        if (c == null) { statusView.text = "Модели недоступны: нет авторизации"; return }
         lifecycleScope.launch {
-            val live = if (c != null) runCatching { ModelsRepository().getModels(BASE_URL, c).models.map { it.id } }.getOrNull() else null
-            val models = (live ?: listOf("gemini-3.8-flash", "gemini-3.8-pro", "claude-sonnet")).toTypedArray()
+            statusView.text = "Загружаю модели…"
+            val catalog = withContext(Dispatchers.IO) {
+                runCatching { ModelsRepository().getModels(BASE_URL, c) }.getOrNull()
+            }
+            val entries = catalog?.let { modelSelection.pickerEntries(it) }.orEmpty()
+            if (entries.isEmpty()) {
+                // No fabricated fallback list: an unavailable catalog is an error, not a guess.
+                statusView.text = "Каталог моделей недоступен"
+                return@launch
+            }
+            val labels = entries.map { it.label }.toTypedArray()
+            val checked = entries.indexOfFirst { it.model.id == modelSelection.current?.modelId }
             android.app.AlertDialog.Builder(this@ChatActivity)
                 .setTitle("Модель Марса")
-                .setSingleChoiceItems(models, models.indexOf(selectedModel).coerceAtLeast(0)) { d, which ->
-                    selectedModel = models[which]
-                    modelBtn?.text = "⚡ $selectedModel"
+                .setSingleChoiceItems(labels, checked) { d, which ->
+                    val picked = modelSelection.select(entries[which].model)
                     d.dismiss()
-                    statusView.text = "Модель: $selectedModel"
+                    if (picked != null) {
+                        updateModelButton()
+                        statusView.text = "Модель: ${picked.modelId}"
+                    }
                 }
                 .show()
         }
+    }
+
+    /** Loads the live /api/models catalog once at startup and resolves the effective choice. */
+    private fun refreshModelCatalog() {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val catalog = withContext(Dispatchers.IO) {
+                runCatching { ModelsRepository().getModels(BASE_URL, c) }.getOrNull()
+            } ?: return@launch
+            modelSelection.resolveEffective(catalog)
+            updateModelButton()
+        }
+    }
+
+    private fun updateModelButton() {
+        modelBtn?.text = modelSelection.buttonLabel()?.let { "⚡ $it" } ?: "⚡ Модель"
     }
 
     private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
