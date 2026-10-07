@@ -27,11 +27,11 @@ Track shape: `{ "id":string, "title":string, "artist":string, "duration":string,
 ## HTTP endpoints relevant to basic library/search
 
 - `GET /api/search?q=<query>[&filter=songs|albums|artists|playlists]`: `{ "success":true, "results":[...] }`. Song results include `{ "type":"song", "id", "title", "artist", "thumbnail", "duration" }`. Empty query responds HTTP 400; upstream failure responds 500.
-- `GET /api/home`, `/api/charts`: success plus sections; not player status.
+- `GET /api/charts`: same envelope as search — `{ "success":true, "results":[track...] }`; not player status. `{ "success":false, "error":... }` must surface as a failure, never as an empty list. (`/api/home` shares the success-envelope shape with sections.)
 - `GET /api/stream/{video_id}`: audio stream, not a control operation.
 
 All API paths above are relative to the service root. The browser UI's playback queue is local and capped at 300 entries when synced; an empty queue does not overwrite global queue during `STATE_SYNC`.
 
 ## Android repository mapping
 
-`MusicRepository.search(query)` calls HTTP `/api/search?q=...`. `getStatus()`/`getQueue()` register over Mars Connect and read `SESSION_RESTORE`. Commands are sent using `CONTROL_CMD`; `play()` and `pause()` both map to `playPause`, since the protocol offers no distinct play/pause action. The client must target the active device ID for reliable control; `all` is a broadcast convenience and can toggle multiple devices, so is not safe for paired play/pause control. No HTTP contract exists for these methods.
+`MusicRepository.search(query)` and `MusicRepository.getCharts()` call HTTP `/api/search?q=...` and `/api/charts`, both parsing the `{success,results}` envelope. `getStatus()`/`getQueue()` register over Mars Connect and read `SESSION_RESTORE`. Commands register, wait for `SESSION_RESTORE`, then send `CONTROL_CMD` with `targetDeviceId` set to the session's `activeDeviceId` (falling back to `all` only when no active device is reported); `play()` and `pause()` both map to `playPause`, since the protocol offers no distinct play/pause action. `all` is a broadcast convenience and can toggle multiple devices, so it is not safe for paired play/pause control. After the command frame is delivered the socket is closed gracefully with code 1000 (never `cancel()` mid-handshake), and a server-initiated close is echoed to complete the handshake. No HTTP contract exists for these methods.
