@@ -65,6 +65,37 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun sendsAttachmentMetadataInStartPayload() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"stream_id\":\"s\"}"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody("event: done\ndata: {}\n\n"))
+            val attachment = ru.mars.network.model.ChatAttachment("photo.jpg", "/uploads/photo.jpg", "image/jpeg", 12L, true)
+            ChatRepository().sendMessage(server.url("/").toString(), credential(), "Look", attachments = listOf(attachment)).toList()
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"attachments\":[{\"name\":\"photo.jpg\",\"path\":\"/uploads/photo.jpg\",\"mime\":\"image/jpeg\",\"size\":12,\"is_image\":true}]"))
+        }
+    }
+
+    @Test
+    fun uploadsAttachmentAsMultipartAndParsesResponse() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"filename\":\"photo.jpg\",\"path\":\"/uploads/photo.jpg\",\"size\":3,\"mime\":\"image/jpeg\",\"is_image\":true}"))
+            val bytes = byteArrayOf(1, 2, 3)
+            val result = ChatRepository().uploadAttachment(server.url("/").toString(), credential(), "photo.jpg", "image/jpeg", bytes, "session-1")
+            assertEquals(ru.mars.network.model.ChatAttachment("photo.jpg", "/uploads/photo.jpg", "image/jpeg", 3L, true), result)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/upload", request.path)
+            assertEquals("Bearer native-token", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("name=\"session_id\""))
+            assertTrue(body.contains("session-1"))
+            assertTrue(body.contains("name=\"file\"; filename=\"photo.jpg\""))
+            assertTrue(body.contains("Content-Type: image/jpeg"))
+        }
+    }
+
+    @Test
     fun buildsCancelAndSteerRequestsWithExactRoutes() {
         val repository = ChatRepository()
         val cancel = repository.cancelRequest("https://mars.test", "stream/opaque", "native-token")

@@ -8,12 +8,14 @@ import kotlinx.coroutines.flow.flowOn
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
 import java.io.BufferedReader
@@ -24,15 +26,16 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         endpoint: String,
         credential: ConsumedDeviceCredential,
         message: String,
-        sessionId: String? = null
+        sessionId: String? = null,
+        attachments: List<ChatAttachment> = emptyList()
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId), credential) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments), credential) { event -> emit(event) }
                 return@flow
             }
-            val startResp = client.newCall(requestStart(base, credential, message, sessionId)).execute().use { response ->
+            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments)).execute().use { response ->
                 if (!response.isSuccessful) {
                     emit(ChatEvent.Error("HTTP ${response.code}"))
                     return@flow
@@ -53,6 +56,27 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         }
     }.flowOn(Dispatchers.IO)
 
+    fun uploadAttachment(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        filename: String,
+        mimeType: String,
+        bytes: ByteArray,
+        sessionId: String?
+    ): ChatAttachment? {
+        val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .apply { if (sessionId != null) addFormDataPart("session_id", sessionId) }
+            .addFormDataPart("file", filename, bytes.toRequestBody(mimeType.toMediaType()))
+            .build()
+        val request = Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/upload").build())
+            .header("Authorization", bearer(credential)).post(multipart).build()
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val obj = parseObject(response.body?.string().orEmpty()) ?: return null
+            ChatAttachment(obj["filename"]?.toString().orEmpty(), obj["path"]?.toString().orEmpty(), obj["mime"]?.toString().orEmpty(), (obj["size"] as? Number)?.toLong(), obj["is_image"] as? Boolean)
+        }
+    }
+
     fun cancelRequest(baseUrl: String, streamId: String, accessToken: String? = null): Request =
         Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/chat/cancel")
             .addQueryParameter("stream_id", streamId).build())
@@ -68,15 +92,18 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         base: HttpUrl,
         credential: ConsumedDeviceCredential,
         message: String,
-        sessionId: String? = null
+        sessionId: String? = null,
+        attachments: List<ChatAttachment> = emptyList()
     ): Request {
         val url = if (base.encodedPath == "/chat") base else base.newBuilder().addPathSegments("api/chat/start").build()
         val jsonBody = buildString {
             append("{\"message\":").append(jsonString(message))
-            if (!sessionId.isNullOrBlank()) {
-                append(",\"session_id\":").append(jsonString(sessionId))
+            if (!sessionId.isNullOrBlank()) append(",\"session_id\":").append(jsonString(sessionId))
+            append(",\"attachments\":[")
+            attachments.joinTo(this, separator = ",") { attachment ->
+                "{\"name\":${jsonString(attachment.name)},\"path\":${jsonString(attachment.path)},\"mime\":${jsonString(attachment.mime)},\"size\":${attachment.size?.toString() ?: "null"},\"is_image\":${attachment.isImage?.toString() ?: "null"}}"
             }
-            append("}")
+            append("]}")
         }
         return Request.Builder().url(url).header("Authorization", bearer(credential))
             .header("Accept", "text/event-stream")
