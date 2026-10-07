@@ -1,13 +1,19 @@
 package ru.mars.tv
 
-import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startActivity(Intent(this, PairingActivity::class.java))
+        val destination = if (AndroidKeyStoreCredentialStore(this).read() != null) {
+            DashboardActivity::class.java
+        } else {
+            PairingActivity::class.java
+        }
+        startActivity(Intent(this, destination))
         finish()
     }
 }
