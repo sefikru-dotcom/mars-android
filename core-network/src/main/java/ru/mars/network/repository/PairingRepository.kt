@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import ru.mars.network.model.PairingResponse
+import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.PairingResponseParser
 import ru.mars.network.model.PairingStatusResponse
 import ru.mars.network.model.PairingStatusResponseParser
@@ -37,6 +38,19 @@ class PairingRepository(
         client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "Pairing status failed: ${response.code}" }
             PairingStatusResponseParser.parse(response.body?.string().orEmpty())
+        }
+    }
+
+    suspend fun pollAndConsumeCredential(pairId: String, pollSecret: String): Result<ConsumedDeviceCredential?> =
+        pollPairingStatus(pairId, pollSecret).map { it.oneTimeCredentialOrNull()?.consume() }
+
+    suspend fun revokeCredential(deviceToken: String): Result<Unit> = request {
+        require(deviceToken.isNotBlank()) { "deviceToken must not be blank" }
+        val request = Request.Builder().url(url("api/auth/device-pairings/revoke"))
+            .header("Authorization", "Bearer $deviceToken")
+            .post(ByteArray(0).toRequestBody()).build()
+        client.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "Credential revoke failed: ${response.code}" }
         }
     }
 

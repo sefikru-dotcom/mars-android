@@ -28,7 +28,7 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
             credential.deviceToken,
             credential.deviceId,
             credential.scopes.joinToString(SCOPE_SEPARATOR),
-            credential.expiresAt.orEmpty()
+            credential.expiresIn.toString()
         ).joinToString(FIELD_SEPARATOR)
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
         val ciphertext = cipher.doFinal(plaintext.toByteArray(StandardCharsets.UTF_8))
@@ -48,7 +48,7 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
             val fields = String(cipher.doFinal(Base64.decode(encoded, Base64.NO_WRAP)), StandardCharsets.UTF_8)
                 .split(FIELD_SEPARATOR)
             require(fields.size == 4)
-            ConsumedDeviceCredential(fields[0], fields[1], fields[2].split(SCOPE_SEPARATOR).filter(String::isNotEmpty), fields[3].ifEmpty { null })
+            ConsumedDeviceCredential(fields[0], fields[1], fields[2].split(SCOPE_SEPARATOR).filter(String::isNotEmpty), fields[3].toInt())
         }.getOrNull()
     }
 

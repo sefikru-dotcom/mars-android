@@ -20,12 +20,16 @@ class PairingModelsTest {
     @Test
     fun parsesPollStatusAndOptionalExpiry() {
         val response = PairingStatusResponseParser.parse(
-            """{"pair_id":"pair-123","status":"approved","expires_at":"2026-10-07T12:00:00Z"}"""
+            """{"pair_id":"pair-123","status":"pending"}"""
         )
 
         assertEquals("pair-123", response.pairId)
-        assertEquals(PairingStatus.APPROVED, response.status)
-        assertEquals("2026-10-07T12:00:00Z", response.expiresAt)
+        assertEquals(PairingStatus.PENDING, response.status)
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun rejectsApprovedStatusWithMissingCredentialFields() {
+        PairingStatusResponseParser.parse("""{"pair_id":"pair-123","status":"approved","device_token":"token"}""")
     }
 
     @Test(expected = IllegalStateException::class)
