@@ -59,6 +59,7 @@ class TvChatActivity : AppCompatActivity() {
                         is ChatEvent.Chunk -> { answer.text = "Марс: ${answer.text.toString().removePrefix("Марс: ")}${event.text}"; scrollDown() }
                         ChatEvent.Done -> Unit
                         is ChatEvent.Error -> answer.text = "Марс: Ошибка: ${event.message}"
+                        else -> Unit
                     }
                 }
             } finally {
