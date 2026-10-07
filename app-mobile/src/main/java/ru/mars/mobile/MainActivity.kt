@@ -67,7 +67,6 @@ class MainActivity : ComponentActivity() {
         content.addView(action, params(WRAP, 56, 24))
         revoke = Button(this).apply { setText(R.string.revoke); visibility = View.GONE; setOnClickListener { revokeCredential() } }
         content.addView(revoke, params(WRAP, 56, 8))
-        content.addView(text(R.string.no_chat_note, 14f, MUTED, 28))
         val scroll = ScrollView(this).apply { addView(content, ViewGroup.LayoutParams(-1, -2)); isFillViewport = true }
         root.addView(scroll, ViewGroup.LayoutParams(-1, -1))
         return root

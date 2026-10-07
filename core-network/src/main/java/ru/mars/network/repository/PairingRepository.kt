@@ -28,26 +28,26 @@ class PairingRepository(
         .build()
 
     suspend fun createPairing(): Result<PairingResponse> = request {
-        val request = Request.Builder()
-            .url(url("api", "v1", "auth", "device-pairings"))
-            .post(ByteArray(0).toRequestBody())
-            .build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Pairing creation failed: ${response.code}" }
-            PairingResponseParser.parse(response.body?.string().orEmpty())
-        }
+        executeWithUnversionedFallback(
+            primary = url("api", "v1", "auth", "device-pairings"),
+            fallback = url("api", "auth", "device-pairings"),
+            request = { endpoint ->
+                Request.Builder().url(endpoint).post(ByteArray(0).toRequestBody()).build()
+            },
+            error = "Pairing creation failed"
+        ) { response -> PairingResponseParser.parse(response.body?.string().orEmpty()) }
     }
 
     suspend fun pollPairingStatus(pairId: String): Result<PairingStatusResponse> = request {
         requireIdentifier(pairId, "pairId")
-        val statusUrl = url("api", "v1", "auth", "device-pairings", "status").newBuilder()
-            .addQueryParameter("pair_id", pairId)
-            .build()
-        val request = Request.Builder().url(statusUrl).get().build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Pairing status failed: ${response.code}" }
-            PairingStatusResponseParser.parse(response.body?.string().orEmpty())
-        }
+        executeWithUnversionedFallback(
+            primary = url("api", "v1", "auth", "device-pairings", "status"),
+            fallback = url("api", "auth", "device-pairings", "status"),
+            request = { endpoint ->
+                Request.Builder().url(endpoint.newBuilder().addQueryParameter("pair_id", pairId).build()).get().build()
+            },
+            error = "Pairing status failed"
+        ) { response -> PairingStatusResponseParser.parse(response.body?.string().orEmpty()) }
     }
 
     suspend fun exchangePairing(pairId: String, pollSecret: String): Result<ConsumedDeviceCredential> = request {
@@ -55,12 +55,12 @@ class PairingRepository(
         require(pollSecret.isNotBlank()) { "pollSecret must not be blank" }
         val body = "{\"poll_secret\":${jsonString(pollSecret)}}"
             .toRequestBody("application/json".toMediaType())
-        val request = Request.Builder()
-            .url(url("api", "v1", "auth", "device-pairings", pairId, "exchange"))
-            .post(body)
-            .build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Pairing exchange failed: ${response.code}" }
+        executeWithUnversionedFallback(
+            primary = url("api", "v1", "auth", "device-pairings", pairId, "exchange"),
+            fallback = url("api", "auth", "device-pairings", pairId, "exchange"),
+            request = { endpoint -> Request.Builder().url(endpoint).post(body).build() },
+            error = "Pairing exchange failed"
+        ) { response ->
             PairingExchangeResponseParser.parse(response.body?.string().orEmpty())
                 .oneTimeCredential().consume()
                 ?: error("Pairing exchange credential was already consumed")
@@ -70,12 +70,33 @@ class PairingRepository(
     suspend fun revokeCredential(deviceId: String, accessToken: String): Result<Unit> = request {
         requireIdentifier(deviceId, "deviceId")
         require(accessToken.isNotBlank()) { "accessToken must not be blank" }
-        val request = Request.Builder()
-            .url(url("api", "v1", "auth", "devices", deviceId, "revoke"))
-            .header("Authorization", "Bearer $accessToken")
-            .post(ByteArray(0).toRequestBody()).build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Credential revoke failed: ${response.code}" }
+        executeWithUnversionedFallback(
+            primary = url("api", "v1", "auth", "devices", deviceId, "revoke"),
+            fallback = url("api", "auth", "devices", deviceId, "revoke"),
+            request = { endpoint -> Request.Builder()
+                .url(endpoint)
+                .header("Authorization", "Bearer $accessToken")
+                .post(ByteArray(0).toRequestBody()).build() },
+            error = "Credential revoke failed"
+        ) { Unit }
+    }
+
+    private fun <T> executeWithUnversionedFallback(
+        primary: HttpUrl,
+        fallback: HttpUrl,
+        request: (HttpUrl) -> Request,
+        error: String,
+        parse: (okhttp3.Response) -> T
+    ): T {
+        client.newCall(request(primary)).execute().use { response ->
+            if (response.code != 404 && response.code != 401) {
+                check(response.isSuccessful) { "$error: ${response.code}" }
+                return parse(response)
+            }
+        }
+        client.newCall(request(fallback)).execute().use { response ->
+            check(response.isSuccessful) { "$error: ${response.code}" }
+            return parse(response)
         }
     }
 

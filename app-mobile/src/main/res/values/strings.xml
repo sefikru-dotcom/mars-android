@@ -16,5 +16,4 @@
     <string name="error_unavailable">Не удалось подключиться. Проверьте сеть и повторите.</string>
     <string name="error_timeout">Код истёк. Создайте новый код и повторите.</string>
     <string name="error_revoke">Не удалось отозвать подключение. Повторите позже.</string>
-    <string name="no_chat_note">Нативный чат пока недоступен.</string>
 </resources>
