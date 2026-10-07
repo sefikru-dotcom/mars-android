@@ -21,11 +21,31 @@ data class ParsedHost(
 
 data class ParsedMetrics(val timestamp: String, val services: List<ParsedService>, val host: ParsedHost?)
 
+/**
+ * Чистое преобразование dashboard JSON (https://marscore.ru/dashboard/api/metrics)
+ * в модели для экрана проектов. Без зависимостей от Android, тестируется на JVM.
+ *
+ * Реальная схема: prod.host.mem.text, prod.host.disk.text, prod.host.load.
+ * Легаси-схема: плоский host/host_metrics со строковыми ram/cpu/disk/uptime.
+ * Отсутствующее значение обозначается [MISSING]; сериализованный JSON вместо
+ * текста не выдаётся никогда.
+ */
 object ProjectsMetricsParser {
+
+    const val MISSING = "—"
+
     fun parse(data: JSONObject): ParsedMetrics {
+        val prod = data.optJSONObject("prod")
+        val services = parseServices(prod?.optJSONArray("services"))
+        val host = parseHost(prod?.optJSONObject("host"))
+            ?: parseHost(data.optJSONObject("host") ?: data.optJSONObject("host_metrics"))
+        return ParsedMetrics(data.optString("ts", ""), services, host)
+    }
+
+    private fun parseServices(array: org.json.JSONArray?): List<ParsedService> {
+        if (array == null) return emptyList()
         val services = mutableListOf<ParsedService>()
-        val array = data.optJSONObject("prod")?.optJSONArray("services")
-        if (array != null) for (i in 0 until array.length()) {
+        for (i in 0 until array.length()) {
             val item = array.optJSONObject(i) ?: continue
             val state = item.optString("state", "offline")
             val normalized = state.lowercase()
@@ -35,8 +55,30 @@ object ProjectsMetricsParser {
                 item.optString("uptime"), item.optString("latency")
             )
         }
-        val hostJson = data.optJSONObject("host") ?: data.optJSONObject("host_metrics")
-        val host = hostJson?.let { ParsedHost(it.optString("ram", "—"), it.optString("cpu", "—"), it.optString("disk", "—"), it.optString("uptime", "—")) }
-        return ParsedMetrics(data.optString("ts", ""), services, host)
+        return services
+    }
+
+    private fun parseHost(json: JSONObject?): ParsedHost? {
+        if (json == null) return null
+        return ParsedHost(
+            ram = textOf(json, "mem") ?: textOf(json, "ram") ?: MISSING,
+            cpu = textOf(json, "load") ?: textOf(json, "cpu") ?: MISSING,
+            disk = textOf(json, "disk") ?: MISSING,
+            uptime = textOf(json, "uptime") ?: MISSING,
+        )
+    }
+
+    /**
+     * Человекочитаемый текст из поля: объект -> его "text", строка -> как есть,
+     * примитив -> toString, отсутствующее/пустое/NULL -> null.
+     * Гарантирует, что JSON-объект не попадёт в UI строкой.
+     */
+    private fun textOf(json: JSONObject, key: String): String? {
+        return when (val value = json.opt(key)) {
+            null, JSONObject.NULL -> null
+            is JSONObject -> value.optString("text", "").ifBlank { null }
+            is String -> value.ifBlank { null }
+            else -> value.toString()
+        }
     }
 }
