@@ -25,3 +25,7 @@ The workflow uploads debug APK outputs and `SHA256SUMS` as short-lived CI eviden
 ## Current baseline limitation
 
 The repository now includes an `app-mobile` shell. CI builds both `app-tv` and `app-mobile`; this shell deliberately does not claim native auth or chat support.
+
+## Android SDK baseline
+
+Both application modules compile against SDK 34. The mobile shell targets SDK 34 as well, matching its compile SDK and the Android Gradle Plugin release-lint requirement (target SDK 33 or newer). Its minimum SDK remains 28; raising `targetSdk` changes platform behavior on newer Android versions but does not drop support for API 28 devices. The TV module's target SDK remains 28 until its device compatibility is reviewed separately.
