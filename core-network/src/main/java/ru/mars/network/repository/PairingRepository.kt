@@ -72,6 +72,22 @@ class PairingRepository(
         }
     }
 
+    suspend fun loginWithPassword(password: String, deviceName: String = "mars_device"): Result<ConsumedDeviceCredential> = request {
+        require(password.isNotBlank()) { "password must not be blank" }
+        val body = "{\"password\":${jsonString(password)},\"device_name\":${jsonString(deviceName)}}"
+            .toRequestBody("application/json".toMediaType())
+        executeWithUnversionedFallback(
+            primary = url("api", "v1", "auth", "token"),
+            fallback = url("api", "auth", "token"),
+            request = { endpoint -> Request.Builder().url(endpoint).post(body).build() },
+            error = "Authentication failed"
+        ) { response ->
+            PairingExchangeResponseParser.parse(response.body?.string().orEmpty())
+                .oneTimeCredential().consume()
+                ?: error("Credential consumption failed")
+        }
+    }
+
     suspend fun revokeCredential(deviceId: String, accessToken: String): Result<Unit> = request {
         requireIdentifier(deviceId, "deviceId")
         require(accessToken.isNotBlank()) { "accessToken must not be blank" }

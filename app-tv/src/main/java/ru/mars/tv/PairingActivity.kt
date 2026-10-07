@@ -1,110 +1,98 @@
 package ru.mars.tv
 
+import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
-import android.os.CountDownTimer
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
-import ru.mars.network.model.PairingStatus
-import kotlin.coroutines.coroutineContext
 import ru.mars.network.repository.PairingRepository
 
 class PairingActivity : AppCompatActivity() {
-    private lateinit var code: TextView
-    private lateinit var timerText: TextView
-    private lateinit var status: TextView
-    private lateinit var retry: Button
+    private lateinit var passwordInput: EditText
+    private lateinit var loginButton: Button
+    private lateinit var statusText: TextView
     private lateinit var store: AndroidKeyStoreCredentialStore
     private val repository = PairingRepository(BASE_URL)
-    private var operation: Job? = null
-    private var timer: CountDownTimer? = null
+    private var loginJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_pairing)
         store = AndroidKeyStoreCredentialStore(this)
-        code = findViewById(R.id.pairingCode)
-        timerText = findViewById(R.id.pairingTimer)
-        status = findViewById(R.id.pairingStatus)
-        retry = findViewById(R.id.retryButton)
-        retry.setOnClickListener { startPairing() }
-        retry.requestFocus()
-        startPairing()
+
+        if (store.read() != null) {
+            startActivity(Intent(this, DashboardActivity::class.java))
+            finish()
+            return
+        }
+
+        setContentView(R.layout.activity_pairing)
+        passwordInput = findViewById(R.id.passwordInput)
+        loginButton = findViewById(R.id.loginButton)
+        statusText = findViewById(R.id.pairingStatus)
+
+        passwordInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_GO) {
+                performLogin()
+                true
+            } else false
+        }
+
+        loginButton.setOnClickListener { performLogin() }
+        loginButton.requestFocus()
     }
 
     override fun onDestroy() {
-        operation?.cancel()
-        timer?.cancel()
+        loginJob?.cancel()
         super.onDestroy()
     }
 
-    private fun startPairing() {
-        operation?.cancel()
-        timer?.cancel()
-        retry.isEnabled = false
-        code.text = "------"
-        timerText.text = "Получение кода…"
-        status.text = "Подключение к Марсу…"
-        operation = lifecycleScope.launch {
-            val created = repository.createPairing().getOrNull()
-            if (created == null) {
-                showError("Не удалось получить код. Проверьте сеть.")
-                return@launch
-            }
-            code.text = created.code.chunked(3).joinToString(" ")
-            retry.isEnabled = false
-            timer = object : CountDownTimer(created.expiresIn * 1000L, 1000L) {
-                override fun onTick(left: Long) {
-                    timerText.text = "Код действителен %02d:%02d".format(left / 60_000, (left / 1000) % 60)
-                }
-                override fun onFinish() { showError("Код истёк. Нажмите OK, чтобы повторить") }
-            }.also { it.start() }
-            status.text = "Откройте marscore.ru/pair и введите код"
-            poll(created.pairId, created.pollSecret, created.expiresIn)
+    private fun performLogin() {
+        val password = passwordInput.text.toString().trim()
+        if (password.isEmpty()) {
+            statusText.text = "Введите пароль"
+            statusText.setTextColor(Color.parseColor("#ff7b72"))
+            passwordInput.requestFocus()
+            return
         }
-    }
 
-    private suspend fun poll(pairId: String, pollSecret: String, expiresIn: Int) {
-        val deadline = System.currentTimeMillis() + expiresIn * 1000L
-        while (coroutineContext[Job]?.isActive == true && System.currentTimeMillis() < deadline) {
-            val response = repository.pollPairingStatus(pairId, pollSecret).getOrNull()
-            if (response == null) {
-                showError("Ошибка сети. Нажмите OK, чтобы повторить")
-                return
-            }
-            if (response.status == PairingStatus.CLAIMED || response.status == PairingStatus.APPROVED) {
-                status.text = "Подключение подтверждено…"
-                val credential = repository.exchangePairing(pairId, pollSecret).getOrNull()
-                if (credential == null) {
-                    showError("Не удалось завершить подключение. Повторите попытку")
-                    return
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(passwordInput.windowToken, 0)
+
+        loginButton.isEnabled = false
+        passwordInput.isEnabled = false
+        statusText.text = "Подключение к Марсу…"
+        statusText.setTextColor(Color.parseColor("#aab2c0"))
+
+        loginJob = lifecycleScope.launch {
+            val result = repository.loginWithPassword(password, "mi_tv")
+            if (result.isSuccess) {
+                val cred = result.getOrNull()
+                if (cred != null) {
+                    store.save(cred)
+                    startActivity(Intent(this@PairingActivity, DashboardActivity::class.java))
+                    finish()
+                    return@launch
                 }
-                store.save(credential)
-                startActivity(Intent(this@PairingActivity, DashboardActivity::class.java))
-                finish()
-                return
             }
-            delay(POLL_INTERVAL_MS)
-        }
-        if (coroutineContext[Job]?.isActive == true) showError("Код истёк. Нажмите OK, чтобы повторить")
-    }
 
-    private fun showError(message: String) {
-        timer?.cancel()
-        retry.isEnabled = true
-        retry.requestFocus()
-        status.text = message
-        timerText.text = ""
+            loginButton.isEnabled = true
+            passwordInput.isEnabled = true
+            statusText.text = "Неверный пароль или ошибка сети"
+            statusText.setTextColor(Color.parseColor("#ff7b72"))
+            passwordInput.requestFocus()
+        }
     }
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
-        private const val POLL_INTERVAL_MS = 2_000L
     }
 }
