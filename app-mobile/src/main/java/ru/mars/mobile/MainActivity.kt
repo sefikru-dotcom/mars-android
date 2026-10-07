@@ -1,6 +1,6 @@
 package ru.mars.mobile
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -18,12 +18,13 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.PairingStatus
 import ru.mars.network.repository.PairingRepository
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private lateinit var status: TextView
     private lateinit var code: TextView
     private lateinit var action: Button
@@ -94,7 +95,7 @@ class MainActivity : Activity() {
     private suspend fun pollUntilClaimed() {
         val current = pairing ?: return
         val deadline = System.currentTimeMillis() + current.expiresIn * 1000L
-        while (isActive && System.currentTimeMillis() < deadline) {
+        while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
             val result = repository.pollPairingStatus(current.pairId)
             if (result.isFailure) { fail(R.string.error_unavailable); return }
             val response = result.getOrNull() ?: return
@@ -104,7 +105,7 @@ class MainActivity : Activity() {
             }
             delay(POLL_INTERVAL_MS)
         }
-        if (isActive) fail(R.string.error_timeout)
+        if (currentCoroutineContext().isActive) fail(R.string.error_timeout)
     }
 
     private suspend fun exchange(current: PairingData) {
@@ -132,8 +133,8 @@ class MainActivity : Activity() {
                 flow.revoked()
                 showDisconnected()
             } else {
-                flow.failed()
-                action.isEnabled = true
+                flow.restoreConnected()
+                revoke.isEnabled = true
                 status.setText(R.string.error_revoke)
             }
         }
@@ -147,5 +148,5 @@ class MainActivity : Activity() {
     private fun params(width: Int, height: Int, top: Int = 0) = LinearLayout.LayoutParams(width, if (height == WRAP) WRAP else dp(height)).apply { topMargin = dp(top) }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     private data class PairingData(val pairId: String, val pollSecret: String, val expiresIn: Int)
-    companion object { private const val BASE_URL = "https://marscore.ru/"; private const val POLL_INTERVAL_MS = 2000L; private const val ROOT_ID = 1001; private const val WRAP = -2; private const val MUTED = 0xffaab2c0.toInt() }
+    companion object { private const val BASE_URL = "https://marscore.ru"; private const val POLL_INTERVAL_MS = 2000L; private const val ROOT_ID = 1001; private const val WRAP = -2; private const val MUTED = 0xffaab2c0.toInt() }
 }
