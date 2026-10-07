@@ -65,6 +65,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
+    // First-message gate: the live /api/chat/start requires a real session_id, so a null
+    // id is minted via POST /api/session/new before the very first ChatRepository.sendMessage.
+    private val firstSessionFlow = FirstSessionFlow(SessionRepository(), BASE_URL)
+    // Explicit one-shot status text (session creation in flight / failure reason). Survives
+    // the finally-block setStatus() reset; cleared on the next send, cancel, or new chat.
+    private var explicitStatus: String? = null
     private lateinit var modelSelection: ModelSelection
     private var modelBtn: Button? = null
     private lateinit var attachmentChips: LinearLayout
@@ -397,10 +403,32 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val credential = store.read() ?: run { uiState.cancel(); leaveChat(); return }
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(input.windowToken, 0)
         input.text.clear()
+        explicitStatus = null
         renderMessages()
         updateControls()
         stream = lifecycleScope.launch {
             try {
+                // Session gate: never POST /api/chat/start with a null session_id. The
+                // creation runs on IO inside the repository; cancelling the stream job
+                // (cancel button / new chat) cancels it before any chat/start is sent.
+                if (currentSessionId == null) {
+                    explicitStatus = "Создаю сессию…"
+                    setStatus()
+                }
+                when (val ensured = firstSessionFlow.ensureSession(currentSessionId, credential)) {
+                    is EnsureSessionResult.Ready -> {
+                        currentSessionId = ensured.sessionId
+                        explicitStatus = null
+                    }
+                    is EnsureSessionResult.Failed -> {
+                        // Explicit failure: chat/start is NOT sent, state returns to idle
+                        // and the reason stays visible (the finally-block setStatus()
+                        // renders explicitStatus instead of clearing it).
+                        uiState.cancel()
+                        explicitStatus = "Сессия не создана: ${ensured.message}"
+                        return@launch
+                    }
+                }
                 val choice = modelSelection.current
                 ChatRepository().sendMessage(
                     BASE_URL, credential, text, currentSessionId, outgoingAttachments,
@@ -440,10 +468,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
         stream?.cancel()
+        stream = null
         currentStreamId = null
         // Prompts of a cancelled stream are dead; also invalidates in-flight respond results.
         interactiveController.dismissAll()
         uiState.cancel()
+        explicitStatus = null
         setStatus()
         updateControls()
         renderMessages()
@@ -478,7 +508,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun setStatus() {
-        statusView.text = uiState.phase?.let { "Марс: ${phaseLabel(it)}" } ?: when (uiState.status) {
+        statusView.text = explicitStatus ?: uiState.phase?.let { "Марс: ${phaseLabel(it)}" } ?: when (uiState.status) {
             ChatStatus.TYPING -> "Марс печатает…"
             ChatStatus.RECEIVED -> "Ответ получен"
             ChatStatus.ERROR -> "Ошибка сети"
@@ -986,10 +1016,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** "New chat" from any entry point: interactive prompts die together with the old session. */
     private fun startNewChat() {
+        // Full teardown of the outgoing conversation: a live stream (including an in-flight
+        // POST /api/session/new) must not collect into the freshly cleared state, and its
+        // session/stream ids must not leak into the next first-message gate.
+        stream?.cancel()
+        stream = null
+        currentStreamId = null
         interactiveController.dismissAll()
         uiState.startNewSession()
         currentSessionId = null
+        explicitStatus = null
         renderMessages()
+        setStatus()
+        updateControls()
     }
 
     /** Transcript echo of an accepted clarify answer (web pushes it as a user message). UI thread. */
