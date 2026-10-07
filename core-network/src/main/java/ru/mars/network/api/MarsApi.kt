@@ -2,6 +2,7 @@ package ru.mars.network.api
 
 import retrofit2.Response
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Query
 import ru.mars.network.model.PairingResponse
@@ -16,4 +17,7 @@ interface MarsApi {
         @Query("pair_id") pairId: String,
         @Query("poll_secret") pollSecret: String
     ): Response<PairingStatusResponse>
+
+    @POST("api/auth/device-pairings/revoke")
+    suspend fun revokeCredential(@Header("Authorization") authorization: String): Response<Unit>
 }
