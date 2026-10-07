@@ -12,8 +12,6 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.Types
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
@@ -73,22 +71,37 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             .header("Authorization", bearer(credential)).post(multipart).build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return null
-            val obj = parseObject(response.body?.string().orEmpty()) ?: return null
+            val obj = StreamEventMapper.parseObject(response.body?.string().orEmpty()) ?: return null
             ChatAttachment(obj["filename"]?.toString().orEmpty(), obj["path"]?.toString().orEmpty(), obj["mime"]?.toString().orEmpty(), (obj["size"] as? Number)?.toLong(), obj["is_image"] as? Boolean)
         }
     }
 
-    fun executeControl(request: Request): Boolean = client.newCall(request).execute().use { it.isSuccessful }
+    /**
+     * Executes a control request (cancel/steer). A 2xx alone is NOT success: `/api/chat/steer`
+     * answers 200 with `{"accepted": false, "fallback": ...}` when the steer was not applied,
+     * which must be reported as failure. Responses without an `accepted` field (e.g. cancel's
+     * `{"ok": true, "cancelled": ...}`) keep the legacy "HTTP status is the result" behaviour.
+     */
+    fun executeControl(request: Request): Boolean = client.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) return@use false
+        val body = response.body?.string().orEmpty()
+        StreamEventMapper.parseObject(body)?.get("accepted")?.let { it != false } ?: true
+    }
 
     fun cancelRequest(baseUrl: String, streamId: String, accessToken: String? = null): Request =
         Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/chat/cancel")
             .addQueryParameter("stream_id", streamId).build())
             .apply { if (accessToken != null) header("Authorization", "Bearer $accessToken") }.get().build()
 
-    fun steerRequest(baseUrl: String, streamId: String, message: String, accessToken: String): Request =
+    /**
+     * Builds `POST /api/chat/steer`. The server contract (`_handle_chat_steer`) requires JSON
+     * fields `session_id` and `text` — NOT `stream_id`/`message`, which it silently rejects
+     * with `{"accepted": false, "fallback": "no_cached_agent"}`.
+     */
+    fun steerRequest(baseUrl: String, sessionId: String, message: String, accessToken: String): Request =
         Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/chat/steer").build())
             .header("Authorization", "Bearer $accessToken").header("Content-Type", "application/json")
-            .post("{\"stream_id\":${jsonString(streamId)},\"message\":${jsonString(message)}}"
+            .post("{\"session_id\":${jsonString(sessionId)},\"text\":${jsonString(message)}}"
                 .toRequestBody("application/json".toMediaType())).build()
 
     private fun requestStart(
@@ -125,20 +138,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             suspend fun dispatch() {
                 if (data.isEmpty()) return
                 val payload = data.toString().removeSuffix("\n")
-                when (event) {
-                    "session", "session_bound" -> parseSessionId(payload)?.let { emit(ChatEvent.SessionBound(it)) }
-                    "done", "stream_end", "cancel" -> emit(ChatEvent.Done)
-                    "error", "apperror" -> emit(ChatEvent.Error(parseError(payload)))
-                    "token", "delta", "chunk", "message", null -> {
-                        val text = parseTokenText(payload)
-                        if (text.isNotEmpty()) emit(ChatEvent.Chunk(text, id))
-                    }
-                    "reasoning", "thought", "thinking" -> parseText(payload)?.let { emit(ChatEvent.Thought(it)) }
-                    "tool_call", "tool" -> parseToolCall(payload)?.let { emit(it) }
-                    "tool_result" -> parseToolResult(payload)?.let { emit(it) }
-                    "status", "phase" -> parsePhase(payload)?.let { emit(it) }
-                    else -> Unit
-                }
+                StreamEventMapper.map(event, id, payload)?.let { emit(it) }
                 event = null; id = null; data.clear()
             }
 
@@ -156,50 +156,9 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
     }
 
     private fun extractStartResponse(json: String): ChatStartResponse? {
-        val obj = parseObject(json) ?: return null
+        val obj = StreamEventMapper.parseObject(json) ?: return null
         val streamId = obj["stream_id"]?.toString()?.takeIf { it.isNotBlank() } ?: return null
         return ChatStartResponse(streamId, obj["session_id"]?.toString()?.takeIf { it.isNotBlank() })
-    }
-
-    private fun parseTokenText(payload: String): String {
-        val obj = parseObject(payload)
-        return listOf("text", "delta", "content").firstNotNullOfOrNull { obj?.get(it)?.toString() } ?: ""
-    }
-
-    private fun parseError(payload: String): String {
-        val obj = parseObject(payload)
-        return obj?.get("message")?.toString()?.takeIf { it.isNotBlank() } ?: obj?.get("error")?.toString()?.takeIf { it.isNotBlank() } ?: payload.trim()
-    }
-
-    private fun parseSessionId(payload: String): String? = parseObject(payload)?.let { m ->
-        (m["session_id"] ?: m["id"])?.toString()?.takeIf { it.isNotBlank() }
-    }
-
-    private fun parseText(payload: String): String? = parseObject(payload)?.let { m ->
-        listOf("text", "content", "message", "thought", "reasoning").firstNotNullOfOrNull { k -> m[k]?.toString()?.takeIf { it.isNotBlank() } }
-    } ?: payload.takeIf { it.isNotBlank() }
-
-    private fun parseToolCall(payload: String): ChatEvent.ToolCall? = parseObject(payload)?.let { m ->
-        ChatEvent.ToolCall(m["id"]?.toString(), (m["name"] ?: m["tool"])?.toString().orEmpty(), jsonValue(m["arguments"] ?: m["args"]))
-    }
-
-    private fun parseToolResult(payload: String): ChatEvent.ToolResult? = parseObject(payload)?.let { m ->
-        ChatEvent.ToolResult(m["id"]?.toString(), (m["name"] ?: m["tool"])?.toString().orEmpty(), jsonValue(m["result"] ?: m["content"]))
-    }
-
-    private fun parsePhase(payload: String): ChatEvent.Phase? = parseObject(payload)?.let { m ->
-        ChatEvent.Phase((m["name"] ?: m["phase"] ?: m["status"])?.toString().orEmpty().ifBlank { payload })
-    } ?: payload.takeIf { it.isNotBlank() }?.let(ChatEvent::Phase)
-
-    private fun parseObject(payload: String): Map<String, Any?>? = try {
-        @Suppress("UNCHECKED_CAST")
-        Moshi.Builder().build().adapter<Map<String, Any?>>(Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)).fromJson(payload)
-    } catch (_: Throwable) { null }
-
-    private fun jsonValue(value: Any?): String = when (value) {
-        null -> ""
-        is String -> value
-        else -> Moshi.Builder().build().adapter(Any::class.java).toJson(value)
     }
 
     private fun bearer(credential: ConsumedDeviceCredential) = "Bearer ${credential.accessToken}"
