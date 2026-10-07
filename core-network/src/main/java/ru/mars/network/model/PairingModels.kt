@@ -1,40 +1,42 @@
 package ru.mars.network.model
 
+import com.squareup.moshi.Json
 import com.squareup.moshi.JsonReader
 import okio.Buffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class PairingResponse(val pairId: String, val code: String, val pollSecret: String, val expiresIn: Int, val status: PairingStatus)
 
-data class PairingStatusResponse(
-    val pairId: String,
-    val status: PairingStatus,
-    val deviceToken: String? = null,
-    val deviceId: String? = null,
-    val scopes: List<String> = emptyList(),
-    val expiresIn: Int? = null
+data class PairingStatusResponse(val pairId: String, val status: PairingStatus)
+
+data class PairingExchangeRequest(@Json(name = "poll_secret") val pollSecret: String)
+data class PairingExchangeResponse(
+    @Json(name = "access_token") val accessToken: String,
+    @Json(name = "token_type") val tokenType: String,
+    @Json(name = "expires_in") val expiresIn: Int,
+    @Json(name = "device_id") val deviceId: String,
+    val scopes: List<String>
 ) {
-    fun oneTimeCredentialOrNull(): OneTimeDeviceCredential? =
-        if (status == PairingStatus.APPROVED && deviceToken != null && deviceId != null && expiresIn != null) {
-            OneTimeDeviceCredential(deviceToken, deviceId, scopes, expiresIn)
-        } else null
+    fun oneTimeCredential(): OneTimeDeviceCredential =
+        OneTimeDeviceCredential(accessToken, tokenType, deviceId, scopes, expiresIn)
 }
 
 enum class PairingStatus { PENDING, APPROVED }
 data class AuthResponse(val accessToken: String?, val refreshToken: String?)
 
 class OneTimeDeviceCredential internal constructor(
-    deviceToken: String,
+    accessToken: String,
+    val tokenType: String,
     val deviceId: String,
     val scopes: List<String>,
     val expiresIn: Int
 ) {
-    private val token = OneTimeValue(deviceToken)
-    fun consume(): ConsumedDeviceCredential? = token.consume()?.let { ConsumedDeviceCredential(it, deviceId, scopes, expiresIn) }
-    override fun toString() = "OneTimeDeviceCredential(deviceToken=[REDACTED], deviceId=$deviceId, scopes=$scopes, expiresIn=$expiresIn)"
+    private val token = OneTimeValue(accessToken)
+    fun consume(): ConsumedDeviceCredential? = token.consume()?.let { ConsumedDeviceCredential(it, tokenType, deviceId, scopes, expiresIn) }
+    override fun toString() = "OneTimeDeviceCredential(accessToken=[REDACTED], tokenType=$tokenType, deviceId=$deviceId, scopes=$scopes, expiresIn=$expiresIn)"
 }
 
-data class ConsumedDeviceCredential(val deviceToken: String, val deviceId: String, val scopes: List<String>, val expiresIn: Int)
+data class ConsumedDeviceCredential(val accessToken: String, val tokenType: String, val deviceId: String, val scopes: List<String>, val expiresIn: Int)
 private class OneTimeValue<T>(private val value: T) {
     private val consumed = AtomicBoolean(false)
     fun consume(): T? = if (consumed.compareAndSet(false, true)) value else null
@@ -50,10 +52,20 @@ object PairingResponseParser {
 object PairingStatusResponseParser {
     fun parse(json: String): PairingStatusResponse {
         val fields = JsonFields.parse(json)
-        val status = PairingStatusParser.parse(fields.stringRequired("status"))
-        val response = PairingStatusResponse(fields.stringRequired("pair_id"), status, fields.string("device_token"), fields.string("device_id"), fields.scopes(), fields.int("expires_in"))
-        if (status == PairingStatus.APPROVED) response.oneTimeCredentialOrNull() ?: error("Approved pairing is missing native credential fields")
-        return response
+        return PairingStatusResponse(fields.stringRequired("pair_id"), PairingStatusParser.parse(fields.stringRequired("status")))
+    }
+}
+
+object PairingExchangeResponseParser {
+    fun parse(json: String): PairingExchangeResponse {
+        val fields = JsonFields.parse(json)
+        return PairingExchangeResponse(
+            fields.stringRequired("access_token"),
+            fields.stringRequired("token_type"),
+            fields.intRequired("expires_in"),
+            fields.stringRequired("device_id"),
+            fields.scopesRequired()
+        )
     }
 }
 
@@ -70,7 +82,8 @@ private class JsonFields(private val values: Map<String, Any?>) {
     fun stringRequired(name: String) = string(name)?.takeIf(String::isNotEmpty) ?: error("Missing required field: $name")
     fun int(name: String) = (values[name] as? Number)?.toInt()
     fun intRequired(name: String) = int(name) ?: error("Missing required field: $name")
-    fun scopes() = (values["scopes"] as? List<*>).orEmpty().map { it as? String ?: error("Invalid scopes field") }
+    fun scopesRequired() = (values["scopes"] as? List<*>)?.map { it as? String ?: error("Invalid scopes field") }
+        ?: error("Missing required field: scopes")
     companion object {
         fun parse(json: String): JsonFields {
             val reader = JsonReader.of(Buffer().writeUtf8(json))

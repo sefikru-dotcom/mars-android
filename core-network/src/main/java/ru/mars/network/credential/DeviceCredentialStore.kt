@@ -25,7 +25,8 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
 
     override fun save(credential: ConsumedDeviceCredential) {
         val plaintext = listOf(
-            credential.deviceToken,
+            credential.accessToken,
+            credential.tokenType,
             credential.deviceId,
             credential.scopes.joinToString(SCOPE_SEPARATOR),
             credential.expiresIn.toString()
@@ -47,8 +48,8 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
             }
             val fields = String(cipher.doFinal(Base64.decode(encoded, Base64.NO_WRAP)), StandardCharsets.UTF_8)
                 .split(FIELD_SEPARATOR)
-            require(fields.size == 4)
-            ConsumedDeviceCredential(fields[0], fields[1], fields[2].split(SCOPE_SEPARATOR).filter(String::isNotEmpty), fields[3].toInt())
+            require(fields.size == 5)
+            ConsumedDeviceCredential(fields[0], fields[1], fields[2], fields[3].split(SCOPE_SEPARATOR).filter(String::isNotEmpty), fields[4].toInt())
         }.getOrNull()
     }
 
