@@ -18,6 +18,7 @@ data class ToolExecution(
 data class ChatMessage(
     val role: String,
     val text: String = "",
+    val attachments: List<String> = emptyList(),
     val thoughts: List<String> = emptyList(),
     val thoughtsExpanded: Boolean = false,
     val tools: List<ToolExecution> = emptyList(),
@@ -38,10 +39,10 @@ class ChatUiState {
     var phase: String? = null
         private set
 
-    fun begin(message: String): Boolean {
-        if (message.isBlank() || status == ChatStatus.TYPING) return false
+    fun begin(message: String, attachmentNames: List<String> = emptyList()): Boolean {
+        if (message.isBlank() && attachmentNames.isEmpty() || status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
-        messages += ChatMessage("user", message, status = MessageStatus.COMPLETE)
+        messages += ChatMessage("user", message, attachments = attachmentNames, status = MessageStatus.COMPLETE)
         messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
         return true
     }
@@ -52,6 +53,7 @@ class ChatUiState {
         val current = messages[index]
         messages[index] = when (event) {
             is ChatEvent.SessionBound -> { activeSessionId = event.sessionId; current }
+            is ChatEvent.StreamStarted -> current
             is ChatEvent.Chunk -> current.copy(text = current.text + event.text)
             is ChatEvent.Thought -> current.copy(thoughts = current.thoughts + event.text)
             is ChatEvent.ToolCall -> current.copy(tools = current.tools + ToolExecution(event.id, event.name, event.arguments))

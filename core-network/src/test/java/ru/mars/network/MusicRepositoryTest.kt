@@ -21,6 +21,17 @@ class MusicRepositoryTest {
     }
 
     @Test
+    fun streamUrlAndChartsUseMusicBasePath() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"charts\":[{\"id\":\"v1\",\"title\":\"Song\",\"artist\":\"Artist\"}]}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            assertEquals("${server.url("/music").toString().removeSuffix("/")}/api/stream/v1", repo.getStreamUrl("v1"))
+            assertEquals("v1", repo.getCharts().single().id)
+            assertEquals("/music/api/charts", server.takeRequest().path)
+        }
+    }
+
+    @Test
     fun statusReadsSessionRestore() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {

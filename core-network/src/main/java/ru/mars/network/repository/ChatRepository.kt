@@ -43,6 +43,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
                 extractStartResponse(response.body?.string().orEmpty())
                     ?: run { emit(ChatEvent.Error("Missing stream_id")); return@flow }
             }
+            startResp.streamId.let { emit(ChatEvent.StreamStarted(it)) }
             startResp.sessionId?.let { emit(ChatEvent.SessionBound(it)) }
 
             val streamUrl = base.newBuilder().addPathSegments("api/chat/stream")
@@ -76,6 +77,8 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             ChatAttachment(obj["filename"]?.toString().orEmpty(), obj["path"]?.toString().orEmpty(), obj["mime"]?.toString().orEmpty(), (obj["size"] as? Number)?.toLong(), obj["is_image"] as? Boolean)
         }
     }
+
+    fun executeControl(request: Request): Boolean = client.newCall(request).execute().use { it.isSuccessful }
 
     fun cancelRequest(baseUrl: String, streamId: String, accessToken: String? = null): Request =
         Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/chat/cancel")

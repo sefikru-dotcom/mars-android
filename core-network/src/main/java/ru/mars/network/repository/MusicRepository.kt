@@ -17,7 +17,7 @@ import kotlin.coroutines.resumeWithException
 
 /** Mars Music's HTTP search and Mars Connect WebSocket client. */
 class MusicRepository(
-    private val baseUrl: String,
+    private val baseUrl: String = "https://marscore.ru/music",
     private val client: OkHttpClient = OkHttpClient(),
     private val deviceId: String = "android-client",
 ) {
@@ -35,6 +35,27 @@ class MusicRepository(
         command("setVolume", "{\"volume\":$volume}")
     }
     suspend fun getQueue(): List<MusicTrack> = getStatus().queue
+
+    fun getStreamUrl(trackId: String): String = "$baseUrl/api/stream/$trackId"
+
+    suspend fun getCharts(): List<MusicTrack> {
+        val request = Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/charts").build()).get().build()
+        return suspendCancellableCoroutine { continuation ->
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) { if (continuation.isActive) continuation.resumeWithException(e) }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    response.use {
+                        try {
+                            if (!it.isSuccessful) error("HTTP ${it.code}")
+                            val json = it.body?.string().orEmpty()
+                            val parsed = moshi.adapter(ChartsResponse::class.java).fromJson(json)
+                            continuation.resume((parsed?.charts ?: parsed?.tracks ?: emptyList()).map { item -> item.toModel() })
+                        } catch (e: Throwable) { if (continuation.isActive) continuation.resumeWithException(e) }
+                    }
+                }
+            })
+        }
+    }
 
     suspend fun search(query: String): List<MusicTrack> {
         require(query.isNotBlank()) { "query must not be blank" }
@@ -89,6 +110,8 @@ class MusicRepository(
         }
     }
 
+    @JsonClass(generateAdapter = false)
+    private data class ChartsResponse(val charts: List<TrackDto>? = null, val tracks: List<TrackDto>? = null)
     @JsonClass(generateAdapter = false)
     private data class SearchResponse(val success: Boolean? = null, val results: List<TrackDto> = emptyList(), val error: String? = null)
     @JsonClass(generateAdapter = false)
