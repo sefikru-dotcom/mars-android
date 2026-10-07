@@ -1,6 +1,7 @@
 package ru.mars.network
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,18 +61,65 @@ class StreamEventMapperTest {
         assertNull(StreamEventMapper.map("interim_assistant", null, """{"text":"   ","already_streamed":false}"""))
     }
 
-    @Test fun mapsApprovalToVisibleThought() {
-        val payload = """{"kind":"approval","session_id":"s1","tool":"terminal","description":"rm -rf /tmp/x","pending_count":1}"""
-        val event = StreamEventMapper.map("approval", null, payload) as ChatEvent.Thought
-        assertTrue(event.text.contains("подтверждение", true))
-        assertTrue(event.text.contains("rm -rf /tmp/x"))
+    @Test fun mapsApprovalToTypedEventPreservingIdsAndOptions() {
+        val payload = """{"kind":"approval","session_id":"s1","approval_id":"appr-9","command":"rm -rf /tmp/x",
+            "description":"Удаление каталога","pattern_key":"terminal:rm","pattern_keys":["terminal:rm","shell:rm"],
+            "allow_permanent":true,"allow_session":false,"smart_denied":false,"pending_count":3}"""
+        val event = StreamEventMapper.map("approval", "e7", payload) as ChatEvent.ApprovalRequired
+        assertEquals("appr-9", event.payload.approvalId)
+        assertEquals("rm -rf /tmp/x", event.payload.command)
+        assertEquals("Удаление каталога", event.payload.description)
+        assertEquals(listOf("terminal:rm", "shell:rm"), event.payload.patternKeys)
+        assertTrue(event.payload.allowPermanent)
+        assertFalse(event.payload.allowSession)
+        assertEquals(3, event.payload.pendingCount)
     }
 
-    @Test fun mapsClarifyWithChoices() {
-        val payload = """{"question":"Какой профиль?","choices_offered":["default","office"],"session_id":"s1","kind":"clarify","timeout_seconds":120}"""
-        val event = StreamEventMapper.map("clarify", null, payload) as ChatEvent.Thought
-        assertTrue(event.text.contains("Какой профиль?"))
-        assertTrue(event.text.contains("default / office"))
+    @Test fun mapsGatewayApprovalWithRunAndMirrorToken() {
+        val payload = """{"approval_id":"ga-1","command":"kubectl delete pod x","description":"",
+            "run_id":"run-42","_gateway_mirror_token":"tok-secret","tool":"terminal","risk_level":"high",
+            "choices":["once","deny"],"pending_count":1}"""
+        val event = StreamEventMapper.map("approval", null, payload) as ChatEvent.ApprovalRequired
+        assertEquals("run-42", event.payload.runId)
+        assertEquals("tok-secret", event.payload.mirrorToken)
+        assertEquals("terminal", event.payload.tool)
+        assertEquals("high", event.payload.riskLevel)
+        assertEquals(listOf("once", "deny"), event.payload.choices)
+    }
+
+    @Test fun approvalDefaultsNeverGrantPermanentAndKeepSession() {
+        val payload = """{"command":"git push","description":""}"""
+        val event = StreamEventMapper.map("approval", null, payload) as ChatEvent.ApprovalRequired
+        assertNull(event.payload.approvalId)
+        assertFalse(event.payload.allowPermanent)
+        assertTrue(event.payload.allowSession)
+        assertEquals(1, event.payload.pendingCount)
+    }
+
+    @Test fun dropsApprovalWithoutAnyRenderableField() {
+        assertNull(StreamEventMapper.map("approval", null, """{"pending_count":1}"""))
+    }
+
+    @Test fun mapsClarifyToTypedEventPreservingIdAndChoices() {
+        val payload = """{"clarify_id":"cl-7","question":"Какой профиль?","choices_offered":["default","office"],
+            "session_id":"s1","kind":"clarify","timeout_seconds":120,"requested_at":1759870000.5,"expires_at":1759870120.5}"""
+        val event = StreamEventMapper.map("clarify", "e8", payload) as ChatEvent.ClarifyRequired
+        assertEquals("cl-7", event.payload.clarifyId)
+        assertEquals("Какой профиль?", event.payload.question)
+        assertEquals(listOf("default", "office"), event.payload.choices)
+        assertEquals("s1", event.payload.sessionId)
+        assertEquals(120, event.payload.timeoutSeconds)
+        assertEquals(1759870120.5, event.payload.expiresAtEpochSeconds!!, 0.0001)
+    }
+
+    @Test fun mapsFreeTextClarifyWithoutChoices() {
+        val payload = """{"clarify_id":"cl-8","question":"Опишите задачу","allow_free_text":true}"""
+        val event = StreamEventMapper.map("clarify", null, payload) as ChatEvent.ClarifyRequired
+        assertTrue(event.payload.choices.isEmpty())
+    }
+
+    @Test fun dropsClarifyWithoutQuestionOrChoices() {
+        assertNull(StreamEventMapper.map("clarify", null, """{"kind":"clarify"}"""))
     }
 
     @Test fun mapsTitleToSessionBoundWithoutLosingFramesAfterDone() {

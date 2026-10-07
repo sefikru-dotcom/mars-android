@@ -2,7 +2,9 @@ package ru.mars.network.repository
 
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
+import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ClarifyPayload
 
 /**
  * Maps raw SSE frames (event name + opaque frame id + JSON payload) from
@@ -13,9 +15,12 @@ import ru.mars.network.model.ChatEvent
  * - `tool_complete`   — `{event_type, name, preview, args, tid?, duration?, is_error?}` (`preview` is the result snippet)
  * - `interim_assistant` — `{text, already_streamed, reasoning_echo?}`; when `already_streamed` is true the text
  *   was already delivered via token chunks and must NOT be emitted again (frontend behaves the same).
- * - `approval` / `clarify` — attention payloads; the current sealed model has no dedicated variants and
- *   app consumers use exhaustive `when` without `else`, so they are surfaced as [ChatEvent.Thought]
- *   instead of being silently dropped.
+ * - `approval`        — `{approval_id, command, description, pattern_key(s), allow_permanent,
+ *   allow_session, run_id?, _gateway_mirror_token?, pending_count, ...}` → [ChatEvent.ApprovalRequired]
+ *   preserving the structured payload (ids/options) required by `POST /api/approval/respond`.
+ * - `clarify`         — `{clarify_id, question, choices_offered, session_id, requested_at,
+ *   timeout_seconds, expires_at}` → [ChatEvent.ClarifyRequired] preserving the structured payload
+ *   required by `POST /api/clarify/respond`.
  * - `title`           — `{session_id, title}`; re-binds the session id ([ChatEvent.SessionBound]).
  * - `warning`         — `{type, message}` non-fatal notice (e.g. provider fallback).
  * - `pending_steer_leftover` — `{session_id, text}`: steer text the agent never consumed; preserved as a thought.
@@ -36,8 +41,8 @@ object StreamEventMapper {
             "interim_assistant" -> interimAssistant(obj, eventId)
             "tool_call", "tool" -> toolCall(obj)
             "tool_result", "tool_complete" -> toolResult(obj)
-            "approval" -> obj?.let { attention("Требуется подтверждение", it, "description", "title", "tool", "name", "question") }
-            "clarify" -> obj?.let { clarify(it) }
+            "approval" -> approvalPayload(obj)?.let { ChatEvent.ApprovalRequired(it) }
+            "clarify" -> clarifyPayload(obj)?.let { ChatEvent.ClarifyRequired(it) }
             "warning" -> (stringField(obj, "message") ?: payload.trim().ifBlank { null })
                 ?.let { ChatEvent.Thought("Предупреждение: $it") }
             "pending_steer_leftover" -> stringField(obj, "text")
@@ -83,17 +88,65 @@ object StreamEventMapper {
         return ChatEvent.Chunk(text, eventId)
     }
 
-    private fun clarify(obj: Map<String, Any?>): ChatEvent? {
-        val question = stringField(obj, "question") ?: return null
-        val choices = (obj["choices_offered"] as? List<*>)?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }.orEmpty()
-        val suffix = if (choices.isEmpty()) "" else " (варианты: ${choices.joinToString(" / ")})"
-        return ChatEvent.Thought("Требуется уточнение: $question$suffix")
+    /**
+     * Parses a `clarify` payload (`api/clarify.py` entry data). Public: the same shape is served by
+     * `GET /api/clarify/pending` (`{"pending": {...}}`) and reused by InteractiveRequestsRepository.
+     * Returns null when the frame carries neither a question nor choices (nothing to render/answer).
+     */
+    fun clarifyPayload(obj: Map<String, Any?>?): ClarifyPayload? {
+        obj ?: return null
+        // Frontend parity (messages.js showClarifyCard): question falls back to description.
+        val question = stringField(obj, "question") ?: stringField(obj, "description").orEmpty()
+        val choices = stringList(obj["choices_offered"] ?: obj["choices"])
+        if (question.isBlank() && choices.isEmpty()) return null
+        return ClarifyPayload(
+            clarifyId = stringField(obj, "clarify_id"),
+            question = question,
+            choices = choices,
+            sessionId = stringField(obj, "session_id"),
+            requestedAtEpochSeconds = (obj["requested_at"] as? Number)?.toDouble(),
+            timeoutSeconds = (obj["timeout_seconds"] as? Number)?.toInt(),
+            expiresAtEpochSeconds = (obj["expires_at"] as? Number)?.toDouble(),
+            pendingCount = positiveInt(obj["pending_count"]) ?: 1,
+        )
     }
 
-    private fun attention(prefix: String, obj: Map<String, Any?>, vararg fields: String): ChatEvent {
-        val detail = fields.firstNotNullOfOrNull { stringField(obj, it) }.orEmpty()
-        return ChatEvent.Thought(if (detail.isBlank()) prefix else "$prefix: $detail")
+    /**
+     * Parses an `approval` payload (`tools/approval.py` data + `route_approvals.submit_pending`
+     * head stamp). Public: the same shape is served by `GET /api/approval/pending`
+     * (`{"pending": {...}, "pending_count": N}`) and reused by InteractiveRequestsRepository.
+     * Returns null when the frame carries no command/description/tool at all (nothing to approve).
+     */
+    fun approvalPayload(obj: Map<String, Any?>?): ApprovalPayload? {
+        obj ?: return null
+        val command = stringField(obj, "command").orEmpty()
+        val description = stringField(obj, "description").orEmpty()
+        val tool = stringField(obj, "tool") ?: stringField(obj, "name")
+        if (command.isBlank() && description.isBlank() && tool.isNullOrBlank()) return null
+        val patternKeys = stringList(obj["pattern_keys"]).ifEmpty { listOfNotNull(stringField(obj, "pattern_key")) }
+        return ApprovalPayload(
+            approvalId = stringField(obj, "approval_id"),
+            command = command,
+            description = description,
+            patternKeys = patternKeys,
+            // Missing flags: never offer a permanent grant the server did not sanction; session-wide
+            // approval is safe for every non-smart-denied prompt (tools/approval.py sets both explicitly).
+            allowPermanent = obj["allow_permanent"] as? Boolean ?: false,
+            allowSession = obj["allow_session"] as? Boolean ?: true,
+            smartDenied = obj["smart_denied"] == true,
+            runId = stringField(obj, "run_id"),
+            mirrorToken = stringField(obj, "_gateway_mirror_token"),
+            pendingCount = positiveInt(obj["pending_count"]) ?: 1,
+            tool = tool,
+            riskLevel = stringField(obj, "risk_level"),
+            choices = stringList(obj["choices"]),
+        )
     }
+
+    private fun stringList(value: Any?): List<String> =
+        (value as? List<*>)?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }.orEmpty()
+
+    private fun positiveInt(value: Any?): Int? = (value as? Number)?.toInt()?.takeIf { it > 0 }
 
     private fun phase(obj: Map<String, Any?>?, payload: String, eventName: String?): ChatEvent.Phase? {
         val name = obj?.let { (it["name"] ?: it["phase"] ?: it["status"] ?: it["message"])?.toString() }

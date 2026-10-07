@@ -21,4 +21,51 @@ class ChatUiStateTest {
     }
     @Test fun completionAndFailureAllowNextMessage() { val state = ChatUiState(); state.begin("hello"); state.complete(); assertEquals(ChatStatus.RECEIVED, state.status); assertTrue(state.begin("again")); state.fail(); assertEquals(ChatStatus.ERROR, state.status); assertTrue(state.begin("retry")) }
     @Test fun cancelMarksStreamIdleAndAllowsNextMessage() { val state = ChatUiState(); state.begin("hello"); state.cancel(); assertEquals(ChatStatus.IDLE, state.status); assertTrue(state.begin("again")) }
+
+    @Test fun approvalEventRecordsPendingPayloadAndThoughtTrace() {
+        val state = ChatUiState(); state.begin("hello")
+        val payload = ru.mars.network.model.ApprovalPayload(approvalId = "a1", command = "rm -rf /tmp/x", description = "Удаление каталога", pendingCount = 2)
+        state.onEvent(ChatEvent.ApprovalRequired(payload))
+        assertEquals(payload, state.pendingApproval)
+        assertTrue(state.messages.last().thoughts.any { it.contains("Требуется подтверждение") && it.contains("Удаление каталога") })
+    }
+
+    @Test fun clarifyEventRecordsPendingPayloadWithChoicesTrace() {
+        val state = ChatUiState(); state.begin("hello")
+        val payload = ru.mars.network.model.ClarifyPayload(clarifyId = "c1", question = "Какой профиль?", choices = listOf("default", "office"))
+        state.onEvent(ChatEvent.ClarifyRequired(payload))
+        assertEquals(payload, state.pendingClarify)
+        assertTrue(state.messages.last().thoughts.any { it.contains("Какой профиль?") && it.contains("default / office") })
+    }
+
+    @Test fun pendingInteractiveSurvivesWithoutAssistantBubble() {
+        val state = ChatUiState()
+        val payload = ru.mars.network.model.ApprovalPayload(approvalId = "a2", command = "ls", description = "")
+        state.onEvent(ChatEvent.ApprovalRequired(payload))
+        assertEquals(payload, state.pendingApproval)
+    }
+
+    @Test fun resolveAndLifecycleTransitionsClearPendingInteractive() {
+        val state = ChatUiState(); state.begin("hello")
+        state.onEvent(ChatEvent.ApprovalRequired(ru.mars.network.model.ApprovalPayload(approvalId = "a1", command = "c", description = "")))
+        state.resolveApproval(); assertNull(state.pendingApproval)
+        state.onEvent(ChatEvent.ClarifyRequired(ru.mars.network.model.ClarifyPayload(clarifyId = "c1", question = "q")))
+        state.onEvent(ChatEvent.Done); assertNull(state.pendingClarify)
+
+        state.begin("again"); state.onEvent(ChatEvent.ClarifyRequired(ru.mars.network.model.ClarifyPayload(clarifyId = "c2", question = "q2")))
+        state.fail(); assertNull(state.pendingClarify)
+
+        state.begin("retry"); state.onEvent(ChatEvent.ApprovalRequired(ru.mars.network.model.ApprovalPayload(approvalId = "a3", command = "c", description = "")))
+        state.cancel(); assertNull(state.pendingApproval)
+
+        state.begin("next"); state.onEvent(ChatEvent.ClarifyRequired(ru.mars.network.model.ClarifyPayload(clarifyId = "c3", question = "q3")))
+        state.startNewSession(); assertNull(state.pendingClarify)
+    }
+
+    @Test fun bindSessionClearsPendingInteractive() {
+        val state = ChatUiState(); state.begin("hello")
+        state.onEvent(ChatEvent.ApprovalRequired(ru.mars.network.model.ApprovalPayload(approvalId = "a1", command = "c", description = "")))
+        state.bindSession("s2", "Другая", emptyList())
+        assertNull(state.pendingApproval)
+    }
 }

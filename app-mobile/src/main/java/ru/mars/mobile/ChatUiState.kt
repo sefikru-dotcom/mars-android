@@ -1,6 +1,8 @@
 package ru.mars.mobile
 
+import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.SessionItem
 
 /** UI model for the rich chat transcript. Kept platform independent for unit tests. */
@@ -38,6 +40,12 @@ class ChatUiState {
         private set
     var phase: String? = null
         private set
+    /** Approval prompt awaiting the user's decision (dialog is driven by InteractiveRequestController). */
+    var pendingApproval: ApprovalPayload? = null
+        private set
+    /** Clarify prompt awaiting the user's answer (dialog is driven by InteractiveRequestController). */
+    var pendingClarify: ClarifyPayload? = null
+        private set
 
     fun begin(message: String, attachmentNames: List<String> = emptyList()): Boolean {
         if (message.isBlank() && attachmentNames.isEmpty() || status == ChatStatus.TYPING) return false
@@ -48,6 +56,13 @@ class ChatUiState {
     }
 
     fun onEvent(event: ChatEvent) {
+        // Attention requests are recorded even without a live assistant bubble (e.g. history
+        // replay races) so the controller hook never misses a prompt.
+        when (event) {
+            is ChatEvent.ApprovalRequired -> pendingApproval = event.payload
+            is ChatEvent.ClarifyRequired -> pendingClarify = event.payload
+            else -> Unit
+        }
         val index = messages.indexOfLast { it.role == "assistant" }
         if (index < 0) return
         val current = messages[index]
@@ -61,6 +76,10 @@ class ChatUiState {
                 if ((event.id != null && tool.id == event.id) || (event.id == null && tool.name == event.name && tool.result == null)) tool.copy(result = event.result) else tool
             })
             is ChatEvent.Phase -> { phase = event.name; current }
+            // Transcript parity with the pre-typed mapper: keep a readable trace of the prompt
+            // while the structured payload drives the interactive dialog.
+            is ChatEvent.ApprovalRequired -> current.copy(thoughts = current.thoughts + approvalThought(event.payload))
+            is ChatEvent.ClarifyRequired -> current.copy(thoughts = current.thoughts + clarifyThought(event.payload))
             ChatEvent.Done -> current.copy(status = MessageStatus.COMPLETE)
             is ChatEvent.Error -> current.copy(text = current.text + "\nОшибка: " + event.message, status = MessageStatus.ERROR)
         }
@@ -71,14 +90,32 @@ class ChatUiState {
         }
     }
 
-    fun complete() { status = ChatStatus.RECEIVED; phase = null; markAssistant(MessageStatus.COMPLETE) }
-    fun fail() { status = ChatStatus.ERROR; phase = null; markAssistant(MessageStatus.ERROR) }
-    fun cancel() { status = ChatStatus.IDLE; phase = null; markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null }
+    fun complete() { status = ChatStatus.RECEIVED; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
+    fun fail() { status = ChatStatus.ERROR; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
+    fun cancel() { status = ChatStatus.IDLE; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
+
+    /** Called by the interactive controller once an approval was answered or dismissed. */
+    fun resolveApproval() { pendingApproval = null }
+
+    /** Called by the interactive controller once a clarify was answered or dismissed. */
+    fun resolveClarify() { pendingClarify = null }
+
+    private fun clearPendingInteractive() { pendingApproval = null; pendingClarify = null }
+
+    private fun approvalThought(payload: ApprovalPayload): String {
+        val detail = payload.description.ifBlank { payload.command.ifBlank { payload.tool.orEmpty() } }
+        return if (detail.isBlank()) "Требуется подтверждение" else "Требуется подтверждение: $detail"
+    }
+
+    private fun clarifyThought(payload: ClarifyPayload): String {
+        val suffix = if (payload.choices.isEmpty()) "" else " (варианты: ${payload.choices.joinToString(" / ")})"
+        return "Требуется уточнение: ${payload.question}$suffix"
+    }
 
     private fun markAssistant(value: MessageStatus) {
         val i = messages.indexOfLast { it.role == "assistant" }
