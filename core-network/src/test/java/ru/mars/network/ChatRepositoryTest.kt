@@ -390,8 +390,11 @@ class ChatRepositoryTest {
                 ChatEvent.ToolCall("call_1", "terminal", "{\"command\":\"ls\"}"),
                 ChatEvent.ToolResult("call_1", "terminal", "a.txt"),
                 ChatEvent.Chunk("Смотрю файлы.", null),
-                ChatEvent.Thought("Требуется подтверждение: Выполнить rm?"),
-                ChatEvent.Thought("Требуется уточнение: Какой файл? (варианты: a / b)"),
+                // approval/clarify now map to typed events preserving ids/options (interactive contracts).
+                ChatEvent.ApprovalRequired(ru.mars.network.model.ApprovalPayload(
+                    approvalId = null, command = "", description = "Выполнить rm?", pendingCount = 1)),
+                ChatEvent.ClarifyRequired(ru.mars.network.model.ClarifyPayload(
+                    clarifyId = null, question = "Какой файл?", choices = listOf("a", "b"), sessionId = "s1")),
                 ChatEvent.Thought("Предупреждение: fallback model"),
                 ChatEvent.Thought("Направление не доставлено: еще тесты"),
                 ChatEvent.Done,
