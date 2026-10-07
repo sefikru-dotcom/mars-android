@@ -127,7 +127,7 @@ class MainActivity : ComponentActivity() {
         action.isEnabled = false
         status.setText(R.string.status_revoking)
         operation = lifecycleScope.launch {
-        val result = repository.revokeCredential(credential.deviceId, credential.accessToken)
+            val result = repository.revokeCredential(credential.deviceId, credential.accessToken)
             if (result.isSuccess) {
                 store.clear()
                 flow.revoked()
