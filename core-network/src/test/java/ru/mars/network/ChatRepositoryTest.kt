@@ -51,7 +51,7 @@ class ChatRepositoryTest {
                 "id: evt-opaque\nevent: chunk\ndata: {\"text\":\"Hi\"}\n\nevent: stream_end\ndata: {}\n\n"
             ))
             val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
-            assertEquals(listOf(ChatEvent.Chunk("Hi", "evt-opaque"), ChatEvent.Done), events)
+            assertEquals(listOf(ChatEvent.StreamStarted("opaque-stream"), ChatEvent.Chunk("Hi", "evt-opaque"), ChatEvent.Done), events)
             val start = server.takeRequest()
             assertEquals("POST", start.method)
             assertEquals("/api/chat/start", start.path)

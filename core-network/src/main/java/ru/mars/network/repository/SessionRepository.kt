@@ -5,6 +5,7 @@ import com.squareup.moshi.Types
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
@@ -25,6 +26,17 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) {
         val s = (root["session"] as? Map<*, *>) ?: root
         return SessionDetail(string(s, "id") ?: string(s, "session_id") ?: sessionId, string(s, "title"), string(s, "created_at", "createdAt"), string(s, "updated_at", "updatedAt"), (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty())
     }
+    fun searchSessions(baseUrl: String, credential: ConsumedDeviceCredential, query: String): List<SessionItem> =
+        getSessions(baseUrl, credential).filter { item ->
+            item.title?.contains(query, ignoreCase = true) == true || item.preview?.contains(query, ignoreCase = true) == true
+        }
+
+    fun renameSession(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String, newTitle: String): Boolean {
+        val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session/title").build()
+        val body = okhttp3.RequestBody.create("application/json; charset=utf-8".toMediaType(), "{\"session_id\":${moshi.adapter(String::class.java).toJson(sessionId)},\"title\":${moshi.adapter(String::class.java).toJson(newTitle)}}")
+        return try { client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).post(body).build()).execute().use { it.isSuccessful } } catch (_: Exception) { false }
+    }
+
     fun deleteSession(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String): Boolean {
         val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session").addQueryParameter("session_id", sessionId).build()
         return try { client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).delete().build()).execute().use { it.isSuccessful } } catch (_: Exception) { false }
