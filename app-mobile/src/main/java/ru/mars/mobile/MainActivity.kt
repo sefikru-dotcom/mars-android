@@ -1,60 +1,152 @@
 package ru.mars.mobile
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
+import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.PairingStatus
+import ru.mars.network.repository.PairingRepository
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
+    private lateinit var status: TextView
+    private lateinit var code: TextView
+    private lateinit var action: Button
+    private lateinit var revoke: Button
+    private lateinit var store: AndroidKeyStoreCredentialStore
+    private lateinit var repository: PairingRepository
+    private val flow = PairingFlowState()
+    private var operation: Job? = null
+    private var pairing: PairingData? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(buildShellView())
-    }
-
-    private fun buildShellView(): LinearLayout {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            setBackgroundColor(Color.parseColor("#10131A"))
+        store = AndroidKeyStoreCredentialStore(this)
+        repository = PairingRepository(BASE_URL)
+        setContentView(buildView())
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(ROOT_ID)) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+            view.setPadding(dp(24), bars.top + dp(24), dp(24), bars.bottom + dp(24))
+            insets
         }
-
-        content.addView(textView(R.string.mobile_shell_title, 24f, Color.WHITE))
-        content.addView(textView(R.string.shell_note, 16f, Color.parseColor("#AAB2C0"), topMargin = 12))
-        content.addView(stateCard(R.string.connection_label, R.string.connection_state, 32))
-        content.addView(stateCard(R.string.sessions_label, R.string.sessions_state, 12))
-        return content
+        store.read()?.let { flow.restoreConnected(); showConnected() }
     }
 
-    private fun stateCard(titleRes: Int, stateRes: Int, marginTop: Int = 0): LinearLayout {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            setBackgroundColor(Color.parseColor("#1B202B"))
+    override fun onDestroy() {
+        operation?.cancel()
+        operation = null
+        super.onDestroy()
+    }
+
+    private fun buildView(): View {
+        val root = LinearLayout(this).apply { id = ROOT_ID; orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(16, 19, 26)) }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+        content.addView(text(R.string.pairing_title, 26f, Color.WHITE))
+        content.addView(text(R.string.pairing_description, 16f, MUTED, 12))
+        code = text(R.string.code_empty, 36f, Color.WHITE, 28).apply { gravity = Gravity.CENTER }
+        content.addView(code)
+        status = text(R.string.status_not_connected, 16f, MUTED, 16)
+        content.addView(status)
+        action = Button(this).apply { setText(R.string.start_pairing); setOnClickListener { startPairing() } }
+        content.addView(action, params(WRAP, 56, 24))
+        revoke = Button(this).apply { setText(R.string.revoke); visibility = View.GONE; setOnClickListener { revokeCredential() } }
+        content.addView(revoke, params(WRAP, 56, 8))
+        content.addView(text(R.string.no_chat_note, 14f, MUTED, 28))
+        val scroll = ScrollView(this).apply { addView(content, ViewGroup.LayoutParams(-1, -2)); isFillViewport = true }
+        root.addView(scroll, ViewGroup.LayoutParams(-1, -1))
+        return root
+    }
+
+    private fun startPairing() {
+        if (!flow.beginCreate()) return
+        operation?.cancel()
+        action.isEnabled = false
+        status.setText(R.string.status_creating)
+        code.setText(R.string.code_empty)
+        operation = lifecycleScope.launch {
+            val result = repository.createPairing()
+            if (result.isFailure) { fail(R.string.error_unavailable); return@launch }
+            val created = result.getOrNull() ?: run { fail(R.string.error_unavailable); return@launch }
+            pairing = PairingData(created.pairId, created.pollSecret, created.expiresIn)
+            flow.created()
+            code.text = created.code
+            status.setText(R.string.status_open_browser)
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$BASE_URL/pair")))
+            pollUntilClaimed()
         }
-        card.addView(textView(titleRes, 14f, Color.parseColor("#E76F51")))
-        card.addView(textView(stateRes, 16f, Color.WHITE, topMargin = 6))
-        card.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(marginTop) }
-        return card
     }
 
-    private fun textView(textRes: Int, sizeSp: Float, color: Int, topMargin: Int = 0): TextView {
-        return TextView(this).apply {
-            setText(textRes)
-            textSize = sizeSp
-            setTextColor(color)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { this.topMargin = dp(topMargin) }
+    private suspend fun pollUntilClaimed() {
+        val current = pairing ?: return
+        val deadline = System.currentTimeMillis() + current.expiresIn * 1000L
+        while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
+            val result = repository.pollPairingStatus(current.pairId)
+            if (result.isFailure) { fail(R.string.error_unavailable); return }
+            val response = result.getOrNull() ?: return
+            if (response.status == PairingStatus.CLAIMED || response.status == PairingStatus.APPROVED) {
+                exchange(current)
+                return
+            }
+            delay(POLL_INTERVAL_MS)
+        }
+        if (currentCoroutineContext().isActive) fail(R.string.error_timeout)
+    }
+
+    private suspend fun exchange(current: PairingData) {
+        if (!flow.beginExchange()) return
+        status.setText(R.string.status_finishing)
+            val result = repository.exchangePairing(current.pairId, current.pollSecret)
+            if (result.isFailure) { fail(R.string.error_unavailable); return }
+            val credential = result.getOrNull() ?: run { fail(R.string.error_unavailable); return }
+            store.save(credential)
+            flow.connected()
+            showConnected()
+    }
+
+    private fun revokeCredential() {
+        if (!flow.beginRevoke()) return
+        val credential = store.read()
+        if (credential == null) { flow.revoked(); showDisconnected(); return }
+        operation?.cancel()
+        action.isEnabled = false
+        status.setText(R.string.status_revoking)
+        operation = lifecycleScope.launch {
+            val result = repository.revokeCredential(credential.deviceId, credential.accessToken)
+            if (result.isSuccess) {
+                store.clear()
+                flow.revoked()
+                showDisconnected()
+            } else {
+                flow.restoreConnected()
+                revoke.isEnabled = true
+                status.setText(R.string.error_revoke)
+            }
         }
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun showConnected() { status.setText(R.string.status_connected); action.visibility = View.GONE; revoke.visibility = View.VISIBLE; revoke.isEnabled = true; code.setText(R.string.code_connected) }
+    private fun showDisconnected() { action.visibility = View.VISIBLE; action.isEnabled = true; revoke.visibility = View.GONE; code.setText(R.string.code_empty); status.setText(R.string.status_not_connected) }
+    private fun fail(message: Int) { flow.failed(); action.isEnabled = true; status.setText(message) }
+
+    private fun text(res: Int, size: Float, color: Int, top: Int = 0) = TextView(this).apply { setText(res); textSize = size; setTextColor(color); layoutParams = params(WRAP, WRAP, top) }
+    private fun params(width: Int, height: Int, top: Int = 0) = LinearLayout.LayoutParams(width, if (height == WRAP) WRAP else dp(height)).apply { topMargin = dp(top) }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private data class PairingData(val pairId: String, val pollSecret: String, val expiresIn: Int)
+    companion object { private const val BASE_URL = "https://marscore.ru"; private const val POLL_INTERVAL_MS = 2000L; private const val ROOT_ID = 1001; private const val WRAP = -2; private const val MUTED = 0xffaab2c0.toInt() }
 }

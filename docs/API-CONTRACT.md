@@ -1,37 +1,36 @@
-# API contract: device pairing
-
-This document records the server contract available to the Android client at the baseline. It is intentionally limited to the pairing flow; it does not invent a native credential or chat API.
+# API contract: device pairing v3
 
 ## Create a pairing
 
-`POST /api/auth/device-pairings`
+`POST /api/v1/auth/device-pairings`
 
-The server returns:
-
-- `pair_id`: pairing identifier used for polling.
-- `code`: user-facing pairing code.
-- `poll_secret`: secret used by the pairing client when polling.
-- `expires_in`: lifetime of the pairing, in seconds.
-- `status`: current pairing status.
-
-The client must keep `poll_secret` confidential and must not log, commit, upload, or expose it in diagnostics. The CI workflow does not call this endpoint and has no pairing secrets.
+The server returns `pair_id`, `code`, `poll_secret`, `expires_in`, and `status`.
+`poll_secret` is confidential and is never logged or sent in a URL.
 
 ## Poll pairing status
 
-`GET /api/auth/device-pairings/status` with `pair_id` and `poll_secret` returns:
+`GET /api/v1/auth/device-pairings/status?pair_id={pair_id}`
 
-- `status`: current pairing status.
-- `expires_at`: server expiration timestamp.
+The response is metadata only: `pair_id` and `status` (plus server metadata such as `expires_at` when supplied). It never contains a device token or native credential. Polling is not approval and must not be used as credential acquisition.
 
-The current Android implementation sends both parameters as URL query parameters. This is a read-only status poll; polling must not be treated as approval. Clients must handle expiration and terminal statuses without treating polling as approval.
+## Exchange the approved pairing
 
-## Approve pairing
+`POST /api/v1/auth/device-pairings/{pair_id}/exchange`
 
-Approval is **browser-only** and requires the browser session plus CSRF protection. A native client must not emulate browser approval or manufacture a session/CSRF token.
+JSON body:
 
-## Explicitly blocked capabilities
+```json
+{"poll_secret":"..."}
+```
 
-- **Native device credential: BLOCKED.** The current contract provides no native device-credential endpoint or credential exchange. Do not add a client-side credential flow until a documented server contract and security review exist.
-- **Native chat: BLOCKED.** Native chat is not part of the current contract. Do not ship, test, or claim a native chat implementation from this baseline.
+The response contains exactly the native credential fields consumed by the client:
+`access_token`, `token_type`, `expires_in`, `device_id`, and `scopes`.
+The access token is accepted once in memory, then stored only in encrypted Android Keystore-backed storage. It must not appear in URLs, logs, or `toString()` output.
 
-Any future API addition must specify authentication, authorization, transport, error/expiry behavior, redaction rules, and security review before client implementation.
+## Revoke
+
+`POST /api/v1/auth/devices/{device_id}/revoke` with `Authorization: Bearer <access_token>`.
+
+The client accepts a successful HTTP response without reading a credential from the response body.
+
+Approval remains browser-only and requires the browser session plus CSRF protection. A native client must not emulate browser approval.

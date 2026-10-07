@@ -1,64 +1,107 @@
 package ru.mars.network.model
 
-private val STRING_FIELD = Regex("\\\"([a-z_]+)\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"")
-private val NUMBER_FIELD = Regex("\\\"([a-z_]+)\\\"\\s*:\\s*(\\d+)")
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonReader
+import okio.Buffer
+import java.util.concurrent.atomic.AtomicBoolean
 
+data class PairingResponse(val pairId: String, val code: String, val pollSecret: String, val expiresIn: Int, val status: PairingStatus)
 
-data class PairingResponse(
-    val pairId: String,
-    val code: String,
-    val pollSecret: String,
-    val expiresIn: Int,
-    val status: PairingStatus
-)
+data class PairingStatusResponse(val pairId: String, val status: PairingStatus)
 
-data class PairingStatusResponse(val pairId: String, val status: PairingStatus, val expiresAt: String?)
+data class PairingExchangeRequest(@Json(name = "poll_secret") val pollSecret: String)
+data class PairingExchangeResponse(
+    @Json(name = "access_token") val accessToken: String,
+    @Json(name = "token_type") val tokenType: String,
+    @Json(name = "expires_in") val expiresIn: Int,
+    @Json(name = "device_id") val deviceId: String,
+    val scopes: List<String>
+) {
+    fun oneTimeCredential(): OneTimeDeviceCredential =
+        OneTimeDeviceCredential(accessToken, tokenType, deviceId, scopes, expiresIn)
+}
 
-enum class PairingStatus { PENDING, APPROVED }
-
+enum class PairingStatus { PENDING, APPROVED, CLAIMED }
 data class AuthResponse(val accessToken: String?, val refreshToken: String?)
+
+class OneTimeDeviceCredential internal constructor(
+    accessToken: String,
+    val tokenType: String,
+    val deviceId: String,
+    val scopes: List<String>,
+    val expiresIn: Int
+) {
+    private val token = OneTimeValue(accessToken)
+    fun consume(): ConsumedDeviceCredential? = token.consume()?.let { ConsumedDeviceCredential(it, tokenType, deviceId, scopes, expiresIn) }
+    override fun toString() = "OneTimeDeviceCredential(accessToken=[REDACTED], tokenType=$tokenType, deviceId=$deviceId, scopes=$scopes, expiresIn=$expiresIn)"
+}
+
+data class ConsumedDeviceCredential(val accessToken: String, val tokenType: String, val deviceId: String, val scopes: List<String>, val expiresIn: Int)
+private class OneTimeValue<T>(private val value: T) {
+    private val consumed = AtomicBoolean(false)
+    fun consume(): T? = if (consumed.compareAndSet(false, true)) value else null
+}
 
 object PairingResponseParser {
     fun parse(json: String): PairingResponse {
-        val strings = json.stringFields()
-        val numbers = json.numberFields()
-        return PairingResponse(
-            pairId = strings.required("pair_id"),
-            code = strings.required("code"),
-            pollSecret = strings.required("poll_secret"),
-            expiresIn = numbers.required("expires_in"),
-            status = PairingStatusParser.parse(strings.required("status"))
-        )
+        val fields = JsonFields.parse(json)
+        return PairingResponse(fields.stringRequired("pair_id"), fields.stringRequired("code"), fields.stringRequired("poll_secret"), fields.intRequired("expires_in"), PairingStatusParser.parse(fields.stringRequired("status")))
     }
 }
 
 object PairingStatusResponseParser {
     fun parse(json: String): PairingStatusResponse {
-        val strings = json.stringFields()
-        return PairingStatusResponse(
-            pairId = strings.required("pair_id"),
-            status = PairingStatusParser.parse(strings.required("status")),
-            expiresAt = strings["expires_at"]
+        val fields = JsonFields.parse(json)
+        return PairingStatusResponse(fields.stringRequired("pair_id"), PairingStatusParser.parse(fields.stringRequired("status")))
+    }
+}
+
+object PairingExchangeResponseParser {
+    fun parse(json: String): PairingExchangeResponse {
+        val fields = JsonFields.parse(json)
+        return PairingExchangeResponse(
+            fields.stringRequired("access_token"),
+            fields.stringRequired("token_type"),
+            fields.intRequired("expires_in"),
+            fields.stringRequired("device_id"),
+            fields.scopesRequired()
         )
     }
 }
 
 private object PairingStatusParser {
-    fun parse(raw: String): PairingStatus = when (raw) {
+    fun parse(raw: String) = when (raw) {
         "pending" -> PairingStatus.PENDING
         "approved" -> PairingStatus.APPROVED
+        "claimed" -> PairingStatus.CLAIMED
         else -> error("Unsupported pairing status: $raw")
     }
 }
 
-private fun String.stringFields(): Map<String, String> = STRING_FIELD.findAll(this)
-    .associate { it.groupValues[1] to it.groupValues[2] }
-
-private fun String.numberFields(): Map<String, Int> = NUMBER_FIELD.findAll(this)
-    .associate { it.groupValues[1] to it.groupValues[2].toInt() }
-
-private fun Map<String, String>.required(name: String): String = this[name]?.takeIf { it.isNotEmpty() }
-    ?: error("Missing required field: $name")
-
-private fun Map<String, Int>.required(name: String): Int = this[name]
-    ?: error("Missing required field: $name")
+private class JsonFields(private val values: Map<String, Any?>) {
+    fun string(name: String): String? = values[name] as? String
+    fun stringRequired(name: String) = string(name)?.takeIf(String::isNotEmpty) ?: error("Missing required field: $name")
+    fun int(name: String) = (values[name] as? Number)?.toInt()
+    fun intRequired(name: String) = int(name) ?: error("Missing required field: $name")
+    fun scopesRequired() = (values["scopes"] as? List<*>)?.map { it as? String ?: error("Invalid scopes field") }
+        ?: error("Missing required field: scopes")
+    companion object {
+        fun parse(json: String): JsonFields {
+            val reader = JsonReader.of(Buffer().writeUtf8(json))
+            val values = linkedMapOf<String, Any?>()
+            reader.beginObject()
+            while (reader.hasNext()) {
+                val name = reader.nextName()
+                if (name == "scopes") {
+                    val items = mutableListOf<String>(); reader.beginArray(); while (reader.hasNext()) items += reader.nextString(); reader.endArray(); values[name] = items
+                } else when (reader.peek()) {
+                    JsonReader.Token.STRING -> values[name] = reader.nextString()
+                    JsonReader.Token.NUMBER -> values[name] = reader.nextLong()
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            return JsonFields(values)
+        }
+    }
+}
