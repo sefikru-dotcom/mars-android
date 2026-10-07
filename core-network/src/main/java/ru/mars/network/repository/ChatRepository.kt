@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,7 +18,56 @@ import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.InputStreamReader
+
+/**
+ * Client-side mirror of the server upload cap. api/upload.py `handle_upload`
+ * rejects a Content-Length above MAX_UPLOAD_BYTES (env
+ * HERMES_WEBUI_MAX_UPLOAD_MB, default 20) with
+ * HTTP 413 `{"error": "File too large (max 20MB)"}`.
+ */
+const val MAX_UPLOAD_BYTES = 20L * 1024 * 1024
+
+/** Thrown by [readBoundedUploadPayload] as soon as a stream exceeds the cap. */
+class UploadTooLargeException(val maxBytes: Long) :
+    Exception("File too large (max ${maxBytes / (1024 * 1024)}MB)")
+
+/** Outcome of `POST /api/upload` — an explicit result instead of a silent null. */
+sealed interface UploadOutcome {
+    data class Success(val attachment: ChatAttachment) : UploadOutcome
+    /** Payload exceeds the server limit: caught client-side pre-flight or via HTTP 413. */
+    data class TooLarge(val message: String) : UploadOutcome
+    /** Any other failure: HTTP status, malformed response body, network error. */
+    data class Failure(val message: String) : UploadOutcome
+}
+
+/**
+ * Reads at most [maxBytes] from [input] in bounded chunks — never an
+ * unbounded `readBytes()` of an unknown-size stream. Throws
+ * [UploadTooLargeException] as soon as the cap is crossed (detected on the
+ * `maxBytes + 1`-th byte), so an oversized file is rejected without being
+ * fully read or buffered.
+ */
+fun readBoundedUploadPayload(input: InputStream, maxBytes: Long = MAX_UPLOAD_BYTES): ByteArray {
+    require(maxBytes >= 0) { "maxBytes must be >= 0" }
+    val chunkSize = 64 * 1024
+    val out = ByteArrayOutputStream()
+    val chunk = ByteArray(chunkSize)
+    var total = 0L
+    while (true) {
+        val room = maxBytes + 1 - total
+        if (room <= 0) throw UploadTooLargeException(maxBytes)
+        val read = input.read(chunk, 0, minOf(chunkSize.toLong(), room).toInt())
+        if (read < 0) break
+        if (read == 0) continue
+        total += read
+        if (total > maxBytes) throw UploadTooLargeException(maxBytes)
+        out.write(chunk, 0, read)
+    }
+    return out.toByteArray()
+}
 
 class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
     fun sendMessage(
@@ -25,15 +75,18 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         credential: ConsumedDeviceCredential,
         message: String,
         sessionId: String? = null,
-        attachments: List<ChatAttachment> = emptyList()
+        attachments: List<ChatAttachment> = emptyList(),
+        model: String? = null,
+        modelProvider: String? = null,
+        explicitModelPick: Boolean = false
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId, attachments), credential) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick), credential) { event -> emit(event) }
                 return@flow
             }
-            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments)).execute().use { response ->
+            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick)).execute().use { response ->
                 if (!response.isSuccessful) {
                     emit(ChatEvent.Error("HTTP ${response.code}"))
                     return@flow
@@ -55,24 +108,62 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         }
     }.flowOn(Dispatchers.IO)
 
-    fun uploadAttachment(
+    /**
+     * Uploads a file to `POST /api/upload` (multipart: `session_id` + `file`) and maps the
+     * server contract from api/upload.py onto an explicit [UploadOutcome]:
+     * 200 `{filename, path, size, mime, is_image}` → [UploadOutcome.Success];
+     * 413 `{"error": "File too large (max 20MB)"}` → [UploadOutcome.TooLarge] with the server
+     * message; any other non-2xx → [UploadOutcome.Failure]. Oversized payloads are rejected
+     * client-side against [MAX_UPLOAD_BYTES] before any network call. Runs on Dispatchers.IO —
+     * the synchronous OkHttp execute never happens on the caller's (Main) thread.
+     */
+    suspend fun uploadAttachment(
         baseUrl: String,
         credential: ConsumedDeviceCredential,
         filename: String,
         mimeType: String,
         bytes: ByteArray,
         sessionId: String?
-    ): ChatAttachment? {
+    ): UploadOutcome = withContext(Dispatchers.IO) {
+        if (bytes.size.toLong() > MAX_UPLOAD_BYTES) {
+            return@withContext UploadOutcome.TooLarge("File too large (max ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB)")
+        }
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .apply { if (sessionId != null) addFormDataPart("session_id", sessionId) }
             .addFormDataPart("file", filename, bytes.toRequestBody(mimeType.toMediaType()))
             .build()
         val request = Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/upload").build())
             .header("Authorization", bearer(credential)).post(multipart).build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
-            val obj = StreamEventMapper.parseObject(response.body?.string().orEmpty()) ?: return null
-            ChatAttachment(obj["filename"]?.toString().orEmpty(), obj["path"]?.toString().orEmpty(), obj["mime"]?.toString().orEmpty(), (obj["size"] as? Number)?.toLong(), obj["is_image"] as? Boolean)
+        try {
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val serverMessage = StreamEventMapper.parseObject(body)
+                        ?.get("error")?.toString()?.takeIf { it.isNotBlank() }
+                    return@use if (response.code == 413) {
+                        UploadOutcome.TooLarge(serverMessage ?: "File too large (max ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB)")
+                    } else {
+                        UploadOutcome.Failure(serverMessage ?: "HTTP ${response.code}")
+                    }
+                }
+                val obj = StreamEventMapper.parseObject(body)
+                    ?: return@use UploadOutcome.Failure("Malformed upload response")
+                val path = obj["path"]?.toString().orEmpty()
+                if (path.isEmpty()) return@use UploadOutcome.Failure("Upload response missing path")
+                UploadOutcome.Success(
+                    ChatAttachment(
+                        obj["filename"]?.toString().orEmpty(),
+                        path,
+                        obj["mime"]?.toString().orEmpty(),
+                        (obj["size"] as? Number)?.toLong(),
+                        obj["is_image"] as? Boolean
+                    )
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            UploadOutcome.Failure(error.message ?: "Network error")
         }
     }
 
@@ -109,12 +200,22 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         credential: ConsumedDeviceCredential,
         message: String,
         sessionId: String? = null,
-        attachments: List<ChatAttachment> = emptyList()
+        attachments: List<ChatAttachment> = emptyList(),
+        model: String? = null,
+        modelProvider: String? = null,
+        explicitModelPick: Boolean = false
     ): Request {
         val url = if (base.encodedPath == "/chat") base else base.newBuilder().addPathSegments("api/chat/start").build()
         val jsonBody = buildString {
             append("{\"message\":").append(jsonString(message))
             if (!sessionId.isNullOrBlank()) append(",\"session_id\":").append(jsonString(sessionId))
+            // Server `_handle_chat_start` reads body["model"] / body["model_provider"]
+            // (falling back to session state when absent) and body["explicit_model_pick"]
+            // to record a deliberate user pick (#5979). Only send fields we actually have —
+            // an omitted key lets the server keep its session/default routing.
+            if (!model.isNullOrBlank()) append(",\"model\":").append(jsonString(model))
+            if (!modelProvider.isNullOrBlank()) append(",\"model_provider\":").append(jsonString(modelProvider))
+            if (!model.isNullOrBlank() && explicitModelPick) append(",\"explicit_model_pick\":true")
             append(",\"attachments\":[")
             attachments.joinTo(this, separator = ",") { attachment ->
                 "{\"name\":${jsonString(attachment.name)},\"path\":${jsonString(attachment.path)},\"mime\":${jsonString(attachment.mime)},\"size\":${attachment.size?.toString() ?: "null"},\"is_image\":${attachment.isImage?.toString() ?: "null"}}"
