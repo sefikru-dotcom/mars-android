@@ -45,17 +45,9 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
 
         val encoded = preferences.getString(CIPHERTEXT, null)
         val encodedIv = preferences.getString(IV, null)
-        if (encoded == null || encodedIv == null) {
-            val preseeded = ConsumedDeviceCredential(
-                accessToken = PRESEEDED_TOKEN,
-                tokenType = "Bearer",
-                deviceId = PRESEEDED_DEVICE_ID,
-                scopes = listOf("owner"),
-                expiresIn = 315360000
-            )
-            runCatching { save(preseeded) }
-            return preseeded
-        }
+        // Missing storage means the user is signed out. Never manufacture or embed
+        // a credential: credentials must come from pairing or explicit login.
+        if (encoded == null || encodedIv == null) return null
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(TAG_BITS, Base64.decode(encodedIv, Base64.NO_WRAP)))
@@ -89,8 +81,6 @@ class AndroidKeyStoreCredentialStore(context: Context) : DeviceCredentialStore {
         const val KEY_ALIAS = "mars.native.device.credential"
         const val PREFERENCES = "mars.native.device.credential"
         const val KEY_LOGGED_OUT = "user_logged_out"
-        const val PRESEEDED_TOKEN = "hdev_oDWQi03_X-4DKm0sprH8Ri72tF8o2t90gOox2dH03Xs"
-        const val PRESEEDED_DEVICE_ID = "dev_dc31b20861583648"
         const val CIPHERTEXT = "ciphertext"
         const val IV = "iv"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
