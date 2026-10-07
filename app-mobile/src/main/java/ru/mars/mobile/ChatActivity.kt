@@ -41,6 +41,7 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
 import ru.mars.network.repository.ChatRepository
+import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.ModelsRepository
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.SessionRepository
@@ -57,6 +58,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var cancel: Button
     private lateinit var statusView: TextView
     private val uiState = ChatUiState()
+    // Interactive attention prompts (approval/clarify). The controller is confined to the UI
+    // thread via MainThreadDispatcher; gateway HTTP runs on its background executor.
+    private lateinit var interactiveView: AlertDialogInteractiveView
+    private lateinit var interactiveController: InteractiveRequestController
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
@@ -78,6 +83,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
+        interactiveView = AlertDialogInteractiveView(this)
+        interactiveController = InteractiveRequestController(
+            view = interactiveView,
+            gateway = RepositoryInteractiveGateway(InteractiveRequestsRepository(), BASE_URL) { store.read() },
+            sessionProvider = { currentSessionId },
+            state = uiState,
+            uiDispatcher = MainThreadDispatcher(),
+        ).also { interactiveView.listener = it }
+        // Accepted clarify answers echo into the transcript as user messages (web parity);
+        // the controller invokes this hook on the UI dispatcher thread.
+        interactiveController.onClarifyAnswered = { answer -> echoClarifyAnswer(answer) }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         setContentView(buildView())
@@ -87,6 +103,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onDestroy() {
+        // Terminal cleanup: ignore late callbacks, then dismiss dialogs synchronously so no
+        // window-leaked warning survives the Activity.
+        if (::interactiveController.isInitialized) interactiveController.destroy()
+        if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
         MarsMusicPlayer.unregisterListener(this)
         stream?.cancel()
         speech?.destroy()
@@ -278,7 +298,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "🎵 Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
             "🌤 Погода в Ставрополе" to { quickSend("Какая сейчас погода и прогноз на день в Ставрополе?") },
             "⚙ Статус хоста" to { quickSend("Марс, проверь аптайм, диск и состояние сервисов") },
-            "🧹 Новый чат" to { uiState.startNewSession(); currentSessionId = null; renderMessages() }
+            "🧹 Новый чат" to { startNewChat() }
         )
         quickPrompts.forEach { (title, action) ->
             quickBox.addView(Button(this).apply {
@@ -391,6 +411,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     uiState.onEvent(event)
                     if (event is ChatEvent.SessionBound) currentSessionId = event.sessionId
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                    // Session/stream ids are captured BEFORE the controller sees the event:
+                    // it resolves sessionProvider() when showing or answering a prompt.
+                    interactiveController.onEvent(event)
                     renderMessages()
                     setStatus()
                     scrollToBottom()
@@ -418,6 +441,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         stream?.cancel()
         currentStreamId = null
+        // Prompts of a cancelled stream are dead; also invalidates in-flight respond results.
+        interactiveController.dismissAll()
         uiState.cancel()
         setStatus()
         updateControls()
@@ -703,10 +728,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setTextColor(Color.WHITE)
             background = buttonBg(ACCENT)
             setOnClickListener {
-                uiState.startNewSession()
-                currentSessionId = null
-                renderMessages()
                 dialog.dismiss()
+                startNewChat()
             }
         })
         val filter = EditText(this).apply {
@@ -768,6 +791,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun loadSession(session: SessionItem) {
         val c = store.read() ?: return
+        // Prompts of the previous session must not survive the switch; in-flight responds for
+        // it are invalidated by the generation bump inside dismissAll().
+        interactiveController.dismissAll()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, session.id)
             if (detail != null) {
@@ -786,7 +812,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         lifecycleScope.launch {
             if (SessionRepository().deleteSession(BASE_URL, c, session.id)) {
                 uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
-                if (currentSessionId == session.id) uiState.startNewSession()
+                if (currentSessionId == session.id) {
+                    interactiveController.dismissAll()
+                    uiState.startNewSession()
+                    currentSessionId = null
+                }
                 dialog.dismiss()
                 showSessions()
             }
@@ -953,6 +983,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
+
+    /** "New chat" from any entry point: interactive prompts die together with the old session. */
+    private fun startNewChat() {
+        interactiveController.dismissAll()
+        uiState.startNewSession()
+        currentSessionId = null
+        renderMessages()
+    }
+
+    /** Transcript echo of an accepted clarify answer (web pushes it as a user message). UI thread. */
+    private fun echoClarifyAnswer(answer: String) {
+        uiState.messages += ChatMessage("user", answer)
+        renderMessages()
+    }
 
     private fun leaveChat() {
         stream?.cancel()

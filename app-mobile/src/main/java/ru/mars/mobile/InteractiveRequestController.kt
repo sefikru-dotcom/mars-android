@@ -19,8 +19,9 @@ import java.util.concurrent.Executors
 
 /**
  * Dialog surface for interactive attention requests. Implemented by [AlertDialogInteractiveView]
- * on device and by fakes in unit tests. All methods may be invoked from a background thread —
- * implementations must marshal to the UI thread themselves.
+ * on device and by fakes in unit tests. The controller invokes these methods on its
+ * [UiDispatcher] thread (the UI thread in production); [AlertDialogInteractiveView] still
+ * marshals defensively via `runOnUiThread` so a stray background call can never crash.
  */
 interface InteractiveRequestView {
     fun showApproval(payload: ApprovalPayload)
@@ -113,8 +114,31 @@ class RepositoryInteractiveGateway(
  * Secret hygiene: the controller never sees the access token (the gateway holds it) and never logs
  * payloads; only user-visible strings are forwarded to [InteractiveRequestView].
  *
- * Threading: [onEvent] and the listener callbacks run on the UI thread; gateway calls run on
- * [executor]. View implementations marshal back to the UI thread.
+ * Threading: [onEvent] and the listener callbacks arrive on the UI thread. Gateway HTTP runs on
+ * [executor] — and NOTHING else does. Every background result is handed to [uiDispatcher] before
+ * any state is touched: the identity guard, the generation guard, all controller fields, the
+ * [ChatUiState] writes and [onClarifyAnswered] run confined to the dispatcher thread, so a late
+ * executor callback can never mutate state or show a dialog from the background.
+ *
+ * Lifecycle: the host calls [dismissAll] on stream cancel, new session and session bind (prompts
+ * must not outlive their stream/session; [dismissAll] also invalidates every in-flight background
+ * result via the generation counter), and [destroy] from `onDestroy` — after [destroy] all late
+ * callbacks and events are ignored, so no dialog can reappear on a dead host.
+ *
+ * Wiring (see ChatActivity#onCreate):
+ * ```
+ * val view = AlertDialogInteractiveView(this)
+ * val controller = InteractiveRequestController(
+ *     view = view,
+ *     gateway = RepositoryInteractiveGateway(InteractiveRequestsRepository(), BASE_URL) { store.read() },
+ *     sessionProvider = { currentSessionId },
+ *     state = uiState,
+ *     uiDispatcher = MainThreadDispatcher(),
+ * ).also { view.listener = it }
+ * controller.onClarifyAnswered = { answer -> /* runs on the UI thread */ }
+ * ```
+ * In the stream collect loop feed every event to BOTH `uiState.onEvent(event)` (after capturing
+ * SessionBound/StreamStarted ids) and `controller.onEvent(event)`.
  */
 class InteractiveRequestController(
     private val view: InteractiveRequestView,
@@ -122,18 +146,39 @@ class InteractiveRequestController(
     private val sessionProvider: () -> String?,
     private val state: ChatUiState? = null,
     private val executor: Executor = SHARED_EXECUTOR,
+    private val uiDispatcher: UiDispatcher = MainThreadDispatcher(),
 ) : InteractiveRequestListener {
 
+    // All of the mutable fields below are confined to the UI dispatcher thread: they are written
+    // from onEvent/listener callbacks (UI thread by contract) and from dispatched result blocks.
     private var currentApproval: ChatEvent.ApprovalRequired? = null
     private var currentClarify: ChatEvent.ClarifyRequired? = null
     private var approvalResponding = false
     private var clarifyResponding = false
 
-    /** Optional echo hook: invoked with the accepted clarify answer (web shows it as a user message). */
+    /**
+     * Bumped by every [dismissAll] (cancel / new session / bind / destroy). Background work
+     * captures the generation it was started under; if it changed by the time the result is
+     * dispatched, the result is dropped — a prompt belonging to a dead stream/session must never
+     * resurface UI. Volatile only for the best-effort pre-flight check on the executor thread;
+     * the authoritative guard is re-evaluated on the dispatcher thread.
+     */
+    @Volatile
+    private var generation = 0
+
+    /** Set by [destroy]; ignores every future event, callback and dispatched result. */
+    @Volatile
+    private var destroyed = false
+
+    /**
+     * Optional echo hook: invoked with the accepted clarify answer ON THE UI DISPATCHER THREAD
+     * (web shows it as a user message; the host appends it to the transcript and re-renders).
+     */
     var onClarifyAnswered: ((String) -> Unit)? = null
 
-    /** Feed every stream event here from the Activity's collect loop. */
+    /** Feed every stream event here from the Activity's collect loop (UI thread). */
     fun onEvent(event: ChatEvent) {
+        if (destroyed) return
         when (event) {
             is ChatEvent.ApprovalRequired -> showApproval(event)
             is ChatEvent.ClarifyRequired -> showClarify(event)
@@ -168,6 +213,7 @@ class InteractiveRequestController(
     }
 
     override fun onApprovalChoice(choice: ApprovalChoice) {
+        if (destroyed) return
         val current = currentApproval ?: return
         if (approvalResponding) return
         val sid = sessionProvider()
@@ -177,36 +223,46 @@ class InteractiveRequestController(
         }
         approvalResponding = true
         view.setApprovalResponding(true)
+        val gen = generation
         executor.execute {
+            // Best-effort pre-flight: a cancel/destroy that landed after the tap must not fire
+            // the respond call at all (the authoritative guards run on the dispatcher below).
+            if (destroyed || gen != generation) return@execute
             val result = gateway.respondApproval(sid, current.payload, choice)
-            // Identity guard: dialog was superseded or dismissed while the call was in flight.
-            if (currentApproval !== current) return@execute
-            when (result) {
-                is InteractiveRespondResult.Accepted -> {
-                    clearApproval()
-                    view.dismissApproval()
-                    if (result.staleCleared || current.payload.pendingCount > 1) showNextPendingApproval(sid)
-                }
-                is InteractiveRespondResult.Stale -> {
-                    clearApproval()
-                    view.dismissApproval()
-                    view.showNotice(result.message)
-                }
-                is InteractiveRespondResult.Rejected -> {
-                    approvalResponding = false
-                    view.setApprovalResponding(false)
-                    view.showError(result.message)
-                }
-                is InteractiveRespondResult.NetworkError -> {
-                    approvalResponding = false
-                    view.setApprovalResponding(false)
-                    view.showError(NETWORK_FAILURE)
+            uiDispatcher.dispatch {
+                if (destroyed || gen != generation) return@dispatch
+                // Identity guard: dialog was superseded or dismissed while the call was in
+                // flight. Evaluated on the dispatcher thread, together with the state it
+                // protects — never on the executor thread.
+                if (currentApproval !== current) return@dispatch
+                when (result) {
+                    is InteractiveRespondResult.Accepted -> {
+                        clearApproval()
+                        view.dismissApproval()
+                        if (result.staleCleared || current.payload.pendingCount > 1) showNextPendingApproval(sid)
+                    }
+                    is InteractiveRespondResult.Stale -> {
+                        clearApproval()
+                        view.dismissApproval()
+                        view.showNotice(result.message)
+                    }
+                    is InteractiveRespondResult.Rejected -> {
+                        approvalResponding = false
+                        view.setApprovalResponding(false)
+                        view.showError(result.message)
+                    }
+                    is InteractiveRespondResult.NetworkError -> {
+                        approvalResponding = false
+                        view.setApprovalResponding(false)
+                        view.showError(NETWORK_FAILURE)
+                    }
                 }
             }
         }
     }
 
     override fun onApprovalDismissed() {
+        if (destroyed) return
         // Deliberately no respond call: dismissing hides the prompt without deciding (web parity,
         // silence ≠ consent). The server-side timeout keeps blocking the agent.
         clearApproval()
@@ -215,6 +271,7 @@ class InteractiveRequestController(
     }
 
     override fun onClarifyResponse(rawText: String) {
+        if (destroyed) return
         val current = currentClarify ?: return
         if (clarifyResponding) return
         val text = rawText.trim()
@@ -226,43 +283,55 @@ class InteractiveRequestController(
         }
         clarifyResponding = true
         view.setClarifyResponding(true)
+        val gen = generation
         executor.execute {
+            if (destroyed || gen != generation) return@execute
             val result = gateway.respondClarify(sid, current.payload, text)
-            if (currentClarify !== current) return@execute
-            when (result) {
-                is InteractiveRespondResult.Accepted -> {
-                    clearClarify()
-                    view.dismissClarify()
-                    onClarifyAnswered?.invoke(text)
-                    if (current.payload.pendingCount > 1) showNextPendingClarify(sid)
-                }
-                is InteractiveRespondResult.Stale -> {
-                    clearClarify()
-                    view.dismissClarify()
-                    view.showNotice(result.message)
-                }
-                is InteractiveRespondResult.Rejected -> {
-                    clarifyResponding = false
-                    view.setClarifyResponding(false)
-                    view.showError(result.message)
-                }
-                is InteractiveRespondResult.NetworkError -> {
-                    clarifyResponding = false
-                    view.setClarifyResponding(false)
-                    view.showError(NETWORK_FAILURE)
+            uiDispatcher.dispatch {
+                if (destroyed || gen != generation) return@dispatch
+                if (currentClarify !== current) return@dispatch
+                when (result) {
+                    is InteractiveRespondResult.Accepted -> {
+                        clearClarify()
+                        view.dismissClarify()
+                        // Echo on the dispatcher (UI) thread — the host appends it to the transcript.
+                        onClarifyAnswered?.invoke(text)
+                        if (current.payload.pendingCount > 1) showNextPendingClarify(sid)
+                    }
+                    is InteractiveRespondResult.Stale -> {
+                        clearClarify()
+                        view.dismissClarify()
+                        view.showNotice(result.message)
+                    }
+                    is InteractiveRespondResult.Rejected -> {
+                        clarifyResponding = false
+                        view.setClarifyResponding(false)
+                        view.showError(result.message)
+                    }
+                    is InteractiveRespondResult.NetworkError -> {
+                        clarifyResponding = false
+                        view.setClarifyResponding(false)
+                        view.showError(NETWORK_FAILURE)
+                    }
                 }
             }
         }
     }
 
     override fun onClarifyDismissed() {
+        if (destroyed) return
         clearClarify()
         view.setClarifyResponding(false)
         view.dismissClarify()
     }
 
-    /** Terminal hook: dismiss everything without responding (stream done/failed/cancelled, session switch). */
+    /**
+     * Cleanup hook: dismiss everything without responding (stream cancel/done/error, new session,
+     * session bind). Invalidates all in-flight background work via [generation] — results for the
+     * dead stream/session are dropped when they arrive. The controller stays usable afterwards.
+     */
     fun dismissAll() {
+        generation++
         clearApproval()
         clearClarify()
         view.setApprovalResponding(false)
@@ -271,24 +340,50 @@ class InteractiveRequestController(
         view.dismissClarify()
     }
 
+    /**
+     * Terminal hook (host `onDestroy`): dismiss everything and ignore every future event,
+     * listener callback and late background result. No dialog can reappear after this.
+     */
+    fun destroy() {
+        if (destroyed) return
+        destroyed = true
+        dismissAll()
+    }
+
     private fun showNextPendingApproval(sid: String) {
-        if (currentApproval != null) return // A newer SSE event already took over the dialog.
-        val found = gateway.fetchPendingApproval(sid) as? PendingApprovalLookup.Found ?: return
-        val next = ChatEvent.ApprovalRequired(found.payload)
-        currentApproval = next
-        approvalResponding = false
-        view.setApprovalResponding(false)
-        view.showApproval(found.payload)
+        val gen = generation
+        executor.execute {
+            if (destroyed || gen != generation) return@execute
+            val lookup = gateway.fetchPendingApproval(sid)
+            uiDispatcher.dispatch {
+                // The queue head belongs to the generation that ordered the fetch: a cancel,
+                // session switch or destroy in between invalidates it (late-callback guard).
+                if (destroyed || gen != generation) return@dispatch
+                if (currentApproval != null) return@dispatch // A newer SSE event already took over the dialog.
+                val found = lookup as? PendingApprovalLookup.Found ?: return@dispatch
+                currentApproval = ChatEvent.ApprovalRequired(found.payload)
+                approvalResponding = false
+                view.setApprovalResponding(false)
+                view.showApproval(found.payload)
+            }
+        }
     }
 
     private fun showNextPendingClarify(sid: String) {
-        if (currentClarify != null) return
-        val found = gateway.fetchPendingClarify(sid) as? PendingClarifyLookup.Found ?: return
-        val next = ChatEvent.ClarifyRequired(found.payload)
-        currentClarify = next
-        clarifyResponding = false
-        view.setClarifyResponding(false)
-        view.showClarify(found.payload)
+        val gen = generation
+        executor.execute {
+            if (destroyed || gen != generation) return@execute
+            val lookup = gateway.fetchPendingClarify(sid)
+            uiDispatcher.dispatch {
+                if (destroyed || gen != generation) return@dispatch
+                if (currentClarify != null) return@dispatch
+                val found = lookup as? PendingClarifyLookup.Found ?: return@dispatch
+                currentClarify = ChatEvent.ClarifyRequired(found.payload)
+                clarifyResponding = false
+                view.setClarifyResponding(false)
+                view.showClarify(found.payload)
+            }
+        }
     }
 
     private fun clearApproval() {
@@ -308,7 +403,8 @@ class InteractiveRequestController(
         const val NETWORK_FAILURE = "Сеть недоступна — попробуйте ещё раз."
 
         // Shared daemon executor: default single-thread pool for respond calls, no Activity
-        // lifecycle cleanup required (daemon threads die with the process).
+        // lifecycle cleanup required (daemon threads die with the process). Late results are
+        // neutralised by the generation/identity guards, not by killing the executor.
         val SHARED_EXECUTOR: Executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "interactive-requests").apply { isDaemon = true }
         }
@@ -410,11 +506,8 @@ class AlertDialogInteractiveView(private val activity: Activity) : InteractiveRe
     }
 
     override fun dismissApproval() = onUi { dismissDialog(approvalDialog); approvalDialog = null }
-
     override fun dismissClarify() = onUi { dismissDialog(clarifyDialog); clarifyDialog = null }
-
     override fun showError(message: String) = onUi { toast(message) }
-
     override fun showNotice(message: String) = onUi { toast(message) }
 
     /** Call from Activity#onDestroy to avoid window-leaked warnings. */

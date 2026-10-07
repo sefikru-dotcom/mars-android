@@ -15,14 +15,26 @@ import java.util.concurrent.Executor
 
 /**
  * Unit tests for [InteractiveRequestController] dialog semantics (no Android framework:
- * view/gateway/executor are fakes). Covers respond routing, queue refresh, stale/terminal
- * handling, error retries, cancellation-without-respond and in-flight identity guards.
+ * view/gateway/executor/ui-dispatcher are clean-seam fakes). Covers respond routing, queue
+ * refresh, stale/terminal handling, error retries, cancellation-without-respond, in-flight
+ * identity guards, UI-dispatch of result/state handling and lifecycle (destroy/session switch)
+ * late-callback drop.
  */
 class InteractiveRequestControllerTest {
 
     private class QueueExecutor : Executor {
         val queue = ArrayDeque<Runnable>()
         override fun execute(command: Runnable) { queue.addLast(command) }
+        fun runAll() { while (queue.isNotEmpty()) queue.removeFirst().run() }
+    }
+
+    /** UI-thread stand-in: runs dispatched blocks inline (single-thread confinement semantics). */
+    private val inlineUi = UiDispatcher { it() }
+
+    /** Queued UI-dispatcher fake: proves WHICH blocks are UI-dispatched and lets tests order them. */
+    private class QueueUiDispatcher : UiDispatcher {
+        val queue = ArrayDeque<Runnable>()
+        override fun dispatch(block: () -> Unit) { queue.addLast(block) }
         fun runAll() { while (queue.isNotEmpty()) queue.removeFirst().run() }
     }
 
@@ -91,7 +103,7 @@ class InteractiveRequestControllerTest {
     fun approvalEventShowsDialogAndRecordsPendingState() {
         val view = FakeView(); val state = ChatUiState()
         state.begin("привет")
-        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor())
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
 
         val event = approvalEvent("appr-9")
         // Activity wiring: uiState.onEvent(event) runs alongside controller.onEvent(event).
@@ -105,7 +117,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun duplicateApprovalEventWithSameIdDoesNotRebuildDialog() {
         val view = FakeView()
-        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor(), inlineUi)
 
         controller.onEvent(approvalEvent("appr-9"))
         controller.onEvent(approvalEvent("appr-9"))
@@ -118,7 +130,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway(); val state = ChatUiState()
         state.begin("x")
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, inlineUi)
         val event = approvalEvent("appr-9")
         state.onEvent(event)
         controller.onEvent(event)
@@ -141,7 +153,7 @@ class InteractiveRequestControllerTest {
         val nextPayload = ApprovalPayload(approvalId = "appr-10", command = "next", description = "")
         gateway.nextApproval = PendingApprovalLookup.Found(nextPayload)
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -158,7 +170,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.approvalResult = InteractiveRespondResult.Rejected("Invalid choice", 400)
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -180,7 +192,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.approvalResult = InteractiveRespondResult.Stale("Approval expired")
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -196,7 +208,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.approvalResult = InteractiveRespondResult.NetworkError("connect timed out to https://host/api")
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -209,7 +221,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun approvalDismissalNeverResponds() {
         val view = FakeView(); val gateway = FakeGateway()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor(), inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalDismissed()
@@ -222,7 +234,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun approvalChoiceWithoutSessionIsRejectedLocally() {
         val view = FakeView(); val gateway = FakeGateway()
-        val controller = InteractiveRequestController(view, gateway, { null }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, gateway, { null }, null, QueueExecutor(), inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -235,7 +247,7 @@ class InteractiveRequestControllerTest {
     fun approvalDoubleSubmitWhileInFlightIsIgnored() {
         val view = FakeView(); val gateway = FakeGateway()
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -251,7 +263,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.approvalResult = InteractiveRespondResult.Rejected("too late", 400)
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onApprovalChoice(ApprovalChoice.ONCE)
@@ -267,7 +279,7 @@ class InteractiveRequestControllerTest {
     fun supersedingApprovalEventReplacesDialogAndStaleResultIgnored() {
         val view = FakeView(); val gateway = FakeGateway()
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
         controller.onApprovalChoice(ApprovalChoice.ONCE)
         // New SSE approval arrives before the response lands.
@@ -288,7 +300,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway(); val state = ChatUiState()
         state.begin("x")
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, inlineUi)
         var echoed: String? = null
         controller.onClarifyAnswered = { echoed = it }
         val event = clarifyEvent("cl-7", "default", "office")
@@ -309,7 +321,7 @@ class InteractiveRequestControllerTest {
     fun clarifyPrefersPayloadSessionIdOverProvider() {
         val view = FakeView(); val gateway = FakeGateway()
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "fallback-session" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "fallback-session" }, null, executor, inlineUi)
         val event = ChatEvent.ClarifyRequired(
             ClarifyPayload(clarifyId = "cl-1", question = "q", choices = listOf("a"), sessionId = "payload-session")
         )
@@ -325,7 +337,7 @@ class InteractiveRequestControllerTest {
     fun clarifyFreeTextIsTrimmedAndBlankIgnored() {
         val view = FakeView(); val gateway = FakeGateway()
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(clarifyEvent("cl-7"))
 
         controller.onClarifyResponse("   ")
@@ -342,7 +354,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.clarifyResult = InteractiveRespondResult.Stale("Prompt expired")
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         var echoed = false
         controller.onClarifyAnswered = { echoed = true }
         controller.onEvent(clarifyEvent("cl-7", "default"))
@@ -361,7 +373,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         gateway.clarifyResult = InteractiveRespondResult.Rejected("session mismatch", 409)
         val executor = QueueExecutor()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor)
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
         controller.onEvent(clarifyEvent("cl-7", "default"))
 
         controller.onClarifyResponse("default")
@@ -380,7 +392,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun clarifyDismissalNeverResponds() {
         val view = FakeView(); val gateway = FakeGateway()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor(), inlineUi)
         controller.onEvent(clarifyEvent("cl-7", "default"))
 
         controller.onClarifyDismissed()
@@ -396,7 +408,7 @@ class InteractiveRequestControllerTest {
         val view = FakeView(); val gateway = FakeGateway()
         val state = ChatUiState()
         state.begin("x")
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, QueueExecutor())
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, QueueExecutor(), inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
         controller.onEvent(clarifyEvent("cl-7", "a"))
 
@@ -413,7 +425,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun errorEventDismissesDialogs() {
         val view = FakeView(); val gateway = FakeGateway()
-        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor(), inlineUi)
         controller.onEvent(approvalEvent("appr-9"))
 
         controller.onEvent(ChatEvent.Error("stream failed"))
@@ -425,7 +437,7 @@ class InteractiveRequestControllerTest {
     @Test
     fun nonInteractiveEventsAreIgnored() {
         val view = FakeView()
-        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor())
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor(), inlineUi)
 
         controller.onEvent(ChatEvent.Chunk("текст"))
         controller.onEvent(ChatEvent.Thought("думаю"))
@@ -433,5 +445,209 @@ class InteractiveRequestControllerTest {
         assertTrue(view.shownApprovals.isEmpty())
         assertTrue(view.shownClarifies.isEmpty())
         assertEquals(0, view.approvalDismissals)
+    }
+
+    // --- threading: UI dispatch of results and state ----------------------------------------------
+
+    @Test
+    fun respondResultHandlingIsDispatchedToUiNotAppliedOnExecutor() {
+        val view = FakeView(); val gateway = FakeGateway(); val state = ChatUiState()
+        state.begin("x")
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val event = approvalEvent("appr-9")
+        state.onEvent(event)
+        controller.onEvent(event)
+
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll() // HTTP completes on the "background" executor…
+
+        // …but nothing may be applied there: ChatUiState and dialog cleanup wait for UI dispatch.
+        assertEquals(1, gateway.approvalCalls.size)
+        assertEquals(event.payload, state.pendingApproval)
+        assertEquals(0, view.approvalDismissals)
+        assertEquals(1, ui.queue.size)
+
+        ui.runAll() // result handling on the UI thread
+        assertNull(state.pendingApproval)
+        assertEquals(1, view.approvalDismissals)
+    }
+
+    @Test
+    fun identityGuardIsEvaluatedOnUiDispatchAgainstLatestState() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, ui)
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll() // accepted result for appr-9 is in flight to the UI thread
+        // A newer SSE event supersedes the dialog BEFORE the UI block runs: the guard must be
+        // evaluated against the state as of the dispatcher thread, not the executor thread.
+        controller.onEvent(approvalEvent("appr-10"))
+        ui.runAll()
+
+        assertEquals(listOf("appr-9", "appr-10"), view.shownApprovals.map { it.approvalId })
+        assertEquals(0, view.approvalDismissals) // stale acceptance dropped, appr-10 stays open
+    }
+
+    @Test
+    fun clarifyEchoIsDeliveredOnUiDispatch() {
+        val view = FakeView(); val gateway = FakeGateway(); val state = ChatUiState()
+        state.begin("x")
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        var echoed: String? = null
+        controller.onClarifyAnswered = { echoed = it }
+        val event = clarifyEvent("cl-7", "default")
+        state.onEvent(event)
+        controller.onEvent(event)
+
+        controller.onClarifyResponse("default")
+        executor.runAll()
+        assertNull(echoed) // never echoed from the executor thread
+        assertEquals(event.payload, state.pendingClarify)
+
+        ui.runAll()
+        assertEquals("default", echoed) // accepted clarify echoes on the UI dispatch (main)
+        assertNull(state.pendingClarify)
+        assertEquals(1, view.clarifyDismissals)
+    }
+
+    // --- lifecycle: late callbacks after destroy / cancel / session switch --------------------------
+
+    @Test
+    fun destroyIgnoresLateRespondResult() {
+        val view = FakeView(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Rejected("too late", 400)
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, ui)
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        controller.destroy() // host onDestroy while the tap is still queued
+        executor.runAll()
+        ui.runAll()
+
+        assertTrue(gateway.approvalCalls.isEmpty()) // invalidated before the HTTP call
+        assertTrue(view.errors.isEmpty())           // no toast after destroy
+        assertEquals(1, view.approvalDismissals)    // only the destroy cleanup
+    }
+
+    @Test
+    fun destroyIgnoresEventsAndListenerCallbacks() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, QueueExecutor(), inlineUi)
+        controller.destroy()
+
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onEvent(clarifyEvent("cl-7", "a"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        controller.onClarifyResponse("a")
+        controller.onApprovalDismissed()
+        controller.onClarifyDismissed()
+        controller.destroy() // idempotent
+
+        assertTrue(view.shownApprovals.isEmpty())
+        assertTrue(view.shownClarifies.isEmpty())
+        assertTrue(gateway.approvalCalls.isEmpty())
+        assertTrue(gateway.clarifyCalls.isEmpty())
+    }
+
+    @Test
+    fun queuedPendingFetchAfterDestroyNeverShowsDialog() {
+        val view = FakeView(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Accepted(staleCleared = true)
+        gateway.nextApproval = PendingApprovalLookup.Found(
+            ApprovalPayload(approvalId = "appr-10", command = "queued", description = "")
+        )
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, ui)
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll() // respond HTTP done, result awaits UI
+        ui.runAll()       // accepted applied → next-head fetch enqueued
+        executor.runAll() // fetch HTTP done, result awaits UI
+        controller.destroy() // host dies while the queue head is in flight
+        ui.runAll()
+
+        assertEquals(1, gateway.pendingApprovalFetches)
+        assertEquals(listOf("appr-9"), view.shownApprovals.map { it.approvalId }) // stale head dropped
+    }
+
+    @Test
+    fun queuedPendingFetchAfterSessionSwitchNeverShowsDialog() {
+        val view = FakeView(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Accepted(staleCleared = true)
+        gateway.nextApproval = PendingApprovalLookup.Found(
+            ApprovalPayload(approvalId = "appr-10", command = "queued", description = "")
+        )
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, ui)
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll()
+        ui.runAll()       // accepted → fetch for the OLD session enqueued
+        executor.runAll() // fetch HTTP done, result awaits UI
+        controller.dismissAll() // user started a new session / bound another one
+        ui.runAll()
+
+        assertEquals(listOf("appr-9"), view.shownApprovals.map { it.approvalId })
+    }
+
+    @Test
+    fun cancelWhileRespondQueuedDropsSendAndLateResult() {
+        val view = FakeView(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Accepted(staleCleared = true)
+        gateway.nextApproval = PendingApprovalLookup.Found(
+            ApprovalPayload(approvalId = "appr-10", command = "queued", description = "")
+        )
+        val executor = QueueExecutor()
+        val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, ui)
+        controller.onEvent(approvalEvent("appr-9"))
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        controller.dismissAll() // stream cancelled before the executor even started
+        executor.runAll()
+        ui.runAll()
+
+        // Invalidated generation: the respond is never sent and no queue head resurfaces.
+        assertTrue(gateway.approvalCalls.isEmpty())
+        assertEquals(0, gateway.pendingApprovalFetches)
+        assertEquals(listOf("appr-9"), view.shownApprovals.map { it.approvalId })
+        assertEquals(1, view.approvalDismissals) // only dismissAll's cleanup
+    }
+
+    // --- wiring contract (mirrors ChatActivity) -----------------------------------------------------
+
+    @Test
+    fun activityWiringEchoAppendsUserMessageToTranscriptOnUiDispatch() {
+        // Mirrors the ChatActivity wiring: uiState.onEvent + controller.onEvent per SSE event and
+        // onClarifyAnswered appending the accepted answer to the transcript (web pushes a user
+        // message). The echo must run on the UI dispatch, not on the executor thread.
+        val state = ChatUiState()
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        controller.onClarifyAnswered = { answer -> state.messages += ChatMessage("user", answer) }
+        state.begin("спроси профиль")
+
+        val event = clarifyEvent("cl-7", "default", "office")
+        state.onEvent(event)      // records pendingClarify + thought trace
+        controller.onEvent(event) // shows the dialog
+
+        controller.onClarifyResponse("office")
+        executor.runAll()
+        assertEquals(2, state.messages.size) // no echo before the UI dispatch
+        ui.runAll()
+
+        assertNull(state.pendingClarify)
+        val last = state.messages.last()
+        assertEquals("user", last.role)
+        assertEquals("office", last.text)
     }
 }
