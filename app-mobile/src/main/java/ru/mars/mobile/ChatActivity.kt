@@ -65,7 +65,7 @@ class ChatActivity : ComponentActivity() {
         val answer = append("Марс", "")
         send.isEnabled = false
         stream = lifecycleScope.launch {
-            ChatRepository().sendMessage(CHAT_ENDPOINT, credential, text).collect { event ->
+            ChatRepository().sendMessage(BASE_URL, credential, text).collect { event ->
                 when (event) {
                     is ChatEvent.Chunk -> answer.append(event.text)
                     ChatEvent.Done -> Unit
@@ -105,7 +105,6 @@ class ChatActivity : ComponentActivity() {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
-        private const val CHAT_ENDPOINT = "$BASE_URL/api/v1/chat"
         private const val BACKGROUND = 0xff10131a.toInt()
         private const val SURFACE = 0xff1b202b.toInt()
         private const val MUTED = 0xffaab2c0.toInt()
