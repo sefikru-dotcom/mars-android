@@ -11,7 +11,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
@@ -95,15 +96,18 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
                 if (data.isEmpty()) return
                 val payload = data.toString().removeSuffix("\n")
                 when (event) {
+                    "session", "session_bound" -> parseSessionId(payload)?.let { emit(ChatEvent.SessionBound(it)) }
                     "done", "stream_end", "cancel" -> emit(ChatEvent.Done)
                     "error", "apperror" -> emit(ChatEvent.Error(parseError(payload)))
                     "token", "delta", "chunk", "message", null -> {
                         val text = parseTokenText(payload)
                         if (text.isNotEmpty()) emit(ChatEvent.Chunk(text, id))
                     }
-                    else -> {
-                        // Other events (metering, tool, reasoning) are safely ignored
-                    }
+                    "reasoning", "thought", "thinking" -> parseText(payload)?.let { emit(ChatEvent.Thought(it)) }
+                    "tool_call", "tool" -> parseToolCall(payload)?.let { emit(it) }
+                    "tool_result" -> parseToolResult(payload)?.let { emit(it) }
+                    "status", "phase" -> parsePhase(payload)?.let { emit(it) }
+                    else -> Unit
                 }
                 event = null; id = null; data.clear()
             }
@@ -122,39 +126,50 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
     }
 
     private fun extractStartResponse(json: String): ChatStartResponse? {
-        return try {
-            val obj = JSONObject(json)
-            val streamId = obj.optString("stream_id").takeIf { it.isNotBlank() } ?: return null
-            val sessionId = obj.optString("session_id").takeIf { it.isNotBlank() }
-            ChatStartResponse(streamId, sessionId)
-        } catch (_: Throwable) {
-            val sid = Regex("\\\"stream_id\\\"\\s*:\\s*\\\"([^\"]+)\\\"").find(json)?.groupValues?.get(1) ?: return null
-            val sess = Regex("\\\"session_id\\\"\\s*:\\s*\\\"([^\"]+)\\\"").find(json)?.groupValues?.get(1)
-            ChatStartResponse(sid, sess)
-        }
+        val obj = parseObject(json) ?: return null
+        val streamId = obj["stream_id"]?.toString()?.takeIf { it.isNotBlank() } ?: return null
+        return ChatStartResponse(streamId, obj["session_id"]?.toString()?.takeIf { it.isNotBlank() })
     }
 
     private fun parseTokenText(payload: String): String {
-        return try {
-            val obj = JSONObject(payload)
-            when {
-                obj.has("text") -> obj.getString("text")
-                obj.has("delta") -> obj.getString("delta")
-                obj.has("content") -> obj.getString("content")
-                else -> ""
-            }
-        } catch (_: Throwable) {
-            Regex("\\\"text\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"").find(payload)?.groupValues?.get(1)?.replace("\\\\", "\\") ?: ""
-        }
+        val obj = parseObject(payload)
+        return listOf("text", "delta", "content").firstNotNullOfOrNull { obj?.get(it)?.toString() } ?: ""
     }
 
     private fun parseError(payload: String): String {
-        return try {
-            val obj = JSONObject(payload)
-            obj.optString("message").ifBlank { obj.optString("error", payload) }
-        } catch (_: Throwable) {
-            payload.trim()
-        }
+        val obj = parseObject(payload)
+        return obj?.get("message")?.toString()?.takeIf { it.isNotBlank() } ?: obj?.get("error")?.toString()?.takeIf { it.isNotBlank() } ?: payload.trim()
+    }
+
+    private fun parseSessionId(payload: String): String? = parseObject(payload)?.let { m ->
+        (m["session_id"] ?: m["id"])?.toString()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun parseText(payload: String): String? = parseObject(payload)?.let { m ->
+        listOf("text", "content", "message", "thought", "reasoning").firstNotNullOfOrNull { k -> m[k]?.toString()?.takeIf { it.isNotBlank() } }
+    } ?: payload.takeIf { it.isNotBlank() }
+
+    private fun parseToolCall(payload: String): ChatEvent.ToolCall? = parseObject(payload)?.let { m ->
+        ChatEvent.ToolCall(m["id"]?.toString(), (m["name"] ?: m["tool"])?.toString().orEmpty(), jsonValue(m["arguments"] ?: m["args"]))
+    }
+
+    private fun parseToolResult(payload: String): ChatEvent.ToolResult? = parseObject(payload)?.let { m ->
+        ChatEvent.ToolResult(m["id"]?.toString(), (m["name"] ?: m["tool"])?.toString().orEmpty(), jsonValue(m["result"] ?: m["content"]))
+    }
+
+    private fun parsePhase(payload: String): ChatEvent.Phase? = parseObject(payload)?.let { m ->
+        ChatEvent.Phase((m["name"] ?: m["phase"] ?: m["status"])?.toString().orEmpty().ifBlank { payload })
+    } ?: payload.takeIf { it.isNotBlank() }?.let(ChatEvent::Phase)
+
+    private fun parseObject(payload: String): Map<String, Any?>? = try {
+        @Suppress("UNCHECKED_CAST")
+        Moshi.Builder().build().adapter<Map<String, Any?>>(Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)).fromJson(payload)
+    } catch (_: Throwable) { null }
+
+    private fun jsonValue(value: Any?): String = when (value) {
+        null -> ""
+        is String -> value
+        else -> Moshi.Builder().build().adapter(Any::class.java).toJson(value)
     }
 
     private fun bearer(credential: ConsumedDeviceCredential) = "Bearer ${credential.accessToken}"

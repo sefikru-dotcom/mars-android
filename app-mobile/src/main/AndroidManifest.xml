@@ -7,6 +7,8 @@
         android:label="Марс"
         android:icon="@drawable/ic_mars">
         <activity android:name=".ChatActivity" />
+        <activity android:name=".MusicActivity" />
+        <activity android:name=".ProjectsActivity" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
