@@ -8,6 +8,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
@@ -23,7 +24,7 @@ class PairingHttpContractTest {
             server.enqueue(MockResponse().setResponseCode(200).setBody(
                 "{\"pair_id\":\"pair-1\",\"status\":\"claimed\"}"
             ))
-            val repository = PairingRepository(server.url("/").toString())
+            val repository = PairingRepository(fixtureUrl(server))
 
             val result = repository.pollPairingStatus("pair-1").getOrThrow()
             val request = server.takeRequest()
@@ -39,7 +40,7 @@ class PairingHttpContractTest {
     fun repositoryRevokesDeviceWithBearerAuthorization() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(204))
-            val repository = PairingRepository(server.url("/").toString())
+            val repository = PairingRepository(fixtureUrl(server))
 
             repository.revokeCredential("device-9", "opaque-token").getOrThrow()
             val request = server.takeRequest()
@@ -81,4 +82,37 @@ class PairingHttpContractTest {
             assertEquals("Bearer opaque-token", revokeRequest.getHeader("Authorization"))
         }
     }
+
+    @Test
+    fun repositoryRejectsRemoteCleartextAndUrlCredentials() {
+        assertThrows(IllegalArgumentException::class.java) {
+            PairingRepository("http://192.0.2.1/")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            PairingRepository("https://user:pass@example.com/")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            PairingRepository("http://localhost/")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            PairingRepository("http://127.0.0.2/")
+        }
+    }
+
+    @Test
+    fun repositoryDoesNotFollowRedirects() = runBlocking {
+        MockWebServer().use { source ->
+            MockWebServer().use { target ->
+                source.enqueue(MockResponse().setResponseCode(302).addHeader("Location", fixtureUrl(target)))
+                val repository = PairingRepository(fixtureUrl(source))
+
+                assertTrue(repository.pollPairingStatus("pair-1").isFailure)
+                assertEquals(1, source.requestCount)
+                assertEquals(0, target.requestCount)
+            }
+        }
+    }
+
+    private fun fixtureUrl(server: MockWebServer): String =
+        server.url("/").newBuilder().host("127.0.0.1").build().toString()
 }
