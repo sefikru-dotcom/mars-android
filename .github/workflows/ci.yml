@@ -51,6 +51,26 @@ jobs:
           find app-tv/build/outputs app-mobile/build/outputs -type f -print0 2>/dev/null \
             | sort -z \
             | xargs -0 -r sha256sum > build/ci-artifacts/SHA256SUMS
+      - name: Upload lint and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-reports-${{ github.sha }}
+          path: |
+            app-tv/build/reports/**/*.txt
+            app-tv/build/reports/**/*.xml
+            app-tv/build/reports/**/*.html
+            app-mobile/build/reports/**/*.txt
+            app-mobile/build/reports/**/*.xml
+            app-mobile/build/reports/**/*.html
+            core-network/build/reports/**/*.txt
+            core-network/build/reports/**/*.xml
+            core-network/build/reports/**/*.html
+            app-tv/build/test-results/**/*.xml
+            app-mobile/build/test-results/**/*.xml
+            core-network/build/test-results/**/*.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload build artifacts and checksums
         if: always()
         uses: actions/upload-artifact@v4
