@@ -41,18 +41,21 @@ class TvChatActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private var currentSessionId: String? = null
+
     private fun sendMessage(): Boolean {
         val text = input.text.toString().trim()
         if (text.isEmpty() || stream?.isActive == true) return false
-        val credential = store.read() ?: run { finish(); return false }
+        val credential = store.read() ?: return false
         input.text.clear()
-        append("Стеф", text)
+        append("Вы", text)
         val answer = append("Марс", "")
         send.isEnabled = false
         stream = lifecycleScope.launch {
             try {
-                ChatRepository().sendMessage(BASE_URL, credential, text).collect { event ->
+                ChatRepository().sendMessage(BASE_URL, credential, text, currentSessionId).collect { event ->
                     when (event) {
+                        is ChatEvent.SessionBound -> currentSessionId = event.sessionId
                         is ChatEvent.Chunk -> { answer.text = "Марс: ${answer.text.toString().removePrefix("Марс: ")}${event.text}"; scrollDown() }
                         ChatEvent.Done -> Unit
                         is ChatEvent.Error -> answer.text = "Марс: Ошибка: ${event.message}"

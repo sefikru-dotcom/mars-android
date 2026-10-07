@@ -68,6 +68,8 @@ class ChatActivity : ComponentActivity() {
         return root
     }
 
+    private var currentSessionId: String? = null
+
     private fun sendMessage() {
         val text = input.text.toString().trim()
         if (!uiState.begin(text)) return
@@ -82,8 +84,9 @@ class ChatActivity : ComponentActivity() {
         scrollToBottom()
         stream = lifecycleScope.launch {
             try {
-                ChatRepository().sendMessage(BASE_URL, credential, text).collect { event ->
+                ChatRepository().sendMessage(BASE_URL, credential, text, currentSessionId).collect { event ->
                     when (event) {
+                        is ChatEvent.SessionBound -> currentSessionId = event.sessionId
                         is ChatEvent.Chunk -> { answer.append(event.text); scrollToBottom() }
                         ChatEvent.Done -> Unit
                         is ChatEvent.Error -> { answer.append("\nОшибка: ${event.message}"); uiState.fail(); setStatus(uiState.status) }
