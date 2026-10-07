@@ -26,13 +26,14 @@ class PairingHttpContractTest {
             ))
             val repository = PairingRepository(fixtureUrl(server))
 
-            val result = repository.pollPairingStatus("pair-1").getOrThrow()
+            val result = repository.pollPairingStatus("pair-1", "poll-secret").getOrThrow()
             val request = server.takeRequest()
 
             assertEquals(PairingStatus.CLAIMED, result.status)
             assertEquals("GET", request.method)
             assertEquals("/api/v1/auth/device-pairings/status?pair_id=pair-1", request.path)
             assertFalse(request.path!!.contains("poll_secret"))
+            assertEquals("poll-secret", request.getHeader("X-Hermes-Poll-Secret"))
         }
     }
 
@@ -63,11 +64,12 @@ class PairingHttpContractTest {
                 .build()
                 .create(MarsApi::class.java)
 
-            api.pollPairingStatus("pair-1")
+            api.pollPairingStatus("pair-1", "poll-secret")
             val statusRequest = server.takeRequest()
             assertEquals("GET", statusRequest.method)
             assertEquals("/api/v1/auth/device-pairings/status?pair_id=pair-1", statusRequest.path)
             assertFalse(statusRequest.path!!.contains("poll_secret"))
+            assertEquals("poll-secret", statusRequest.getHeader("X-Hermes-Poll-Secret"))
 
             api.exchangePairing("pair-1", PairingExchangeRequest("poll-secret"))
             val exchangeRequest = server.takeRequest()
@@ -106,7 +108,7 @@ class PairingHttpContractTest {
                 source.enqueue(MockResponse().setResponseCode(302).addHeader("Location", fixtureUrl(target)))
                 val repository = PairingRepository(fixtureUrl(source))
 
-                assertTrue(repository.pollPairingStatus("pair-1").isFailure)
+                assertTrue(repository.pollPairingStatus("pair-1", "poll-secret").isFailure)
                 assertEquals(1, source.requestCount)
                 assertEquals(0, target.requestCount)
             }
