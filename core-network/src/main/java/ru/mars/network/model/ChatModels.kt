@@ -1,5 +1,13 @@
 package ru.mars.network.model
 
+data class ChatAttachment(
+    val name: String,
+    val path: String,
+    val mime: String,
+    val size: Long? = null,
+    val isImage: Boolean? = null
+)
+
 data class ChatStartResponse(val streamId: String, val sessionId: String? = null)
 
 sealed interface ChatEvent {
