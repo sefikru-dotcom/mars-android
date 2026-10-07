@@ -13,13 +13,12 @@ import ru.mars.network.model.PairingResponse
 import ru.mars.network.model.PairingStatusResponse
 
 interface MarsApi {
-    @POST("api/auth/device-pairings")
+    @POST("api/v1/auth/device-pairings")
     suspend fun createPairing(): Response<PairingResponse>
 
     @GET("api/v1/auth/device-pairings/status")
     suspend fun pollPairingStatus(
-        @Query("pair_id") pairId: String,
-        @Query("poll_secret") pollSecret: String
+        @Query("pair_id") pairId: String
     ): Response<PairingStatusResponse>
 
     @POST("api/v1/auth/device-pairings/{pair_id}/exchange")
@@ -28,6 +27,9 @@ interface MarsApi {
         @Body request: PairingExchangeRequest
     ): Response<PairingExchangeResponse>
 
-    @POST("api/v1/auth/device-pairings/revoke")
-    suspend fun revokeCredential(@Header("Authorization") authorization: String): Response<Unit>
+    @POST("api/v1/auth/devices/{device_id}/revoke")
+    suspend fun revokeCredential(
+        @Path("device_id") deviceId: String,
+        @Header("Authorization") authorization: String
+    ): Response<Unit>
 }

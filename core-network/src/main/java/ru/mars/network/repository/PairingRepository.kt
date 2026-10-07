@@ -20,7 +20,7 @@ class PairingRepository(
 ) {
     suspend fun createPairing(): Result<PairingResponse> = request {
         val request = Request.Builder()
-            .url(url("api/auth/device-pairings"))
+            .url(url("api/v1/auth/device-pairings"))
             .post(ByteArray(0).toRequestBody())
             .build()
         client.newCall(request).execute().use { response ->
@@ -29,12 +29,10 @@ class PairingRepository(
         }
     }
 
-    suspend fun pollPairingStatus(pairId: String, pollSecret: String): Result<PairingStatusResponse> = request {
+    suspend fun pollPairingStatus(pairId: String): Result<PairingStatusResponse> = request {
         require(pairId.isNotBlank()) { "pairId must not be blank" }
-        require(pollSecret.isNotBlank()) { "pollSecret must not be blank" }
         val statusUrl = url("api/v1/auth/device-pairings/status").newBuilder()
             .addQueryParameter("pair_id", pairId)
-            .addQueryParameter("poll_secret", pollSecret)
             .build()
         val request = Request.Builder().url(statusUrl).get().build()
         client.newCall(request).execute().use { response ->
@@ -60,9 +58,10 @@ class PairingRepository(
         }
     }
 
-    suspend fun revokeCredential(accessToken: String): Result<Unit> = request {
+    suspend fun revokeCredential(deviceId: String, accessToken: String): Result<Unit> = request {
+        require(deviceId.isNotBlank()) { "deviceId must not be blank" }
         require(accessToken.isNotBlank()) { "accessToken must not be blank" }
-        val request = Request.Builder().url(url("api/v1/auth/device-pairings/revoke"))
+        val request = Request.Builder().url(url("api/v1/auth/devices/$deviceId/revoke"))
             .header("Authorization", "Bearer $accessToken")
             .post(ByteArray(0).toRequestBody()).build()
         client.newCall(request).execute().use { response ->

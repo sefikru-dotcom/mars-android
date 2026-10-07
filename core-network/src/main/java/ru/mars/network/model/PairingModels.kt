@@ -21,7 +21,7 @@ data class PairingExchangeResponse(
         OneTimeDeviceCredential(accessToken, tokenType, deviceId, scopes, expiresIn)
 }
 
-enum class PairingStatus { PENDING, APPROVED }
+enum class PairingStatus { PENDING, APPROVED, CLAIMED }
 data class AuthResponse(val accessToken: String?, val refreshToken: String?)
 
 class OneTimeDeviceCredential internal constructor(
@@ -73,6 +73,7 @@ private object PairingStatusParser {
     fun parse(raw: String) = when (raw) {
         "pending" -> PairingStatus.PENDING
         "approved" -> PairingStatus.APPROVED
+        "claimed" -> PairingStatus.CLAIMED
         else -> error("Unsupported pairing status: $raw")
     }
 }
