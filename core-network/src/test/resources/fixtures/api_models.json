@@ -1,0 +1,200 @@
+{
+  "active_provider": "custom:vertex-gemini",
+  "default_model": "gemini-3.8-flash",
+  "configured_model_badges": {
+    "gemini-3.8-flash": {
+      "role": "primary",
+      "label": "Primary",
+      "provider": "custom:vertex-gemini"
+    },
+    "custom:vertex-gemini/gemini-3.8-flash": {
+      "role": "primary",
+      "label": "Primary",
+      "provider": "custom:vertex-gemini"
+    },
+    "@custom:vertex-gemini:gemini-3.8-flash": {
+      "role": "primary",
+      "label": "Primary",
+      "provider": "custom:vertex-gemini"
+    },
+    "custom/gemini-3-flash-preview": {
+      "role": "fallback",
+      "label": "Fallback 1",
+      "provider": "custom"
+    },
+    "@custom:gemini-3-flash-preview": {
+      "role": "fallback",
+      "label": "Fallback 1",
+      "provider": "custom"
+    },
+    "gemini-3-flash-preview": {
+      "role": "fallback",
+      "label": "Fallback 1",
+      "provider": "custom"
+    },
+    "deepseek-flash": {
+      "role": "fallback",
+      "label": "Fallback 2",
+      "provider": "custom"
+    },
+    "custom/deepseek-flash": {
+      "role": "fallback",
+      "label": "Fallback 2",
+      "provider": "custom"
+    },
+    "@custom:deepseek-flash": {
+      "role": "fallback",
+      "label": "Fallback 2",
+      "provider": "custom"
+    }
+  },
+  "groups": [
+    {
+      "provider": "Vertex Gemini · Талант",
+      "provider_id": "custom:vertex-gemini",
+      "models": [
+        {
+          "id": "gemini-3.8-flash",
+          "label": "gemini-3.8-flash"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "label": "gemini-2.5-pro"
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "label": "gemini-3.1-pro-preview"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "label": "gemini-2.5-flash"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "label": "gemini-3-flash-preview"
+        }
+      ]
+    },
+    {
+      "provider": "Cerebras",
+      "provider_id": "custom:cerebras",
+      "models": [
+        {
+          "id": "@custom:cerebras:gpt-oss-120b",
+          "label": "GPT OSS 120b"
+        },
+        {
+          "id": "@custom:cerebras:qwen-3.8-27b",
+          "label": "Qwen 3.8 27B"
+        }
+      ]
+    },
+    {
+      "provider": "DeepSeek",
+      "provider_id": "custom:deepseek",
+      "models": [
+        {
+          "id": "@custom:deepseek:deepseek-flash",
+          "label": "Deepseek Flash"
+        },
+        {
+          "id": "@custom:deepseek:deepseek-v4-flash-0731:free",
+          "label": "Deepseek V4 Flash 0731:free"
+        }
+      ]
+    },
+    {
+      "provider": "NVIDIA NIM",
+      "provider_id": "custom:nvidia-nim",
+      "models": [
+        {
+          "id": "@custom:nvidia-nim:deepseek-r1",
+          "label": "Deepseek R1"
+        },
+        {
+          "id": "@custom:nvidia-nim:nemotron-550b",
+          "label": "Nemotron 550b"
+        },
+        {
+          "id": "@custom:nvidia-nim:nemotron-120b",
+          "label": "Nemotron 120b"
+        },
+        {
+          "id": "@custom:nvidia-nim:lightning",
+          "label": "Lightning"
+        },
+        {
+          "id": "@custom:nvidia-nim:vision",
+          "label": "Vision"
+        }
+      ]
+    },
+    {
+      "provider": "PlusVibe API",
+      "provider_id": "custom:plusvibe-api",
+      "models": [
+        {
+          "id": "@custom:plusvibe-api:gpt-6.1-sol",
+          "label": "GPT 6.1 SOL"
+        },
+        {
+          "id": "@custom:plusvibe-api:gpt-6-luna",
+          "label": "GPT 6 Luna"
+        },
+        {
+          "id": "@custom:plusvibe-api:claude-sonnet-5.5",
+          "label": "Claude Sonnet 5.5"
+        },
+        {
+          "id": "@custom:plusvibe-api:claude-opus-5.5",
+          "label": "Claude Opus 5.5"
+        },
+        {
+          "id": "@custom:plusvibe-api:deepseek-v4.1-flash",
+          "label": "Deepseek V4.1 Flash"
+        },
+        {
+          "id": "@custom:plusvibe-api:google/gemini-3.8-flash",
+          "label": "Gemini 3.8 Flash"
+        },
+        {
+          "id": "@custom:plusvibe-api:google/gemini-3.1-pro-preview",
+          "label": "Gemini 3.1 PRO Preview"
+        },
+        {
+          "id": "@custom:plusvibe-api:grok-4.7",
+          "label": "Grok 4.7"
+        },
+        {
+          "id": "@custom:plusvibe-api:qwen/qwen3.8-max",
+          "label": "Qwen3.8 MAX"
+        },
+        {
+          "id": "@custom:plusvibe-api:qwen3.8-omni-flash",
+          "label": "Qwen3.8 Omni Flash"
+        },
+        {
+          "id": "@custom:plusvibe-api:z-ai/glm-5.2",
+          "label": "GLM 5.2"
+        },
+        {
+          "id": "@custom:plusvibe-api:glm-5.3-flashx",
+          "label": "GLM 5.3 Flashx"
+        },
+        {
+          "id": "@custom:plusvibe-api:minimax/minimax-m2.5",
+          "label": "Minimax M2.5"
+        },
+        {
+          "id": "@custom:plusvibe-api:minimax/minimax-m3",
+          "label": "Minimax M3"
+        },
+        {
+          "id": "@custom:plusvibe-api:xiaomi/mimo-v2.5-pro",
+          "label": "Mimo V2.5 PRO"
+        }
+      ]
+    }
+  ],
+  "aliases": {}
+}
