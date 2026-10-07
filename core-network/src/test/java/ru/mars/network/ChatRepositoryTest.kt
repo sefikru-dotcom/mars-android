@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
@@ -103,12 +104,87 @@ class ChatRepositoryTest {
         assertEquals("/api/chat/cancel", cancel.url.encodedPath)
         assertEquals("stream/opaque", cancel.url.queryParameter("stream_id"))
         assertEquals("Bearer native-token", cancel.newBuilder().header("Authorization", "Bearer native-token").build().header("Authorization"))
-        val steer = repository.steerRequest("https://mars.test", "stream/opaque", "new direction", "native-token")
+        val steer = repository.steerRequest("https://mars.test", "session-1", "new direction", "native-token")
         assertEquals("POST", steer.method)
         assertEquals("/api/chat/steer", steer.url.encodedPath)
         assertEquals("Bearer native-token", steer.header("Authorization"))
         assertTrue(steer.body!!.contentType().toString().startsWith("application/json"))
-        assertTrue(steer.body!!.contentLength() > 0)
+        val steerBody = okio.Buffer().also { steer.body!!.writeTo(it) }.readUtf8()
+        assertTrue("steer body must use session_id/text per server contract: $steerBody",
+            steerBody.contains("\"session_id\":\"session-1\"") && steerBody.contains("\"text\":\"new direction\""))
+        assertTrue(!steerBody.contains("stream_id") && !steerBody.contains("\"message\""))
+    }
+
+    @Test
+    fun steerAcceptedFalseIsReportedAsFailure() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"accepted\": false, \"fallback\": \"no_cached_agent\", \"stream_id\": null}"))
+            val repository = ChatRepository()
+            val ok = repository.executeControl(repository.steerRequest(server.url("/").toString(), "session-1", "do it", "native-token"))
+            assertFalse("HTTP 200 with accepted:false must be a failure", ok)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/chat/steer", request.path)
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"session_id\":\"session-1\""))
+            assertTrue(body.contains("\"text\":\"do it\""))
+        }
+    }
+
+    @Test
+    fun steerAcceptedTrueIsReportedAsSuccess() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"accepted\": true, \"fallback\": null, \"stream_id\": \"st-1\"}"))
+            val repository = ChatRepository()
+            assertTrue(repository.executeControl(repository.steerRequest(server.url("/").toString(), "s1", "go", "t")))
+        }
+    }
+
+    @Test
+    fun controlFailureWithoutAcceptedFieldStillFollowsHttpStatus() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"ok\": true, \"cancelled\": true, \"stream_id\": \"st-1\"}"))
+            server.enqueue(MockResponse().setResponseCode(502).setBody("{\"ok\": false, \"error\": \"Gateway stop failed\"}"))
+            val repository = ChatRepository()
+            assertTrue(repository.executeControl(repository.cancelRequest(server.url("/").toString(), "st-1", "t")))
+            assertFalse(repository.executeControl(repository.cancelRequest(server.url("/").toString(), "st-1", "t")))
+        }
+    }
+
+    @Test
+    fun streamsRealServerEventSequenceWithoutLosingEvents() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+                "event: session_bound\ndata: {\"session_id\":\"s1\"}\n\n" +
+                "id: e1\nevent: token\ndata: {\"text\":\"Привет\"}\n\n" +
+                "event: tool\ndata: {\"event_type\":\"tool.started\",\"name\":\"terminal\",\"preview\":null,\"args\":{\"command\":\"ls\"},\"tid\":\"call_1\"}\n\n" +
+                "event: tool_complete\ndata: {\"event_type\":\"tool.completed\",\"name\":\"terminal\",\"preview\":\"a.txt\",\"args\":{\"command\":\"ls\"},\"tid\":\"call_1\",\"is_error\":false}\n\n" +
+                "event: interim_assistant\ndata: {\"text\":\"Смотрю файлы.\",\"already_streamed\":false}\n\n" +
+                "event: interim_assistant\ndata: {\"text\":\"Привет\",\"already_streamed\":true}\n\n" +
+                "event: approval\ndata: {\"kind\":\"approval\",\"session_id\":\"s1\",\"description\":\"Выполнить rm?\",\"pending_count\":1}\n\n" +
+                "event: clarify\ndata: {\"question\":\"Какой файл?\",\"choices_offered\":[\"a\",\"b\"],\"session_id\":\"s1\",\"kind\":\"clarify\"}\n\n" +
+                "event: warning\ndata: {\"type\":\"fallback\",\"message\":\"fallback model\"}\n\n" +
+                "event: metering\ndata: {\"session_id\":\"s1\"}\n\n" +
+                "event: pending_steer_leftover\ndata: {\"session_id\":\"s1\",\"text\":\"еще тесты\"}\n\n" +
+                "event: done\ndata: {}\n\n" +
+                "event: title\ndata: {\"session_id\":\"s1\",\"title\":\"Отладка\"}\n\n" +
+                "event: stream_end\ndata: {}\n\n"))
+            val events = ChatRepository().sendMessage(server.url("/chat").toString(), credential(), "x").toList()
+            assertEquals(listOf(
+                ChatEvent.SessionBound("s1"),
+                ChatEvent.Chunk("Привет", "e1"),
+                ChatEvent.ToolCall("call_1", "terminal", "{\"command\":\"ls\"}"),
+                ChatEvent.ToolResult("call_1", "terminal", "a.txt"),
+                ChatEvent.Chunk("Смотрю файлы.", null),
+                ChatEvent.Thought("Требуется подтверждение: Выполнить rm?"),
+                ChatEvent.Thought("Требуется уточнение: Какой файл? (варианты: a / b)"),
+                ChatEvent.Thought("Предупреждение: fallback model"),
+                ChatEvent.Thought("Направление не доставлено: еще тесты"),
+                ChatEvent.Done,
+                ChatEvent.SessionBound("s1"),
+                ChatEvent.Done,
+            ), events)
+        }
     }
 
     private fun credential() = ConsumedDeviceCredential(
