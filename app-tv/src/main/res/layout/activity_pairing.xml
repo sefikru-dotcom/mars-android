@@ -1,7 +1,70 @@
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:orientation="vertical" android:gravity="center" android:padding="48dp" android:background="@color/mars_background" android:layout_width="match_parent" android:layout_height="match_parent">
-    <TextView android:text="Подключение к Марсу" android:textColor="@color/mars_text" android:textSize="32sp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <TextView android:id="@+id/pairingCode" android:text="------" android:textColor="@color/mars_accent" android:textSize="72sp" android:textStyle="bold" android:letterSpacing="0.18" android:layout_marginTop="24dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <TextView android:id="@+id/pairingTimer" android:textColor="@color/mars_muted" android:textSize="22sp" android:layout_marginTop="16dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <TextView android:id="@+id/pairingStatus" android:textColor="@color/mars_text" android:textSize="24sp" android:gravity="center" android:layout_marginTop="28dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <Button android:id="@+id/retryButton" android:text="Повторить" android:textSize="20sp" android:layout_marginTop="28dp" android:focusable="true" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/mars_background"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="48dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="МАРС ТВ"
+        android:textColor="@color/mars_accent"
+        android:textSize="44sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/pairingTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Вход в персональный ассистент"
+        android:textColor="@color/mars_muted"
+        android:textSize="20sp" />
+
+    <LinearLayout
+        android:layout_width="540dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="36dp"
+        android:gravity="center"
+        android:orientation="vertical">
+
+        <EditText
+            android:id="@+id/passwordInput"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:background="#1b202b"
+            android:focusable="true"
+            android:gravity="center"
+            android:hint="Введите пароль Марса"
+            android:imeOptions="actionDone"
+            android:inputType="textPassword"
+            android:padding="16dp"
+            android:textColor="#ffffff"
+            android:textColorHint="@color/mars_muted"
+            android:textSize="22sp" />
+
+        <Button
+            android:id="@+id/loginButton"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_marginTop="18dp"
+            android:backgroundTint="@color/mars_accent"
+            android:focusable="true"
+            android:text="Войти"
+            android:textColor="#10131a"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/pairingStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:gravity="center"
+        android:text=""
+        android:textColor="@color/mars_text"
+        android:textSize="20sp" />
 </LinearLayout>
