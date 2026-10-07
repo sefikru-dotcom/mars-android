@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
         val current = pairing ?: return
         val deadline = System.currentTimeMillis() + current.expiresIn * 1000L
         while (currentCoroutineContext().isActive && System.currentTimeMillis() < deadline) {
-            val result = repository.pollPairingStatus(current.pairId)
+            val result = repository.pollPairingStatus(current.pairId, current.pollSecret)
             if (result.isFailure) { fail(R.string.error_unavailable); return }
             val response = result.getOrNull() ?: return
             if (response.status == PairingStatus.CLAIMED || response.status == PairingStatus.APPROVED) {

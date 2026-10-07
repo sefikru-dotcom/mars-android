@@ -38,13 +38,18 @@ class PairingRepository(
         ) { response -> PairingResponseParser.parse(response.body?.string().orEmpty()) }
     }
 
-    suspend fun pollPairingStatus(pairId: String): Result<PairingStatusResponse> = request {
+    suspend fun pollPairingStatus(pairId: String, pollSecret: String): Result<PairingStatusResponse> = request {
         requireIdentifier(pairId, "pairId")
+        require(pollSecret.isNotBlank()) { "pollSecret must not be blank" }
         executeWithUnversionedFallback(
             primary = url("api", "v1", "auth", "device-pairings", "status"),
             fallback = url("api", "auth", "device-pairings", "status"),
             request = { endpoint ->
-                Request.Builder().url(endpoint.newBuilder().addQueryParameter("pair_id", pairId).build()).get().build()
+                Request.Builder()
+                    .url(endpoint.newBuilder().addQueryParameter("pair_id", pairId).build())
+                    .header("X-Hermes-Poll-Secret", pollSecret)
+                    .get()
+                    .build()
             },
             error = "Pairing status failed"
         ) { response -> PairingStatusResponseParser.parse(response.body?.string().orEmpty()) }

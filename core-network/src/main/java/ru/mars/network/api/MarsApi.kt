@@ -18,7 +18,8 @@ interface MarsApi {
 
     @GET("api/v1/auth/device-pairings/status")
     suspend fun pollPairingStatus(
-        @Query("pair_id") pairId: String
+        @Query("pair_id") pairId: String,
+        @Header("X-Hermes-Poll-Secret") pollSecret: String
     ): Response<PairingStatusResponse>
 
     @POST("api/v1/auth/device-pairings/{pair_id}/exchange")
