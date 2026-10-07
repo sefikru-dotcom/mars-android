@@ -42,6 +42,8 @@ jobs:
         run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
       - name: Assemble mobile debug APK
         run: ./gradlew --no-daemon --stacktrace :app-mobile:assembleDebug
+      - name: Verify release lint and APK builds
+        run: ./gradlew --no-daemon --stacktrace :app-tv:lintRelease :app-mobile:lintRelease :app-tv:assembleRelease :app-mobile:assembleRelease
       - name: Generate artifact checksums
         if: always()
         run: |
