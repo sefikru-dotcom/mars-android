@@ -140,7 +140,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showConnected() { status.setText(R.string.status_connected); action.visibility = View.GONE; revoke.visibility = View.VISIBLE; revoke.isEnabled = true; code.setText(R.string.code_connected) }
+    private fun showConnected() {
+        startActivity(Intent(this, ChatActivity::class.java))
+        finish()
+    }
     private fun showDisconnected() { action.visibility = View.VISIBLE; action.isEnabled = true; revoke.visibility = View.GONE; code.setText(R.string.code_empty); status.setText(R.string.status_not_connected) }
     private fun fail(message: Int) { flow.failed(); action.isEnabled = true; status.setText(message) }
 
