@@ -414,13 +414,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun steerMessage() {
         val text = input.text.toString().trim()
         val credential = store.read()
-        val id = currentStreamId
+        val id = currentSessionId
         if (text.isBlank() || credential == null || id == null) return
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            ChatRepository().executeControl(ChatRepository().steerRequest(BASE_URL, id, text, credential.accessToken))
+        lifecycleScope.launch {
+            val accepted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    val repository = ChatRepository()
+                    repository.executeControl(repository.steerRequest(BASE_URL, id, text, credential.accessToken))
+                }.getOrDefault(false)
+            }
+            if (accepted) {
+                if (input.text.toString().trim() == text) input.text.clear()
+                statusView.text = "Направление отправлено"
+            } else {
+                statusView.text = "Направление не принято — текст сохранён"
+            }
         }
-        input.text.clear()
-        statusView.text = "Направление отправлено"
     }
 
     private fun updateControls() {
