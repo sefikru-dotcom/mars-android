@@ -91,4 +91,30 @@ class ChatUiStateTest {
         state.onEvent(ChatEvent.ContextUsage(10000, 200000, 5))
         state.bindSession("s1", "t", emptyList()); assertNull(state.contextUsage)
     }
+
+    @Test fun yoloEnabledTracksServerStateAndResetsOnSessionChange() {
+        val state = ChatUiState()
+        assertFalse(state.yoloEnabled)
+
+        state.setYoloEnabled(true)
+        assertTrue(state.yoloEnabled)
+        state.setYoloEnabled(false)
+        assertFalse(state.yoloEnabled)
+
+        // WebUI parity: the flag is session-scoped and cleared on every session switch/new chat.
+        state.setYoloEnabled(true)
+        state.startNewSession()
+        assertFalse(state.yoloEnabled)
+
+        state.setYoloEnabled(true)
+        state.bindSession("s2", "t", emptyList())
+        assertFalse(state.yoloEnabled)
+    }
+
+    @Test fun steerLeftoverRecordsThoughtTraceOnRunningAssistantMessage() {
+        val state = ChatUiState(); state.begin("hello")
+        state.onEvent(ChatEvent.SteerLeftover("добавь тесты"))
+        // Transcript trace only — the composer restore is an Activity-side concern.
+        assertTrue(state.messages.last().thoughts.any { it.contains("Направление не доставлено") && it.contains("добавь тесты") })
+    }
 }

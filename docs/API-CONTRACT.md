@@ -34,3 +34,35 @@ The access token is accepted once in memory, then stored only in encrypted Andro
 The client accepts a successful HTTP response without reading a credential from the response body.
 
 Approval remains browser-only and requires the browser session plus CSRF protection. A native client must not emulate browser approval.
+
+# Turn control: mid-turn steer and context compression
+
+All endpoints below use the same native credential (`Authorization: Bearer <access_token>`) as chat.
+
+## Mid-turn steer
+
+`POST /api/chat/steer` with `{"session_id": "...", "text": "..."}`.
+
+A 2xx response is NOT success by itself: the server answers 200 with `{"accepted": false, "fallback": "no_cached_agent"}` when the correction could not be injected into the running turn. The client treats `accepted: false` as a failed steer and keeps the text in the composer.
+
+When a steer was accepted but the turn ended before the agent consumed it, the stream emits SSE `pending_steer_leftover` `{session_id, text}`. The client maps it to `ChatEvent.SteerLeftover`, records a transcript trace and returns the text to the composer input.
+
+## Manual context compression
+
+`POST /api/session/compress/start` with `{"session_id": "...", "focus_topic": "..."?}`.
+
+Responses:
+- 200 `{"ok": true, "status": "running", ...}` — background job admitted; poll the status endpoint.
+- 200 `{"ok": true, "status": "done", "summary": {...}, "session": {...}}` — small histories can finish inside the start call.
+- 409 — the session is streaming or the Agent runtime is stale; retry after the turn ends.
+- 404 / 400 — unknown session / bad body.
+
+`GET /api/session/compress/status?session_id=...` returns `{"ok": true, "status": "idle"|"running"|"done"|"error"|"cancelled", ...}`; terminal payloads merge `summary` / `error` and stay readable for the job TTL (10 minutes). `idle` in the middle of an observed job means it vanished server-side and must be reported, not polled forever.
+
+The `summary` dict is `{headline, token_line, note, reference_message}`. After `done` the server has REPLACED the session history, so the client reloads the transcript via `GET /api/session`.
+
+The mobile client polls with the WebUI cadence (700 ms, +300 ms per poll, capped at 2 s) and tolerates up to 2 consecutive transport failures before aborting.
+
+## Automatic compression (client-side)
+
+The server auto-compresses mid-turn on its own threshold. The client additionally offers an idle-between-turns trigger: when the `metering` fill percentage crosses the configured threshold (default 85%) while no stream is active and the user enabled the switch, one compression is started per arming cycle; the trigger re-arms only after the fill drops back below the threshold (hysteresis prevents compression loops). The preference persists in SharedPreferences `mars-auto-compression`.

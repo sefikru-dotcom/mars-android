@@ -54,6 +54,32 @@ class ChatUiState {
         private set
 
     /**
+     * Session-scoped YOLO mode (autonomous run without blocking confirmations). Mirrors the
+     * server-side per-session flag (`/api/session/yolo`); never persisted locally and reset on
+     * every session switch/new chat — exactly the WebUI `_yoloEnabled` lifecycle.
+     */
+    var yoloEnabled: Boolean = false
+        private set
+
+    /** Applies the settled YOLO state reported by the server (toggle result or fresh lookup). */
+    fun setYoloEnabled(value: Boolean) { yoloEnabled = value }
+
+    /**
+     * Expanded long code listings, keyed «messageIndex:blockIndex». Long blocks are
+     * collapsed by default (CodeBlockPresenter); a tap on the toggle flips the key.
+     * Cleared on every session swap so indices never leak across transcripts.
+     */
+    private val expandedCodeBlocks = mutableSetOf<String>()
+
+    fun isCodeBlockExpanded(messageIndex: Int, blockIndex: Int): Boolean =
+        "$messageIndex:$blockIndex" in expandedCodeBlocks
+
+    fun toggleCodeBlock(messageIndex: Int, blockIndex: Int) {
+        val key = "$messageIndex:$blockIndex"
+        if (!expandedCodeBlocks.remove(key)) expandedCodeBlocks.add(key)
+    }
+
+    /**
      * Switches the display mode and re-applies the expansion policy to the whole
      * transcript so the change is immediately visible.
      */
@@ -102,6 +128,9 @@ class ChatUiState {
             // while the structured payload drives the interactive dialog.
             is ChatEvent.ApprovalRequired -> current.copy(thoughts = current.thoughts + approvalThought(event.payload))
             is ChatEvent.ClarifyRequired -> current.copy(thoughts = current.thoughts + clarifyThought(event.payload))
+            // Transcript trace for the undelivered steer; ChatActivity additionally returns the
+            // text to the composer input (WebUI pending_steer_leftover parity).
+            is ChatEvent.SteerLeftover -> current.copy(thoughts = current.thoughts + "Направление не доставлено: ${event.text}")
             // Session-level meter (composer indicator) — the transcript itself is untouched.
             is ChatEvent.ContextUsage -> current
             ChatEvent.Done -> current.copy(
@@ -123,9 +152,9 @@ class ChatUiState {
     fun complete() { status = ChatStatus.RECEIVED; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
     fun fail() { status = ChatStatus.ERROR; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 

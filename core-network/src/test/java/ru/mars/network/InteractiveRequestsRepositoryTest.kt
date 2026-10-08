@@ -174,6 +174,28 @@ class InteractiveRequestsRepositoryTest {
         }
     }
 
+    @Test
+    fun rejectedApprovalStillCarriesSettledYoloFlag() {
+        // Web parity (`_applyApprovalYoloProjection` on the error payload): the server may fail
+        // the gateway relay (409) while still committing YOLO — `yolo_enabled` must survive in
+        // the Rejected result so the UI can project the real session state.
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(409)
+                    .setBody("""{"ok":false,"error":"Gateway run unavailable","code":"gateway_run_unavailable","yolo_enabled":true}""")
+            )
+            val result = repository.respondApproval(
+                server.url("/").toString(), credential(), "sess-1",
+                ApprovalPayload(approvalId = "a", command = "c", description = ""),
+                ApprovalChoice.ONCE, yolo = true,
+            )
+            assertEquals(
+                InteractiveRespondResult.Rejected("Gateway run unavailable", 409, "gateway_run_unavailable", yoloEnabled = true),
+                result,
+            )
+        }
+    }
+
     // --- clarify respond -------------------------------------------------------------------------
 
     @Test

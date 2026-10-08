@@ -42,8 +42,17 @@ sealed interface InteractiveRespondResult {
      * Server refused the response: HTTP 200 `{"ok": false}`, HTTP 409 gateway relay failure
      * (`code` carries e.g. `gateway_run_unavailable`), 4xx validation errors, or local pre-flight
      * validation ([httpStatus] = 0, no request was sent).
+     *
+     * @param yoloEnabled present when the failed response still toggled YOLO mode (web parity:
+     *   respondApproval projects `yolo_enabled` from error payloads too — the server commits the
+     *   flag even when the individual approval relay fails, e.g. `gateway_run_unavailable`).
      */
-    data class Rejected(val message: String, val httpStatus: Int, val code: String? = null) : InteractiveRespondResult
+    data class Rejected(
+        val message: String,
+        val httpStatus: Int,
+        val code: String? = null,
+        val yoloEnabled: Boolean? = null,
+    ) : InteractiveRespondResult
 
     /** Transport failure; no HTTP response was observed. */
     data class NetworkError(val message: String) : InteractiveRespondResult
@@ -239,6 +248,7 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = OkHttpCli
             message = message,
             httpStatus = code,
             code = obj?.get("code")?.toString()?.takeIf { it.isNotBlank() },
+            yoloEnabled = obj?.get("yolo_enabled") as? Boolean,
         )
     }
 

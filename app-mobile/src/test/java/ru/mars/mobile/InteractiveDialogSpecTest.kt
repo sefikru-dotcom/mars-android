@@ -53,23 +53,32 @@ class InteractiveDialogSpecTest {
     fun approvalOptionsDefaultsAreOnceSessionDeny() {
         val options = InteractiveDialogSpec.approvalOptions(approval())
         assertEquals(
-            listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.DENY),
+            listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.ONCE, ApprovalChoice.DENY),
             options.map { it.choice }
         )
-        assertEquals(listOf("Разрешить один раз", "Разрешить для этой сессии", "Отклонить"), options.map { it.label })
+        assertEquals(
+            listOf(
+                "Разрешить один раз",
+                "Разрешить для этой сессии",
+                InteractiveDialogSpec.YOLO_ENABLE_LABEL,
+                "Отклонить",
+            ),
+            options.map { it.label }
+        )
     }
 
     @Test
     fun approvalOptionsGateSessionByPayloadFlag() {
         val options = InteractiveDialogSpec.approvalOptions(approval(allowSession = false))
-        assertEquals(listOf(ApprovalChoice.ONCE, ApprovalChoice.DENY), options.map { it.choice })
+        assertEquals(listOf(ApprovalChoice.ONCE, ApprovalChoice.ONCE, ApprovalChoice.DENY), options.map { it.choice })
+        assertEquals(listOf(false, true, false), options.map { it.yolo })
     }
 
     @Test
     fun approvalOptionsAddAlwaysOnlyWhenPermanentAllowed() {
         val options = InteractiveDialogSpec.approvalOptions(approval(allowPermanent = true))
         assertEquals(
-            listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.ALWAYS, ApprovalChoice.DENY),
+            listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.ALWAYS, ApprovalChoice.ONCE, ApprovalChoice.DENY),
             options.map { it.choice }
         )
     }
@@ -79,6 +88,26 @@ class InteractiveDialogSpecTest {
         val options = InteractiveDialogSpec.approvalOptions(approval(allowPermanent = true))
         assertTrue(InteractiveDialogSpec.isDeny(options.last()))
         assertFalse(options.dropLast(1).any { InteractiveDialogSpec.isDeny(it) })
+    }
+
+    @Test
+    fun yoloGrantOfferedOnlyWhileYoloIsOff() {
+        val off = InteractiveDialogSpec.approvalOptions(approval(), yoloEnabled = false)
+        val on = InteractiveDialogSpec.approvalOptions(approval(), yoloEnabled = true)
+        val yoloOption = off.single { it.yolo }
+        assertEquals(InteractiveDialogSpec.YOLO_ENABLE_LABEL, yoloOption.label)
+        assertEquals(ApprovalChoice.ONCE, yoloOption.choice) // web parity: 'once' + yolo:true
+        assertFalse(on.any { it.yolo })
+        assertEquals(
+            listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.DENY),
+            on.map { it.choice }
+        )
+    }
+
+    @Test
+    fun yoloGrantIsNotFlaggedAsDeny() {
+        val options = InteractiveDialogSpec.approvalOptions(approval())
+        assertFalse(InteractiveDialogSpec.isDeny(options.single { it.yolo }))
     }
 
     // --- approval presentation --------------------------------------------------------------

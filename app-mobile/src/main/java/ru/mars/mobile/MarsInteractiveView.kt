@@ -39,6 +39,9 @@ import ru.mars.network.repository.ApprovalChoice
 class MarsInteractiveView(private val activity: Activity) : InteractiveRequestView {
     var listener: InteractiveRequestListener? = null
 
+    /** Supplies the session's current YOLO state; the approval dialog hides the YOLO grant when on. */
+    var yoloEnabledProvider: () -> Boolean = { false }
+
     private var approvalDialog: Dialog? = null
     private var approvalControls: List<View> = emptyList()
     private var approvalError: TextView? = null
@@ -135,14 +138,16 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         root.addView(MarsDialog.block(activity, error, bottomDp = 12))
 
         val controls = mutableListOf<View>()
-        InteractiveDialogSpec.approvalOptions(payload).forEach { option ->
+        InteractiveDialogSpec.approvalOptions(payload, yoloEnabledProvider()).forEach { option ->
             val button = when {
                 InteractiveDialogSpec.isDeny(option) ->
-                    MarsDialog.denyButton(activity, option.label) { onApprovalTap(option.choice) }
+                    MarsDialog.denyButton(activity, option.label) { onApprovalTap(option.choice, option.yolo) }
+                option.yolo ->
+                    MarsDialog.secondaryButton(activity, option.label) { onApprovalTap(option.choice, option.yolo) }
                 option.choice == ApprovalChoice.ONCE ->
-                    MarsDialog.primaryButton(activity, option.label) { onApprovalTap(option.choice) }
+                    MarsDialog.primaryButton(activity, option.label) { onApprovalTap(option.choice, option.yolo) }
                 else ->
-                    MarsDialog.secondaryButton(activity, option.label) { onApprovalTap(option.choice) }
+                    MarsDialog.secondaryButton(activity, option.label) { onApprovalTap(option.choice, option.yolo) }
             }
             controls += button
             root.addView(MarsDialog.block(activity, button, bottomDp = 8))
@@ -151,10 +156,10 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         return controls
     }
 
-    private fun onApprovalTap(choice: ApprovalChoice) {
+    private fun onApprovalTap(choice: ApprovalChoice, yolo: Boolean = false) {
         if (approvalResponding) return
         approvalError?.let { MarsDialog.setError(it, null) }
-        listener?.onApprovalChoice(choice)
+        listener?.onApprovalChoice(choice, yolo)
     }
 
     // --- clarify ------------------------------------------------------------------------------

@@ -137,8 +137,9 @@ class StreamEventMapperTest {
 
     @Test fun mapsPendingSteerLeftover() {
         val payload = """{"session_id":"s1","text":"добавь тесты"}"""
-        val event = StreamEventMapper.map("pending_steer_leftover", null, payload) as ChatEvent.Thought
-        assertTrue(event.text.contains("добавь тесты"))
+        // Typed event: ChatActivity returns the undelivered steer text to the composer input
+        // (WebUI pending_steer_leftover parity), ChatUiState keeps the transcript trace.
+        assertEquals(ChatEvent.SteerLeftover("добавь тесты"), StreamEventMapper.map("pending_steer_leftover", null, payload))
     }
 
     @Test fun mapsTokenChunkAndKeepsOpaqueEventId() {
