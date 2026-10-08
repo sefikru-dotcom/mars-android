@@ -2170,10 +2170,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun leaveChat() {
         stream?.cancel()
         lifecycleScope.launch {
-            val c = store.read()
-            if (c != null && PairingRepository(BASE_URL).revokeCredential(c.deviceId, c.accessToken).isSuccess) {
-                store.clear()
-            }
+            // Best-effort server revoke; the local credential is cleared regardless of the
+            // outcome so a 401/network failure can never lock the user in a stale auth state.
+            LogoutFlow(store) { deviceId, accessToken ->
+                PairingRepository(BASE_URL).revokeCredential(deviceId, accessToken)
+            }.logout()
             finish()
         }
     }
