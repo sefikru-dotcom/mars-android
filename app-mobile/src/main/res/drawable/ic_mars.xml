@@ -3,6 +3,18 @@
     android:height="48dp"
     android:viewportWidth="48"
     android:viewportHeight="48">
-    <path android:fillColor="#E76F51" android:pathData="M24,4A20,20 0,1 0,24 44A20,20 0,1 0,24 4" />
-    <path android:fillColor="#10131A" android:pathData="M15,19h6v4h-6zM27,19h6v4h-6zM15,29c4,4 14,4 18,0v4c-4,4 -14,4 -18,0z" />
+    <!-- Outer ambient ring -->
+    <path
+        android:strokeColor="#33EF4444"
+        android:strokeWidth="1.5"
+        android:pathData="M24,4A20,20 0,1 0,24 44A20,20 0,1 0,24 4" />
+    <!-- Core Planet -->
+    <path
+        android:fillColor="#EF4444"
+        android:pathData="M24,12A12,12 0,1 0,24 36A12,12 0,1 0,24 12" />
+    <!-- Planetary ring / arc -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:pathData="M8,30C12,36 36,36 40,18" />
 </vector>

@@ -1,7 +1,41 @@
 <resources>
-    <color name="mars_background">#10131A</color>
-    <color name="mars_surface">#1B202B</color>
-    <color name="mars_text">#F5F7FA</color>
-    <color name="mars_muted">#AAB2C0</color>
-    <color name="mars_accent">#E76F51</color>
+    <!-- Mars Dark Obsidian Theme Palette (Strict WebUI parity) -->
+    <color name="mars_background">#07080B</color>
+    <color name="mars_sidebar">#0C0E14</color>
+    <color name="mars_surface">#10131B</color>
+    <color name="mars_surface_subtle">#141822</color>
+    <color name="mars_surface_card">#161B28</color>
+    <color name="mars_border">#212634</color>
+    <color name="mars_border_subtle">#171C26</color>
+    <color name="mars_border_muted">#283042</color>
+    
+    <!-- Accent Ruby Mars -->
+    <color name="mars_accent">#EF4444</color>
+    <color name="mars_accent_hover">#F87171</color>
+    <color name="mars_accent_bg">#26EF4444</color>
+    <color name="mars_accent_text">#FCA5A5</color>
+    
+    <!-- Typography -->
+    <color name="mars_text">#F1F5F9</color>
+    <color name="mars_strong">#FFFFFF</color>
+    <color name="mars_muted">#8B95A5</color>
+    <color name="mars_em">#CBD5E1</color>
+    
+    <!-- Chat specific -->
+    <color name="mars_user_bubble">#1C2436</color>
+    <color name="mars_user_border">#2A354D</color>
+    <color name="mars_bot_card">#0F121A</color>
+    <color name="mars_bot_border">#1A2130</color>
+    
+    <!-- Code & Terminal -->
+    <color name="mars_code_bg">#090B10</color>
+    <color name="mars_code_border">#1D2331</color>
+    <color name="mars_code_text">#F8FAFC</color>
+    <color name="mars_code_tag">#38BDF8</color>
+    
+    <!-- Statuses -->
+    <color name="mars_status_online">#22C55E</color>
+    <color name="mars_status_error">#EF4444</color>
+    <color name="mars_status_warning">#F59E0B</color>
+    <color name="mars_status_info">#38BDF8</color>
 </resources>
