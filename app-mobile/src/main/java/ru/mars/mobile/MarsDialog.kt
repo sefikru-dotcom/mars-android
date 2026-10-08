@@ -207,7 +207,7 @@ object MarsDialog {
         items.forEachIndexed { index, (label, onClick) ->
             val last = index == items.lastIndex
             val pill = if (accentLast && last) {
-                pill(context, label, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_TEXT, 0x33ef4444, onClick = onClick)
+                pill(context, label, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_TEXT, MarsTheme.ACCENT_BORDER, onClick = onClick)
             } else {
                 pill(context, label, onClick = onClick)
             }
@@ -228,7 +228,7 @@ object MarsDialog {
 
     /** Destructive quiet button (deny): ruby text on a subtle ruby-tinted surface. */
     fun denyButton(context: Context, label: String, onClick: () -> Unit): Button =
-        button(context, label, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_TEXT, onClick, 0x33ef4444)
+        button(context, label, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_TEXT, onClick, MarsTheme.ACCENT_BORDER)
 
     /** Text-only quiet action (back / cancel). */
     fun quietButton(context: Context, label: String, onClick: () -> Unit): Button {
@@ -276,7 +276,7 @@ object MarsDialog {
             background = GradientDrawable().apply {
                 setColor(MarsTheme.ACCENT_BG)
                 cornerRadius = MarsTheme.dp(context, 10).toFloat()
-                setStroke(MarsTheme.dp(context, 1), 0x33ef4444)
+                setStroke(MarsTheme.dp(context, 1), MarsTheme.ACCENT_BORDER)
             }
             val pad = MarsTheme.dp(context, 12)
             setPadding(pad, MarsTheme.dp(context, 10), pad, pad)
@@ -360,7 +360,7 @@ object MarsDialog {
             setColor(Color.WHITE)
             cornerRadius = MarsTheme.dp(context, radiusDp).toFloat()
         }
-        return RippleDrawable(ColorStateList.valueOf(0x33ffffff.toInt()), null, mask)
+        return RippleDrawable(ColorStateList.valueOf(MarsTheme.RIPPLE), null, mask)
     }
 
     private fun lp(): LinearLayout.LayoutParams {

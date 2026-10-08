@@ -36,7 +36,12 @@ object MarsTheme {
     const val ACCENT = 0xffef4444.toInt()
     const val ACCENT_HOVER = 0xfff87171.toInt()
     const val ACCENT_BG = 0x26ef4444.toInt() // 15% alpha
+    /** 20%-alpha accent border for accent-tinted pills/buttons (WebUI `rgba(239,68,68,.2)`). */
+    const val ACCENT_BORDER = 0x33ef4444.toInt()
     const val ACCENT_TEXT = 0xfffca5a5.toInt()
+
+    /** Standard 20% white ripple for every interactive surface (buttons, icon buttons). */
+    const val RIPPLE = 0x33ffffff.toInt()
     
     // Text colors
     const val TEXT = 0xfff1f5f9.toInt()
@@ -95,7 +100,7 @@ object MarsTheme {
             setColor(Color.WHITE)
             cornerRadius = dp(context, radiusDp).toFloat()
         }
-        val rippleColor = ColorStateList.valueOf(0x33ffffff.toInt())
+        val rippleColor = ColorStateList.valueOf(RIPPLE)
         return RippleDrawable(rippleColor, content, mask)
     }
 
@@ -120,12 +125,26 @@ object MarsTheme {
                 shape = GradientDrawable.OVAL
                 setColor(Color.WHITE)
             }
-            background = RippleDrawable(ColorStateList.valueOf(0x33ffffff.toInt()), normal, mask)
+            background = RippleDrawable(ColorStateList.valueOf(RIPPLE), normal, mask)
             setImageDrawable(ContextCompat.getDrawable(context, drawableRes))
             imageTintList = ColorStateList.valueOf(iconTint)
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             val pad = dp(context, 10)
             setPadding(pad, pad, pad, pad)
+        }
+    }
+
+    /**
+     * Small circular status dot, tinted with a STATUS_* color — replaces the `●` text glyph
+     * (font-dependent metrics/color across OEM skins, same anti-pattern as emojis). The caller
+     * sets the layout size (8 dp matches the WebUI status bullets).
+     */
+    fun statusDot(context: Context, color: Int): View {
+        return View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(color)
+            }
         }
     }
 }
