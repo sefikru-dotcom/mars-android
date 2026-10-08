@@ -29,6 +29,9 @@ class DashboardActivity : AppCompatActivity() {
         findViewById<Button>(R.id.chatButton).setOnClickListener {
             startActivity(Intent(this, TvChatActivity::class.java))
         }
+        findViewById<Button>(R.id.musicButton).setOnClickListener {
+            startActivity(Intent(this, TvMusicActivity::class.java))
+        }
         findViewById<Button>(R.id.settingsButton).setOnClickListener { logout() }
         TvFocusLift.attachAll(
             findViewById(R.id.chatButton),

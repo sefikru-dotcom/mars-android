@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV music screen (P1): Dark Obsidian + Ruby, D-pad focusable, theme colors only, no emojis. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="52dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/backButton"
+            android:text="Назад"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_arrow_back"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="10dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:layout_width="wrap_content"
+            android:layout_height="64dp" />
+
+        <ImageView
+            android:src="@drawable/ic_music"
+            android:contentDescription="@null"
+            android:layout_marginStart="28dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp" />
+
+        <TextView
+            android:text="Музыка"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:layout_marginStart="14dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/nowText"
+            android:textColor="@color/mars_muted"
+            android:textSize="18sp"
+            android:gravity="end"
+            android:visibility="gone"
+            android:layout_weight="1"
+            android:layout_marginStart="24dp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/stopButton"
+            android:text="Остановить"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:visibility="gone"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="64dp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/stateText"
+        android:text="Загрузка треков…"
+        android:textColor="@color/mars_muted"
+        android:textSize="24sp"
+        android:layout_marginTop="28dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <Button
+        android:id="@+id/retryButton"
+        android:text="Повторить"
+        android:textSize="20sp"
+        android:textColor="@color/mars_text"
+        android:background="@drawable/bg_focus_accent"
+        android:paddingStart="28dp"
+        android:paddingEnd="28dp"
+        android:gravity="center"
+        android:focusable="true"
+        android:visibility="gone"
+        android:layout_marginTop="18dp"
+        android:layout_width="wrap_content"
+        android:layout_height="72dp" />
+
+    <ScrollView
+        android:layout_marginTop="24dp"
+        android:scrollbars="none"
+        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="0dp">
+
+        <LinearLayout
+            android:id="@+id/trackList"
+            android:orientation="vertical"
+            android:descendantFocusability="afterDescendants"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </ScrollView>
+</LinearLayout>
