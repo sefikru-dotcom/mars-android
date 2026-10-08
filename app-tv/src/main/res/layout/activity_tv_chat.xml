@@ -28,20 +28,6 @@
             android:layout_weight="1"
             android:layout_height="wrap_content" />
 
-        <ImageView
-            android:src="@drawable/ic_status_dot"
-            android:contentDescription="@null"
-            android:layout_width="12dp"
-            android:layout_height="12dp" />
-
-        <TextView
-            android:text="онлайн"
-            android:textColor="@color/mars_status_online"
-            android:textSize="20sp"
-            android:layout_marginStart="8dp"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-
         <Button
             android:id="@+id/newChatButton"
             android:focusable="true"

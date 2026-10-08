@@ -23,8 +23,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
 import java.net.HttpURLConnection
@@ -359,11 +357,18 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         job?.cancel()
         showLoading()
         job = lifecycleScope.launch {
-            val found = withContext(Dispatchers.IO) {
-                runCatching { fetch("$BASE_URL/api/charts") }.getOrNull()
-                    ?: runCatching { fetch("$BASE_URL/api/home") }.getOrNull()
+            // Charts go through the repository: {success:false,error} at HTTP 200 is an
+            // exception there, so a server rejection can never masquerade as an empty
+            // «Треки не найдены» list — both endpoints failing shows the error/retry UI.
+            val outcome = withContext(Dispatchers.IO) {
+                MusicChartLoader.resolve(runCatching { repository.getCharts() }) {
+                    runCatching { MusicChartLoader.parseHomePayload(fetchHomeText()) }
+                }
             }
-            if (found == null) showHomeError() else showTracks(parseTracks(found))
+            when (outcome) {
+                is MusicChartLoader.Outcome.Tracks -> showTracks(outcome.items)
+                is MusicChartLoader.Outcome.Failed -> showHomeError()
+            }
         }
     }
 
@@ -650,29 +655,16 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
     }
 
-    private fun fetch(url: String): JSONObject {
-        val c = URL(url).openConnection() as HttpURLConnection
+    /** Raw body of the `/api/home` fallback; typed parsing lives in [MusicChartLoader]. */
+    private fun fetchHomeText(): String {
+        val c = URL("$BASE_URL/api/home").openConnection() as HttpURLConnection
         try {
             c.connectTimeout = 8000
             c.readTimeout = 10000
-            return c.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+            return c.inputStream.bufferedReader().use { it.readText() }
         } finally {
             c.disconnect() // also on timeouts/parse failures, not just the happy path
         }
-    }
-
-    private fun parseTracks(o: JSONObject): List<MusicTrack> {
-        val a = o.optJSONArray("tracks") ?: o.optJSONArray("results") ?: o.optJSONObject("data")?.optJSONArray("tracks") ?: JSONArray()
-        return (0 until a.length()).mapNotNull {
-            val x = a.optJSONObject(it) ?: return@mapNotNull null
-            MusicTrack(
-                x.optString("id", x.optString("track_id")),
-                x.optString("title", "Без названия"),
-                x.optString("artist", "Неизвестный артист"),
-                x.optString("duration", "--:--"),
-                x.optString("thumbnail").takeIf { s -> s.isNotBlank() }
-            )
-        }.filter { it.id.isNotBlank() }
     }
 
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
