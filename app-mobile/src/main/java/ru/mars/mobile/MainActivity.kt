@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
         statusText.setTextColor(MarsTheme.TEXT_MUTED)
 
         loginJob = lifecycleScope.launch {
-            val result = repository.loginWithPassword(password, "poco_f5")
+            val result = repository.loginWithPassword(password, DeviceIdentity.stableDeviceName())
             if (result.isSuccess) {
                 val cred = result.getOrNull()
                 if (cred != null) {
