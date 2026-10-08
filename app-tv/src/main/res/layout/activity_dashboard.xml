@@ -28,29 +28,8 @@
             android:layout_height="wrap_content" />
     </LinearLayout>
 
-    <LinearLayout
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="14dp"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content">
-
-        <ImageView
-            android:src="@drawable/ic_status_dot"
-            android:contentDescription="@null"
-            android:layout_width="14dp"
-            android:layout_height="14dp" />
-
-        <TextView
-            android:id="@+id/status"
-            android:text="Марс онлайн"
-            android:textColor="@color/mars_status_online"
-            android:textSize="24sp"
-            android:layout_marginStart="10dp"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-    </LinearLayout>
-
+    <!-- Без статичного «Марс онлайн»: доступность сервера здесь не проверяется,
+         живой статус показывают экраны Чат/Проекты из реальных данных. -->
     <TextView
         android:id="@+id/time"
         android:text="00:00"
