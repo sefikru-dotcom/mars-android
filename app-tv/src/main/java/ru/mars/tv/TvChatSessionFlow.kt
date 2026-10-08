@@ -29,7 +29,10 @@ sealed interface TvSessionResult {
  * - [sessionId] — the bound session for the next chat/start call;
  * - [statusText] — the compact reasoning status line (WebUI parity:
  *   «Марс размышляет…», «Выполняет: read_file») — empty means "nothing to show";
- * - [contextUsageText] — the token-fill pill text, null while the window is unknown.
+ * - [contextUsageText] — the token-fill pill text, null while the window is unknown;
+ * - [canStop] / [activeStreamId] — the stop-control state: while a turn is running the
+ *   primary button becomes «Остановить» and cancels the live server-side turn via
+ *   [activeStreamId] (mobile cancelStream parity) instead of silently abandoning it.
  */
 class TvChatSessionFlow(
     private val creator: SessionCreator,
@@ -51,7 +54,16 @@ class TvChatSessionFlow(
     var contextUsageText: String? = null
         private set
 
+    /** Stream id of the live turn (from [ChatEvent.StreamStarted]); null before it arrives. */
+    var activeStreamId: String? = null
+        private set
+
+    private var turnActive = false
+
     val hasSession: Boolean get() = !sessionId.isNullOrBlank()
+
+    /** True while a turn is running — the host shows «Остановить» instead of «Отправить». */
+    val canStop: Boolean get() = turnActive
 
     /**
      * Pre-send preflight: reuses the bound id or mints a fresh session. Guarantees that
@@ -75,37 +87,68 @@ class TvChatSessionFlow(
 
     /** Called when the user message hits the screen, before the preflight/network work. */
     fun beginTurn() {
+        turnActive = true
         statusText = TYPING
     }
 
     /**
-     * Feeds one SSE event: binds the session, captures the metering frame and refreshes
-     * the status line. Events without status meaning (SessionBound, StreamStarted,
-     * ContextUsage, SteerLeftover) never clobber the status set by an earlier event.
+     * Feeds one SSE event: binds the session, captures the metering frame, tracks the live
+     * stream id and refreshes the status line. Events without status meaning (SessionBound,
+     * StreamStarted, ContextUsage, SteerLeftover) never clobber the status set by an earlier
+     * event. Terminal events (Done, Error) disarm the stop control.
      */
     fun onEvent(event: ChatEvent) {
         when (event) {
             is ChatEvent.SessionBound -> sessionId = event.sessionId
+            is ChatEvent.StreamStarted -> {
+                activeStreamId = event.streamId
+                turnActive = true
+            }
             is ChatEvent.ContextUsage -> {
                 contextUsage = event
                 contextUsageText = formatContextUsage(event)
             }
+            is ChatEvent.Done, is ChatEvent.Error -> endTurn()
             else -> Unit
         }
         statusFor(event)?.let { statusText = it }
     }
 
-    /** «Новый чат»: drops the session binding, metering and status; next send mints fresh. */
+    /**
+     * The turn is over (stream completed, failed, or was torn down): disarms [canStop] and
+     * drops [activeStreamId]. Never touches [statusText] — the completion status («Ответ
+     * получен», «Ошибка: …», [STOPPED]) is owned by the event/stop that ended the turn.
+     */
+    fun endTurn() {
+        turnActive = false
+        activeStreamId = null
+    }
+
+    /**
+     * The user pressed «Остановить»: disarms the stop control and reports the outcome
+     * honestly — [STOPPED] only when the server confirmed the cancel, [STOP_FAILED] when
+     * the turn was dropped locally without server confirmation (the stream id had not
+     * arrived yet or /api/chat/cancel failed).
+     */
+    fun markTurnStopped(serverCancelled: Boolean) {
+        endTurn()
+        statusText = if (serverCancelled) STOPPED else STOP_FAILED
+    }
+
+    /** «Новый чат»: drops the session binding, turn state, metering and status; next send mints fresh. */
     fun startNewChat() {
         sessionId = null
         contextUsage = null
         contextUsageText = null
         statusText = ""
+        endTurn()
     }
 
     companion object {
         const val CREATING_SESSION = "Создаю сессию…"
         const val TYPING = "Марс печатает…"
+        const val STOPPED = "Остановлено"
+        const val STOP_FAILED = "Остановлено локально — сервер не подтвердил"
 
         /** Status-line text for one SSE event; null when the event carries no status. */
         fun statusFor(event: ChatEvent): String? = when (event) {

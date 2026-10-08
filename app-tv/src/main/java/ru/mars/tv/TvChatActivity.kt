@@ -10,14 +10,27 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.SessionRepository
 
+/**
+ * TV chat screen: transcript, composer and the live turn status strip.
+ *
+ * A running turn is STOPPABLE (mobile cancelStream parity): while the turn is live the
+ * primary button becomes «Остановить» and posts /api/chat/cancel ([TvChatControlGateway])
+ * before tearing the local stream down. «Новый чат» and BACK/onDestroy cancel the server
+ * turn best-effort as well — the TV client has no stream re-attach, so a merely abandoned
+ * turn would keep executing invisibly (tokens, commands, or blocked on an approval card).
+ */
 class TvChatActivity : AppCompatActivity() {
     private lateinit var messages: LinearLayout
     private lateinit var input: EditText
@@ -45,6 +58,12 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var interactiveSurface: TvChatInteractiveSurface
     private lateinit var interactive: TvInteractiveController
 
+    /** Server-side turn stop (/api/chat/cancel) — all HTTP/auth stays in core-network. */
+    private lateinit var controlGateway: TvChatControlGateway
+
+    /** True while an explicit «Остановить» teardown is in flight (the stream finally defers to it). */
+    private var stopping = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
@@ -58,9 +77,12 @@ class TvChatActivity : AppCompatActivity() {
         back.setOnClickListener { finish() }
         newChat.setOnClickListener { startNewChat() }
         TvFocusLift.attachAll(input, send, newChat, back)
-        send.setOnClickListener { sendMessage() }
+        controlGateway = RepositoryTvChatControlGateway.create(BASE_URL, store)
+        // While a turn is live the same button becomes «Остановить» (mobile parity).
+        send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
         wireInteractive()
+        renderSendControl()
         input.requestFocus()
     }
 
@@ -82,6 +104,9 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // BACK/exit abandons the session for good (no stream re-attach on TV): cancel the
+        // live server turn first so the agent does not keep running invisibly.
+        cancelServerTurnBestEffort()
         stream?.cancel()
         if (::interactive.isInitialized) interactive.destroy()
         super.onDestroy()
@@ -94,8 +119,8 @@ class TvChatActivity : AppCompatActivity() {
         input.text.clear()
         append("Вы", text, isUser = true)
         val answer = append("Марс", "", isUser = false)
-        send.isEnabled = false
         sessionFlow.beginTurn()
+        renderSendControl()
         renderStatus()
         stream = lifecycleScope.launch {
             try {
@@ -130,26 +155,93 @@ class TvChatActivity : AppCompatActivity() {
                 // Stream finished/cancelled: prompts cannot outlive their stream (Done/Error
                 // already dismissed via the controller; this covers abnormal termination).
                 if (::interactive.isInitialized) interactive.dismissAll()
-                renderStatus()
-                send.isEnabled = true
-                input.requestFocus()
+                if (!stopping) {
+                    // An explicit «Остановить» teardown owns the final render (stopCurrentTurn).
+                    sessionFlow.endTurn()
+                    renderStatus()
+                    renderSendControl()
+                    input.requestFocus()
+                }
             }
         }
         return true
     }
 
-    /** «Новый чат» from the header: aborts any live stream and resets session + transcript. */
+    /** «Новый чат» from the header: cancels the live server turn, aborts the stream, resets session + transcript. */
     private fun startNewChat() {
+        // The session is dropped for good — cancel the server turn first (best-effort) so the
+        // agent does not keep running for a transcript nobody will ever see again.
+        cancelServerTurnBestEffort()
         stream?.cancel()
         stream = null
+        stopping = false
         // Cards of the dead stream go first (invalidates in-flight responds), then the transcript.
         if (::interactive.isInitialized) interactive.dismissAll()
         sessionFlow.startNewChat()
         messages.removeAllViews()
-        send.isEnabled = true
+        renderSendControl()
         renderStatus()
         input.text.clear()
         input.requestFocus()
+    }
+
+    /**
+     * «Остановить»: cancels the RUNNING SERVER-SIDE turn (mobile cancelStream parity), then
+     * tears the local stream down. Dropping only the SSE connection would leave the agent
+     * executing invisibly — burning tokens, running commands, or blocked forever on an
+     * approval card until the server timeout. The status line reports honestly whether the
+     * server confirmed the cancel ([TvChatSessionFlow.markTurnStopped]).
+     */
+    private fun stopCurrentTurn() {
+        if (!sessionFlow.canStop || stopping) return
+        // Captured up front: startNewChat racing in must not change what we cancel.
+        val streamId = sessionFlow.activeStreamId
+        stopping = true
+        send.isEnabled = false
+        statusView.text = STOPPING
+        statusView.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val serverCancelled = streamId?.let { id ->
+                withContext(Dispatchers.IO) { controlGateway.cancelStream(id) }
+            } ?: false
+            stream?.cancel()
+            stream?.join()
+            stream = null
+            stopping = false
+            // A «Новый чат» pressed mid-stop owns the screen now — its reset must not be clobbered.
+            if (sessionFlow.canStop) {
+                sessionFlow.markTurnStopped(serverCancelled)
+                renderStatus()
+                renderSendControl()
+                input.requestFocus()
+            }
+        }
+    }
+
+    /**
+     * Fire-and-forget cancel of the live server turn when the screen leaves the session
+     * («Новый чат», BACK/onDestroy). Runs on [applicationScope] so it survives Activity
+     * teardown; the outcome is intentionally not surfaced (the transcript is already gone).
+     */
+    private fun cancelServerTurnBestEffort() {
+        if (!::controlGateway.isInitialized) return
+        val streamId = sessionFlow.activeStreamId ?: return
+        applicationScope.launch { controlGateway.cancelStream(streamId) }
+    }
+
+    /**
+     * The primary button mirrors the turn state (mobile send-becomes-stop parity):
+     * «Остановить» + stop icon while the agent turn is live, «Отправить» otherwise. It stays
+     * enabled and focusable in BOTH states — a D-pad user must never lose the ability to
+     * interrupt a running turn.
+     */
+    private fun renderSendControl() {
+        val liveTurn = sessionFlow.canStop
+        send.text = if (liveTurn) STOP_LABEL else SEND_LABEL
+        send.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (liveTurn) R.drawable.ic_stop else R.drawable.ic_send, 0, 0, 0)
+        send.compoundDrawableTintList = ContextCompat.getColorStateList(this, R.color.mars_on_accent)
+        send.isEnabled = true
     }
 
     /**
@@ -193,5 +285,11 @@ class TvChatActivity : AppCompatActivity() {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
+        private const val SEND_LABEL = "Отправить"
+        private const val STOP_LABEL = "Остановить"
+        private const val STOPPING = "Останавливаю…"
+
+        /** Process-wide scope for fire-and-forget server cancels that must outlive the Activity. */
+        private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }
