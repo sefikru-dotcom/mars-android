@@ -113,6 +113,55 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
     }.flowOn(Dispatchers.IO)
 
     /**
+     * Reattaches to an ALREADY-RUNNING turn without minting a new one: opens
+     * `GET /api/chat/stream?stream_id=…` (Bearer) directly — never `POST /api/chat/start`.
+     *
+     * Call-site contract (UI coordinator): obtain [streamId] from the session detail/list
+     * active-turn metadata (`SessionDetail.activeTurn` / `SessionItem.activeTurn`, reattach
+     * when `canReattach`), then collect this flow exactly like [sendMessage]. The first
+     * event is always [ChatEvent.StreamStarted] with [streamId] so consumers bind the
+     * cancel/steer target without special-casing the reattach path.
+     *
+     * Server behaviour (routes.py `_handle_sse_stream`):
+     * - live stream → subscribe; with a resume cursor the journaled events missed since
+     *   that cursor are replayed first (gap-checked), then live frames continue;
+     * - dead-but-journaled stream → full journal replay, then terminal frames;
+     * - unknown/expired stream → HTTP 404 `{"error":"stream not found"}`, surfaced here as
+     *   [ChatEvent.Error] `"HTTP 404"` — the caller should fall back to reloading history.
+     *
+     * [lastEventId] is the optional resume cursor: the `id:` value (`stream_id:seq`) of the
+     * last SSE event the client actually processed, sent as the `Last-Event-ID` header (the
+     * spec-compliant reconnect cursor the server honors after explicit query params).
+     * Omit it to subscribe live-only (server-side snapshot backfill still applies).
+     */
+    fun attachToStream(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        streamId: String,
+        lastEventId: String? = null,
+    ): Flow<ChatEvent> = flow {
+        val streamUrl = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/chat/stream")
+            .addQueryParameter("stream_id", streamId)
+            .build()
+        val request = Request.Builder().url(streamUrl)
+            .header("Authorization", bearer(credential))
+            .header("Accept", "text/event-stream")
+            .apply { lastEventId?.takeIf { it.isNotBlank() }?.let { header("Last-Event-ID", it) } }
+            .get().build()
+        try {
+            emit(ChatEvent.StreamStarted(streamId))
+            stream(request, credential) { event -> emit(event) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            // Same resilience contract as sendMessage: a link loss mid-reattach must leave
+            // the UI in a terminal state, not waiting forever.
+            emit(ChatEvent.Error(describeNetworkError(error)))
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
      * Uploads a file to `POST /api/upload` (multipart: `session_id` + `file`) and maps the
      * server contract from api/upload.py onto an explicit [UploadOutcome]:
      * 200 `{filename, path, size, mime, is_image}` → [UploadOutcome.Success];

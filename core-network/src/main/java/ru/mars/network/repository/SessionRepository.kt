@@ -10,10 +10,16 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
+import ru.mars.network.model.TodoItem
+import ru.mars.network.model.TodoSnapshot
+import ru.mars.network.model.TodoSummary
+import ru.mars.network.model.WorkspacePrefix
 
 /**
  * Outcome of `POST /api/session/new` — an explicit result instead of a silent null
@@ -67,7 +73,15 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
             val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session").addQueryParameter("session_id", sessionId).build().toString()
             val root = parseMap(execute(url, credential) ?: return@withContext null) ?: return@withContext null
             val s = (root["session"] as? Map<*, *>) ?: root
-            SessionDetail(string(s, "id") ?: string(s, "session_id") ?: sessionId, string(s, "title"), string(s, "created_at", "createdAt"), string(s, "updated_at", "updatedAt"), (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty())
+            SessionDetail(
+                string(s, "id") ?: string(s, "session_id") ?: sessionId,
+                string(s, "title"),
+                string(s, "created_at", "createdAt"),
+                string(s, "updated_at", "updatedAt"),
+                (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty(),
+                activeTurn(s),
+                todoSnapshot(s["todo_state"] as? Map<*, *>),
+            )
         }
 
     /**
@@ -152,8 +166,75 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
     private fun execute(url: String, c: ConsumedDeviceCredential): String? =
         try { client.newCall(Request.Builder().url(url).header("Authorization", bearer(c)).get().build()).execute().use { if (it.isSuccessful) it.body?.string() else null } } catch (_: Exception) { null }
     private fun parseMap(json: String): Map<String, Any?>? = try { moshi.adapter<Map<String, Any?>>(mapType).fromJson(json) } catch (_: Exception) { null }
-    private fun sessionItem(o: Map<*, *>) = SessionItem(string(o, "id", "session_id").orEmpty(), string(o, "title"), string(o, "preview", "last_message", "summary"), string(o, "created_at", "createdAt"), string(o, "updated_at", "updatedAt"), (o["message_count"] as? Number)?.toInt())
-    private fun message(o: Map<*, *>) = SessionMessage(string(o, "id", "message_id"), o["role"]?.toString().orEmpty(), when (val v = o["content"]) { is String -> v; is List<*> -> v.mapNotNull { (it as? Map<*, *>)?.get("text")?.toString() }.joinToString(""); else -> o["text"]?.toString().orEmpty() }, string(o, "created_at", "createdAt"), string(o, "event_id"))
+    private fun sessionItem(o: Map<*, *>) = SessionItem(string(o, "id", "session_id").orEmpty(), string(o, "title"), string(o, "preview", "last_message", "summary"), string(o, "created_at", "createdAt"), string(o, "updated_at", "updatedAt"), (o["message_count"] as? Number)?.toInt(), activeTurn(o))
+
+    /**
+     * Active-turn metadata shared by the detail and list payloads (hermes-webui
+     * `Session.compact(include_runtime=True)` + sidebar `attention` stamp). Lenient by
+     * contract: absent fields mean "idle" (the detail response omits `attention`; older
+     * servers omit the runtime block entirely), never a parse failure.
+     */
+    private fun activeTurn(o: Map<*, *>): ActiveTurnInfo {
+        val attention = (o["attention"] as? Map<*, *>)?.let { a ->
+            string(a, "kind")?.let { kind ->
+                SessionAttention(kind, (a["count"] as? Number)?.toInt() ?: 0, string(a, "severity"))
+            }
+        }
+        return ActiveTurnInfo(
+            activeStreamId = string(o, "active_stream_id"),
+            isStreaming = o["is_streaming"] == true,
+            hasPendingUserMessage = o["has_pending_user_message"] == true,
+            pendingStartedAtEpochSeconds = (o["pending_started_at"] as? Number)?.toDouble(),
+            attention = attention,
+        )
+    }
+
+    /**
+     * Parses the normalized `todo_state` snapshot (api/todo_state.py `_normalize_snapshot`:
+     * `{todos, summary, version}` + optional `ts`; the live SSE event carries the same shape
+     * inside a `{session_id, stream_id, source}` envelope). `todos` must be a list — anything
+     * else is not a snapshot; an EMPTY list IS a valid snapshot (the latest write cleared it,
+     * server-side contract).
+     */
+    private fun todoSnapshot(o: Map<*, *>?): TodoSnapshot? {
+        o ?: return null
+        val todos = o["todos"] as? List<*> ?: return null
+        val summary = o["summary"] as? Map<*, *>
+        return TodoSnapshot(
+            todos = todos.mapNotNull { (it as? Map<*, *>)?.let(::todoItem) },
+            summary = TodoSummary(
+                total = intOf(summary, "total"),
+                pending = intOf(summary, "pending"),
+                inProgress = intOf(summary, "in_progress"),
+                completed = intOf(summary, "completed"),
+                cancelled = intOf(summary, "cancelled"),
+            ),
+            version = (o["version"] as? Number)?.toInt() ?: 1,
+            tsEpochSeconds = (o["ts"] as? Number)?.toDouble(),
+        )
+    }
+
+    private fun todoItem(o: Map<*, *>) = TodoItem(
+        // Moshi decodes JSON numbers as Double; normalize integral ids so `1` stays "1" (WebUI String(t.id) parity).
+        id = (o["id"] as? Number)?.let { if (it.toDouble() == it.toLong().toDouble()) it.toLong().toString() else it.toString() }
+            ?: string(o, "id"),
+        // WebUI parity (ui.js todoContent): `text` is tolerated as a content alias.
+        content = string(o, "content", "text").orEmpty(),
+        status = string(o, "status") ?: "pending",
+    )
+
+    private fun intOf(o: Map<*, *>?, key: String) = (o?.get(key) as? Number)?.toInt() ?: 0
+
+    private fun message(o: Map<*, *>): SessionMessage {
+        val role = o["role"]?.toString().orEmpty()
+        val raw = when (val v = o["content"]) { is String -> v; is List<*> -> v.mapNotNull { (it as? Map<*, *>)?.get("text")?.toString() }.joinToString(""); else -> o["text"]?.toString().orEmpty() }
+        // The workspace sentinel is client-injected transport noise (WorkspacePrefix.apply on send);
+        // WebUI strips it when rendering history (`_strip_workspace_prefix`). Strip for USER content
+        // ONLY: an assistant message never carries a real sentinel, and a literal "[Workspace::v1: …]"
+        // quoted inside model output must survive verbatim.
+        val content = if (role == "user") WorkspacePrefix.strip(raw) else raw
+        return SessionMessage(string(o, "id", "message_id"), role, content, string(o, "created_at", "createdAt"), string(o, "event_id"))
+    }
     private fun string(o: Map<*, *>, vararg keys: String) = keys.firstNotNullOfOrNull { o[it]?.toString()?.takeIf(String::isNotBlank) }
     private fun bearer(c: ConsumedDeviceCredential) = "Bearer ${c.accessToken}"
 }
