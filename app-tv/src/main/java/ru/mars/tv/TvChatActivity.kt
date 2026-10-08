@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.repository.ChatRepository
+import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.SessionRepository
 
 class TvChatActivity : AppCompatActivity() {
@@ -34,6 +35,16 @@ class TvChatActivity : AppCompatActivity() {
      */
     private val sessionFlow = TvChatSessionFlow(SessionRepository(), BASE_URL)
 
+    /**
+     * Interactive attention requests (P0): approval/clarify arrive as SSE events and must NOT be
+     * silently swallowed — they block the turn until answered. The controller owns the state
+     * machine (queue refresh, stale/identity guards, cancel-without-respond); the surface renders
+     * inline D-pad-focusable cards in the transcript. All HTTP stays in core-network
+     * ([InteractiveRequestsRepository] via [RepositoryTvInteractiveGateway]) — no network logic here.
+     */
+    private lateinit var interactiveSurface: TvChatInteractiveSurface
+    private lateinit var interactive: TvInteractiveController
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
@@ -49,11 +60,30 @@ class TvChatActivity : AppCompatActivity() {
         TvFocusLift.attachAll(input, send, newChat, back)
         send.setOnClickListener { sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
+        wireInteractive()
         input.requestFocus()
+    }
+
+    /** Builds the controller/surface pair: cards live in [messages], focus returns to the composer. */
+    private fun wireInteractive() {
+        interactiveSurface = TvChatInteractiveSurface(
+            container = messages,
+            onAllCardsCleared = { input.requestFocus() },
+            onCardShown = { scrollDown() },
+        )
+        interactive = TvInteractiveController(
+            surface = interactiveSurface,
+            gateway = RepositoryTvInteractiveGateway(InteractiveRequestsRepository(), BASE_URL) { store.read() },
+            sessionProvider = { sessionFlow.sessionId },
+            uiDispatcher = MainThreadTvDispatcher(),
+        ).also { interactiveSurface.listener = it }
+        // WebUI parity: the accepted answer is echoed into the transcript as a user message.
+        interactive.onClarifyAnswered = { answer -> append("Вы", answer, isUser = true) }
     }
 
     override fun onDestroy() {
         stream?.cancel()
+        if (::interactive.isInitialized) interactive.destroy()
         super.onDestroy()
     }
 
@@ -81,17 +111,25 @@ class TvChatActivity : AppCompatActivity() {
                 ChatRepository().sendMessage(BASE_URL, credential, text, sessionFlow.sessionId)
                     .collect { event ->
                         sessionFlow.onEvent(event)
+                        // Interactive gates are handled explicitly — they must never fall into
+                        // a silent `else -> Unit` (P0: the turn would hang with no way to answer).
+                        interactive.onEvent(event)
                         when (event) {
                             is ChatEvent.Chunk -> {
                                 answer.text = "${answer.text.toString().removePrefix("Марс: ")}${event.text}"
                                 scrollDown()
                             }
                             is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
+                            is ChatEvent.ApprovalRequired -> scrollDown() // card rendered by the surface
+                            is ChatEvent.ClarifyRequired -> scrollDown()
                             else -> Unit
                         }
                         renderStatus()
                     }
             } finally {
+                // Stream finished/cancelled: prompts cannot outlive their stream (Done/Error
+                // already dismissed via the controller; this covers abnormal termination).
+                if (::interactive.isInitialized) interactive.dismissAll()
                 renderStatus()
                 send.isEnabled = true
                 input.requestFocus()
@@ -104,6 +142,8 @@ class TvChatActivity : AppCompatActivity() {
     private fun startNewChat() {
         stream?.cancel()
         stream = null
+        // Cards of the dead stream go first (invalidates in-flight responds), then the transcript.
+        if (::interactive.isInitialized) interactive.dismissAll()
         sessionFlow.startNewChat()
         messages.removeAllViews()
         send.isEnabled = true
