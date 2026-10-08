@@ -769,6 +769,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         renderMessages()
         updateControls()
         stream = lifecycleScope.launch {
+            var credentialRejected = false
             try {
                 if (currentSessionId == null) {
                     explicitStatus = "Создаю сессию…"
@@ -781,7 +782,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                     is EnsureSessionResult.Failed -> {
                         uiState.cancel()
-                        explicitStatus = "Сессия не создана: ${ensured.message}"
+                        // A 401 here means the stored credential is dead server-side: route
+                        // to login instead of leaving the user retrying the same failure.
+                        if (AuthRejectionPolicy.isCredentialRejected(ensured.message)) {
+                            requestReauthentication()
+                        } else {
+                            explicitStatus = "Сессия не создана: ${ensured.message}"
+                        }
                         return@launch
                     }
                 }
@@ -797,6 +804,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     onTodoState = todoCallback(currentSessionId)
                 ).collect { event ->
                     uiState.onEvent(event)
+                    if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
                     if (event is ChatEvent.SessionBound) {
                         currentSessionId = event.sessionId
                         refreshYoloState()
@@ -809,11 +817,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     renderMessages()
                     setStatus()
                 }
+                if (credentialRejected) { requestReauthentication(); return@launch }
                 if (uiState.status == ChatStatus.TYPING) uiState.complete()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
                 uiState.fail()
+                if (credentialRejected) { requestReauthentication(); return@launch }
             } finally {
                 renderMessages()
                 setStatus()
@@ -1472,6 +1482,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val sessionId = currentSessionId
         stream = lifecycleScope.launch {
             var streamGone = false
+            var credentialRejected = false
             try {
                 ChatRepository().attachToStream(BASE_URL, credential, plan.streamId,
                     onTodoState = todoCallback(sessionId)).collect { event ->
@@ -1480,6 +1491,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                         return@collect
                     }
                     uiState.onEvent(event)
+                    if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
                     if (event is ChatEvent.ContextUsage) updateContextIndicator()
                     if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
@@ -1487,6 +1499,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (::compressionController.isInitialized) compressionController.onEvent(event)
                     renderMessages()
                     setStatus()
+                }
+                if (credentialRejected) {
+                    requestReauthentication()
+                    return@launch
                 }
                 if (streamGone) {
                     // The stream died server-side (404): drop the empty placeholder and show
@@ -1501,6 +1517,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 throw cancelled
             } catch (_: Throwable) {
                 uiState.fail()
+                if (credentialRejected) { requestReauthentication(); return@launch }
             } finally {
                 if (explicitStatus == REATTACH_STATUS) explicitStatus = null
                 renderMessages()
@@ -2177,6 +2194,25 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }.logout()
             finish()
         }
+    }
+
+    /**
+     * Forced re-authentication after the server rejected the stored credential (401,
+     * [AuthRejectionPolicy]): drop it locally and return to the login screen with an
+     * explicit notice. No remote revoke — the server just rejected this very token, so
+     * calling revoke with it is pointless. Without this path a revoked/expired credential
+     * loops every action into the same 401 with no way back to login.
+     */
+    private fun requestReauthentication() {
+        stream?.cancel()
+        stream = null
+        currentStreamId = null
+        runCatching { store.clear() }
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_AUTH_NOTICE, AuthRejectionPolicy.REAUTH_NOTICE)
+        )
+        finish()
     }
 
     private fun dp(value: Int) = MarsTheme.dp(this, value)

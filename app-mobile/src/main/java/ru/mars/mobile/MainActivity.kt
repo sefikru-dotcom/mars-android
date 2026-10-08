@@ -51,6 +51,12 @@ class MainActivity : ComponentActivity() {
             view.setPadding(dp(24), bars.top + dp(32), dp(24), bars.bottom + dp(24))
             insets
         }
+        // Forced re-authentication from ChatActivity (server rejected the stored credential):
+        // say why the login screen is back instead of showing a silent empty form.
+        intent.getStringExtra(EXTRA_AUTH_NOTICE)?.takeIf { it.isNotBlank() }?.let { notice ->
+            statusText.text = notice
+            statusText.setTextColor(MarsTheme.STATUS_ERROR)
+        }
     }
 
     override fun onDestroy() {
@@ -197,5 +203,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val BASE_URL = "https://marscore.ru"
         private const val ROOT_ID = 2001
+        /** Intent extra (String): notice to show in the status line, e.g. after a forced re-auth. */
+        const val EXTRA_AUTH_NOTICE = "auth_notice"
     }
 }
