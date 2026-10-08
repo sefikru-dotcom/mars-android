@@ -2,7 +2,6 @@ package ru.mars.tv
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.os.Bundle
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -10,6 +9,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -47,6 +47,7 @@ class PairingActivity : AppCompatActivity() {
         }
 
         loginButton.setOnClickListener { performLogin() }
+        TvFocusLift.attachAll(passwordInput, loginButton)
         loginButton.requestFocus()
     }
 
@@ -59,7 +60,7 @@ class PairingActivity : AppCompatActivity() {
         val password = passwordInput.text.toString().trim()
         if (password.isEmpty()) {
             statusText.text = "Введите пароль"
-            statusText.setTextColor(Color.parseColor("#ff7b72"))
+            statusText.setTextColor(ContextCompat.getColor(this, R.color.mars_status_error))
             passwordInput.requestFocus()
             return
         }
@@ -70,7 +71,7 @@ class PairingActivity : AppCompatActivity() {
         loginButton.isEnabled = false
         passwordInput.isEnabled = false
         statusText.text = "Подключение к Марсу…"
-        statusText.setTextColor(Color.parseColor("#aab2c0"))
+        statusText.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
 
         loginJob = lifecycleScope.launch {
             val result = repository.loginWithPassword(password, "mi_tv")
@@ -87,7 +88,7 @@ class PairingActivity : AppCompatActivity() {
             loginButton.isEnabled = true
             passwordInput.isEnabled = true
             statusText.text = "Неверный пароль или ошибка сети"
-            statusText.setTextColor(Color.parseColor("#ff7b72"))
+            statusText.setTextColor(ContextCompat.getColor(this@PairingActivity, R.color.mars_status_error))
             passwordInput.requestFocus()
         }
     }
