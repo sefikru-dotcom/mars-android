@@ -75,6 +75,19 @@ sealed interface ChatEvent {
     /** Agent is blocked awaiting a clarification answer; respond via `POST /api/clarify/respond`. */
     data class ClarifyRequired(val payload: ClarifyPayload) : ChatEvent
 
+    /**
+     * Context-window fill level for the composer indicator (WebUI parity with
+     * `_syncCtxIndicator`, static/ui.js). Sourced from the SSE `metering`
+     * frames' `usage` payload (`last_prompt_tokens` / `post_compression_context_
+     * tokens_estimate` over `context_length`).
+     *
+     * [usedTokens] — tokens of the most recent prompt (never the cumulative
+     * `input_tokens`, which would overflow the window on long sessions, #1436).
+     * [maxTokens] — the model's context window (>0).
+     * [percent] — 0..100, clamped like the WebUI ring.
+     */
+    data class ContextUsage(val usedTokens: Int, val maxTokens: Int, val percent: Int) : ChatEvent
+
     data object Done : ChatEvent
     data class Error(val message: String) : ChatEvent
 }

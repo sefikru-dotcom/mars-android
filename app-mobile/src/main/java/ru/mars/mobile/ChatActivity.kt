@@ -50,6 +50,7 @@ import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
+import ru.mars.network.repository.WorkspaceRepository
 import ru.mars.network.repository.readBoundedUploadPayload
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
@@ -71,6 +72,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var explicitStatus: String? = null
     private lateinit var modelSelection: ModelSelection
     private var modelBtn: Button? = null
+    private lateinit var activityModeSelection: ActivityModeSelection
+    private var activityModeBtn: Button? = null
+    private lateinit var workspaceSelection: WorkspaceSelection
+    private var workspaceBtn: Button? = null
+    private var contextIndicator: TextView? = null
     private lateinit var attachmentChips: LinearLayout
     private val attachments = mutableListOf<ChatAttachment>()
     private var speech: SpeechRecognizer? = null
@@ -104,6 +110,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         interactiveController.onClarifyAnswered = { answer -> echoClarifyAnswer(answer) }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
+        activityModeSelection = ActivityModeSelection(PrefsActivityModeStorage(getSharedPreferences("mars-activity-mode", MODE_PRIVATE)))
+        workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
+        uiState.setActivityMode(activityModeSelection.current)
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         setContentView(buildView())
 
@@ -121,6 +130,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         MarsMusicPlayer.registerListener(this)
         loadSessions()
         refreshModelCatalog()
+        loadWorkspaces()
     }
 
     override fun onDestroy() {
@@ -353,7 +363,43 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             gravity = Gravity.START
             setOnClickListener { chooseModel() }
         }
-        titleBox.addView(modelBtn)
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(modelBtn, LinearLayout.LayoutParams(-2, -2))
+        activityModeBtn = Button(this).apply {
+            text = "· ${activityModeSelection.buttonLabel()}"
+            textSize = 11f
+            contentDescription = "Режим активности"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setOnClickListener { chooseActivityMode() }
+        }
+        titleRow.addView(activityModeBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
+        workspaceBtn = Button(this).apply {
+            text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+            textSize = 11f
+            contentDescription = "Рабочее пространство"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            isSingleLine = true
+            maxEms = 14
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setOnClickListener { chooseWorkspace() }
+        }
+        titleRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
+        titleBox.addView(titleRow)
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
 
         val musicBtn = MarsTheme.circleIconButton(
@@ -515,6 +561,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 if (action == 4) { sendMessage(); true } else false
             }
         }
+        // Context-window fill pill (WebUI parity with the composer ring): percent +
+        // used/total tokens from the stream's `metering` frames; hidden until known.
+        contextIndicator = TextView(this).apply {
+            textSize = 10f
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_SUBTLE, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(7), dp(3), dp(7), dp(3))
+            visibility = View.GONE
+            setOnClickListener { showContextUsageDetails() }
+        }
+        composer.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
         composer.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
 
         val attachBtn = MarsTheme.circleIconButton(
@@ -615,8 +671,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                 }
                 val choice = modelSelection.current
+                // WebUI parity: the wire message carries the `[Workspace::v1: <path>]`
+                // sentinel; the transcript above keeps showing the raw text.
+                val wireText = workspaceSelection.outgoingMessage(text)
                 ChatRepository().sendMessage(
-                    BASE_URL, credential, text, currentSessionId, outgoingAttachments,
+                    BASE_URL, credential, wireText, currentSessionId, outgoingAttachments,
                     model = choice?.modelId,
                     modelProvider = choice?.providerId,
                     explicitModelPick = choice?.explicitPick == true
@@ -624,6 +683,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     uiState.onEvent(event)
                     if (event is ChatEvent.SessionBound) currentSessionId = event.sessionId
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
                     interactiveController.onEvent(event)
                     renderMessages()
                     setStatus()
@@ -688,14 +748,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             ContextCompat.getDrawable(this, if (active) R.drawable.ic_stop else R.drawable.ic_send)
         )
         sendButton.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        updateContextIndicator()
     }
 
     private fun setStatus() {
-        statusView.text = explicitStatus ?: uiState.phase?.let { "Марс: ${phaseLabel(it)}" } ?: when (uiState.status) {
-            ChatStatus.TYPING -> "Марс печатает…"
-            ChatStatus.RECEIVED -> "Ответ получен"
-            ChatStatus.ERROR -> "Ошибка сети"
-            else -> ""
+        val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
+        statusView.text = explicitStatus ?: when {
+            quiet && uiState.status == ChatStatus.TYPING -> "Марс работает…"
+            else -> uiState.phase?.let { "Марс: ${phaseLabel(it)}" } ?: when (uiState.status) {
+                ChatStatus.TYPING -> "Марс печатает…"
+                ChatStatus.RECEIVED -> "Ответ получен"
+                ChatStatus.ERROR -> "Ошибка сети"
+                else -> ""
+            }
         }
     }
 
@@ -1264,6 +1329,117 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun updateModelButton() {
         modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
+    }
+
+    /** Activity display mode picker — parity with the WebUI header switch. */
+    private fun chooseActivityMode() {
+        val modes = ActivityDisplayMode.values()
+        val labels = modes.map { "${it.label} — ${it.description}" }.toTypedArray()
+        val checked = modes.indexOf(activityModeSelection.current)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Режим активности")
+            .setSingleChoiceItems(labels, checked) { d, which ->
+                val picked = activityModeSelection.select(modes[which])
+                d.dismiss()
+                uiState.setActivityMode(picked)
+                updateActivityModeButton()
+                renderMessages()
+                setStatus()
+            }
+            .show()
+    }
+
+    private fun updateActivityModeButton() {
+        activityModeBtn?.text = "· ${activityModeSelection.buttonLabel()}"
+    }
+
+    /**
+     * Workspace picker (WebUI parity with the composer workspace chip): the first
+     * row is "Авто" (server default, no persisted pick), then the live catalog
+     * rows `name — path`. The catalog comes from GET /api/workspaces.
+     */
+    private fun chooseWorkspace() {
+        val credential = store.read()
+        if (credential == null) {
+            statusView.text = "Workspaces недоступны: нет авторизации"
+            return
+        }
+        lifecycleScope.launch {
+            statusView.text = "Загружаю рабочие пространства…"
+            val catalog = runCatching { WorkspaceRepository().getWorkspaces(BASE_URL, credential) }.getOrNull()
+            if (catalog == null || catalog.workspaces.isEmpty()) {
+                statusView.text = "Каталог рабочих пространств недоступен"
+                return@launch
+            }
+            workspaceSelection.pickerEntries(catalog)
+            val items = catalog.workspaces
+            val labels = (listOf("Авто — пространство сервера по умолчанию") +
+                items.map { "${it.name} — ${it.path}" }).toTypedArray()
+            val checkedIndex = items.indexOfFirst { it.path == workspaceSelection.current?.path } + 1
+            android.app.AlertDialog.Builder(this@ChatActivity)
+                .setTitle("Рабочее пространство")
+                .setSingleChoiceItems(labels, checkedIndex) { d, which ->
+                    workspaceSelection.select(if (which == 0) null else items[which - 1])
+                    d.dismiss()
+                    updateWorkspaceButton()
+                    statusView.text = workspaceSelection.current?.let { "Workspace: ${it.name}" } ?: "Workspace: авто"
+                }
+                .show()
+        }
+    }
+
+    private fun updateWorkspaceButton() {
+        workspaceBtn?.text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+    }
+
+    /**
+     * Loads GET /api/workspaces once at startup: adopts the server default
+     * (`last`) when nothing is persisted and refreshes the chip label.
+     */
+    private fun loadWorkspaces() {
+        val credential = store.read() ?: return
+        lifecycleScope.launch {
+            val catalog = runCatching { WorkspaceRepository().getWorkspaces(BASE_URL, credential) }.getOrNull() ?: return@launch
+            workspaceSelection.resolveEffective(catalog)
+            updateWorkspaceButton()
+        }
+    }
+
+    /**
+     * Composer context pill: `NN%` + used/total tokens, colored like the WebUI
+     * ring (green ≤50, orange ≤75, red above). Hidden while unknown — an
+     * unresolved window must not become a fake percentage (#1436 parity).
+     */
+    private fun updateContextIndicator() {
+        val view = contextIndicator ?: return
+        val usage = uiState.contextUsage
+        if (usage == null || usage.maxTokens <= 0) {
+            view.visibility = View.GONE
+            return
+        }
+        view.visibility = View.VISIBLE
+        view.text = "${usage.percent}% · ${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.maxTokens)}"
+        view.setTextColor(
+            when {
+                usage.percent > 75 -> MarsTheme.STATUS_ERROR
+                usage.percent > 50 -> MarsTheme.STATUS_WARNING
+                else -> MarsTheme.STATUS_ONLINE
+            }
+        )
+        view.contentDescription = "Заполнение контекста: ${usage.percent}%"
+    }
+
+    private fun showContextUsageDetails() {
+        val usage = uiState.contextUsage ?: return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Окно контекста")
+            .setMessage(
+                "Заполнено: ${usage.percent}%\n" +
+                    "Использовано токенов: ${usage.usedTokens}\n" +
+                    "Размер окна: ${usage.maxTokens}"
+            )
+            .setPositiveButton("ОК", null)
+            .show()
     }
 
     private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
