@@ -63,18 +63,20 @@ data class TodoSummary(
 
 /**
  * Normalized `todo_state` snapshot — the single deserialization contract of
- * hermes-webui api/todo_state.py (`{todos, summary, version}`, VERSION = 1).
- *
- * Two producers share the shape:
+ * hermes-webui api/todo_state.py (`{todos, summary, version}`, VERSION = 1),
+ * parsed by ONE point ([ru.mars.network.repository.TodoStateParser]) for both
+ * producers:
  * - Cold load: `GET /api/session` attaches `todo_state` derived from the
- *   settled transcript (`attach_todo_state`), parsed here into
- *   [SessionDetail.todoState].
+ *   settled transcript (`attach_todo_state`) → [SessionDetail.todoState]; the
+ *   envelope fields ([sessionId]/[streamId]/[source]) stay null.
  * - Live: the SSE `todo_state` event adds an envelope `{session_id, stream_id,
- *   source, ts}` on top of the same snapshot. It currently has NO carrier in
- *   the sealed [ChatEvent] (an exhaustive `when` over ChatEvent exists in
- *   app-mobile ChatUiState, so adding a variant would break the app modules);
- *   [tsEpochSeconds] is already part of this model so the future mapper
- *   integration parses the live payload with the same contract.
+ *   source, ts}` on top of the same snapshot. It deliberately has NO carrier
+ *   in the sealed [ChatEvent] (an exhaustive `when` over ChatEvent exists in
+ *   app-mobile ChatUiState and app-tv, so a new variant would break the app
+ *   modules); delivery goes through the `ChatRepository.onTodoState` transport
+ *   callback (a non-sealed side channel on `sendMessage`/`attachToStream`),
+ *   so live updates are never silently dropped and never leak into the chat
+ *   transcript.
  *
  * `todos == []` is a VALID snapshot (the latest write cleared the list) —
  * never treat empty as absent.
@@ -84,6 +86,12 @@ data class TodoSnapshot(
     val summary: TodoSummary = TodoSummary(),
     val version: Int = 1,
     val tsEpochSeconds: Double? = null,
+    /** Live-envelope session the snapshot belongs to; null on the cold path. */
+    val sessionId: String? = null,
+    /** Live-envelope stream that broadcast the snapshot; null on the cold path. */
+    val streamId: String? = null,
+    /** Live-envelope write source (`tool`/`api`/…); null on the cold path. */
+    val source: String? = null,
 )
 
 /** A session shown in the WebUI session list. */
