@@ -1,10 +1,5 @@
 package ru.mars.mobile
 
-import android.app.Activity
-import android.app.AlertDialog
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.Toast
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
@@ -18,10 +13,11 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
- * Dialog surface for interactive attention requests. Implemented by [AlertDialogInteractiveView]
- * on device and by fakes in unit tests. The controller invokes these methods on its
- * [UiDispatcher] thread (the UI thread in production); [AlertDialogInteractiveView] still
- * marshals defensively via `runOnUiThread` so a stray background call can never crash.
+ * Dialog surface for interactive attention requests. Implemented by [MarsInteractiveView]
+ * (custom Mars-themed modals — no stock AlertDialog) on device and by fakes in unit tests.
+ * The controller invokes these methods on its [UiDispatcher] thread (the UI thread in
+ * production); [MarsInteractiveView] still marshals defensively via `runOnUiThread` so a
+ * stray background call can never crash.
  */
 interface InteractiveRequestView {
     fun showApproval(payload: ApprovalPayload)
@@ -127,7 +123,7 @@ class RepositoryInteractiveGateway(
  *
  * Wiring (see ChatActivity#onCreate):
  * ```
- * val view = AlertDialogInteractiveView(this)
+ * val view = MarsInteractiveView(this)
  * val controller = InteractiveRequestController(
  *     view = view,
  *     gateway = RepositoryInteractiveGateway(InteractiveRequestsRepository(), BASE_URL) { store.read() },
@@ -411,139 +407,4 @@ class InteractiveRequestController(
     }
 }
 
-/**
- * Real dialog implementation for [InteractiveRequestView]:
- * - approval → single-select list dialog (once / session / always / deny, gated by payload flags)
- *   with the command and pattern keys in the message;
- * - clarify → choices list with a trailing "own answer" item that opens a free-text input dialog,
- *   or the free-text dialog directly when no choices were offered.
- *
- * Both dialogs are non-cancelable on outside touch; BACK cancels and routes to the listener's
- * dismissed callbacks (no respond is sent). Set [listener] right after constructing the
- * controller (see the wiring snippet in the class KDoc of [InteractiveRequestController]).
- */
-class AlertDialogInteractiveView(private val activity: Activity) : InteractiveRequestView {
-    var listener: InteractiveRequestListener? = null
 
-    private var approvalDialog: AlertDialog? = null
-    private var clarifyDialog: AlertDialog? = null
-
-    override fun showApproval(payload: ApprovalPayload) = onUi {
-        dismissDialog(approvalDialog); approvalDialog = null
-        val options = buildList {
-            add("Разрешить один раз" to ApprovalChoice.ONCE)
-            if (payload.allowSession) add("Разрешить для этой сессии" to ApprovalChoice.SESSION)
-            if (payload.allowPermanent) add("Разрешать всегда" to ApprovalChoice.ALWAYS)
-            add("Отклонить" to ApprovalChoice.DENY)
-        }
-        val title = if (payload.pendingCount > 1) {
-            "Требуется подтверждение · 1 из ${payload.pendingCount}"
-        } else {
-            "Требуется подтверждение"
-        }
-        approvalDialog = AlertDialog.Builder(activity)
-            .setTitle(title)
-            .setMessage(approvalMessage(payload))
-            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
-                listener?.onApprovalChoice(options[which].second)
-            }
-            .setOnCancelListener { listener?.onApprovalDismissed() }
-            .create()
-            .also { it.setCanceledOnTouchOutside(false); it.show() }
-    }
-
-    override fun showClarify(payload: ClarifyPayload) = onUi {
-        dismissDialog(clarifyDialog); clarifyDialog = null
-        if (payload.choices.isEmpty()) {
-            showClarifyFreeText(payload, initial = "")
-            return@onUi
-        }
-        val items = (payload.choices + FREE_TEXT_ITEM).toTypedArray()
-        clarifyDialog = AlertDialog.Builder(activity)
-            .setTitle(CLARIFY_TITLE)
-            .setMessage(payload.question.ifBlank { null })
-            .setItems(items) { _, which ->
-                if (which < payload.choices.size) {
-                    listener?.onClarifyResponse(payload.choices[which])
-                } else {
-                    showClarifyFreeText(payload, initial = "")
-                }
-            }
-            .setOnCancelListener { listener?.onClarifyDismissed() }
-            .create()
-            .also { it.setCanceledOnTouchOutside(false); it.show() }
-    }
-
-    private fun showClarifyFreeText(payload: ClarifyPayload, initial: String) {
-        dismissDialog(clarifyDialog); clarifyDialog = null
-        val input = EditText(activity).apply {
-            setText(initial)
-            hint = "Ваш ответ…"
-            setSingleLine(false)
-        }
-        val container = FrameLayout(activity)
-        val pad = (20 * activity.resources.displayMetrics.density).toInt()
-        container.setPadding(pad, pad / 2, pad, 0)
-        container.addView(input)
-        clarifyDialog = AlertDialog.Builder(activity)
-            .setTitle(CLARIFY_TITLE)
-            .setMessage(payload.question.ifBlank { null })
-            .setView(container)
-            .setPositiveButton("Отправить") { _, _ -> listener?.onClarifyResponse(input.text.toString()) }
-            .setOnCancelListener { listener?.onClarifyDismissed() }
-            .create()
-            .also { it.setCanceledOnTouchOutside(false); it.show() }
-    }
-
-    override fun setApprovalResponding(responding: Boolean) = onUi {
-        approvalDialog?.listView?.isEnabled = !responding
-        approvalDialog?.setCanceledOnTouchOutside(false)
-    }
-
-    override fun setClarifyResponding(responding: Boolean) = onUi {
-        clarifyDialog?.listView?.isEnabled = !responding
-        clarifyDialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = !responding
-    }
-
-    override fun dismissApproval() = onUi { dismissDialog(approvalDialog); approvalDialog = null }
-    override fun dismissClarify() = onUi { dismissDialog(clarifyDialog); clarifyDialog = null }
-    override fun showError(message: String) = onUi { toast(message) }
-    override fun showNotice(message: String) = onUi { toast(message) }
-
-    /** Call from Activity#onDestroy to avoid window-leaked warnings. */
-    fun dismissAllNow() {
-        dismissDialog(approvalDialog); approvalDialog = null
-        dismissDialog(clarifyDialog); clarifyDialog = null
-    }
-
-    private fun approvalMessage(payload: ApprovalPayload): String = buildString {
-        val detail = payload.description.ifBlank { payload.command }
-        if (detail.isNotBlank()) append(detail)
-        if (payload.command.isNotBlank() && payload.command != payload.description) {
-            if (isNotEmpty()) append("\n\n")
-            append(payload.command)
-        }
-        if (payload.patternKeys.isNotEmpty()) {
-            if (isNotEmpty()) append("\n\n")
-            append("Шаблон: ").append(payload.patternKeys.joinToString(", "))
-        }
-    }
-
-    private fun onUi(block: () -> Unit) {
-        if (activity.isFinishing || activity.isDestroyed) return
-        activity.runOnUiThread(block)
-    }
-
-    private fun dismissDialog(dialog: AlertDialog?) {
-        if (dialog?.isShowing == true) runCatching { dialog.dismiss() }
-    }
-
-    private fun toast(message: String) {
-        Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
-    }
-
-    private companion object {
-        const val CLARIFY_TITLE = "Марс уточняет"
-        const val FREE_TEXT_ITEM = "Свой ответ…"
-    }
-}
