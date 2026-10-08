@@ -215,6 +215,89 @@ class VoiceSessionControllerTest {
         assertEquals(State.LISTENING, controller.state)
     }
 
+    // --- guarded launch (ActivityNotFound / recognizer-start regression) ---------------------------
+
+    @Test
+    fun `start with a successful launcher opens LISTENING and fires the start event`() {
+        var launched = false
+        assertTrue(controller.start { launched = true })
+        assertTrue("launcher must run exactly once", launched)
+        assertEquals(State.LISTENING, controller.state)
+        assertEquals(1, listener.startedCount.size)
+        assertEquals(listOf(State.LISTENING), listener.states)
+    }
+
+    @Test
+    fun `launch failure moves to ERROR instead of stuck LISTENING`() {
+        // Regression: recognizer launch (startActivityForResult ACTION_RECOGNIZE_SPEECH) throws
+        // ActivityNotFoundException when no recognizer app is installed — the session must NOT
+        // stay in LISTENING with nobody alive to ever deliver a result.
+        assertFalse(controller.start { throw RuntimeException("No Activity found to handle Intent") })
+        assertEquals(State.ERROR, controller.state)
+        assertEquals(VoiceSessionController.LAUNCH_FAILED, controller.lastError)
+        assertEquals(listOf(VoiceSessionController.LAUNCH_FAILED), listener.errors)
+        assertEquals(listOf(State.ERROR), listener.states)
+    }
+
+    @Test
+    fun `failed launch never fires onListeningStarted`() {
+        assertFalse(controller.start { throw SecurityException("mic denied") })
+        assertTrue("a session that did not open must not announce itself", listener.startedCount.isEmpty())
+        assertTrue(listener.results.isEmpty())
+    }
+
+    @Test
+    fun `launcher is not invoked while LISTENING or PROCESSING`() {
+        controller.start()
+        var launched = false
+        assertFalse(controller.start { launched = true })
+        assertTrue("guard must run before the launch side effect", !launched)
+        assertEquals(State.LISTENING, controller.state)
+
+        controller.onResult("текст")
+        assertFalse(controller.start { launched = true })
+        assertTrue(!launched)
+        assertEquals(State.PROCESSING, controller.state)
+    }
+
+    @Test
+    fun `session is recoverable after a launch failure`() {
+        assertFalse(controller.start { throw RuntimeException("no recognizer") })
+        assertEquals(State.ERROR, controller.state)
+        // User retries on a device where the recognizer appeared (or after granting permission).
+        assertTrue(controller.start { })
+        assertEquals(State.LISTENING, controller.state)
+        assertNull("retry clears the launch error", controller.lastError)
+        // Late result from the FAILED launch must not leak into the fresh session…
+        controller.cancel()
+        assertFalse(controller.onResult("запоздалый текст"))
+    }
+
+    @Test
+    fun `repeated launch failures keep a single recoverable ERROR`() {
+        assertFalse(controller.start { throw RuntimeException("no recognizer") })
+        assertFalse(controller.start { throw RuntimeException("still no recognizer") })
+        assertEquals(State.ERROR, controller.state)
+        assertEquals(VoiceSessionController.LAUNCH_FAILED, controller.lastError)
+        assertTrue(controller.reset())
+        assertEquals(State.IDLE, controller.state)
+    }
+
+    @Test
+    fun `Error from the launcher propagates and leaves IDLE`() {
+        // JVM Errors (OOM, assertion kills) are not recognition failures — never swallowed.
+        try {
+            controller.start { throw AssertionError("fatal") }
+            throw IllegalStateException("AssertionError must propagate")
+        } catch (expected: AssertionError) {
+            assertEquals("fatal", expected.message)
+        }
+        assertEquals(State.IDLE, controller.state)
+        assertNull(controller.lastError)
+        assertTrue(listener.errors.isEmpty())
+        assertTrue(listener.startedCount.isEmpty())
+    }
+
     // --- full lifecycle ----------------------------------------------------------------------------------
 
     @Test
