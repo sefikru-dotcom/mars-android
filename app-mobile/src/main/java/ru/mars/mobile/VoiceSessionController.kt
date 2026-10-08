@@ -12,8 +12,14 @@ package ru.mars.mobile
  *  ▲                    │                             │
  *  │                    ├──onError(msg)──▶ ERROR ◀────┘
  *  └──────cancel()/reset()───────────────────┘
+ *  IDLE/ERROR ──start { launch() throws }──▶ ERROR (LAUNCH_FAILED, session never opens)
  * ```
  * - [start] is rejected (returns false) while LISTENING or PROCESSING — no double sessions;
+ * - [start] with a launcher runs the recognizer launch (e.g. `startActivityForResult` with
+ *   `ACTION_RECOGNIZE_SPEECH`) INSIDE the guard: a throwing launch (`ActivityNotFoundException`
+ *   when no recognizer app is installed, `SecurityException` on a denied mic, any other
+ *   launch failure) moves the controller to ERROR with [LAUNCH_FAILED] instead of leaving it
+ *   stuck in LISTENING with no recognizer alive to ever deliver a result;
  * - [onResult] is accepted ONLY from LISTENING; a blank recognition is reported as an error,
  *   never as an empty message to the host;
  * - [onError] moves LISTENING/PROCESSING to ERROR and records [lastError];
@@ -48,9 +54,28 @@ class VoiceSessionController(private val listener: Listener? = null) {
      * Open a listening session. Returns false (no-op) when already LISTENING or PROCESSING —
      * an active session is never restarted underneath the user.
      */
-    fun start(): Boolean {
+    fun start(): Boolean = beginSession { }
+
+    /**
+     * Open a listening session guarded by the actual recognizer launch. [launchSession] is the
+     * host's side-effecting step (e.g. `startActivityForResult` with `ACTION_RECOGNIZE_SPEECH`);
+     * it runs AFTER the re-entrance guard but BEFORE the LISTENING transition. If it throws —
+     * `ActivityNotFoundException` (no recognizer app installed), `SecurityException` (denied
+     * mic), any other launch failure — the controller moves to ERROR with [LAUNCH_FAILED] and
+     * returns false instead of staying stuck in LISTENING forever; [Listener.onListeningStarted]
+     * is never fired for a session that did not open. `Error`s are not swallowed.
+     */
+    fun start(launchSession: () -> Unit): Boolean = beginSession(launchSession)
+
+    private fun beginSession(launchSession: () -> Unit): Boolean {
         if (state == State.LISTENING || state == State.PROCESSING) return false
         lastError = null
+        try {
+            launchSession()
+        } catch (ignored: Exception) {
+            fail(LAUNCH_FAILED)
+            return false
+        }
         transition(State.LISTENING)
         listener?.onListeningStarted()
         return true
@@ -119,5 +144,6 @@ class VoiceSessionController(private val listener: Listener? = null) {
     companion object {
         const val EMPTY_RESULT = "Речь не распознана — попробуйте ещё раз."
         const val GENERIC_ERROR = "Голосовой ввод недоступен — попробуйте ещё раз."
+        const val LAUNCH_FAILED = "Не удалось запустить распознавание речи на этом устройстве."
     }
 }
