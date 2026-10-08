@@ -40,11 +40,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
+import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.ApprovalChoice
@@ -74,6 +76,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private lateinit var interactiveView: MarsInteractiveView
     private lateinit var interactiveController: InteractiveRequestController
+
+    /** Transcript auto-scroll decisions (pure policy): a reader scrolled up must survive SSE tokens. */
+    private var autoScroll = AutoScrollPolicy()
+    /** Stream-recovery decisions (pure policy): reattach plan + dead-stream (404) detection. */
+    private val reattachPolicy = StreamReattachPolicy()
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
@@ -144,6 +151,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             settings = autoCompressionStorage,
         )
         uiState.setActivityMode(activityModeSelection.current)
+        autoScroll = AutoScrollPolicy(bottomThresholdPx = dp(56))
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         // Voice-input state machine: guards the recognizer session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
@@ -578,6 +586,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             clipToPadding = false
             setPadding(0, dp(4), 0, dp(8))
         }
+        // Feed live scroll positions into the policy so scrolling back down re-pins the viewport.
+        scroll.setOnScrollChangeListener { _, _, _, _, _ ->
+            autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
+        }
         messages = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(messages, ViewGroup.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -729,6 +741,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(input.windowToken, 0)
         input.text.clear()
         explicitStatus = null
+        // Own outgoing message always takes the reader to the latest.
+        autoScroll.pinToBottom()
         renderMessages()
         updateControls()
         stream = lifecycleScope.launch {
@@ -770,7 +784,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (::compressionController.isInitialized) compressionController.onEvent(event)
                     renderMessages()
                     setStatus()
-                    scrollToBottom()
                 }
                 if (uiState.status == ChatStatus.TYPING) uiState.complete()
             } catch (cancelled: CancellationException) {
@@ -896,6 +909,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
         statusView.text = explicitStatus ?: when {
             quiet && uiState.status == ChatStatus.TYPING -> "Марс работает…"
+            uiState.status != ChatStatus.TYPING && uiState.attention != null ->
+                attentionLabel(requireNotNull(uiState.attention))
+            uiState.status != ChatStatus.TYPING && uiState.hasPendingUserMessage ->
+                "Сообщение в очереди — ждём запуска хода"
             else -> uiState.phase?.let { "Марс: ${phaseLabel(it)}" } ?: when (uiState.status) {
                 ChatStatus.TYPING -> "Марс печатает…"
                 ChatStatus.RECEIVED -> "Ответ получен"
@@ -905,6 +922,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    /** Human banner for the session's server-side attention (WebUI `_session_attention_summary` parity). */
+    private fun attentionLabel(attention: SessionAttention): String {
+        val kind = when (attention.kind) {
+            "approval" -> "подтверждения"
+            "clarify" -> "уточнения"
+            else -> attention.kind
+        }
+        val count = if (attention.count > 1) " ×${attention.count}" else ""
+        val prefix = if (attention.severity == "critical") "❗ " else ""
+        return "${prefix}Ожидает $kind$count"
+    }
+
     private fun phaseLabel(value: String) = when {
         value.contains("tool", true) || value.contains("command", true) -> "Выполняет команду…"
         value.contains("think", true) || value.contains("reason", true) -> "Анализирует задачу…"
@@ -912,6 +941,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun renderMessages() {
+        // Take the auto-scroll decision from the PRE-render viewport (synchronously, before any
+        // mutation): a user scrolled up reading history stays put while SSE tokens keep coming;
+        // only a pinned viewport follows the stream to the bottom.
+        autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
         messages.removeAllViews()
         uiState.messages.forEachIndexed { index, message ->
             val isUser = message.role == "user"
@@ -1094,7 +1127,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             messages.addView(card, params)
         }
         renderSmartChips()
-        scrollToBottom()
+        if (autoScroll.shouldScrollOnContentChanged()) scrollToBottom()
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
@@ -1324,6 +1357,26 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     setPadding(dp(4), 0, dp(40), dp(2))
                 })
             }
+
+            // Active-turn/attention badge: which sessions are live or waiting for the user.
+            val turn = session.activeTurn
+            val turnAttention = turn.attention
+            val badge: Pair<String, Int>? = when {
+                turnAttention != null -> "⚠ ${attentionLabel(turnAttention)}" to MarsTheme.STATUS_WARNING
+                turn.isStreaming -> "● Активный ход" to MarsTheme.STATUS_ONLINE
+                turn.hasPendingUserMessage -> "↑ Сообщение в очереди" to MarsTheme.STATUS_INFO
+                else -> null
+            }
+            if (badge != null) {
+                card.addView(TextView(this).apply {
+                    text = badge.first
+                    textSize = 11f
+                    setTextColor(badge.second)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(40), 0)
+                })
+            }
             drawerSessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         }
     }
@@ -1344,9 +1397,74 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, session.id)
             if (detail != null) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                // Active-turn/attention banner state from the freshly loaded detail.
+                uiState.setActiveTurn(detail.activeTurn)
                 currentSessionId = detail.id
+                autoScroll.pinToBottom()
                 renderMessages()
+                setStatus()
                 refreshYoloState()
+                // Stream recovery: a session that is still streaming server-side must resume
+                // live instead of showing a frozen transcript.
+                reattachActiveTurn(detail.activeTurn)
+            }
+        }
+    }
+
+    /**
+     * Reattaches to the session's live stream (`GET /api/chat/stream?stream_id=...`, no
+     * `POST /api/chat/start`) when [activeTurn] says one exists — the server replays journaled
+     * events missed while the app was closed and continues live. A terminal 404 means the turn
+     * settled between the detail fetch and the attach: the placeholder bubble is dropped and the
+     * settled history is reloaded instead of surfacing an error.
+     */
+    private fun reattachActiveTurn(activeTurn: ActiveTurnInfo) {
+        val plan = reattachPolicy.planFor(activeTurn) as? ReattachPlan.Attach ?: return
+        if (stream?.isActive == true) return
+        val credential = store.read() ?: return
+        if (!uiState.beginReattachedTurn()) return
+        autoScroll.pinToBottom()
+        currentStreamId = plan.streamId
+        explicitStatus = REATTACH_STATUS
+        renderMessages()
+        setStatus()
+        updateControls()
+        val sessionId = currentSessionId
+        stream = lifecycleScope.launch {
+            var streamGone = false
+            try {
+                ChatRepository().attachToStream(BASE_URL, credential, plan.streamId).collect { event ->
+                    if (reattachPolicy.outcomeOf(event) == ReattachEventOutcome.StreamGone) {
+                        streamGone = true
+                        return@collect
+                    }
+                    uiState.onEvent(event)
+                    if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
+                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
+                    interactiveController.onEvent(event)
+                    if (::compressionController.isInitialized) compressionController.onEvent(event)
+                    renderMessages()
+                    setStatus()
+                }
+                if (streamGone) {
+                    // The stream died server-side (404): drop the empty placeholder and show
+                    // what actually settled in the transcript.
+                    uiState.cancelReattachedTurn()
+                    explicitStatus = "Ход завершён — история обновлена"
+                    if (currentSessionId == sessionId) reloadCurrentSession()
+                } else if (uiState.status == ChatStatus.TYPING) {
+                    uiState.complete()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                uiState.fail()
+            } finally {
+                if (explicitStatus == REATTACH_STATUS) explicitStatus = null
+                renderMessages()
+                setStatus()
+                updateControls()
             }
         }
     }
@@ -1368,8 +1486,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, id)
             if (detail != null && currentSessionId == id) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                uiState.setActiveTurn(detail.activeTurn)
+                autoScroll.pinToBottom()
                 renderMessages()
-                scrollToBottom()
                 refreshYoloState()
             }
         }
@@ -1755,6 +1874,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
 
+    /**
+     * Distance (px) between the bottom of the transcript content and the bottom of the visible
+     * viewport; 0 while pinned at the latest message and before the views exist.
+     */
+    private fun distanceFromBottomPx(): Int {
+        if (!::scroll.isInitialized) return 0
+        val child = scroll.getChildAt(0) ?: return 0
+        return (child.bottom - (scroll.height + scroll.scrollY)).coerceAtLeast(0)
+    }
+
     private fun startNewChat() {
         stream?.cancel()
         stream = null
@@ -1764,6 +1893,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         uiState.startNewSession()
         currentSessionId = null
         explicitStatus = null
+        autoScroll.pinToBottom()
         renderMessages()
         setStatus()
         updateControls()
@@ -1912,5 +2042,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
+        /** Status line while a reattach to the session's live stream is being established. */
+        private const val REATTACH_STATUS = "Подключение к активному ходу…"
     }
 }
