@@ -19,6 +19,7 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.StreamSideEvent
 import ru.mars.network.model.TodoSnapshot
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -85,6 +86,25 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * transcript stays clean. Invoked on this flow's IO context — receivers own
      * any thread hopping and must not throw (an exception surfaces as
      * [ChatEvent.Error]). Default `null` keeps the pre-todo_state behaviour.
+     *
+     * [workspace] — optional server-side workspace PATH for this turn. When
+     * non-blank it is sent as the `workspace` field of the `POST /api/chat/start`
+     * body: `_handle_chat_start` resolves it via
+     * `_resolve_chat_workspace_with_recovery(s, body["workspace"])` (trusted-path
+     * resolution, session recovery on mismatch). Null/blank OMITS the key
+     * entirely so the server keeps the session's current workspace — byte-identical
+     * to the pre-workspace payload (backward compatible). Value comes from
+     * `GET /api/workspaces` ([ru.mars.network.model.WorkspaceItem.path]) or from
+     * `SessionDetail.workspace`; never invent a path.
+     *
+     * [onSideEvent] — optional NON-SEALED transport callback (same delivery
+     * pattern as [onTodoState]) for SSE metadata frames without a sealed
+     * [ChatEvent] carrier: `title` text, `goal` and `goal_continue`
+     * ([ru.mars.network.model.StreamSideEvent]). Delivered in stream order on
+     * this flow's IO context, ALONGSIDE the [ChatEvent] flow (a `title` frame
+     * still emits [ChatEvent.SessionBound]). Delivery only: receivers must not
+     * auto-send a goal continuation — that is an explicit UI decision. Default
+     * `null` keeps the previous behaviour (frames are dropped).
      */
     fun sendMessage(
         endpoint: String,
@@ -95,15 +115,17 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         model: String? = null,
         modelProvider: String? = null,
         explicitModelPick: Boolean = false,
+        workspace: String? = null,
         onTodoState: ((TodoSnapshot) -> Unit)? = null,
+        onSideEvent: ((StreamSideEvent) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick), credential, onTodoState) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace), credential, onTodoState, onSideEvent) { event -> emit(event) }
                 return@flow
             }
-            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick)).execute().use { response ->
+            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace)).execute().use { response ->
                 if (!response.isSuccessful) {
                     emit(ChatEvent.Error("HTTP ${response.code}"))
                     return@flow
@@ -117,7 +139,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             val streamUrl = base.newBuilder().addPathSegments("api/chat/stream")
                 .addQueryParameter("stream_id", startResp.streamId).build()
             stream(Request.Builder().url(streamUrl).header("Authorization", bearer(credential))
-                .header("Accept", "text/event-stream").get().build(), credential, onTodoState) { event -> emit(event) }
+                .header("Accept", "text/event-stream").get().build(), credential, onTodoState, onSideEvent) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -153,6 +175,9 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * [onTodoState] — same live `todo_state` transport callback as in [sendMessage]
      * (the journaled replay of a reattached stream can contain `todo_state` frames too);
      * see its KDoc for the delivery contract.
+     *
+     * [onSideEvent] — same `title`/`goal`/`goal_continue` side-channel callback as in
+     * [sendMessage] (a reattached stream replays these frames from the journal too).
      */
     fun attachToStream(
         baseUrl: String,
@@ -160,6 +185,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         streamId: String,
         lastEventId: String? = null,
         onTodoState: ((TodoSnapshot) -> Unit)? = null,
+        onSideEvent: ((StreamSideEvent) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val streamUrl = baseUrl.toHttpUrl().newBuilder()
             .addPathSegments("api/chat/stream")
@@ -172,7 +198,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             .get().build()
         try {
             emit(ChatEvent.StreamStarted(streamId))
-            stream(request, credential, onTodoState) { event -> emit(event) }
+            stream(request, credential, onTodoState, onSideEvent) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -277,12 +303,19 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         attachments: List<ChatAttachment> = emptyList(),
         model: String? = null,
         modelProvider: String? = null,
-        explicitModelPick: Boolean = false
+        explicitModelPick: Boolean = false,
+        workspace: String? = null
     ): Request {
         val url = if (base.encodedPath == "/chat") base else base.newBuilder().addPathSegments("api/chat/start").build()
         val jsonBody = buildString {
             append("{\"message\":").append(jsonString(message))
             if (!sessionId.isNullOrBlank()) append(",\"session_id\":").append(jsonString(sessionId))
+            // Server `_handle_chat_start` reads body["workspace"] (a trusted path
+            // string) and resolves it via `_resolve_chat_workspace_with_recovery`,
+            // letting a turn switch the session workspace mid-conversation. Only
+            // send the key when a concrete path was chosen — an omitted key keeps
+            // the session's current workspace (backward compatible payload).
+            if (!workspace.isNullOrBlank()) append(",\"workspace\":").append(jsonString(workspace))
             // Server `_handle_chat_start` reads body["model"] / body["model_provider"]
             // (falling back to session state when absent) and body["explicit_model_pick"]
             // to record a deliberate user pick (#5979). Only send fields we actually have —
@@ -321,11 +354,18 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * [onTodoState]: when non-null, `todo_state` frames are diverted to it (side channel —
      * no sealed ChatEvent carrier exists) instead of reaching [StreamEventMapper.map],
      * which returns null for them. When null, behaviour is unchanged (frames are dropped).
+     *
+     * [onSideEvent]: when non-null, `title`/`goal`/`goal_continue` frames are ALSO
+     * parsed by [StreamEventMapper.sideEvent] and handed to it (typed
+     * [StreamSideEvent] side channel). Unlike `todo_state` this does NOT divert
+     * the frame from [StreamEventMapper.map] — a `title` frame still emits
+     * [ChatEvent.SessionBound] into the flow. When null, behaviour is unchanged.
      */
     private suspend fun stream(
         request: Request,
         credential: ConsumedDeviceCredential,
         onTodoState: ((TodoSnapshot) -> Unit)?,
+        onSideEvent: ((StreamSideEvent) -> Unit)? = null,
         emit: suspend (ChatEvent) -> Unit,
     ) {
         client.newCall(request).execute().use { response ->
@@ -340,8 +380,14 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             suspend fun emitFrames(frames: List<SseChunkParser.Frame>) {
                 for (frame in frames) {
                     val snapshot = onTodoState?.let { StreamEventMapper.todoState(frame.event, frame.data) }
-                    if (snapshot != null) onTodoState.invoke(snapshot)
-                    else StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
+                    if (snapshot != null) {
+                        onTodoState.invoke(snapshot)
+                        continue
+                    }
+                    onSideEvent?.let { callback ->
+                        StreamEventMapper.sideEvent(frame.event, frame.data)?.let(callback)
+                    }
+                    StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
                 }
             }
             val reader = InputStreamReader(byteStream, Charsets.UTF_8)

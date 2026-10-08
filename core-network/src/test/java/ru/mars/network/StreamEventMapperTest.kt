@@ -6,6 +6,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.GoalContinuation
+import ru.mars.network.model.GoalUpdate
+import ru.mars.network.model.SessionTitleUpdate
 import ru.mars.network.repository.StreamEventMapper
 
 /**
@@ -189,5 +192,90 @@ class StreamEventMapperTest {
         assertEquals(ChatEvent.Thought("thinking"), StreamEventMapper.map("reasoning", null, """{"text":"thinking"}"""))
         assertEquals(ChatEvent.Phase("final"), StreamEventMapper.map("phase", null, """{"name":"final"}"""))
         assertEquals(ChatEvent.Phase("Compressing context"), StreamEventMapper.map("compressing", null, """{"session_id":"s1","message":"Compressing context"}"""))
+    }
+
+    // ---- side-channel metadata frames: title text / goal / goal_continue -----
+    // Verified against hermes-webui api/streaming.py: put_event('title', {session_id,
+    // title}), put('goal', {session_id, state, message, message_key, message_args?,
+    // decision?}), put('goal_continue', {session_id, continuation_prompt, text,
+    // message, message_key, message_args, decision}).
+
+    @Test fun sideEventDeliversTitleTextThatSessionBoundDrops() {
+        val payload = """{"session_id":"s9","title":"Отладка чата"}"""
+        // The sealed flow keeps the session binding (backward compatible)...
+        assertEquals(ChatEvent.SessionBound("s9"), StreamEventMapper.map("title", null, payload))
+        // ...and the side channel adds the title TEXT.
+        assertEquals(
+            SessionTitleUpdate(sessionId = "s9", title = "Отладка чата"),
+            StreamEventMapper.sideEvent("title", payload)
+        )
+    }
+
+    @Test fun sideEventDropsTitleWithoutUsableText() {
+        assertNull(StreamEventMapper.sideEvent("title", """{"session_id":"s9","title":"   "}"""))
+        assertNull(StreamEventMapper.sideEvent("title", """{"session_id":"s9"}"""))
+        // Malformed payload: no crash, nothing delivered.
+        assertNull(StreamEventMapper.sideEvent("title", "not-json"))
+    }
+
+    @Test fun sideEventDeliversGoalEvaluating() {
+        val payload = """{"session_id":"s1","state":"evaluating","message":"Evaluating goal progress…","message_key":"goal_evaluating_progress"}"""
+        assertEquals(
+            GoalUpdate(
+                sessionId = "s1",
+                state = "evaluating",
+                message = "Evaluating goal progress…",
+                messageKey = "goal_evaluating_progress",
+            ),
+            StreamEventMapper.sideEvent("goal", payload)
+        )
+        // No sealed carrier: goal frames must NOT enter the ChatEvent flow.
+        assertNull(StreamEventMapper.map("goal", null, payload))
+    }
+
+    @Test fun sideEventDeliversGoalContinuingWithRawDecision() {
+        val payload = """{"session_id":"s1","state":"continuing","message":"Цель не завершена","message_key":"goal_continuing","message_args":["шаг 2"],"decision":{"should_continue":true,"continuation_prompt":"Продолжи"}}"""
+        val update = StreamEventMapper.sideEvent("goal", payload) as GoalUpdate
+        assertEquals("s1", update.sessionId)
+        assertEquals("continuing", update.state)
+        assertEquals("Цель не завершена", update.message)
+        assertEquals("goal_continuing", update.messageKey)
+        assertEquals(listOf("шаг 2"), update.messageArgs)
+        // decision is an opaque server payload, preserved as compact JSON.
+        assertTrue(update.decisionJson!!.contains("\"should_continue\":true"))
+        assertTrue(update.decisionJson!!.contains("Продолжи"))
+    }
+
+    @Test fun sideEventDeliversGoalContinuationPrompt() {
+        val payload = """{"session_id":"s1","continuation_prompt":"Продолжи шаг 2","text":"Продолжи шаг 2","message":"Цель не завершена","message_key":"goal_continuing","message_args":[],"decision":{"should_continue":true}}"""
+        val continuation = StreamEventMapper.sideEvent("goal_continue", payload) as GoalContinuation
+        assertEquals("s1", continuation.sessionId)
+        assertEquals("Продолжи шаг 2", continuation.continuationPrompt)
+        assertEquals("Цель не завершена", continuation.message)
+        assertEquals("goal_continuing", continuation.messageKey)
+        assertTrue(continuation.decisionJson!!.contains("\"should_continue\":true"))
+        // Delivery only — the sealed flow never sees the continuation prompt.
+        assertNull(StreamEventMapper.map("goal_continue", null, payload))
+    }
+
+    @Test fun sideEventFallsBackToTextAliasAndDropsPromptlessContinuation() {
+        // `text` is the wire alias of `continuation_prompt`.
+        assertEquals(
+            "Продолжи",
+            (StreamEventMapper.sideEvent("goal_continue", """{"session_id":"s1","text":"Продолжи"}""") as GoalContinuation).continuationPrompt
+        )
+        // No prompt at all → nothing to deliver.
+        assertNull(StreamEventMapper.sideEvent("goal_continue", """{"session_id":"s1","message":"..."}"""))
+        // Gateway mirror without session_id → delivered with null sessionId.
+        assertNull(
+            (StreamEventMapper.sideEvent("goal_continue", """{"continuation_prompt":"go"}""") as GoalContinuation).sessionId
+        )
+    }
+
+    @Test fun sideEventIgnoresUnrelatedFrames() {
+        assertNull(StreamEventMapper.sideEvent("chunk", """{"text":"hi"}"""))
+        assertNull(StreamEventMapper.sideEvent("todo_state", """{"todos":[],"summary":{"total":0},"version":1}"""))
+        assertNull(StreamEventMapper.sideEvent("state_saved", "{}"))
+        assertNull(StreamEventMapper.sideEvent(null, """{"title":"x"}"""))
     }
 }

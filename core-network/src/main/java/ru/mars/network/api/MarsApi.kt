@@ -16,10 +16,18 @@ interface MarsApi {
     @POST("api/v1/auth/device-pairings")
     suspend fun createPairing(): Response<PairingResponse>
 
+    /**
+     * `GET /api/v1/auth/device-pairings/status` — identified by `pair_id` ONLY.
+     *
+     * The deployed server (api/routes.py) answers 400 `poll_secret is accepted
+     * only by exchange` when this request carries the `X-Hermes-Poll-Secret`
+     * header or a `poll_secret` query parameter, so the interface must not
+     * declare either. The poll secret belongs exclusively to
+     * [exchangePairing]'s JSON body ([PairingExchangeRequest.pollSecret]).
+     */
     @GET("api/v1/auth/device-pairings/status")
     suspend fun pollPairingStatus(
-        @Query("pair_id") pairId: String,
-        @Header("X-Hermes-Poll-Secret") pollSecret: String
+        @Query("pair_id") pairId: String
     ): Response<PairingStatusResponse>
 
     @POST("api/v1/auth/device-pairings/{pair_id}/exchange")
