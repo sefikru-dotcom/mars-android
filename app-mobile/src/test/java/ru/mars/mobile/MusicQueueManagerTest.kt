@@ -50,14 +50,17 @@ class MusicQueueManagerTest {
     }
 
     @Test
-    fun `sequential next advances and stops at the end when repeat is off`() {
+    fun `sequential next advances and finishes the session at the end when repeat is off`() {
         val manager = seeded(3)
         assertEquals("t1", manager.currentTrack?.id)
         assertEquals(0, manager.currentIndex)
         assertEquals("t2", manager.next()?.id)
         assertEquals("t3", manager.next()?.id)
         assertNull(manager.next())
-        assertEquals(2, manager.currentIndex) // stays on the last track
+        // Exhaustion finishes the session: the stale selection is dropped, not preserved.
+        assertEquals(-1, manager.currentIndex)
+        assertTrue(manager.isFinished)
+        assertNull(manager.currentTrack)
         assertFalse(manager.hasNext())
         assertNull(manager.nextIndex()) // repeat off: nothing follows the last track
     }
