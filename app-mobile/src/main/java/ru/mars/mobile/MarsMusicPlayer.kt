@@ -57,13 +57,17 @@ object MarsMusicPlayer {
         startCurrentTrack()
     }
 
-    /** Appends [track] to the playback queue; playback starts when nothing was queued. */
+    /**
+     * Appends [track] to the playback queue. Playback (re)starts on it when the queue was
+     * empty OR the previous session finished (exhausted/stopped) — the decision comes from
+     * [MusicQueueManager]/[QueueResumePolicy], so a finished queue can never resurrect its
+     * stale track and the enqueue is never a silent no-op.
+     */
     @Synchronized
     fun enqueue(track: MusicTrack) {
-        val wasEmpty = queueManager.isEmpty
-        queueManager.addToQueue(track)
+        val shouldStart = queueManager.addToQueue(track)
         syncQueueState()
-        if (wasEmpty) {
+        if (shouldStart) {
             consecutiveFailures = 0
             startCurrentTrack()
         } else {
@@ -173,14 +177,19 @@ object MarsMusicPlayer {
         listeners.toList().forEach { it.onProgress(position, duration) }
     }
 
-    /** Queue exhausted (repeat off) or an unwinnable failure streak: release the player. */
+    /**
+     * Queue exhausted (repeat off) or an unwinnable failure streak: release the player and
+     * finish the queue session so the stale track cannot resurface as current; the queue
+     * list itself is kept for the UI, and the next [enqueue] resumes playback.
+     */
     private fun stopPlayback() {
         mediaPlayer?.release()
         mediaPlayer = null
         setPlaying(false)
         currentPosition = 0
         duration = 0
-        currentTrack = null
+        queueManager.markFinished()
+        syncQueueState() // currentTrack <- null (finished), tracks kept
         notifyState()
         notifyProgress()
     }

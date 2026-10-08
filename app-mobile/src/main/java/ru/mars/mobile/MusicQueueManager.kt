@@ -19,6 +19,13 @@ import kotlin.random.Random
  * first and everything else in random order (seeded via [random] for deterministic tests);
  * toggling it off restores the natural queue order from the current track. Tracks added
  * while shuffled are scheduled at the end of the current pass.
+ *
+ * Session lifecycle: when [next] runs past the end of the queue (repeat OFF) the session
+ * finishes — [isFinished] becomes true and the stale selection is dropped, so the finished
+ * track can never resurface as [currentTrack]. The player mirrors this via [markFinished]
+ * when it releases the media player (exhaustion or an unwinnable failure streak). Adding
+ * tracks to a finished (or empty) queue starts a fresh session on the first added track —
+ * the decision lives in [QueueResumePolicy] and is returned by [addToQueue]/[addAllToQueue].
  */
 class MusicQueueManager(private val random: Random = Random.Default) {
 
@@ -38,6 +45,14 @@ class MusicQueueManager(private val random: Random = Random.Default) {
     var repeatMode: RepeatMode = RepeatMode.OFF
         private set
 
+    /**
+     * True when the playback session ended: the queue ran out (repeat OFF) or the player
+     * was stopped. The queue keeps its tracks (for the UI) but nothing is current until an
+     * explicit selection ([playAt]/[setQueue]) or an addition resumes playback.
+     */
+    var isFinished: Boolean = false
+        private set
+
     /** Queue indexes in the order they will play; identity permutation unless shuffled. */
     private var playOrder: List<Int> = emptyList()
 
@@ -52,25 +67,46 @@ class MusicQueueManager(private val random: Random = Random.Default) {
     fun setQueue(tracks: List<MusicTrack>, startIndex: Int = 0) {
         queue = tracks.toList()
         currentIndex = if (queue.isEmpty()) -1 else startIndex.coerceIn(0, queue.lastIndex)
+        isFinished = false
         rebuildOrder()
+    }
+
+    /**
+     * Ends the session (player released): drops the current selection so the finished
+     * track does not resurface, keeps the queued tracks. Idempotent.
+     */
+    fun markFinished() {
+        isFinished = true
+        currentIndex = -1
+        orderPosition = -1
     }
 
     /** Selects an arbitrary track without changing the queue; null when out of range. */
     fun playAt(index: Int): MusicTrack? = advanceTo(index)
 
-    /** Appends one track; it immediately becomes current when the queue was empty. */
-    fun addToQueue(track: MusicTrack) {
-        addAllToQueue(listOf(track))
-    }
+    /**
+     * Appends one track. Returns true when playback must (re)start on it: the queue was
+     * empty or the previous session finished (see [QueueResumePolicy]).
+     */
+    fun addToQueue(track: MusicTrack): Boolean = addAllToQueue(listOf(track))
 
-    /** Appends tracks; the first one immediately becomes current when the queue was empty. */
-    fun addAllToQueue(tracks: List<MusicTrack>) {
-        if (tracks.isEmpty()) return
+    /**
+     * Appends tracks. Returns true when playback must (re)start on the first added track:
+     * the queue was empty or the previous session finished (see [QueueResumePolicy]).
+     */
+    fun addAllToQueue(tracks: List<MusicTrack>): Boolean {
+        if (tracks.isEmpty()) return false
         val firstNew = queue.size
-        val wasEmpty = queue.isEmpty()
+        val shouldStart = QueueResumePolicy.shouldStartPlayback(
+            queueWasEmpty = queue.isEmpty(),
+            queueFinished = isFinished
+        )
         queue = queue + tracks
         when {
-            wasEmpty -> {
+            // Empty or finished session: the first added track becomes the new current one;
+            // a finished queue keeps its old tracks but never resumes from them.
+            shouldStart -> {
+                isFinished = false
                 currentIndex = firstNew
                 rebuildOrder()
             }
@@ -79,11 +115,12 @@ class MusicQueueManager(private val random: Random = Random.Default) {
             // Sequential: natural order already covers the appended tail.
             else -> playOrder = queue.indices.toList()
         }
+        return shouldStart
     }
 
-    /** Index [next] would advance to, or null when the queue is exhausted in this mode. */
+    /** Index [next] would advance to, or null when the session finished or the queue is exhausted in this mode. */
     fun nextIndex(): Int? {
-        if (queue.isEmpty()) return null
+        if (queue.isEmpty() || isFinished) return null
         if (repeatMode == RepeatMode.ONE) return currentIndex.takeIf { it in queue.indices }
         if (isShuffled) {
             if (playOrder.isEmpty()) return null
@@ -105,7 +142,7 @@ class MusicQueueManager(private val random: Random = Random.Default) {
 
     /** Index [previous] would return to, or null when there is nothing before the current track. */
     fun previousIndex(): Int? {
-        if (queue.isEmpty()) return null
+        if (queue.isEmpty() || isFinished) return null
         if (repeatMode == RepeatMode.ONE) return currentIndex.takeIf { it in queue.indices }
         if (isShuffled) {
             if (playOrder.isEmpty()) return null
@@ -125,8 +162,16 @@ class MusicQueueManager(private val random: Random = Random.Default) {
         }
     }
 
-    /** Advances to the next track; returns the new current track, or null when the queue ended. */
-    fun next(): MusicTrack? = advanceTo(nextIndex())
+    /**
+     * Advances to the next track; returns the new current track. When the queue is
+     * exhausted (repeat OFF) the session finishes: null is returned, the stale selection
+     * is dropped and [isFinished] becomes true.
+     */
+    fun next(): MusicTrack? {
+        val track = advanceTo(nextIndex())
+        if (track == null && queue.isNotEmpty()) markFinished()
+        return track
+    }
 
     /** Steps back one track; returns the new current track, or null when there is no previous. */
     fun previous(): MusicTrack? = advanceTo(previousIndex())
@@ -164,7 +209,7 @@ class MusicQueueManager(private val random: Random = Random.Default) {
 
     /** Tracks that will play after the current one within this pass, in play order. */
     fun upcoming(): List<MusicTrack> {
-        if (queue.isEmpty() || playOrder.isEmpty()) return emptyList()
+        if (isFinished || queue.isEmpty() || playOrder.isEmpty()) return emptyList()
         val start = (orderPosition + 1).coerceIn(0, playOrder.size)
         return playOrder.subList(start, playOrder.size).mapNotNull { queue.getOrNull(it) }
     }
@@ -175,11 +220,13 @@ class MusicQueueManager(private val random: Random = Random.Default) {
         currentIndex = -1
         playOrder = emptyList()
         orderPosition = -1
+        isFinished = false
     }
 
     private fun advanceTo(index: Int?): MusicTrack? {
         if (index == null || index !in queue.indices) return null
         currentIndex = index
+        isFinished = false
         orderPosition = if (isShuffled) playOrder.indexOf(index) else index
         return queue[index]
     }

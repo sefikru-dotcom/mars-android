@@ -356,13 +356,56 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun loadHome() {
+        job?.cancel()
+        showLoading()
         job = lifecycleScope.launch {
             val found = withContext(Dispatchers.IO) {
                 runCatching { fetch("$BASE_URL/api/charts") }.getOrNull()
                     ?: runCatching { fetch("$BASE_URL/api/home") }.getOrNull()
             }
-            found?.let { showTracks(parseTracks(it)) }
+            if (found == null) showHomeError() else showTracks(parseTracks(found))
         }
+    }
+
+    /** Explicit loading placeholder for the chart list (also shown before a retry). */
+    private fun showLoading() {
+        showStatus(null)
+        results.removeAllViews()
+        heartButtons.clear()
+        results.addView(TextView(this).apply {
+            text = "Загружаем чарт…"
+            setTextColor(MarsTheme.TEXT_MUTED)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(32), 0, dp(32))
+        })
+    }
+
+    /** Chart fetch failed (both endpoints): say so and offer an explicit retry. */
+    private fun showHomeError() {
+        results.removeAllViews()
+        heartButtons.clear()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(32), 0, dp(32))
+        }
+        box.addView(TextView(this).apply {
+            text = "Чарт недоступен — проверьте сеть"
+            setTextColor(MarsTheme.TEXT_MUTED)
+            gravity = Gravity.CENTER
+        })
+        val retryBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_refresh,
+            "Повторить загрузку чарта",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.ACCENT,
+            sizeDp = 42
+        ).apply {
+            setOnClickListener { loadHome() }
+        }
+        box.addView(retryBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { topMargin = dp(12) })
+        results.addView(box, LinearLayout.LayoutParams(-1, -2))
     }
 
     private fun search(q: String) {
@@ -588,7 +631,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun onQueueAddClicked(track: MusicTrack) {
         MarsMusicPlayer.enqueue(track)
-        showStatus("Добавлено в очередь: ${track.title}")
+        // Real state feedback: a finished/empty session resumes on this very track.
+        showStatus(
+            if (MarsMusicPlayer.currentTrack?.id == track.id) "Играет: ${track.title}"
+            else "Добавлено в очередь: ${track.title}"
+        )
     }
 
     private fun updateQueueIcons() {
@@ -605,9 +652,13 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun fetch(url: String): JSONObject {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 8000
-        c.readTimeout = 10000
-        return c.inputStream.bufferedReader().use { JSONObject(it.readText()) }.also { c.disconnect() }
+        try {
+            c.connectTimeout = 8000
+            c.readTimeout = 10000
+            return c.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+        } finally {
+            c.disconnect() // also on timeouts/parse failures, not just the happy path
+        }
     }
 
     private fun parseTracks(o: JSONObject): List<MusicTrack> {
