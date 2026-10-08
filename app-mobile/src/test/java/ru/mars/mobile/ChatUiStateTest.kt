@@ -17,7 +17,11 @@ class ChatUiStateTest {
         state.startNewSession(); assertNull(state.activeSessionId); assertTrue(state.messages.isEmpty()); assertEquals(ChatStatus.IDLE, state.status)
     }
     @Test fun collapsibleRichBlocksToggle() {
-        val state = ChatUiState(); state.begin("hello"); state.onEvent(ChatEvent.Thought("why")); state.onEvent(ChatEvent.ToolCall("1", "read_file", "x")); state.toggleThoughts(1); state.toggleTool(1, 0); assertTrue(state.messages[1].thoughtsExpanded); assertTrue(state.messages[1].tools[0].expanded)
+        val state = ChatUiState(); state.begin("hello"); state.onEvent(ChatEvent.Thought("why")); state.onEvent(ChatEvent.ToolCall("1", "read_file", "x")); state.toggleThoughts(1)
+        // STREAM_WINDOW keeps the still-running tool expanded; a manual toggle collapses it.
+        assertTrue(state.messages[1].tools[0].expanded)
+        state.toggleTool(1, 0)
+        assertTrue(state.messages[1].thoughtsExpanded); assertFalse(state.messages[1].tools[0].expanded)
     }
     @Test fun completionAndFailureAllowNextMessage() { val state = ChatUiState(); state.begin("hello"); state.complete(); assertEquals(ChatStatus.RECEIVED, state.status); assertTrue(state.begin("again")); state.fail(); assertEquals(ChatStatus.ERROR, state.status); assertTrue(state.begin("retry")) }
     @Test fun cancelMarksStreamIdleAndAllowsNextMessage() { val state = ChatUiState(); state.begin("hello"); state.cancel(); assertEquals(ChatStatus.IDLE, state.status); assertTrue(state.begin("again")) }
@@ -67,5 +71,24 @@ class ChatUiStateTest {
         state.onEvent(ChatEvent.ApprovalRequired(ru.mars.network.model.ApprovalPayload(approvalId = "a1", command = "c", description = "")))
         state.bindSession("s2", "Другая", emptyList())
         assertNull(state.pendingApproval)
+    }
+
+    @Test fun contextUsageEventUpdatesMeterWithoutTouchingTranscript() {
+        val state = ChatUiState(); state.begin("hello")
+        val before = state.messages.toList()
+        state.onEvent(ChatEvent.ContextUsage(usedTokens = 50000, maxTokens = 200000, percent = 25))
+        assertEquals(ChatEvent.ContextUsage(50000, 200000, 25), state.contextUsage)
+        assertEquals(before, state.messages) // meter is session-level: no bubbles added/changed
+    }
+
+    @Test fun contextUsageSurvivesWithoutAssistantBubbleAndResetsOnSessionSwitch() {
+        val state = ChatUiState()
+        // A late `metering` frame after history replay must not be dropped by the no-bubble guard.
+        state.onEvent(ChatEvent.ContextUsage(90000, 128000, 70))
+        assertEquals(70, state.contextUsage?.percent)
+        state.startNewSession(); assertNull(state.contextUsage)
+
+        state.onEvent(ChatEvent.ContextUsage(10000, 200000, 5))
+        state.bindSession("s1", "t", emptyList()); assertNull(state.contextUsage)
     }
 }

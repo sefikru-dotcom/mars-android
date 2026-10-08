@@ -24,6 +24,14 @@ import ru.mars.network.model.ClarifyPayload
  * - `title`           — `{session_id, title}`; re-binds the session id ([ChatEvent.SessionBound]).
  * - `warning`         — `{type, message}` non-fatal notice (e.g. provider fallback).
  * - `pending_steer_leftover` — `{session_id, text}`: steer text the agent never consumed; preserved as a thought.
+ * - `metering`        — `{tps, tps_available, estimated, high, low, active, session_id, usage: {input_tokens,
+ *   output_tokens, context_length, threshold_tokens, last_prompt_tokens,
+ *   post_compression_context_tokens_estimate, ...}}` (api/metering.py `get_stats` +
+ *   api/streaming.py `_live_usage_snapshot`): the `usage` block feeds the context-window
+ *   indicator ([ChatEvent.ContextUsage]); percent parity with WebUI `_syncCtxIndicator`
+ *   (static/ui.js): prompt tokens (`post_compression_context_tokens_estimate` when present,
+ *   else `last_prompt_tokens` — NEVER the cumulative `input_tokens`, #1436) over
+ *   `context_length`, clamped to 0..100.
  * - `done` is NOT terminal: `title` and `stream_end` follow it; `stream_end`/`cancel`/`error`/`apperror` are terminal.
  */
 object StreamEventMapper {
@@ -48,11 +56,38 @@ object StreamEventMapper {
             "pending_steer_leftover" -> stringField(obj, "text")
                 ?.let { ChatEvent.Thought("Направление не доставлено: $it") }
             "status", "phase", "compressing", "compressed" -> phase(obj, payload, eventName)
+            "metering", "context", "context_usage", "usage" -> contextUsage(obj)
             "token", "delta", "chunk", "message", null -> chunk(obj, payload, eventId)
-            // Unknown frames (metering, todo_state, state_saved, goal, ...) carry no chat content.
+            // Unknown frames (todo_state, state_saved, goal, ...) carry no chat content.
             else -> null
         }
     }
+
+    /**
+     * Parses the context-window portion of a `metering`/`usage` frame
+     * (`_live_usage_snapshot` payload, either nested under `usage` or flat).
+     * Returns null when the frame carries no usable data: an unknown window
+     * (`context_length` <= 0) must NOT become a fake percentage, and zero
+     * prompt tokens means nothing has been measured yet (WebUI shows "·").
+     */
+    private fun contextUsage(obj: Map<String, Any?>?): ChatEvent.ContextUsage? {
+        obj ?: return null
+        @Suppress("UNCHECKED_CAST")
+        val usage = (obj["usage"] as? Map<String, Any?>) ?: obj
+        val maxTokens = intField(usage, "context_length", "context_window", "max_tokens") ?: return null
+        if (maxTokens <= 0) return null
+        // #1436 parity: the post-compression estimate (when positive) wins, then
+        // last_prompt_tokens; the cumulative input_tokens is NEVER a percentage base.
+        val postCompression = intField(usage, "post_compression_context_tokens_estimate")?.takeIf { it > 0 }
+        val usedTokens = postCompression ?: intField(usage, "last_prompt_tokens", "tokens_used") ?: return null
+        if (usedTokens <= 0) return null
+        // WebUI parity: Math.round(used/window*100), clamped like the ring (pct=min(100,rawPct)).
+        val percent = Math.round(usedTokens.toLong() * 100.0 / maxTokens).toInt().coerceIn(0, 100)
+        return ChatEvent.ContextUsage(usedTokens, maxTokens, percent)
+    }
+
+    private fun intField(obj: Map<String, Any?>, vararg keys: String): Int? =
+        keys.firstNotNullOfOrNull { key -> (obj[key] as? Number)?.toInt() }
 
     private fun interimAssistant(obj: Map<String, Any?>?, eventId: String?): ChatEvent? {
         if (obj == null) return null
