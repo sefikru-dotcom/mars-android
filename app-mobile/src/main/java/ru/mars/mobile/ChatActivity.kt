@@ -770,7 +770,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     BASE_URL, credential, wireText, currentSessionId, outgoingAttachments,
                     model = choice?.modelId,
                     modelProvider = choice?.providerId,
-                    explicitModelPick = choice?.explicitPick == true
+                    explicitModelPick = choice?.explicitPick == true,
+                    onTodoState = todoCallback(currentSessionId)
                 ).collect { event ->
                     uiState.onEvent(event)
                     if (event is ChatEvent.SessionBound) {
@@ -905,9 +906,24 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         QuickChipId.STATUS -> R.drawable.ic_status
     }
 
+    private fun todoCallback(sessionId: String?): (ru.mars.network.model.TodoSnapshot) -> Unit = { snapshot ->
+        runOnUiThread {
+            if ((sessionId == null || currentSessionId == sessionId) && (snapshot.sessionId == null || currentSessionId == snapshot.sessionId)) {
+                uiState.setTodoState(snapshot)
+                setStatus()
+            }
+        }
+    }
+
     private fun setStatus() {
         val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
         statusView.text = explicitStatus ?: when {
+            uiState.todoState?.todos?.isNotEmpty() == true && uiState.status == ChatStatus.TYPING -> {
+                val todos = requireNotNull(uiState.todoState).todos
+                val done = todos.count { it.status == "completed" }
+                val current = todos.firstOrNull { it.status == "in_progress" }
+                "Задачи: $done/${todos.size}" + (current?.let { " — ${it.content}" } ?: "")
+            }
             quiet && uiState.status == ChatStatus.TYPING -> "Марс работает…"
             uiState.status != ChatStatus.TYPING && uiState.attention != null ->
                 attentionLabel(requireNotNull(uiState.attention))
@@ -1399,6 +1415,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 // Active-turn/attention banner state from the freshly loaded detail.
                 uiState.setActiveTurn(detail.activeTurn)
+                uiState.setTodoState(detail.todoState)
                 currentSessionId = detail.id
                 autoScroll.pinToBottom()
                 renderMessages()
@@ -1433,7 +1450,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         stream = lifecycleScope.launch {
             var streamGone = false
             try {
-                ChatRepository().attachToStream(BASE_URL, credential, plan.streamId).collect { event ->
+                ChatRepository().attachToStream(BASE_URL, credential, plan.streamId,
+                    onTodoState = todoCallback(sessionId)).collect { event ->
                     if (reattachPolicy.outcomeOf(event) == ReattachEventOutcome.StreamGone) {
                         streamGone = true
                         return@collect
@@ -1487,6 +1505,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (detail != null && currentSessionId == id) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 uiState.setActiveTurn(detail.activeTurn)
+                uiState.setTodoState(detail.todoState)
                 autoScroll.pinToBottom()
                 renderMessages()
                 refreshYoloState()
@@ -1583,13 +1602,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.RECORD_AUDIO), recognizeVoice); return
         }
-        // Controller guards against double sessions and fires the start haptic via the listener.
-        if (!voiceSession.start()) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault())
         }
-        startActivityForResult(intent, recognizeVoice)
+        // Launch is part of the guarded transition: ActivityNotFound/SecurityException cannot leave
+        // the controller stuck in LISTENING.
+        voiceSession.start {
+            startActivityForResult(intent, recognizeVoice)
+        }
     }
 
     /** Speak a message through TTS after cleaning markdown with [SpeechContentFilter]. */
