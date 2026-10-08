@@ -19,9 +19,11 @@ import okio.ByteString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.MusicPlayerState
+import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
 import ru.mars.network.repository.MusicRepository
 
@@ -59,6 +61,84 @@ class MusicRepositoryTest {
             val failure = runCatching { repo.getCharts() }.exceptionOrNull()
             assertNotNull(failure)
             assertTrue(failure!!.message!!.contains("upstream down"))
+        }
+    }
+
+    @Test
+    fun favoritesUsesFavoritesEnvelopeAndBlankDurationFallsBack() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"favorites\":[{\"id\":\"f1\",\"title\":\"Fav\",\"artist\":\"A\",\"duration\":\"\",\"thumbnail\":\"/music/api/thumb?v=f1\"},{\"id\":\"f2\",\"title\":\"Second\",\"artist\":\"B\",\"duration\":\"4:05\"}]}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val favorites = repo.getFavorites()
+            assertEquals(listOf("f1", "f2"), favorites.map { it.id })
+            assertEquals("--:--", favorites[0].duration) // live rows may carry ""
+            assertEquals("4:05", favorites[1].duration)
+            assertEquals("/music/api/favorites", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun emptyFavoritesAreANormalEmptyList() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"favorites\":[]}"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            assertEquals(emptyList<MusicTrack>(), repo.getFavorites())
+        }
+    }
+
+    @Test
+    fun toggleFavoritePostsBothIdKeysWithMetadataAndParsesFavorited() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val result = repo.toggleFavorite("v1", MusicTrack("v1", "Song", "Artist", "3:24", "thumb"))
+            assertEquals(true, result)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/music/api/favorite/toggle", request.path)
+            val body = request.body.readUtf8()
+            // The live service reads "id"; the documented contract says "video_id" — send both.
+            assertTrue(body.contains("\"id\":\"v1\""))
+            assertTrue(body.contains("\"video_id\":\"v1\""))
+            assertTrue(body.contains("\"title\":\"Song\""))
+            assertTrue(body.contains("\"artist\":\"Artist\""))
+            assertTrue(body.contains("\"duration\":\"3:24\""))
+            assertTrue(body.contains("\"thumbnail\":\"thumb\""))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteUnfavoritesAndOmitsMissingMetadata() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":false}"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            assertEquals(false, repo.toggleFavorite("v1"))
+            val body = server.takeRequest().body.readUtf8()
+            assertFalse(body.contains("title"))
+            assertFalse(body.contains("thumbnail"))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteReturnsNullWhenServerCannotDetermineState() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"error\"}"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            assertNull(repo.toggleFavorite("unknown"))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteRejectsBlankIdAndSurfacesHttpErrors() {
+        val blankError = runBlocking { runCatching { MusicRepository("http://localhost/music").toggleFavorite(" ") }.exceptionOrNull() }
+        assertTrue(blankError is IllegalArgumentException)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500))
+            val httpError = runBlocking {
+                runCatching { MusicRepository(server.url("/").toString().removeSuffix("/")).toggleFavorite("v1") }.exceptionOrNull()
+            }
+            assertNotNull(httpError)
+            assertTrue(httpError!!.message!!.contains("500"))
         }
     }
 

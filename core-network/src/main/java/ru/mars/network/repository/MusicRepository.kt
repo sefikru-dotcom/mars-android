@@ -1,14 +1,21 @@
 package ru.mars.network.repository
 
+import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import ru.mars.network.model.MusicPlayerState
@@ -46,6 +53,75 @@ class MusicRepository(
     /** Real `/api/charts` payload is the same `{success,results}` envelope as `/api/search`. */
     suspend fun getCharts(): List<MusicTrack> = fetchTracks("api/charts")
 
+    /**
+     * GET /api/favorites — the user's favorite tracks. The live service wraps them in a
+     * `{"favorites": [...]}` envelope (same track shape as charts/home).
+     */
+    suspend fun getFavorites(): List<MusicTrack> = fetchTracks("api/favorites")
+
+    /**
+     * POST /api/favorite/toggle — adds or removes [videoId] from favorites and returns the
+     * server's new `favorited` state, or null when the server could not determine it
+     * (e.g. `{"status":"error"}`). [track] metadata is forwarded so the service can store
+     * title/artist/thumbnail alongside the id (it inserts empty strings otherwise).
+     */
+    suspend fun toggleFavorite(videoId: String, track: MusicTrack? = null): Boolean? {
+        require(videoId.isNotBlank()) { "videoId must not be blank" }
+        val json = moshi.adapter(FavoriteToggleRequest::class.java).toJson(
+            FavoriteToggleRequest(
+                id = videoId,
+                toggleVideoId = videoId,
+                title = track?.title,
+                artist = track?.artist,
+                duration = track?.duration,
+                thumbnail = track?.thumbnail,
+            ),
+        )
+        val parsed = postJson("api/favorite/toggle", json) { body ->
+            moshi.adapter(FavoriteToggleResponse::class.java).fromJson(body.source())
+        }
+        return parsed?.favorited
+    }
+
+    /** POSTs a JSON body to [path] and maps the successful response through [parse]. */
+    private suspend fun <T> postJson(path: String, json: String, parse: (ResponseBody) -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            val request = Request.Builder()
+                .url("$baseUrl/$path")
+                .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        val body = resp.body
+                        when {
+                            !resp.isSuccessful -> continuation.resumeWithException(
+                                IllegalStateException("HTTP ${resp.code} for /$path"),
+                            )
+                            body == null -> continuation.resumeWithException(
+                                IOException("Empty body from /$path"),
+                            )
+                            else -> {
+                                val result = runCatching { parse(body) }
+                                if (result.isSuccess) {
+                                    continuation.resume(result.getOrThrow())
+                                } else {
+                                    continuation.resumeWithException(
+                                        IOException("Malformed response from /$path", result.exceptionOrNull()),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            })
+        }
+
     suspend fun search(query: String): List<MusicTrack> {
         require(query.isNotBlank()) { "query must not be blank" }
         return fetchTracks("api/search", "q" to query)
@@ -64,7 +140,8 @@ class MusicRepository(
                             if (!it.isSuccessful) error("HTTP ${it.code}")
                             val parsed = listAdapter.fromJson(it.body?.string().orEmpty()) ?: error("Empty music response")
                             if (parsed.success == false) error(parsed.error ?: "Music request failed")
-                            continuation.resume(parsed.results.map { item -> item.toModel() })
+                            val items = parsed.results.ifEmpty { parsed.favorites }
+                            continuation.resume(items.map { item -> item.toModel() })
                         } catch (e: Throwable) { if (continuation.isActive) continuation.resumeWithException(e) }
                     }
                 }
@@ -175,14 +252,42 @@ class MusicRepository(
         }
     }
 
+    /**
+     * `results` is the charts/search envelope key; `favorites` is what `/api/favorites`
+     * uses. `success == false` (with `error`) surfaces as an exception.
+     */
     @JsonClass(generateAdapter = false)
-    private data class TrackListEnvelope(val success: Boolean? = null, val results: List<TrackDto> = emptyList(), val error: String? = null)
+    private data class TrackListEnvelope(
+        val success: Boolean? = null,
+        val results: List<TrackDto> = emptyList(),
+        val favorites: List<TrackDto> = emptyList(),
+        val error: String? = null,
+    )
     @JsonClass(generateAdapter = false)
     private data class SessionEnvelope(val type: String? = null, val session: Session? = null, val globalSession: Session? = null)
     @JsonClass(generateAdapter = false)
     private data class TrackDto(val id: String, val title: String, val artist: String, val duration: String? = null, val thumbnail: String? = null) {
-        fun toModel() = MusicTrack(id, title, artist, duration ?: "--:--", thumbnail)
+        // Favorites rows recorded without metadata carry an empty duration string.
+        fun toModel(): MusicTrack = MusicTrack(id, title, artist, duration?.takeIf { it.isNotBlank() } ?: "--:--", thumbnail)
     }
+
+    /**
+     * The live service reads `id` (server.py handle_toggle_favorite) while the documented
+     * contract also mentions `video_id`, so both keys are sent and each server picks the
+     * one it knows. Null metadata fields are omitted from the JSON by Moshi.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class FavoriteToggleRequest(
+        val id: String,
+        @Json(name = "video_id") val toggleVideoId: String,
+        val title: String? = null,
+        val artist: String? = null,
+        val duration: String? = null,
+        val thumbnail: String? = null,
+    )
+
+    @JsonClass(generateAdapter = false)
+    private data class FavoriteToggleResponse(val status: String? = null, val favorited: Boolean? = null)
     @JsonClass(generateAdapter = false)
     private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null) {
         fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId)
