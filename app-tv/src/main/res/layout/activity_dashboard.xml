@@ -1,10 +1,124 @@
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:orientation="vertical" android:padding="52dp" android:background="@color/mars_background" android:layout_width="match_parent" android:layout_height="match_parent">
-    <TextView android:text="Марс" android:textColor="@color/mars_accent" android:textSize="42sp" android:textStyle="bold" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <TextView android:id="@+id/status" android:text="● Марс онлайн" android:textColor="#7EE787" android:textSize="24sp" android:layout_marginTop="12dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <TextView android:id="@+id/time" android:text="00:00" android:textColor="@color/mars_text" android:textSize="54sp" android:layout_marginTop="8dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-    <LinearLayout android:orientation="horizontal" android:layout_marginTop="50dp" android:layout_width="match_parent" android:layout_height="wrap_content">
-        <Button android:id="@+id/chatButton" android:text="Чат" android:textSize="22sp" android:focusable="true" android:nextFocusRight="@id/musicButton" android:layout_width="0dp" android:layout_weight="1" android:layout_height="96dp"/>
-        <Button android:id="@+id/musicButton" android:text="Музыка" android:textSize="22sp" android:focusable="true" android:nextFocusRight="@id/settingsButton" android:layout_width="0dp" android:layout_weight="1" android:layout_height="96dp"/>
-        <Button android:id="@+id/settingsButton" android:text="Настройки / выход" android:textSize="22sp" android:focusable="true" android:layout_width="0dp" android:layout_weight="1" android:layout_height="96dp"/>
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="52dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:src="@drawable/ic_mars"
+            android:contentDescription="@null"
+            android:layout_width="56dp"
+            android:layout_height="56dp" />
+
+        <TextView
+            android:text="Марс"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="42sp"
+            android:textStyle="bold"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="14dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:src="@drawable/ic_status_dot"
+            android:contentDescription="@null"
+            android:layout_width="14dp"
+            android:layout_height="14dp" />
+
+        <TextView
+            android:id="@+id/status"
+            android:text="Марс онлайн"
+            android:textColor="@color/mars_status_online"
+            android:textSize="24sp"
+            android:layout_marginStart="10dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/time"
+        android:text="00:00"
+        android:textColor="@color/mars_text"
+        android:textSize="54sp"
+        android:layout_marginTop="8dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:layout_marginTop="50dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/chatButton"
+            android:text="Чат"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_chat"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusRight="@id/musicButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/musicButton"
+            android:text="Музыка"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_music"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusRight="@id/settingsButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/settingsButton"
+            android:text="Настройки / выход"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_settings"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
     </LinearLayout>
 </LinearLayout>

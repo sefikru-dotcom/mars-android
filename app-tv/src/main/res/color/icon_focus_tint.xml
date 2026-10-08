@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Selector for icon drawables: muted by default, ruby-accented under D-pad focus -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true" android:color="@color/mars_accent_hover" />
+    <item android:color="@color/mars_muted" />
+</selector>
