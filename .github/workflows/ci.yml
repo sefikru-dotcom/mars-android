@@ -48,7 +48,7 @@ jobs:
         if: always()
         run: |
           mkdir -p build/ci-artifacts
-          find app-tv/build/outputs app-mobile/build/outputs -type f -print0 2>/dev/null \
+          find app-tv/build/outputs app-mobile/build/outputs -type f -name '*.apk' -print0 2>/dev/null \
             | sort -z \
             | xargs -0 -r sha256sum > build/ci-artifacts/SHA256SUMS
       - name: Upload lint and test reports
