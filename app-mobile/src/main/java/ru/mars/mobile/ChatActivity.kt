@@ -43,11 +43,20 @@ import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.SessionDetail
+import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.repository.ChatRepository
+import ru.mars.network.repository.ApprovalChoice
+import ru.mars.network.repository.CompressionSummary
+import ru.mars.network.repository.ContextCompressionRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.ModelsRepository
 import ru.mars.network.repository.PairingRepository
+import ru.mars.network.repository.PendingApprovalLookup
+import ru.mars.network.repository.PendingClarifyLookup
 import ru.mars.network.repository.SessionRepository
+import ru.mars.network.repository.SessionYoloRepository
+import ru.mars.network.repository.YoloLookup
 import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
 import ru.mars.network.repository.WorkspaceRepository
@@ -76,7 +85,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var activityModeBtn: Button? = null
     private lateinit var workspaceSelection: WorkspaceSelection
     private var workspaceBtn: Button? = null
+    private var yoloBtn: Button? = null
     private var contextIndicator: TextView? = null
+    private lateinit var compressionController: ContextCompressionController
+    private lateinit var autoCompressionStorage: AutoCompressionStorage
+    private var compressionRunning = false
     private lateinit var attachmentChips: LinearLayout
     private val attachments = mutableListOf<ChatAttachment>()
     private var speech: SpeechRecognizer? = null
@@ -89,6 +102,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var miniPlayerTitle: TextView
     private lateinit var miniPlayerPlayBtn: ImageButton
     private lateinit var quickChipsScroll: HorizontalScrollView
+    private lateinit var smartChipsRow: HorizontalScrollView
 
     // Sessions side panel (DrawerLayout)
     private lateinit var drawer: DrawerLayout
@@ -109,9 +123,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         ).also { interactiveView.listener = it }
 
         interactiveController.onClarifyAnswered = { answer -> echoClarifyAnswer(answer) }
+        interactiveView.yoloEnabledProvider = { uiState.yoloEnabled }
+        interactiveController.onYoloChanged = { enabled ->
+            updateYoloPill()
+            Toast.makeText(this, if (enabled) "YOLO включён — Марс работает без подтверждений" else "YOLO выключен", Toast.LENGTH_SHORT).show()
+        }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         activityModeSelection = ActivityModeSelection(PrefsActivityModeStorage(getSharedPreferences("mars-activity-mode", MODE_PRIVATE)))
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
+        autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
+        compressionController = ContextCompressionController(
+            host = CompressionHostBridge(),
+            gateway = RepositoryContextCompressionGateway(ContextCompressionRepository(), BASE_URL) { store.read() },
+            sessionProvider = { currentSessionId },
+            streamingProvider = { uiState.status == ChatStatus.TYPING },
+            settings = autoCompressionStorage,
+        )
         uiState.setActivityMode(activityModeSelection.current)
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         setContentView(buildView())
@@ -135,6 +162,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onDestroy() {
         if (::interactiveController.isInitialized) interactiveController.destroy()
+        if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
         MarsMusicPlayer.unregisterListener(this)
         stream?.cancel()
@@ -399,6 +427,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { chooseWorkspace() }
         }
         titleRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
+        yoloBtn = Button(this).apply {
+            text = "YOLO"
+            textSize = 11f
+            contentDescription = "Режим YOLO — автономная работа без подтверждений"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setOnClickListener { interactiveController.setYoloEnabled(!uiState.yoloEnabled) }
+        }
+        titleRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(6) })
+        updateYoloPill()
         titleBox.addView(titleRow)
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
 
@@ -525,7 +567,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
             "Погода в Ставрополе" to { quickSend("Какая сейчас погода и прогноз на день в Ставрополе?") },
             "Статус хоста" to { quickSend("Марс, проверь аптайм, диск и состояние сервисов") },
-            "Новый чат" to { startNewChat() }
+            "Новый чат" to { startNewChat() },
+            "Финиш" to { finishSession() }
         )
         quickPrompts.forEach { (title, action) ->
             quickBox.addView(Button(this).apply {
@@ -539,6 +582,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         quickChipsScroll.addView(quickBox)
         root.addView(quickChipsScroll)
+
+        // Smart quick chips: context-aware one-tap replies right above the composer.
+        smartChipsRow = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+            setPadding(0, 0, 0, dp(2))
+        }
+        root.addView(smartChipsRow)
 
         // Floating Glass Composer Bar
         val composer = LinearLayout(this).apply {
@@ -681,10 +732,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     explicitModelPick = choice?.explicitPick == true
                 ).collect { event ->
                     uiState.onEvent(event)
-                    if (event is ChatEvent.SessionBound) currentSessionId = event.sessionId
+                    if (event is ChatEvent.SessionBound) {
+                        currentSessionId = event.sessionId
+                        refreshYoloState()
+                    }
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
                     if (event is ChatEvent.ContextUsage) updateContextIndicator()
+                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
                     interactiveController.onEvent(event)
+                    if (::compressionController.isInitialized) compressionController.onEvent(event)
                     renderMessages()
                     setStatus()
                     scrollToBottom()
@@ -749,6 +805,64 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
         sendButton.imageTintList = ColorStateList.valueOf(Color.WHITE)
         updateContextIndicator()
+        renderSmartChips()
+    }
+
+    /**
+     * Smart Quick Chips ribbon (WebUI parity): one-tap conversation actions above
+     * the composer. Visibility is decided by the pure [QuickChips] policy; icons are
+     * monochrome vectors per the design system (no emoji).
+     */
+    private fun renderSmartChips() {
+        if (!::smartChipsRow.isInitialized) return
+        smartChipsRow.removeAllViews()
+        val lastAssistant = uiState.messages.lastOrNull { it.role == "assistant" }
+        val chips = QuickChips.visibleChips(
+            status = uiState.status,
+            hasAssistantReply = lastAssistant != null &&
+                (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty()),
+            lastTurnFailed = lastAssistant?.status == MessageStatus.ERROR,
+        )
+        smartChipsRow.visibility = if (chips.isEmpty()) View.GONE else View.VISIBLE
+        if (chips.isEmpty()) return
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        chips.forEach { chip ->
+            row.addView(
+                buildSmartChip(chip),
+                LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) }
+            )
+        }
+        smartChipsRow.addView(row)
+    }
+
+    private fun buildSmartChip(chip: QuickChip): Button = Button(this).apply {
+        text = chip.label
+        textSize = 12f
+        isAllCaps = false
+        setTextColor(MarsTheme.TEXT)
+        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_SUBTLE, strokeColor = MarsTheme.BORDER_MUTED)
+        setPadding(dp(12), dp(4), dp(14), dp(4))
+        setCompoundDrawablesRelativeWithIntrinsicBounds(smartChipIcon(chip.id), 0, 0, 0)
+        compoundDrawablePadding = dp(6)
+        compoundDrawableTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+        gravity = Gravity.CENTER
+        minimumHeight = 0
+        minHeight = 0
+        stateListAnimator = null
+        contentDescription = chip.label
+        setOnClickListener { quickSend(chip.message) }
+    }
+
+    private fun smartChipIcon(id: QuickChipId): Int = when (id) {
+        QuickChipId.OK -> R.drawable.ic_check
+        QuickChipId.CONTINUE -> R.drawable.ic_play
+        QuickChipId.ROLLBACK -> R.drawable.ic_undo
+        QuickChipId.EXPLAIN -> R.drawable.ic_help
+        QuickChipId.PLAN -> R.drawable.ic_plan
+        QuickChipId.STATUS -> R.drawable.ic_status
     }
 
     private fun setStatus() {
@@ -812,7 +926,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
 
             if (message.text.isNotBlank()) {
-                renderMarkdownBlocks(message.text, card, isUser)
+                renderMarkdownBlocks(message.text, card, isUser, index)
                 val copyBtn = Button(this).apply {
                     text = "Копировать"
                     textSize = 11f
@@ -929,12 +1043,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
             messages.addView(card, params)
         }
+        renderSmartChips()
         scrollToBottom()
     }
 
-    private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean) {
+    private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
         val blocks = MarkdownFormatter.parseBlocks(value)
-        blocks.forEach { block ->
+        blocks.forEachIndexed { blockIndex, block ->
             when (block) {
                 is ContentBlock.Text -> {
                     block.lines.forEach { line ->
@@ -982,21 +1097,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                 }
                 is ContentBlock.Code -> {
-                    val code = block.code
+                    val expanded = uiState.isCodeBlockExpanded(messageIndex, blockIndex)
+                    val view = CodeBlockPresenter.present(block, expanded)
                     val box = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL
-                        setPadding(dp(10), dp(8), dp(6), dp(6))
+                        setPadding(dp(10), dp(6), dp(6), dp(6))
                         background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 10, strokeColor = MarsTheme.CODE_BORDER)
                     }
-                    val bar = LinearLayout(this).apply { gravity = Gravity.END }
-                    if (block.language.isNotEmpty()) {
-                        bar.addView(TextView(this).apply {
-                            text = block.language
-                            textSize = 11f
-                            setTextColor(MarsTheme.TEXT_MUTED)
-                            setPadding(0, 0, dp(8), 0)
-                        }, LinearLayout.LayoutParams(0, -2, 1f))
-                    }
+                    // Block header: language title on the left, copy action on the right.
+                    val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                    bar.addView(TextView(this).apply {
+                        text = view.languageLabel
+                        textSize = 11f
+                        setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                        setTextColor(MarsTheme.ACCENT_TEXT)
+                        setPadding(dp(2), 0, dp(8), 0)
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
                     val copyCodeBtn = MarsTheme.circleIconButton(
                         this,
                         R.drawable.ic_copy,
@@ -1007,21 +1123,41 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                         strokeColor = 0
                     ).apply {
                         setOnClickListener {
-                            copyMessage(code)
-                            Toast.makeText(this@ChatActivity, "Код скопирован", Toast.LENGTH_SHORT).show()
+                            copyMessage(view.fullCode)
+                            Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
                         }
                     }
                     bar.addView(copyCodeBtn, LinearLayout.LayoutParams(dp(28), dp(28)))
                     box.addView(bar)
                     box.addView(HorizontalScrollView(this).apply {
                         addView(TextView(this@ChatActivity).apply {
-                            text = code
+                            text = view.visibleCode
                             setTextColor(0xffe6edf3.toInt())
                             typeface = Typeface.MONOSPACE
                             textSize = 13f
                             setPadding(0, dp(4), dp(16), dp(8))
                         })
                     })
+                    // Long listings are collapsed by default; the toggle flips the state.
+                    val toggleLabel = view.toggleLabel
+                    if (toggleLabel != null) {
+                        box.addView(Button(this).apply {
+                            text = "${if (view.expanded) "▲" else "▼"}  $toggleLabel"
+                            textSize = 11f
+                            setTypeface(null, Typeface.BOLD)
+                            setTextColor(MarsTheme.ACCENT_TEXT)
+                            background = null
+                            isAllCaps = false
+                            setPadding(0, 0, 0, 0)
+                            minimumHeight = 0
+                            minHeight = 0
+                            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                            setOnClickListener {
+                                uiState.toggleCodeBlock(messageIndex, blockIndex)
+                                renderMessages()
+                            }
+                        }, LinearLayout.LayoutParams(-1, dp(26)))
+                    }
                     parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
                 }
             }
@@ -1153,15 +1289,38 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun loadSession(session: SessionItem) {
         val c = store.read() ?: return
         interactiveController.dismissAll()
+        compressionController.onSessionChanged()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, session.id)
             if (detail != null) {
-                val history = detail.messages.map {
-                    ChatMessage(if (it.role == "user") "user" else "assistant", it.content, timestamp = System.currentTimeMillis())
-                }
-                uiState.bindSession(detail.id, detail.title, history)
+                uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 currentSessionId = detail.id
                 renderMessages()
+                refreshYoloState()
+            }
+        }
+    }
+
+    /** Maps a persisted session transcript to bubbles (shared by loadSession and post-compression reload). */
+    private fun historyMessages(detail: SessionDetail): List<ChatMessage> = detail.messages.map {
+        ChatMessage(if (it.role == "user") "user" else "assistant", it.content, timestamp = System.currentTimeMillis())
+    }
+
+    /**
+     * Re-fetches the transcript of [currentSessionId] after compression replaced the server-side
+     * history (`/api/session/compress` swaps `context_messages`); the compressed transcript is
+     * what the next turn continues from, so the bubbles must show the same view.
+     */
+    private fun reloadCurrentSession() {
+        val c = store.read() ?: return
+        val id = currentSessionId ?: return
+        lifecycleScope.launch {
+            val detail = SessionRepository().getSessionDetail(BASE_URL, c, id)
+            if (detail != null && currentSessionId == id) {
+                uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                renderMessages()
+                scrollToBottom()
+                refreshYoloState()
             }
         }
     }
@@ -1173,6 +1332,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
                 if (currentSessionId == session.id) {
                     interactiveController.dismissAll()
+                    compressionController.onSessionChanged()
                     uiState.startNewSession()
                     currentSessionId = null
                 }
@@ -1413,6 +1573,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun updateContextIndicator() {
         val view = contextIndicator ?: return
         val usage = uiState.contextUsage
+        // In-flight compression job: the pill becomes the progress marker (WebUI ctx-ring parity —
+        // the ring is locked while a manual compression runs).
+        if (compressionRunning) {
+            view.visibility = View.VISIBLE
+            view.text = "Сжатие…"
+            view.setTextColor(MarsTheme.STATUS_WARNING)
+            view.contentDescription = "Идёт сжатие контекста"
+            return
+        }
         if (usage == null || usage.maxTokens <= 0) {
             view.visibility = View.GONE
             return
@@ -1429,17 +1598,97 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         view.contentDescription = "Заполнение контекста: ${usage.percent}%"
     }
 
+    /**
+     * Context pill dialog: fill details + quick manual compression (WebUI «быстрое сжатие
+     * сессии» parity) with the optional focus topic, plus the persisted auto-compression switch
+     * ([PrefsAutoCompressionStorage]).
+     */
     private fun showContextUsageDetails() {
-        val usage = uiState.contextUsage ?: return
+        if (compressionRunning) return
+        val usage = uiState.contextUsage
+        val config = autoCompressionStorage.load()
+        val details = TextView(this).apply {
+            text = if (usage != null && usage.maxTokens > 0) {
+                "Заполнено: ${usage.percent}%\n" +
+                    "Использовано токенов: ${formatTokenCount(usage.usedTokens)}\n" +
+                    "Размер окна: ${formatTokenCount(usage.maxTokens)}"
+            } else {
+                "Заполнение ещё не измерено — данные появятся после первого хода."
+            }
+            setTextColor(Color.WHITE)
+        }
+        val topicInput = EditText(this).apply {
+            hint = "Фокус сжатия (необязательно)"
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(MarsTheme.TEXT_MUTED)
+        }
+        val autoBox = CheckBox(this).apply {
+            text = "Автосжатие при ${config.thresholdPercent}% заполнения"
+            isChecked = config.enabled
+            setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, checked ->
+                autoCompressionStorage.save(autoCompressionStorage.load().copy(enabled = checked))
+            }
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = dp(20)
+            setPadding(pad, pad, pad, dp(8))
+            addView(details)
+            addView(topicInput, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) })
+            addView(autoBox, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) })
+        }
         android.app.AlertDialog.Builder(this)
             .setTitle("Окно контекста")
-            .setMessage(
-                "Заполнено: ${usage.percent}%\n" +
-                    "Использовано токенов: ${usage.usedTokens}\n" +
-                    "Размер окна: ${usage.maxTokens}"
-            )
-            .setPositiveButton("ОК", null)
+            .setView(container)
+            .setPositiveButton("Сжать контекст") { _, _ ->
+                compressionController.startManualCompression(topicInput.text.toString())
+            }
+            .setNegativeButton("Закрыть", null)
             .show()
+    }
+
+    /**
+     * Undelivered mid-turn steer (SSE `pending_steer_leftover`): the correction is returned to
+     * the composer so the user can resend it as a normal message (WebUI parity); the transcript
+     * trace is recorded by [ChatUiState.onEvent].
+     */
+    private fun restoreSteerText(text: String) {
+        if (text.isNotBlank() && input.text.isNullOrBlank()) input.setText(text)
+        explicitStatus = "Направление не доставлено — текст возвращён в поле ввода."
+        setStatus()
+    }
+
+    /** Host seam of [ContextCompressionController]: pill state, status line, transcript reload. */
+    private inner class CompressionHostBridge : ContextCompressionHost {
+        override fun setCompressionRunning(running: Boolean) {
+            compressionRunning = running
+            if (running) {
+                explicitStatus = "Сжимаю контекст сессии…"
+            } else if (explicitStatus == "Сжимаю контекст сессии…") {
+                explicitStatus = null
+            }
+            setStatus()
+            updateContextIndicator()
+        }
+
+        override fun showCompressionError(message: String) {
+            explicitStatus = message
+            setStatus()
+        }
+
+        override fun onCompressionCompleted(summary: CompressionSummary?) {
+            explicitStatus = summary?.display?.takeIf { it.isNotBlank() }
+                ?.let { "Контекст сжат — $it" }
+                ?: "Контекст сессии сжат"
+            setStatus()
+            reloadCurrentSession()
+        }
     }
 
     private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
@@ -1449,9 +1698,133 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         stream = null
         currentStreamId = null
         interactiveController.dismissAll()
+        compressionController.onSessionChanged()
         uiState.startNewSession()
         currentSessionId = null
         explicitStatus = null
+        renderMessages()
+        setStatus()
+        updateControls()
+        updateYoloPill()
+    }
+
+    // --- YOLO mode ------------------------------------------------------------------------------
+
+    /** Header pill: accent + «YOLO ●» while the session runs autonomously, muted while off. */
+    private fun updateYoloPill() {
+        val btn = yoloBtn ?: return
+        val on = uiState.yoloEnabled
+        btn.text = if (on) "YOLO ●" else "YOLO"
+        btn.setTextColor(if (on) Color.WHITE else MarsTheme.TEXT_MUTED)
+        btn.background = MarsTheme.pill(
+            this,
+            if (on) MarsTheme.ACCENT else MarsTheme.SURFACE,
+            strokeColor = if (on) MarsTheme.ACCENT else MarsTheme.BORDER,
+        )
+    }
+
+    /**
+     * Re-reads the server-side YOLO flag for [currentSessionId] (GET /api/session/yolo) and
+     * projects it into the UI state — web parity with loadSession's `_yoloEnabled` reset+fetch.
+     * Silently keeps the flag off when the lookup fails (session-scoped, in-memory server state).
+     */
+    private fun refreshYoloState() {
+        val sid = currentSessionId
+        val credential = store.read()
+        if (sid == null || credential == null) {
+            uiState.setYoloEnabled(false)
+            updateYoloPill()
+            return
+        }
+        lifecycleScope.launch {
+            val enabled = withContext(Dispatchers.IO) {
+                when (val lookup = SessionYoloRepository().fetchState(BASE_URL, credential, sid)) {
+                    is YoloLookup.State -> lookup.enabled
+                    is YoloLookup.Failed -> false
+                }
+            }
+            if (currentSessionId == sid) {
+                uiState.setYoloEnabled(enabled)
+                updateYoloPill()
+            }
+        }
+    }
+
+    // --- Finish (graceful session close) ---------------------------------------------------------
+
+    /**
+     * «Финиш»: graceful close of the current session — cancels the in-flight stream on the
+     * server, denies every queued approval so the agent is not left parked, drops pending
+     * dialogs, and returns the chat to the fresh-session state. Orchestration lives in the
+     * pure [SessionFinishFlow] (unit-tested); this is only the Android wiring.
+     */
+    private fun finishSession() {
+        val credential = store.read()
+        val sid = currentSessionId
+        val streamId = currentStreamId
+        val wasStreaming = uiState.status == ChatStatus.TYPING
+        val capturedApproval = uiState.pendingApproval
+        val capturedClarify = uiState.pendingClarify
+
+        // Local stream teardown first so no more events land while the close is in flight.
+        stream?.cancel()
+        stream = null
+        currentStreamId = null
+
+        if (credential == null || sid == null) {
+            closeSessionLocally(null)
+            return
+        }
+        explicitStatus = "Завершаю сессию…"
+        setStatus()
+        lifecycleScope.launch {
+            val report = withContext(Dispatchers.IO) {
+                val chat = ChatRepository()
+                val interactive = InteractiveRequestsRepository()
+                val flow = SessionFinishFlow(object : SessionFinishFlow.Actions {
+                    override val isStreaming: Boolean get() = wasStreaming
+                    override fun cancelStream(): Boolean =
+                        streamId?.let { runCatching { chat.executeControl(chat.cancelRequest(BASE_URL, it, credential.accessToken)) }.getOrDefault(false) } ?: false
+
+                    private var firstHead = true
+                    override fun nextPendingApproval(): ApprovalPayload? {
+                        if (firstHead) {
+                            firstHead = false
+                            return capturedApproval
+                        }
+                        val lookup = interactive.fetchPendingApproval(BASE_URL, credential, sid)
+                        return (lookup as? PendingApprovalLookup.Found)?.payload
+                    }
+
+                    override fun denyApproval(payload: ApprovalPayload) =
+                        interactive.respondApproval(BASE_URL, credential, sid, payload, ApprovalChoice.DENY)
+
+                    override fun nextPendingClarify() = capturedClarify
+                        ?: (interactive.fetchPendingClarify(BASE_URL, credential, sid) as? PendingClarifyLookup.Found)?.payload
+                })
+                runCatching { flow.finish() }.getOrNull()
+            }
+            closeSessionLocally(report)
+            // YOLO does not outlive the session being closed; make the pill reflect reality.
+            if (report != null) uiState.setYoloEnabled(false)
+            updateYoloPill()
+        }
+    }
+
+    private fun closeSessionLocally(report: SessionFinishFlow.Report?) {
+        interactiveController.dismissAll()
+        uiState.cancel()
+        uiState.startNewSession()
+        currentSessionId = null
+        explicitStatus = when {
+            report == null -> "Сессия завершена"
+            report.succeeded -> buildString {
+                append("Сессия завершена")
+                if (report.streamCancelled) append(" · поток остановлен")
+                if (report.approvalsDenied > 0) append(" · отклонено подтверждений: ${report.approvalsDenied}")
+            }
+            else -> "Сессия завершена с ошибками: ${report.approvalFailures.first()}"
+        }
         renderMessages()
         setStatus()
         updateControls()

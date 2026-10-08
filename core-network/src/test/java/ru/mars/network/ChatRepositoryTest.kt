@@ -396,7 +396,7 @@ class ChatRepositoryTest {
                 ChatEvent.ClarifyRequired(ru.mars.network.model.ClarifyPayload(
                     clarifyId = null, question = "Какой файл?", choices = listOf("a", "b"), sessionId = "s1")),
                 ChatEvent.Thought("Предупреждение: fallback model"),
-                ChatEvent.Thought("Направление не доставлено: еще тесты"),
+                ChatEvent.SteerLeftover("еще тесты"),
                 ChatEvent.Done,
                 ChatEvent.SessionBound("s1"),
                 ChatEvent.Done,

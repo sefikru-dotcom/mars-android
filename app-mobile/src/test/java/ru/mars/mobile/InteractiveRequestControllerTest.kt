@@ -1,6 +1,7 @@
 package ru.mars.mobile
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -11,6 +12,7 @@ import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.InteractiveRespondResult
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
+import ru.mars.network.repository.YoloToggleResult
 import java.util.concurrent.Executor
 
 /**
@@ -63,13 +65,17 @@ class InteractiveRequestControllerTest {
         var clarifyResult: InteractiveRespondResult = InteractiveRespondResult.Accepted()
         var nextApproval: PendingApprovalLookup = PendingApprovalLookup.Empty
         var nextClarify: PendingClarifyLookup = PendingClarifyLookup.Empty
-        val approvalCalls = mutableListOf<Triple<String, ApprovalPayload, ApprovalChoice>>()
+        var yoloResult: YoloToggleResult = YoloToggleResult.Applied(true)
+        val approvalCalls = mutableListOf<ApprovalCall>()
         val clarifyCalls = mutableListOf<Triple<String, ClarifyPayload, String>>()
+        val yoloCalls = mutableListOf<Pair<String, Boolean>>()
         var pendingApprovalFetches = 0
         var pendingClarifyFetches = 0
 
-        override fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice): InteractiveRespondResult {
-            approvalCalls += Triple(sessionId, payload, choice)
+        data class ApprovalCall(val sessionId: String, val payload: ApprovalPayload, val choice: ApprovalChoice, val yolo: Boolean)
+
+        override fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice, yolo: Boolean): InteractiveRespondResult {
+            approvalCalls += ApprovalCall(sessionId, payload, choice, yolo)
             return approvalResult
         }
 
@@ -86,6 +92,11 @@ class InteractiveRequestControllerTest {
         override fun fetchPendingClarify(sessionId: String): PendingClarifyLookup {
             pendingClarifyFetches++
             return nextClarify
+        }
+
+        override fun setSessionYolo(sessionId: String, enabled: Boolean): YoloToggleResult {
+            yoloCalls += sessionId to enabled
+            return yoloResult
         }
     }
 
@@ -140,7 +151,10 @@ class InteractiveRequestControllerTest {
         assertEquals(1, executor.queue.size)
         executor.runAll()
 
-        assertEquals(Triple("sess-1", view.shownApprovals[0], ApprovalChoice.ALWAYS), gateway.approvalCalls.single())
+        assertEquals(
+            FakeGateway.ApprovalCall("sess-1", view.shownApprovals[0], ApprovalChoice.ALWAYS, yolo = false),
+            gateway.approvalCalls.single()
+        )
         assertEquals(1, view.approvalDismissals)
         assertNull(state.pendingApproval)
         assertTrue(view.errors.isEmpty())
@@ -255,7 +269,7 @@ class InteractiveRequestControllerTest {
         executor.runAll()
 
         assertEquals(1, gateway.approvalCalls.size)
-        assertEquals(ApprovalChoice.ONCE, gateway.approvalCalls.single().third)
+        assertEquals(ApprovalChoice.ONCE, gateway.approvalCalls.single().choice)
     }
 
     @Test
@@ -649,5 +663,156 @@ class InteractiveRequestControllerTest {
         val last = state.messages.last()
         assertEquals("user", last.role)
         assertEquals("office", last.text)
+    }
+
+    // --- YOLO mode --------------------------------------------------------------------------------
+
+    @Test
+    fun approvalYoloGrantSendsYoloFlagAndProjectsEnabledState() {
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Accepted(yoloEnabled = true)
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val changes = mutableListOf<Boolean>()
+        controller.onYoloChanged = { changes += it }
+        state.begin("запусти деплой")
+        state.onEvent(approvalEvent("appr-1"))
+        controller.onEvent(approvalEvent("appr-1"))
+
+        assertFalse(state.yoloEnabled)
+        controller.onApprovalChoice(ApprovalChoice.ONCE, yolo = true)
+        executor.runAll()
+        ui.runAll()
+
+        // The respond carried the yolo flag and the settled server state was projected locally.
+        assertTrue(gateway.approvalCalls.single().yolo)
+        assertTrue(state.yoloEnabled)
+        assertEquals(listOf(true), changes)
+        assertEquals(1, view.approvalDismissals)
+    }
+
+    @Test
+    fun plainApprovalChoiceNeverSendsYoloFlag() {
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        state.begin("привет")
+        state.onEvent(approvalEvent("appr-2"))
+        controller.onEvent(approvalEvent("appr-2"))
+
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll(); ui.runAll()
+
+        assertFalse(gateway.approvalCalls.single().yolo)
+        assertFalse(state.yoloEnabled)
+    }
+
+    @Test
+    fun rejectedRespondStillProjectsYoloStateFromErrorPayload() {
+        // Web parity: gateway relay failures (e.g. gateway_run_unavailable) still commit the
+        // YOLO flag — the error body's yolo_enabled must be applied before the error surfaces.
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        gateway.approvalResult = InteractiveRespondResult.Rejected(
+            "gateway relay unavailable", httpStatus = 409, code = "gateway_run_unavailable", yoloEnabled = true
+        )
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val changes = mutableListOf<Boolean>()
+        controller.onYoloChanged = { changes += it }
+        state.begin("деплой")
+        state.onEvent(approvalEvent("appr-3"))
+        controller.onEvent(approvalEvent("appr-3"))
+
+        controller.onApprovalChoice(ApprovalChoice.ONCE, yolo = true)
+        executor.runAll(); ui.runAll()
+
+        assertTrue(state.yoloEnabled)
+        assertEquals(listOf(true), changes)
+        assertEquals(1, view.errors.size) // dialog stays open with the server message
+        assertEquals(1, view.shownApprovals.size)
+    }
+
+    @Test
+    fun setYoloEnabledAppliesServerSettledState() {
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        gateway.yoloResult = YoloToggleResult.Applied(true)
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val changes = mutableListOf<Boolean>()
+        controller.onYoloChanged = { changes += it }
+
+        controller.setYoloEnabled(true)
+        executor.runAll()
+        assertEquals(listOf("sess-1" to true), gateway.yoloCalls)
+        assertFalse(state.yoloEnabled) // not applied before the UI dispatch
+        ui.runAll()
+
+        assertTrue(state.yoloEnabled)
+        assertEquals(listOf(true), changes)
+        assertTrue(view.errors.isEmpty())
+    }
+
+    @Test
+    fun setYoloEnabledFailureAppliesKnownStateAndShowsError() {
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        state.setYoloEnabled(true)
+        // Server refused the disable but reported the committed flag (web applies it from errors).
+        gateway.yoloResult = YoloToggleResult.Failed("YOLO переход уже выполняется", knownState = true)
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val changes = mutableListOf<Boolean>()
+        controller.onYoloChanged = { changes += it }
+
+        controller.setYoloEnabled(false)
+        executor.runAll(); ui.runAll()
+
+        assertTrue(state.yoloEnabled) // knownState projection kept the flag on
+        assertTrue(changes.isEmpty())   // no change → no notification
+        assertEquals(1, view.errors.size)
+    }
+
+    @Test
+    fun setYoloEnabledWithoutSessionShowsErrorAndSendsNothing() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { null }, null, executor, inlineUi)
+
+        controller.setYoloEnabled(true)
+
+        assertEquals(1, view.errors.size)
+        assertTrue(gateway.yoloCalls.isEmpty())
+        assertTrue(executor.queue.isEmpty())
+    }
+
+    @Test
+    fun yoloToggleResultDroppedAfterSessionSwitch() {
+        var sid = "sess-1"
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        gateway.yoloResult = YoloToggleResult.Applied(true)
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { sid }, state, executor, ui)
+
+        controller.setYoloEnabled(true)
+        sid = "sess-2" // session switched while the POST was in flight
+        executor.runAll(); ui.runAll()
+
+        assertFalse(state.yoloEnabled) // stale-session result never touches the new session's state
+    }
+
+    @Test
+    fun onYoloChangedFiresOnlyOnActualChange() {
+        val view = FakeView(); val state = ChatUiState(); val gateway = FakeGateway()
+        gateway.yoloResult = YoloToggleResult.Applied(true)
+        val executor = QueueExecutor(); val ui = QueueUiDispatcher()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, state, executor, ui)
+        val changes = mutableListOf<Boolean>()
+        controller.onYoloChanged = { changes += it }
+
+        controller.setYoloEnabled(true)
+        executor.runAll(); ui.runAll()
+        controller.setYoloEnabled(true) // already on — server confirms the same state
+        executor.runAll(); ui.runAll()
+
+        assertEquals(listOf(true), changes)
     }
 }

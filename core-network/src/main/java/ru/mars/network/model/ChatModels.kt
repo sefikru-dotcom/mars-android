@@ -88,6 +88,13 @@ sealed interface ChatEvent {
      */
     data class ContextUsage(val usedTokens: Int, val maxTokens: Int, val percent: Int) : ChatEvent
 
+    /**
+     * Steer text the agent never consumed (SSE `pending_steer_leftover`: `{session_id, text}`).
+     * WebUI parity (static/messages.js): the text is surfaced to the user AND returned to the
+     * composer input so the correction is not lost when the turn ended mid-steer.
+     */
+    data class SteerLeftover(val text: String) : ChatEvent
+
     data object Done : ChatEvent
     data class Error(val message: String) : ChatEvent
 }

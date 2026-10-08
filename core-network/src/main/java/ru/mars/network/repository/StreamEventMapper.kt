@@ -23,7 +23,7 @@ import ru.mars.network.model.ClarifyPayload
  *   required by `POST /api/clarify/respond`.
  * - `title`           — `{session_id, title}`; re-binds the session id ([ChatEvent.SessionBound]).
  * - `warning`         — `{type, message}` non-fatal notice (e.g. provider fallback).
- * - `pending_steer_leftover` — `{session_id, text}`: steer text the agent never consumed; preserved as a thought.
+ * - `pending_steer_leftover` — `{session_id, text}`: steer text the agent never consumed; typed as [ru.mars.network.model.ChatEvent.SteerLeftover].
  * - `metering`        — `{tps, tps_available, estimated, high, low, active, session_id, usage: {input_tokens,
  *   output_tokens, context_length, threshold_tokens, last_prompt_tokens,
  *   post_compression_context_tokens_estimate, ...}}` (api/metering.py `get_stats` +
@@ -54,7 +54,7 @@ object StreamEventMapper {
             "warning" -> (stringField(obj, "message") ?: payload.trim().ifBlank { null })
                 ?.let { ChatEvent.Thought("Предупреждение: $it") }
             "pending_steer_leftover" -> stringField(obj, "text")
-                ?.let { ChatEvent.Thought("Направление не доставлено: $it") }
+                ?.let { ChatEvent.SteerLeftover(it) }
             "status", "phase", "compressing", "compressed" -> phase(obj, payload, eventName)
             "metering", "context", "context_usage", "usage" -> contextUsage(obj)
             "token", "delta", "chunk", "message", null -> chunk(obj, payload, eventId)
