@@ -1,8 +1,10 @@
 package ru.mars.mobile
 
+import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
 
 /** UI model for the rich chat transcript. Kept platform independent for unit tests. */
@@ -63,6 +65,63 @@ class ChatUiState {
 
     /** Applies the settled YOLO state reported by the server (toggle result or fresh lookup). */
     fun setYoloEnabled(value: Boolean) { yoloEnabled = value }
+
+    /**
+     * Active-turn metadata of the loaded session (`GET /api/session` → `activeTurn`):
+     * a server-side attention request (approval/clarify waiting) and a queued user message
+     * that has not reached the runtime yet. Cleared on every session swap/turn settle so a
+     * stale banner never survives the state it describes.
+     */
+    var attention: SessionAttention? = null
+        private set
+    var hasPendingUserMessage: Boolean = false
+        private set
+
+    /** True while the transcript streams a REATTACHED turn (vs one started from this device). */
+    var reattachedTurn: Boolean = false
+        private set
+
+    /** Projects the loaded session's [ActiveTurnInfo] into the banner state. */
+    fun setActiveTurn(turn: ActiveTurnInfo) {
+        attention = turn.attention
+        hasPendingUserMessage = turn.hasPendingUserMessage
+    }
+
+    /**
+     * Opens the streaming bubble for a reattached active turn (no user message is appended —
+     * the prompt already lives in the loaded history). Returns false when a turn is already
+     * streaming so a double attach can never create two bubbles.
+     */
+    fun beginReattachedTurn(): Boolean {
+        if (status == ChatStatus.TYPING) return false
+        status = ChatStatus.TYPING
+        reattachedTurn = true
+        messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
+        return true
+    }
+
+    /**
+     * Abandons a reattached turn that died before delivering anything (e.g. the stream 404'd
+     * and settled history is about to replace the transcript): the placeholder bubble is
+     * removed when still empty, otherwise it is finalized so no content is lost.
+     */
+    fun cancelReattachedTurn() {
+        val index = messages.indexOfLast { it.role == "assistant" }
+        if (reattachedTurn && index >= 0) {
+            val bubble = messages[index]
+            if (bubble.status == MessageStatus.STREAMING &&
+                bubble.text.isBlank() && bubble.thoughts.isEmpty() && bubble.tools.isEmpty()
+            ) {
+                messages.removeAt(index)
+            } else {
+                messages[index] = bubble.copy(status = MessageStatus.COMPLETE)
+            }
+        }
+        reattachedTurn = false
+        status = ChatStatus.IDLE
+        phase = null
+        clearPendingInteractive()
+    }
 
     /**
      * Expanded long code listings, keyed «messageIndex:blockIndex». Long blocks are
@@ -149,12 +208,12 @@ class ChatUiState {
         }
     }
 
-    fun complete() { status = ChatStatus.RECEIVED; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun fail() { status = ChatStatus.ERROR; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
-    fun cancel() { status = ChatStatus.IDLE; phase = null; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; clearPendingInteractive() }
+    fun complete() { status = ChatStatus.RECEIVED; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
+    fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
+    fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 
@@ -165,6 +224,9 @@ class ChatUiState {
     fun resolveClarify() { pendingClarify = null }
 
     private fun clearPendingInteractive() { pendingApproval = null; pendingClarify = null }
+
+    /** Drops the active-turn banner state (attention / queued message) — the turn has settled or the session was swapped. */
+    private fun clearActiveTurnFlags() { attention = null; hasPendingUserMessage = false }
 
     /** Re-applies the current [activityMode] expansion policy to one assistant message. */
     private fun applyModePolicy(message: ChatMessage): ChatMessage = message.copy(
