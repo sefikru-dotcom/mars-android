@@ -5,6 +5,7 @@ import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.TodoSnapshot
 
 /**
  * Maps raw SSE frames (event name + opaque frame id + JSON payload) from
@@ -58,10 +59,34 @@ object StreamEventMapper {
             "status", "phase", "compressing", "compressed" -> phase(obj, payload, eventName)
             "metering", "context", "context_usage", "usage" -> contextUsage(obj)
             "token", "delta", "chunk", "message", null -> chunk(obj, payload, eventId)
-            // Unknown frames (todo_state, state_saved, goal, ...) carry no chat content.
+            // Unknown frames (state_saved, goal, ...) carry no chat content;
+            // `todo_state` is deliberately NOT mapped onto ChatEvent — it is
+            // delivered via [todoState] on the side channel (see below).
             else -> null
         }
     }
+
+    /**
+     * Live `todo_state` SSE frame (server contract: `event: todo_state`,
+     * `data:` = the normalized snapshot `{todos, summary, version}` inside the
+     * envelope `{session_id, stream_id, source, ts}` — hermes-webui
+     * api/todo_state.py `_broadcast`).
+     *
+     * It has NO carrier in the sealed [ChatEvent]: app modules hold exhaustive
+     * `when` expressions over ChatEvent (ChatUiState, app-tv), so a new variant
+     * would break their compile. Delivery instead goes through the
+     * `ChatRepository.onTodoState` transport callback, which calls this method —
+     * the frame never reaches [map] and never pollutes the chat transcript.
+     *
+     * Parsing is delegated to [TodoStateParser] — the SAME single point the cold
+     * `SessionDetail.todoState` uses (no duplicated contract).
+     *
+     * @return the snapshot when [eventName] is `todo_state` and the payload is a
+     *   snapshot (`todos` list present); `null` for any other event name or a
+     *   non-snapshot payload.
+     */
+    fun todoState(eventName: String?, payload: String): TodoSnapshot? =
+        if (eventName?.trim() == "todo_state") TodoStateParser.parsePayload(payload) else null
 
     /**
      * Parses the context-window portion of a `metering`/`usage` frame

@@ -16,9 +16,6 @@ import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
-import ru.mars.network.model.TodoItem
-import ru.mars.network.model.TodoSnapshot
-import ru.mars.network.model.TodoSummary
 import ru.mars.network.model.WorkspacePrefix
 
 /**
@@ -80,7 +77,9 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
                 string(s, "updated_at", "updatedAt"),
                 (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty(),
                 activeTurn(s),
-                todoSnapshot(s["todo_state"] as? Map<*, *>),
+                // Cold `todo_state`: parsing lives in ONE place shared with the
+                // live SSE path (TodoStateParser; contract documented there).
+                TodoStateParser.parse(s["todo_state"] as? Map<*, *>),
             )
         }
 
@@ -188,42 +187,6 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
             attention = attention,
         )
     }
-
-    /**
-     * Parses the normalized `todo_state` snapshot (api/todo_state.py `_normalize_snapshot`:
-     * `{todos, summary, version}` + optional `ts`; the live SSE event carries the same shape
-     * inside a `{session_id, stream_id, source}` envelope). `todos` must be a list — anything
-     * else is not a snapshot; an EMPTY list IS a valid snapshot (the latest write cleared it,
-     * server-side contract).
-     */
-    private fun todoSnapshot(o: Map<*, *>?): TodoSnapshot? {
-        o ?: return null
-        val todos = o["todos"] as? List<*> ?: return null
-        val summary = o["summary"] as? Map<*, *>
-        return TodoSnapshot(
-            todos = todos.mapNotNull { (it as? Map<*, *>)?.let(::todoItem) },
-            summary = TodoSummary(
-                total = intOf(summary, "total"),
-                pending = intOf(summary, "pending"),
-                inProgress = intOf(summary, "in_progress"),
-                completed = intOf(summary, "completed"),
-                cancelled = intOf(summary, "cancelled"),
-            ),
-            version = (o["version"] as? Number)?.toInt() ?: 1,
-            tsEpochSeconds = (o["ts"] as? Number)?.toDouble(),
-        )
-    }
-
-    private fun todoItem(o: Map<*, *>) = TodoItem(
-        // Moshi decodes JSON numbers as Double; normalize integral ids so `1` stays "1" (WebUI String(t.id) parity).
-        id = (o["id"] as? Number)?.let { if (it.toDouble() == it.toLong().toDouble()) it.toLong().toString() else it.toString() }
-            ?: string(o, "id"),
-        // WebUI parity (ui.js todoContent): `text` is tolerated as a content alias.
-        content = string(o, "content", "text").orEmpty(),
-        status = string(o, "status") ?: "pending",
-    )
-
-    private fun intOf(o: Map<*, *>?, key: String) = (o?.get(key) as? Number)?.toInt() ?: 0
 
     private fun message(o: Map<*, *>): SessionMessage {
         val role = o["role"]?.toString().orEmpty()

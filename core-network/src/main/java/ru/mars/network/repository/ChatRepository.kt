@@ -19,6 +19,7 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.TodoSnapshot
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -71,6 +72,20 @@ fun readBoundedUploadPayload(input: InputStream, maxBytes: Long = MAX_UPLOAD_BYT
 }
 
 class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
+    /**
+     * Sends a message and streams the answer.
+     *
+     * [onTodoState] — optional NON-SEALED transport callback for live `todo_state`
+     * snapshots (the SSE frame has no carrier in the sealed [ChatEvent]: app
+     * modules hold exhaustive `when` expressions over it, so a new variant would
+     * break their compile). When provided, every `todo_state` frame is parsed by
+     * [TodoStateParser] (the same single point as the cold
+     * `SessionDetail.todoState`) and handed to the callback instead of being
+     * silently dropped; the frame never enters the [ChatEvent] flow, so the chat
+     * transcript stays clean. Invoked on this flow's IO context — receivers own
+     * any thread hopping and must not throw (an exception surfaces as
+     * [ChatEvent.Error]). Default `null` keeps the pre-todo_state behaviour.
+     */
     fun sendMessage(
         endpoint: String,
         credential: ConsumedDeviceCredential,
@@ -79,12 +94,13 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         attachments: List<ChatAttachment> = emptyList(),
         model: String? = null,
         modelProvider: String? = null,
-        explicitModelPick: Boolean = false
+        explicitModelPick: Boolean = false,
+        onTodoState: ((TodoSnapshot) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick), credential) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick), credential, onTodoState) { event -> emit(event) }
                 return@flow
             }
             val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick)).execute().use { response ->
@@ -101,7 +117,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             val streamUrl = base.newBuilder().addPathSegments("api/chat/stream")
                 .addQueryParameter("stream_id", startResp.streamId).build()
             stream(Request.Builder().url(streamUrl).header("Authorization", bearer(credential))
-                .header("Accept", "text/event-stream").get().build(), credential) { event -> emit(event) }
+                .header("Accept", "text/event-stream").get().build(), credential, onTodoState) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -133,12 +149,17 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * last SSE event the client actually processed, sent as the `Last-Event-ID` header (the
      * spec-compliant reconnect cursor the server honors after explicit query params).
      * Omit it to subscribe live-only (server-side snapshot backfill still applies).
+     *
+     * [onTodoState] — same live `todo_state` transport callback as in [sendMessage]
+     * (the journaled replay of a reattached stream can contain `todo_state` frames too);
+     * see its KDoc for the delivery contract.
      */
     fun attachToStream(
         baseUrl: String,
         credential: ConsumedDeviceCredential,
         streamId: String,
         lastEventId: String? = null,
+        onTodoState: ((TodoSnapshot) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val streamUrl = baseUrl.toHttpUrl().newBuilder()
             .addPathSegments("api/chat/stream")
@@ -151,7 +172,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             .get().build()
         try {
             emit(ChatEvent.StreamStarted(streamId))
-            stream(request, credential) { event -> emit(event) }
+            stream(request, credential, onTodoState) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -296,8 +317,17 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      *   leaves the waiting state;
      * - cancellation is checked between reads so a cancelled collector does not block on
      *   the socket read loop.
+     *
+     * [onTodoState]: when non-null, `todo_state` frames are diverted to it (side channel —
+     * no sealed ChatEvent carrier exists) instead of reaching [StreamEventMapper.map],
+     * which returns null for them. When null, behaviour is unchanged (frames are dropped).
      */
-    private suspend fun stream(request: Request, credential: ConsumedDeviceCredential, emit: suspend (ChatEvent) -> Unit) {
+    private suspend fun stream(
+        request: Request,
+        credential: ConsumedDeviceCredential,
+        onTodoState: ((TodoSnapshot) -> Unit)?,
+        emit: suspend (ChatEvent) -> Unit,
+    ) {
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) { emit(ChatEvent.Error("HTTP ${response.code}")); return }
             val byteStream = response.body?.byteStream()
@@ -309,7 +339,9 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             val parser = SseChunkParser()
             suspend fun emitFrames(frames: List<SseChunkParser.Frame>) {
                 for (frame in frames) {
-                    StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
+                    val snapshot = onTodoState?.let { StreamEventMapper.todoState(frame.event, frame.data) }
+                    if (snapshot != null) onTodoState.invoke(snapshot)
+                    else StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
                 }
             }
             val reader = InputStreamReader(byteStream, Charsets.UTF_8)

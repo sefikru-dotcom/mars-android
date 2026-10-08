@@ -154,8 +154,35 @@ class StreamEventMapperTest {
 
     @Test fun unknownMetadataEventsMapToNullAndAreNotErrors() {
         assertNull(StreamEventMapper.map("metering", null, """{"session_id":"s1","usage":{}}"""))
+        // todo_state has no ChatEvent carrier BY DESIGN — delivery goes through
+        // [StreamEventMapper.todoState] + the ChatRepository.onTodoState callback.
         assertNull(StreamEventMapper.map("todo_state", null, """{"todos":[]}"""))
         assertNull(StreamEventMapper.map("state_saved", null, """{"kind":"file","name":"a.kt"}"""))
+    }
+
+    /** Live `todo_state` frame → snapshot via the shared [ru.mars.network.repository.TodoStateParser] (envelope included). */
+    @Test fun todoStateSideChannelParsesLiveEnvelope() {
+        val snapshot = StreamEventMapper.todoState(
+            "todo_state",
+            """{"session_id":"s-1","stream_id":"st-9","source":"tool","ts":1759900001.25,
+                "todos":[{"id":"1","content":"Шаг","status":"in_progress"}],
+                "summary":{"total":1,"pending":0,"in_progress":1,"completed":0,"cancelled":0},"version":1}"""
+        )!!
+        assertEquals("s-1", snapshot.sessionId)
+        assertEquals("st-9", snapshot.streamId)
+        assertEquals("tool", snapshot.source)
+        assertEquals(1759900001.25, snapshot.tsEpochSeconds!!, 0.0)
+        assertEquals(ru.mars.network.model.TodoItem("1", "Шаг", "in_progress"), snapshot.todos.single())
+        assertEquals(1, snapshot.summary.total)
+        assertEquals(1, snapshot.summary.inProgress)
+    }
+
+    /** Only the `todo_state` event name opens the side channel; a non-snapshot payload yields null, never a crash. */
+    @Test fun todoStateIgnoresOtherEventsAndNonSnapshots() {
+        assertNull(StreamEventMapper.todoState("token", """{"todos":[]}"""))
+        assertNull(StreamEventMapper.todoState(null, """{"todos":[]}"""))
+        assertNull(StreamEventMapper.todoState("todo_state", """{"summary":{"total":1}}"""))
+        assertNull(StreamEventMapper.todoState("todo_state", "not json"))
     }
 
     @Test fun mapsReasoningAndPhaseLikeBefore() {
