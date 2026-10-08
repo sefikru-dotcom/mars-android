@@ -1,1 +1,16 @@
-<resources><style name="AppTheme" parent="Theme.AppCompat.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">@color/mars_accent</item><item name="android:windowBackground">@color/mars_background</item><item name="android:navigationBarColor">@color/mars_background</item></style></resources>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:colorAccent">@color/mars_accent</item>
+        <item name="android:colorPrimary">@color/mars_surface</item>
+        <item name="android:colorPrimaryDark">@color/mars_background</item>
+        <item name="android:windowBackground">@color/mars_background</item>
+        <item name="android:statusBarColor">@color/mars_background</item>
+        <item name="android:navigationBarColor">@color/mars_background</item>
+        <item name="android:textColorPrimary">@color/mars_text</item>
+        <item name="android:textColorSecondary">@color/mars_muted</item>
+        <!-- Premium D-pad focus: custom ruby highlight, no default focus frames -->
+        <item name="android:defaultFocusHighlightEnabled">false</item>
+    </style>
+</resources>

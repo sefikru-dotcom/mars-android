@@ -1,14 +1,122 @@
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:orientation="vertical" android:padding="36dp" android:background="@color/mars_background" android:layout_width="match_parent" android:layout_height="match_parent">
-    <LinearLayout android:orientation="horizontal" android:gravity="center_vertical" android:layout_width="match_parent" android:layout_height="wrap_content">
-        <TextView android:text="Чат с Марсом" android:textColor="@color/mars_text" android:textSize="32sp" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"/>
-        <TextView android:text="● онлайн" android:textColor="#7EE787" android:textSize="20sp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-        <Button android:id="@+id/backButton" android:text="Назад" android:focusable="true" android:layout_marginStart="20dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="36dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:src="@drawable/ic_mars"
+            android:contentDescription="@null"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="14dp" />
+
+        <TextView
+            android:text="Чат с Марсом"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="32sp"
+            android:textStyle="bold"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <ImageView
+            android:src="@drawable/ic_status_dot"
+            android:contentDescription="@null"
+            android:layout_width="12dp"
+            android:layout_height="12dp" />
+
+        <TextView
+            android:text="онлайн"
+            android:textColor="@color/mars_status_online"
+            android:textSize="20sp"
+            android:layout_marginStart="8dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/backButton"
+            android:focusable="true"
+            android:layout_marginStart="20dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_arrow_back"
+            android:drawableTint="@color/icon_focus_tint"
+            android:text="Назад"
+            android:textColor="@color/mars_text"
+            android:textSize="20sp"
+            android:drawablePadding="10dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
     </LinearLayout>
-    <ScrollView android:id="@+id/messageScroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="true">
-        <LinearLayout android:id="@+id/messages" android:orientation="vertical" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+
+    <ScrollView
+        android:id="@+id/messageScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scrollbars="none"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:id="@+id/messages"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
     </ScrollView>
-    <LinearLayout android:orientation="horizontal" android:gravity="center_vertical" android:layout_width="match_parent" android:layout_height="wrap_content">
-        <EditText android:id="@+id/messageInput" android:hint="Сообщение…" android:textColor="@color/mars_text" android:textColorHint="@color/mars_muted" android:textSize="22sp" android:singleLine="true" android:imeOptions="actionSend" android:nextFocusRight="@id/sendButton" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"/>
-        <Button android:id="@+id/sendButton" android:text="Отправить" android:textSize="20sp" android:focusable="true" android:nextFocusLeft="@id/messageInput" android:layout_marginStart="16dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="12dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <EditText
+            android:id="@+id/messageInput"
+            android:hint="Сообщение…"
+            android:textColor="@color/mars_text"
+            android:textColorHint="@color/mars_muted"
+            android:textSize="22sp"
+            android:singleLine="true"
+            android:background="@drawable/bg_focus_input"
+            android:padding="16dp"
+            android:focusable="true"
+            android:imeOptions="actionSend"
+            android:nextFocusRight="@id/sendButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="64dp" />
+
+        <Button
+            android:id="@+id/sendButton"
+            android:text="Отправить"
+            android:textSize="20sp"
+            android:textColor="@color/mars_on_accent"
+            android:textStyle="bold"
+            android:background="@drawable/bg_focus_accent"
+            android:drawableStart="@drawable/ic_send"
+            android:drawableTint="@color/mars_on_accent"
+            android:drawablePadding="10dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:focusable="true"
+            android:nextFocusLeft="@id/messageInput"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="64dp" />
     </LinearLayout>
 </LinearLayout>

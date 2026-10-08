@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- D-pad focus for text inputs: ruby border glow when focused -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:enterFadeDuration="180"
+    android:exitFadeDuration="220">
+
+    <item android:state_focused="true">
+        <layer-list>
+            <item android:left="-3dp" android:top="-3dp" android:right="-3dp" android:bottom="-3dp">
+                <shape android:shape="rectangle">
+                    <solid android:color="@android:color/transparent" />
+                    <corners android:radius="14dp" />
+                    <stroke android:width="3dp" android:color="@color/mars_accent_bg" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/mars_background" />
+                    <corners android:radius="12dp" />
+                    <stroke android:width="2dp" android:color="@color/mars_accent" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/mars_background" />
+            <corners android:radius="12dp" />
+            <stroke android:width="1dp" android:color="@color/mars_border" />
+        </shape>
+    </item>
+</selector>
