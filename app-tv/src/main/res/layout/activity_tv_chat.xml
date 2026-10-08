@@ -43,6 +43,26 @@
             android:layout_height="wrap_content" />
 
         <Button
+            android:id="@+id/newChatButton"
+            android:focusable="true"
+            android:layout_marginStart="20dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_new_chat"
+            android:drawableTint="@color/icon_focus_tint"
+            android:text="Новый чат"
+            android:textColor="@color/mars_text"
+            android:textSize="20sp"
+            android:drawablePadding="10dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
             android:id="@+id/backButton"
             android:focusable="true"
             android:layout_marginStart="20dp"
@@ -59,6 +79,36 @@
             android:textColor="@color/mars_text"
             android:textSize="20sp"
             android:drawablePadding="10dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <!-- Status strip: live reasoning/tool status + context-fill pill (both hidden when unknown) -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="10dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:textColor="@color/mars_muted"
+            android:textSize="18sp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:visibility="gone"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/contextText"
+            android:textColor="@color/mars_status_online"
+            android:textSize="16sp"
+            android:singleLine="true"
+            android:visibility="gone"
+            android:layout_marginStart="12dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
     </LinearLayout>
