@@ -195,12 +195,7 @@ class ProjectsActivity : ComponentActivity() {
             setTextColor(MarsTheme.TEXT_STRONG)
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
-        titleRow.addView(TextView(this).apply {
-            text = "● Онлайн"
-            textSize = 12f
-            setTextColor(MarsTheme.STATUS_ONLINE)
-            typeface = Typeface.DEFAULT_BOLD
-        })
+        titleRow.addView(statusBadge("Онлайн", MarsTheme.STATUS_ONLINE))
         card.addView(titleRow)
 
         val metricsText = TextView(this).apply {
@@ -230,12 +225,7 @@ class ProjectsActivity : ComponentActivity() {
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
         val isOnline = active != false
-        row.addView(TextView(this).apply {
-            text = "● $status"
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(if (isOnline) MarsTheme.STATUS_ONLINE else MarsTheme.STATUS_ERROR)
-        })
+        row.addView(statusBadge(status, if (isOnline) MarsTheme.STATUS_ONLINE else MarsTheme.STATUS_ERROR))
         card.addView(row)
 
         if (desc.isNotBlank()) {
@@ -256,9 +246,28 @@ class ProjectsActivity : ComponentActivity() {
                 background = MarsTheme.button(this@ProjectsActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 10, strokeColor = MarsTheme.BORDER)
                 setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             }
-            card.addView(openBtn, LinearLayout.LayoutParams(-1, dp(38)).apply { topMargin = dp(8) })
+            card.addView(openBtn, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         }
         list.addView(card, margin())
+    }
+
+    /** Status badge: themed circular dot (vector-drawn, not the font `●` glyph) + bold label. */
+    private fun statusBadge(label: String, color: Int): View {
+        val badge = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        badge.addView(
+            MarsTheme.statusDot(this, color),
+            LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) }
+        )
+        badge.addView(TextView(this).apply {
+            text = label
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(color)
+        })
+        return badge
     }
 
     private fun margin() = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }
