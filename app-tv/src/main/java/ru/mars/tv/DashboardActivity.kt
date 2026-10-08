@@ -8,6 +8,7 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.tv.projects.TvProjectsActivity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -29,12 +30,16 @@ class DashboardActivity : AppCompatActivity() {
         findViewById<Button>(R.id.chatButton).setOnClickListener {
             startActivity(Intent(this, TvChatActivity::class.java))
         }
+        findViewById<Button>(R.id.projectsButton).setOnClickListener {
+            startActivity(Intent(this, TvProjectsActivity::class.java))
+        }
         findViewById<Button>(R.id.musicButton).setOnClickListener {
             startActivity(Intent(this, TvMusicActivity::class.java))
         }
         findViewById<Button>(R.id.settingsButton).setOnClickListener { logout() }
         TvFocusLift.attachAll(
             findViewById(R.id.chatButton),
+            findViewById(R.id.projectsButton),
             findViewById(R.id.musicButton),
             findViewById(R.id.settingsButton),
         )

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Карточка хоста: статус выводится из факта получения данных (не заглушка). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:background="@drawable/bg_focus_card"
+    android:padding="24dp"
+    android:focusable="true"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <TextView
+            android:id="@+id/hostTitle"
+            android:text="Хост Aeza Mars"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <ImageView
+            android:id="@+id/hostStatusDot"
+            android:src="@drawable/ic_status_dot"
+            android:contentDescription="@null"
+            android:layout_width="12dp"
+            android:layout_height="12dp" />
+
+        <TextView
+            android:id="@+id/hostStatusLabel"
+            android:textColor="@color/mars_status_online"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginStart="8dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/hostMetrics"
+        android:textColor="@color/mars_muted"
+        android:textSize="18sp"
+        android:lineSpacingExtra="4dp"
+        android:layout_marginTop="10dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+</LinearLayout>
