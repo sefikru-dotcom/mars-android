@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- D-pad focus for primary ruby buttons: brightens + halo on focus -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:enterFadeDuration="180"
+    android:exitFadeDuration="220">
+
+    <item android:state_focused="true">
+        <layer-list>
+            <item android:left="-3dp" android:top="-3dp" android:right="-3dp" android:bottom="-3dp">
+                <shape android:shape="rectangle">
+                    <solid android:color="@android:color/transparent" />
+                    <corners android:radius="14dp" />
+                    <stroke android:width="3dp" android:color="@color/mars_accent_bg_pressed" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/mars_accent_hover" />
+                    <corners android:radius="12dp" />
+                    <stroke android:width="2dp" android:color="@color/mars_accent" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/mars_accent_hover" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/mars_accent" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+</selector>

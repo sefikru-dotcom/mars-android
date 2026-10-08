@@ -1,16 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/mars_background"
+    android:background="@drawable/bg_tv_root"
     android:gravity="center"
     android:orientation="vertical"
     android:padding="48dp">
 
+    <ImageView
+        android:src="@drawable/ic_mars"
+        android:contentDescription="@null"
+        android:layout_width="96dp"
+        android:layout_height="96dp" />
+
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
         android:text="МАРС ТВ"
-        android:textColor="@color/mars_accent"
+        android:textColor="@color/mars_text_strong"
         android:textSize="44sp"
         android:textStyle="bold" />
 
@@ -34,14 +42,14 @@
             android:id="@+id/passwordInput"
             android:layout_width="match_parent"
             android:layout_height="64dp"
-            android:background="#1b202b"
+            android:background="@drawable/bg_focus_input"
             android:focusable="true"
             android:gravity="center"
             android:hint="Введите пароль Марса"
             android:imeOptions="actionDone"
             android:inputType="textPassword"
             android:padding="16dp"
-            android:textColor="#ffffff"
+            android:textColor="@color/mars_text_strong"
             android:textColorHint="@color/mars_muted"
             android:textSize="22sp" />
 
@@ -50,10 +58,10 @@
             android:layout_width="match_parent"
             android:layout_height="64dp"
             android:layout_marginTop="18dp"
-            android:backgroundTint="@color/mars_accent"
+            android:background="@drawable/bg_focus_accent"
             android:focusable="true"
             android:text="Войти"
-            android:textColor="#10131a"
+            android:textColor="@color/mars_on_accent"
             android:textSize="22sp"
             android:textStyle="bold" />
     </LinearLayout>

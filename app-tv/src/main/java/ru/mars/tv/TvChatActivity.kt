@@ -1,15 +1,14 @@
 package ru.mars.tv
 
-import android.graphics.Color
 import android.os.Bundle
 import android.view.View
-import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -31,6 +30,7 @@ class TvChatActivity : AppCompatActivity() {
         input = findViewById(R.id.messageInput)
         send = findViewById(R.id.sendButton)
         findViewById<Button>(R.id.backButton).setOnClickListener { finish() }
+        TvFocusLift.attachAll(input, send, findViewById(R.id.backButton))
         send.setOnClickListener { sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
         input.requestFocus()
@@ -48,17 +48,20 @@ class TvChatActivity : AppCompatActivity() {
         if (text.isEmpty() || stream?.isActive == true) return false
         val credential = store.read() ?: return false
         input.text.clear()
-        append("Вы", text)
-        val answer = append("Марс", "")
+        append("Вы", text, isUser = true)
+        val answer = append("Марс", "", isUser = false)
         send.isEnabled = false
         stream = lifecycleScope.launch {
             try {
                 ChatRepository().sendMessage(BASE_URL, credential, text, currentSessionId).collect { event ->
                     when (event) {
                         is ChatEvent.SessionBound -> currentSessionId = event.sessionId
-                        is ChatEvent.Chunk -> { answer.text = "Марс: ${answer.text.toString().removePrefix("Марс: ")}${event.text}"; scrollDown() }
+                        is ChatEvent.Chunk -> {
+                            answer.text = "${answer.text.toString().removePrefix("Марс: ")}${event.text}"
+                            scrollDown()
+                        }
                         ChatEvent.Done -> Unit
-                        is ChatEvent.Error -> answer.text = "Марс: Ошибка: ${event.message}"
+                        is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
                         else -> Unit
                     }
                 }
@@ -70,14 +73,21 @@ class TvChatActivity : AppCompatActivity() {
         return true
     }
 
-    private fun append(author: String, text: String): TextView = TextView(this).apply {
+    /**
+     * WebUI-parity chat bubble: user side gets the deep-navy bubble
+     * (USER_BUBBLE + USER_BORDER), Mars side gets the bot card
+     * (BOT_CARD + BOT_BORDER). Both are focusable — under D-pad focus the
+     * bg_bubble_* StateListDrawable cross-fades to a ruby border.
+     */
+    private fun append(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
         this.text = "$author: $text"
         textSize = 22f
-        setTextColor(Color.WHITE)
-        setPadding(dp(20), dp(14), dp(20), dp(14))
-        setBackgroundColor(SURFACE)
+        setTextColor(ContextCompat.getColor(context, R.color.mars_text))
+        setPadding(dp(24), dp(16), dp(24), dp(16))
+        setBackgroundResource(if (isUser) R.drawable.bg_bubble_user else R.drawable.bg_bubble_bot)
         isFocusable = true
-        messages.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        TvFocusLift.attach(this)
+        messages.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
     }
 
     private fun scrollDown() { findViewById<ScrollView>(R.id.messageScroll).post { findViewById<ScrollView>(R.id.messageScroll).fullScroll(View.FOCUS_DOWN) } }
@@ -85,6 +95,5 @@ class TvChatActivity : AppCompatActivity() {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
-        private const val SURFACE = 0xff1b202b.toInt()
     }
 }
