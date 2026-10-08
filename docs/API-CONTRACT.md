@@ -66,3 +66,11 @@ The mobile client polls with the WebUI cadence (700 ms, +300 ms per poll, capped
 ## Automatic compression (client-side)
 
 The server auto-compresses mid-turn on its own threshold. The client additionally offers an idle-between-turns trigger: when the `metering` fill percentage crosses the configured threshold (default 85%) while no stream is active and the user enabled the switch, one compression is started per arming cycle; the trigger re-arms only after the fill drops back below the threshold (hysteresis prevents compression loops). The preference persists in SharedPreferences `mars-auto-compression`.
+
+## Reasoning effort
+
+`GET /api/reasoning?model=…&provider=…&session_id=…` returns the effective reasoning state: `{show_reasoning, reasoning_effort, source, supported_efforts[], supports_reasoning_effort, supports_thinking_toggle, model_overrides}`. `reasoning_effort` is the server-COERCED effective value (`''`/absent = default); `supported_efforts` is the per-model ladder the client must offer verbatim (never invent levels). A thinking-toggle-only model (`supports_thinking_toggle:true`, empty ladder) has no selector.
+
+`POST /api/reasoning` with `{"effort": "…", "model"?, "provider"?, "session_id"?}` persists the choice server-side and answers the same status payload. WebUI parity: `effort:""` means Default (clears the override) and the key must be present.
+
+`POST /api/chat/start` carries NO reasoning field. The server resolves the effort per turn from session override > per-model pin > global config, so an explicit pick must be persisted via `POST /api/reasoning` before the next chat/start; the mobile client records a pick locally only after the server confirmed it, and hides the selector on any failed/unknown status.
