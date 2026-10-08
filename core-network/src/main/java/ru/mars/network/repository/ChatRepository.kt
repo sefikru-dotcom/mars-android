@@ -2,6 +2,8 @@ package ru.mars.network.repository
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -17,7 +19,6 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ConsumedDeviceCredential
-import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -104,7 +105,10 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            emit(ChatEvent.Error(error.message ?: "Network error"))
+            // Sudden link losses (Wi-Fi <-> LTE handover, DNS/TLS failure, read timeout)
+            // must surface as a readable ChatEvent.Error — otherwise the UI hangs in the
+            // "waiting for answer" state with no way out.
+            emit(ChatEvent.Error(describeNetworkError(error)))
         }
     }.flowOn(Dispatchers.IO)
 
@@ -163,7 +167,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            UploadOutcome.Failure(error.message ?: "Network error")
+            UploadOutcome.Failure(describeNetworkError(error))
         }
     }
 
@@ -228,31 +232,48 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             .build()
     }
 
+    /**
+     * Streams an SSE response body chunk-by-chunk through [SseChunkParser].
+     *
+     * Resilience contract (POCO F5 Wi-Fi/LTE handovers):
+     * - the body is read in transport-sized chunks and fed to the parser verbatim: an SSE
+     *   frame split across TCP packets ANYWHERE (mid-line, between `\r` and `\n`, between
+     *   two `data:` lines) is reassembled from the parser's internal buffer — no partial
+     *   state is ever dropped;
+     * - multi-byte UTF-8 sequences split across chunks are handled by the InputStreamReader
+     *   decoder (never decode a raw byte chunk to String directly);
+     * - if the connection dies mid-frame, the IOException propagates to [sendMessage], which
+     *   maps it via [describeNetworkError] and emits a terminal ChatEvent.Error so the UI
+     *   leaves the waiting state;
+     * - cancellation is checked between reads so a cancelled collector does not block on
+     *   the socket read loop.
+     */
     private suspend fun stream(request: Request, credential: ConsumedDeviceCredential, emit: suspend (ChatEvent) -> Unit) {
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) { emit(ChatEvent.Error("HTTP ${response.code}")); return }
-            val reader = BufferedReader(InputStreamReader(response.body?.byteStream() ?: return, Charsets.UTF_8))
-            var event: String? = null
-            var id: String? = null
-            val data = StringBuilder()
-
-            suspend fun dispatch() {
-                if (data.isEmpty()) return
-                val payload = data.toString().removeSuffix("\n")
-                StreamEventMapper.map(event, id, payload)?.let { emit(it) }
-                event = null; id = null; data.clear()
+            val byteStream = response.body?.byteStream()
+            if (byteStream == null) {
+                // A 200 with no body must not leave the UI waiting forever.
+                emit(ChatEvent.Error("Пустой ответ сервера"))
+                return
             }
-
-            while (true) {
-                val line = reader.readLine() ?: break
-                if (line.isEmpty()) { dispatch(); continue }
-                when {
-                    line.startsWith("event:") -> event = line.substringAfter(':').trim()
-                    line.startsWith("id:") -> id = line.substringAfter(':').trim()
-                    line.startsWith("data:") -> data.append(line.substringAfter(':').trimStart()).append('\n')
+            val parser = SseChunkParser()
+            suspend fun emitFrames(frames: List<SseChunkParser.Frame>) {
+                for (frame in frames) {
+                    StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
                 }
             }
-            dispatch()
+            val reader = InputStreamReader(byteStream, Charsets.UTF_8)
+            val chars = CharArray(8 * 1024)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val read = reader.read(chars)
+                if (read < 0) break
+                if (read > 0) emitFrames(parser.feed(String(chars, 0, read)))
+            }
+            // Stream ended without the terminating blank line (server closed early, or the
+            // last frame lacks it): still deliver the buffered frame.
+            emitFrames(parser.end())
         }
     }
 
