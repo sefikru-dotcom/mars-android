@@ -21,6 +21,7 @@ import android.text.style.ClickableSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -94,6 +95,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private val attachments = mutableListOf<ChatAttachment>()
     private var speech: SpeechRecognizer? = null
     private lateinit var tts: TextToSpeech
+    private val speechFilter = SpeechContentFilter()
+    private lateinit var voiceSession: VoiceSessionController
+    private var voiceBtn: ImageButton? = null
     private val pickAttachment = 4101
     private val recognizeVoice = 4102
 
@@ -141,6 +145,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
         uiState.setActivityMode(activityModeSelection.current)
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
+        // Voice-input state machine: guards the recognizer session, delivers haptic feedback on
+        // start/finish and routes results into the composer. Pure logic lives in the controller.
+        voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
+            override fun onListeningStarted() {
+                voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                statusView.text = "Слушаю…"
+            }
+
+            override fun onResult(text: String) {
+                input.setText(text)
+                input.setSelection(input.length())
+            }
+
+            override fun onError(message: String) {
+                statusView.text = message
+            }
+        })
         setContentView(buildView())
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -196,10 +217,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == recognizeVoice && resultCode == RESULT_OK) {
-            data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let {
-                input.setText(it)
-                input.setSelection(input.length())
+        if (requestCode == recognizeVoice) {
+            // Haptic feedback on voice-input finish (success or dismissal).
+            voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            if (resultCode == RESULT_OK) {
+                val recognized = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                if (voiceSession.onResult(recognized.orEmpty())) voiceSession.onProcessingComplete()
+            } else {
+                voiceSession.cancel()
+                statusView.text = ""
             }
         }
         if (requestCode == pickAttachment && resultCode == RESULT_OK) {
@@ -637,7 +663,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         composer.addView(attachBtn, LinearLayout.LayoutParams(dp(38), dp(38)))
 
-        val voiceBtn = MarsTheme.circleIconButton(
+        val voiceButton = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_mic,
             "Голосовой ввод",
@@ -648,7 +674,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         ).apply {
             setOnClickListener { startVoiceInput() }
         }
-        composer.addView(voiceBtn, LinearLayout.LayoutParams(dp(38), dp(38)))
+        voiceBtn = voiceButton
+        composer.addView(voiceButton, LinearLayout.LayoutParams(dp(38), dp(38)))
 
         val volumeBtn = MarsTheme.circleIconButton(
             this,
@@ -927,16 +954,39 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
             if (message.text.isNotBlank()) {
                 renderMarkdownBlocks(message.text, card, isUser, index)
+                val actionsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, 0)
+                }
                 val copyBtn = Button(this).apply {
                     text = "Копировать"
                     textSize = 11f
                     setTextColor(MarsTheme.TEXT_MUTED)
                     background = null
-                    setPadding(0, dp(4), 0, 0)
+                    setPadding(0, 0, 0, 0)
+                    minimumHeight = 0
+                    minHeight = 0
                     gravity = Gravity.START
                     setOnClickListener { copyMessage(message.text) }
                 }
-                card.addView(copyBtn)
+                actionsRow.addView(copyBtn)
+                if (!isUser) {
+                    // Speaker button: read Mars's answer aloud through the speech filter.
+                    val speakBtn = MarsTheme.circleIconButton(
+                        this,
+                        R.drawable.ic_volume,
+                        "Озвучить сообщение",
+                        bg = Color.TRANSPARENT,
+                        iconTint = MarsTheme.TEXT_MUTED,
+                        sizeDp = 30,
+                        strokeColor = 0
+                    ).apply {
+                        setOnClickListener { speakMessage(message.text) }
+                    }
+                    actionsRow.addView(speakBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
+                }
+                card.addView(actionsRow)
             }
 
             if (message.thoughts.isNotEmpty()) {
@@ -1414,6 +1464,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.RECORD_AUDIO), recognizeVoice); return
         }
+        // Controller guards against double sessions and fires the start haptic via the listener.
+        if (!voiceSession.start()) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault())
@@ -1421,9 +1473,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         startActivityForResult(intent, recognizeVoice)
     }
 
+    /** Speak a message through TTS after cleaning markdown with [SpeechContentFilter]. */
+    private fun speakMessage(text: String) {
+        val speakable = speechFilter.filterForSpeech(text)
+        if (speakable.isBlank()) {
+            statusView.text = "В сообщении нет текста для озвучивания"
+            return
+        }
+        tts.speak(speakable, TextToSpeech.QUEUE_FLUSH, null, "mars-message")
+    }
+
     private fun speakLastMessage() {
-        uiState.messages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() }?.text?.let {
-            tts.speak(it, TextToSpeech.QUEUE_FLUSH, null, "mars-last-response")
+        uiState.messages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() }?.let {
+            speakMessage(it.text)
         }
     }
 
