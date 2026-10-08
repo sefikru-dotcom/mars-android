@@ -1,4 +1,4 @@
-package ru.mars.mobile
+package ru.mars.mobile.domain.util
 
 /**
  * Intelligent speech filter for TTS: converts Mars's technical markdown answers into clean,
@@ -14,6 +14,8 @@ package ru.mars.mobile
  * - inline code `` `foo` `` keeps only the clean name (backticks removed);
  * - markdown links `[текст](url)` become just «текст»; images `![alt](url)` are dropped;
  *   bare URLs (http/https) become «ссылка» so TTS never spells out a domain character-by-character;
+ * - emoji and decorative picture glyphs (✅🚀⭐, variation selectors, ZWJ) are dropped:
+ *   TTS engines either stay silent or spell out their names, both are noise;
  * - markdown decoration is smoothed away: heading hashes, bold/italic/strikethrough markers,
  *   blockquote `>`, list bullets, horizontal rules, table separator rows and cell pipes,
  *   residual HTML tags — leaving clean Russian/English prose.
@@ -39,6 +41,8 @@ class SpeechContentFilter {
         text = Regex("\\[([^\\]]*)]\\([^)]*\\)").replace(text, "$1")
         // Reference-style links [text][ref] -> text.
         text = Regex("\\[([^\\]]*)]\\[[^\\]]*]").replace(text, "$1")
+        // Reference definition lines ([ref]: url) are metadata — never spoken.
+        text = Regex("(?m)^[ \\t]*\\[[^\\]]+]:[ \\t]*\\S+[ \\t]*$").replace(text, "")
         // Autolinks <https://…> and bare URLs -> «ссылка».
         text = Regex("<https?://[^>\\s]+>").replace(text, " ссылка ")
         text = Regex("https?://\\S+").replace(text, " ссылка ")
@@ -56,6 +60,7 @@ class SpeechContentFilter {
         text = Regex("</?[a-zA-Z][^>]*>").replace(text, " ")                      // residual HTML tags
 
         // 6. Inline markers.
+        text = EMOJI.replace(text, " ")
         text = text.replace("~~", "")
         text = Regex("\\*+").replace(text, "")
         // Underscore emphasis: strip only edges not glued to a word character
@@ -85,5 +90,10 @@ class SpeechContentFilter {
         private val CODE_FENCE = Regex("```[^\\n]*\\n?[\\s\\S]*?```")
 
         private const val ESCAPED_PLACEHOLDER = "\\(Блок кода выведен на экран\\)"
+
+        /** Emoji / pictographic glyphs incl. variation selectors and ZWJ — never speakable. */
+        private val EMOJI = Regex(
+            "[\\x{1F000}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{2B00}-\\x{2BFF}\\x{FE00}-\\x{FE0F}\\x{200D}\\x{2190}-\\x{21FF}]"
+        )
     }
 }
