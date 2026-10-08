@@ -25,10 +25,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
-import android.app.Dialog
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +88,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var miniPlayerPlayBtn: Button
     private lateinit var quickChipsScroll: HorizontalScrollView
 
+    // Sessions side panel (DrawerLayout replaces the old floating Dialog)
+    private lateinit var drawer: DrawerLayout
+    private lateinit var drawerSessionList: LinearLayout
+    private lateinit var drawerFilter: EditText
+    private var drawerFilterQuery: String = ""
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
@@ -103,6 +111,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         setContentView(buildView())
+        // Back press: an open drawer consumes the press and closes instead of leaving chat.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (drawer.isDrawerOpen(GravityCompat.START)) {
+                    drawer.closeDrawer(GravityCompat.START)
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
         MarsMusicPlayer.registerListener(this)
         loadSessions()
         refreshModelCatalog()
@@ -155,6 +175,95 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun buildView(): View {
+        drawer = DrawerLayout(this).apply { setBackgroundColor(BACKGROUND) }
+        drawer.addView(buildChatContent(), DrawerLayout.LayoutParams(-1, -1))
+        drawer.addView(buildSessionsDrawer(), DrawerLayout.LayoutParams(dp(300), -1, GravityCompat.START))
+        return drawer
+    }
+
+    /** Sessions side panel: header, new chat, filter, quick jumps, session list. */
+    private fun buildSessionsDrawer(): View {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setBackgroundColor(SURFACE)
+            isClickable = true
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(panel) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(dp(16), systemBars.top + dp(6), dp(16), systemBars.bottom + dp(6))
+            insets
+        }
+
+        val headerRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        headerRow.addView(TextView(this).apply {
+            text = "Сессии"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        headerRow.addView(Button(this).apply {
+            text = "✕"
+            contentDescription = "Закрыть панель сессий"
+            background = null
+            setTextColor(MUTED)
+            setOnClickListener { drawer.closeDrawer(GravityCompat.START) }
+        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+        panel.addView(headerRow)
+
+        panel.addView(Button(this).apply {
+            text = "+ Новый чат"
+            setTextColor(Color.WHITE)
+            background = buttonBg(ACCENT)
+            setOnClickListener {
+                drawer.closeDrawer(GravityCompat.START)
+                startNewChat()
+            }
+        }, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(8) })
+
+        drawerFilter = EditText(this).apply {
+            hint = "Поиск сессий…"
+            setTextColor(Color.WHITE)
+            setHintTextColor(MUTED)
+            isSingleLine = true
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    drawerFilterQuery = s?.toString().orEmpty()
+                    renderSessionList()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) {}
+            })
+        }
+        panel.addView(drawerFilter, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        listOf(
+            "📊 Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
+            "🎵 Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) }
+        ).forEach { (title, action) ->
+            quickRow.addView(Button(this).apply {
+                text = title
+                textSize = 12f
+                setTextColor(0xffd0d8e8.toInt())
+                background = buttonBg(BACKGROUND)
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                setOnClickListener {
+                    drawer.closeDrawer(GravityCompat.START)
+                    action()
+                }
+            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(6) })
+        }
+        panel.addView(quickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        drawerSessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val listScroll = ScrollView(this).apply { addView(drawerSessionList, ViewGroup.LayoutParams(-1, -2)) }
+        panel.addView(listScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8) })
+        renderSessionList()
+        return panel
+    }
+
+    private fun buildChatContent(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -175,7 +284,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             contentDescription = "Сессии"
             background = buttonBg(SURFACE)
             setTextColor(Color.WHITE)
-            setOnClickListener { showSessions() }
+            setOnClickListener {
+                if (drawer.isDrawerOpen(GravityCompat.START)) {
+                    drawer.closeDrawer(GravityCompat.START)
+                } else {
+                    drawer.openDrawer(GravityCompat.START)
+                }
+            }
         }, LinearLayout.LayoutParams(dp(44), dp(44)))
 
         val titleBox = LinearLayout(this).apply {
@@ -560,42 +675,99 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
 
             if (message.thoughts.isNotEmpty()) {
+                val thoughtBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = cardBg(0x143759a8, 0xff5b7fc7.toInt())
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                }
                 val toggle = Button(this).apply {
                     text = "${if (message.thoughtsExpanded) "⌃" else "⌄"}  Мысли Марса"
                     textSize = 12f
+                    setTypeface(null, Typeface.BOLD)
                     setTextColor(0xff9cb4d8.toInt())
-                    background = buttonBg(0x223759a8.toInt())
+                    background = null
+                    isAllCaps = false
+                    setPadding(0, 0, 0, 0)
+                    minimumHeight = 0
+                    minHeight = 0
+                    gravity = Gravity.START or Gravity.CENTER_VERTICAL
                     setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
                 }
-                card.addView(toggle, LinearLayout.LayoutParams(-1, dp(32)).apply { topMargin = dp(6) })
+                thoughtBox.addView(toggle, LinearLayout.LayoutParams(-1, dp(26)))
                 if (message.thoughtsExpanded) {
-                    card.addView(TextView(this).apply {
+                    thoughtBox.addView(TextView(this).apply {
                         text = message.thoughts.joinToString("\n")
-                        setTextColor(MUTED)
+                        setTextColor(0xffb8c6e0.toInt())
                         textSize = 13f
-                        setPadding(dp(8), dp(4), 0, dp(5))
+                        setTypeface(null, Typeface.ITALIC)
+                        setLineSpacing(dp(2).toFloat(), 1f)
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                    thoughtBox.addView(Button(this).apply {
+                        text = "Копировать мысли"
+                        textSize = 11f
+                        setTextColor(MUTED)
+                        background = null
+                        setPadding(0, dp(2), 0, 0)
+                        gravity = Gravity.START
+                        setOnClickListener { copyMessage(message.thoughts.joinToString("\n")) }
                     })
                 }
+                card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             }
 
             message.tools.forEachIndexed { toolIndex, tool ->
+                val box = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = cardBg(0xff0d1117.toInt(), 0xff30363d.toInt())
+                    setPadding(dp(10), dp(4), dp(6), dp(4))
+                }
+                val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
                 val toggle = Button(this).apply {
-                    text = "${if (tool.expanded) "⌃" else "⌄"}  Инструмент: ${tool.name}"
+                    text = "${if (tool.expanded) "⌃" else "⌄"}  ⚙ ${tool.name}"
                     textSize = 12f
+                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
                     setTextColor(0xffffb86c.toInt())
-                    background = buttonBg(0x22443020.toInt())
+                    background = null
+                    isAllCaps = false
+                    setPadding(0, 0, 0, 0)
+                    minimumHeight = 0
+                    minHeight = 0
+                    gravity = Gravity.START or Gravity.CENTER_VERTICAL
                     setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
                 }
-                card.addView(toggle, LinearLayout.LayoutParams(-1, dp(32)).apply { topMargin = dp(6) })
+                header.addView(toggle, LinearLayout.LayoutParams(0, dp(30), 1f))
+                val done = tool.result != null
+                header.addView(TextView(this).apply {
+                    text = if (done) "✓ готово" else "… выполняется"
+                    textSize = 11f
+                    setTypeface(Typeface.MONOSPACE)
+                    setTextColor(if (done) 0xff7ee787.toInt() else MUTED)
+                    setPadding(dp(6), 0, dp(6), 0)
+                })
+                header.addView(Button(this).apply {
+                    text = "⧉"
+                    contentDescription = "Копировать вызов инструмента"
+                    textSize = 13f
+                    setTextColor(MUTED)
+                    background = null
+                    minimumHeight = 0
+                    minHeight = 0
+                    setOnClickListener { copyMessage(toolDump(tool)) }
+                }, LinearLayout.LayoutParams(dp(34), dp(30)))
+                box.addView(header, LinearLayout.LayoutParams(-1, -2))
                 if (tool.expanded) {
-                    card.addView(TextView(this).apply {
-                        text = "Аргументы:\n${tool.arguments}\n\nРезультат:\n${tool.result ?: "Выполняется…"}"
-                        setTextColor(MUTED)
+                    val body = TextView(this).apply {
+                        text = toolDump(tool)
+                        setTextColor(0xffc9d1d9.toInt())
                         textSize = 12f
-                        setTypeface(Typeface.MONOSPACE)
-                        setPadding(dp(8), dp(4), 0, dp(6))
-                    })
+                        typeface = Typeface.MONOSPACE
+                        setTextIsSelectable(true)
+                        setPadding(dp(2), dp(2), dp(8), dp(6))
+                    }
+                    box.addView(HorizontalScrollView(this).apply { addView(body) })
                 }
+                card.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             }
 
             val params = LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .88).toInt(), -2).apply {
@@ -645,6 +817,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                             }
                             is RichLine.Normal -> {
                                 appendInlineSpans(ssb, line.spans)
+                            }
+                            is RichLine.Divider -> {
+                                ssb.append("─".repeat(24))
+                                tv.setTextColor(0xff3a4356.toInt())
                             }
                         }
                         tv.text = ssb
@@ -727,6 +903,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    /** Human-readable dump of a tool call for the expanded body and the copy button. */
+    private fun toolDump(tool: ToolExecution): String =
+        "Аргументы:\n${tool.arguments}\n\nРезультат:\n${tool.result ?: "Выполняется…"}"
+
     private fun bubble(user: Boolean) = GradientDrawable().apply {
         setColor(if (user) USER_BUBBLE else SURFACE)
         cornerRadius = dp(18).toFloat()
@@ -743,80 +923,76 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setStroke(dp(1), border)
     }
 
-    private fun showSessions() {
-        val dialog = Dialog(this)
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-            setBackgroundColor(SURFACE)
+    /** Renders the drawer session list: filtered by the search query, newest first by updatedAt/createdAt. */
+    private fun renderSessionList() {
+        if (!::drawerSessionList.isInitialized) return
+        drawerSessionList.removeAllViews()
+        val filtered = uiState.sessions
+            .filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
+            .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+        if (filtered.isEmpty()) {
+            drawerSessionList.addView(TextView(this).apply {
+                text = "Нет подходящих сессий"
+                setTextColor(MUTED)
+                setPadding(0, dp(14), 0, dp(14))
+            })
+            return
         }
-        box.addView(TextView(this).apply {
-            text = "Сессии"; textSize = 22f; setTextColor(Color.WHITE); setPadding(0, 0, 0, dp(10))
-        })
-        box.addView(Button(this).apply {
-            text = "+ Новый чат"
-            setTextColor(Color.WHITE)
-            background = buttonBg(ACCENT)
-            setOnClickListener {
-                dialog.dismiss()
-                startNewChat()
+        filtered.forEach { session ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = cardBg(BACKGROUND, 0xff283143.toInt())
+                setPadding(dp(10), dp(6), dp(6), dp(6))
             }
-        })
-        val filter = EditText(this).apply {
-            hint = "Поиск сессий…"; setTextColor(Color.WHITE); setHintTextColor(MUTED)
-        }
-        box.addView(filter)
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        box.addView(list)
-
-        fun populate(query: String = "") {
-            list.removeAllViews()
-            val filtered = uiState.sessions.filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(query, true) }
-            if (filtered.isEmpty()) {
-                list.addView(TextView(this).apply {
-                    text = "Нет подходящих сессий"
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            row.addView(Button(this).apply {
+                text = session.title ?: "Новый диалог"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                background = null
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setOnClickListener {
+                    drawer.closeDrawer(GravityCompat.START)
+                    loadSession(session)
+                }
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(Button(this).apply {
+                text = "✎"
+                contentDescription = "Переименовать сессию"
+                background = null
+                setTextColor(MUTED)
+                setOnClickListener { renameSession(session) }
+            }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            row.addView(Button(this).apply {
+                text = "×"
+                contentDescription = "Удалить сессию"
+                background = null
+                setTextColor(0xffff7d87.toInt())
+                setOnClickListener { deleteSession(session) }
+            }, LinearLayout.LayoutParams(dp(40), dp(40)))
+            card.addView(row)
+            if (!session.preview.isNullOrBlank()) {
+                card.addView(TextView(this).apply {
+                    text = session.preview
+                    textSize = 12f
                     setTextColor(MUTED)
-                    setPadding(0, dp(14), 0, dp(14))
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(40), dp(2))
                 })
             }
-            filtered.forEach { session ->
-                val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-                row.addView(Button(this).apply {
-                    text = session.title ?: session.preview ?: "Новый диалог"
-                    setTextColor(Color.WHITE)
-                    background = null
-                    gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                    setOnClickListener { dialog.dismiss(); loadSession(session) }
-                }, LinearLayout.LayoutParams(0, -2, 1f))
-                row.addView(Button(this).apply {
-                    text = "✎"
-                    background = null
-                    setTextColor(MUTED)
-                    setOnClickListener { renameSession(session, dialog) }
-                })
-                row.addView(Button(this).apply {
-                    text = "×"
-                    background = null
-                    setTextColor(0xffff7d87.toInt())
-                    setOnClickListener { deleteSession(session, dialog) }
-                })
-                list.addView(row)
-            }
+            drawerSessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         }
-        filter.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { populate(s?.toString().orEmpty()) }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        })
-        populate()
-        dialog.setContentView(box)
-        dialog.window?.setLayout(dp(340), -1)
-        dialog.show()
     }
 
     private fun loadSessions() {
         val c = store.read() ?: return
-        lifecycleScope.launch { uiState.setSessions(SessionRepository().getSessions(BASE_URL, c)) }
+        lifecycleScope.launch {
+            uiState.setSessions(SessionRepository().getSessions(BASE_URL, c))
+            renderSessionList()
+        }
     }
 
     private fun loadSession(session: SessionItem) {
@@ -837,7 +1013,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun deleteSession(session: SessionItem, dialog: Dialog) {
+    private fun deleteSession(session: SessionItem) {
         val c = store.read() ?: return
         lifecycleScope.launch {
             if (SessionRepository().deleteSession(BASE_URL, c, session.id)) {
@@ -847,13 +1023,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     uiState.startNewSession()
                     currentSessionId = null
                 }
-                dialog.dismiss()
-                showSessions()
+                renderSessionList()
             }
         }
     }
 
-    private fun renameSession(session: SessionItem, dialog: Dialog) {
+    private fun renameSession(session: SessionItem) {
         val c = store.read() ?: return
         val nameInput = EditText(this).apply { setText(session.title.orEmpty()); setSingleLine(true); setTextColor(Color.WHITE) }
         android.app.AlertDialog.Builder(this)
@@ -865,8 +1040,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     lifecycleScope.launch {
                         if (SessionRepository().renameSession(BASE_URL, c, session.id, title)) {
                             loadSessions()
-                            dialog.dismiss()
-                            showSessions()
                         }
                     }
                 }
