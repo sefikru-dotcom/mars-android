@@ -5,6 +5,10 @@ import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.GoalContinuation
+import ru.mars.network.model.GoalUpdate
+import ru.mars.network.model.SessionTitleUpdate
+import ru.mars.network.model.StreamSideEvent
 import ru.mars.network.model.TodoSnapshot
 
 /**
@@ -22,7 +26,8 @@ import ru.mars.network.model.TodoSnapshot
  * - `clarify`         — `{clarify_id, question, choices_offered, session_id, requested_at,
  *   timeout_seconds, expires_at}` → [ChatEvent.ClarifyRequired] preserving the structured payload
  *   required by `POST /api/clarify/respond`.
- * - `title`           — `{session_id, title}`; re-binds the session id ([ChatEvent.SessionBound]).
+ * - `title`           — `{session_id, title}`; re-binds the session id ([ChatEvent.SessionBound]);
+ *   the title TEXT has no sealed carrier and travels via [sideEvent] → [SessionTitleUpdate].
  * - `warning`         — `{type, message}` non-fatal notice (e.g. provider fallback).
  * - `pending_steer_leftover` — `{session_id, text}`: steer text the agent never consumed; typed as [ru.mars.network.model.ChatEvent.SteerLeftover].
  * - `metering`        — `{tps, tps_available, estimated, high, low, active, session_id, usage: {input_tokens,
@@ -42,7 +47,8 @@ object StreamEventMapper {
         val obj = parseObject(payload)
         return when (eventName?.trim()?.ifEmpty { null }) {
             "session", "session_bound" -> sessionId(obj, payload)?.let { ChatEvent.SessionBound(it) }
-            // {session_id, title}: the title text has no carrier in ChatEvent; keep the session binding.
+            // {session_id, title}: keep the session binding; the title TEXT has no sealed
+            // carrier and is delivered via [sideEvent] → [SessionTitleUpdate].
             "title" -> sessionId(obj, payload)?.let { ChatEvent.SessionBound(it) }
             "done", "stream_end", "cancel" -> ChatEvent.Done
             "error", "apperror" -> ChatEvent.Error(errorMessage(obj, payload))
@@ -59,9 +65,10 @@ object StreamEventMapper {
             "status", "phase", "compressing", "compressed" -> phase(obj, payload, eventName)
             "metering", "context", "context_usage", "usage" -> contextUsage(obj)
             "token", "delta", "chunk", "message", null -> chunk(obj, payload, eventId)
-            // Unknown frames (state_saved, goal, ...) carry no chat content;
+            // Unknown frames (state_saved, ...) carry no chat content;
             // `todo_state` is deliberately NOT mapped onto ChatEvent — it is
-            // delivered via [todoState] on the side channel (see below).
+            // delivered via [todoState] on the side channel (see below), and the
+            // `title` text / `goal` / `goal_continue` frames travel via [sideEvent].
             else -> null
         }
     }
@@ -87,6 +94,78 @@ object StreamEventMapper {
      */
     fun todoState(eventName: String?, payload: String): TodoSnapshot? =
         if (eventName?.trim() == "todo_state") TodoStateParser.parsePayload(payload) else null
+
+    /**
+     * SSE metadata frames with no sealed [ChatEvent] carrier → typed
+     * [StreamSideEvent] for the `ChatRepository.onSideEvent` transport callback
+     * (same delivery pattern as [todoState]), or null for any other frame.
+     *
+     * Handled frames (verified against hermes-webui api/streaming.py):
+     * - `title` → [SessionTitleUpdate]: `{session_id, title}` — the title text
+     *   [ChatEvent.SessionBound] drops. Blank/missing title → null (nothing to
+     *   deliver; the session binding itself still flows through [map]).
+     * - `goal` → [GoalUpdate]: `{session_id, state, message, message_key,
+     *   message_args?, decision?}` with `state` ∈ `evaluating`/`continuing`/
+     *   `idle` preserved verbatim.
+     * - `goal_continue` → [GoalContinuation]: `{session_id, continuation_prompt,
+     *   text, message, message_key, message_args, decision}` (`text` is a wire
+     *   alias of `continuation_prompt`). DELIVERY ONLY — the continuation is
+     *   never auto-sent by the transport; queuing it as the next user message
+     *   is an explicit UI-layer decision (WebUI /goal parity).
+     *
+     * Independent of [map]: a `title` frame yields BOTH [ChatEvent.SessionBound]
+     * (via [map]) and a [SessionTitleUpdate] (via this function).
+     */
+    fun sideEvent(eventName: String?, payload: String): StreamSideEvent? {
+        val name = eventName?.trim()
+        if (name != "title" && name != "goal" && name != "goal_continue") return null
+        val obj = parseObject(payload) ?: return null
+        return when (name) {
+            "title" -> stringField(obj, "title")
+                ?.let { SessionTitleUpdate(sessionId(obj, payload), it) }
+            "goal" -> goalUpdate(obj, payload)
+            else -> goalContinuation(obj, payload)
+        }
+    }
+
+    /**
+     * SSE `goal` → [GoalUpdate]. A frame without `state` is tolerated only when
+     * it still carries a message; a frame with neither is dropped (null).
+     */
+    private fun goalUpdate(obj: Map<String, Any?>, payload: String): GoalUpdate? {
+        val state = stringField(obj, "state")
+        val message = stringField(obj, "message")
+        if (state == null && message == null) return null
+        return GoalUpdate(
+            sessionId = sessionId(obj, payload),
+            state = state.orEmpty(),
+            message = message,
+            messageKey = stringField(obj, "message_key"),
+            messageArgs = stringList(obj["message_args"]),
+            decisionJson = decisionJson(obj),
+        )
+    }
+
+    /**
+     * SSE `goal_continue` → [GoalContinuation]. `continuation_prompt` is
+     * canonical, `text` is the wire alias; a frame with neither carries no
+     * continuation and is dropped (null).
+     */
+    private fun goalContinuation(obj: Map<String, Any?>, payload: String): GoalContinuation? {
+        val prompt = stringField(obj, "continuation_prompt") ?: stringField(obj, "text") ?: return null
+        return GoalContinuation(
+            sessionId = sessionId(obj, payload),
+            continuationPrompt = prompt,
+            message = stringField(obj, "message"),
+            messageKey = stringField(obj, "message_key"),
+            messageArgs = stringList(obj["message_args"]),
+            decisionJson = decisionJson(obj),
+        )
+    }
+
+    /** Raw compact JSON of the opaque `decision` object, null when absent. */
+    private fun decisionJson(obj: Map<String, Any?>): String? =
+        obj["decision"]?.let { jsonValue(it).takeIf(String::isNotBlank) }
 
     /**
      * Parses the context-window portion of a `metering`/`usage` frame

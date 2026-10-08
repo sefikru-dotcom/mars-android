@@ -80,6 +80,9 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
                 // Cold `todo_state`: parsing lives in ONE place shared with the
                 // live SSE path (TodoStateParser; contract documented there).
                 TodoStateParser.parse(s["todo_state"] as? Map<*, *>),
+                // Live workspace path (Session.compact() `workspace`); absent on
+                // older payloads → null ("server default"), backward compatible.
+                workspace = string(s, "workspace"),
             )
         }
 
@@ -118,6 +121,11 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
                             string(session, "title"),
                             string(session, "created_at", "createdAt"),
                             string(session, "updated_at", "updatedAt"),
+                            // The server resolves the new session's workspace at
+                            // creation (profile default or args override) and
+                            // returns it in the session payload — surface it so
+                            // the caller can echo it on the first chat/start.
+                            workspace = string(session, "workspace"),
                         )
                     )
                 }

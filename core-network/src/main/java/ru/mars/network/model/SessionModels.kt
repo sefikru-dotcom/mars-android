@@ -131,4 +131,18 @@ data class SessionDetail(
     val activeTurn: ActiveTurnInfo = ActiveTurnInfo(),
     /** Latest settled todo snapshot (`todo_state`), `null` when the session never wrote todos. */
     val todoState: TodoSnapshot? = null,
+    /**
+     * The session's CURRENT server-side workspace path (`GET /api/session` →
+     * `session.workspace`, emitted by `Session.compact()`; also present on the
+     * `POST /api/session/new` response). This is the authoritative value the
+     * client echoes back as `ChatRepository.sendMessage(workspace = …)` on the
+     * next send and the source for the `[Workspace::v1: …]` sentinel
+     * ([WorkspacePrefix]). `null` when the server omitted the field (older
+     * payloads) — never guess a path; `null` means "server default".
+     *
+     * Note: `Session.compact()` also emits `created_workspace` (the immutable
+     * birth workspace, #6672) — [workspace] is the LIVE one that follows
+     * mid-session switches.
+     */
+    val workspace: String? = null,
 )

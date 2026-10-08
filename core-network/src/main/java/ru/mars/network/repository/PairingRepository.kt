@@ -38,16 +38,27 @@ class PairingRepository(
         ) { response -> PairingResponseParser.parse(response.body?.string().orEmpty()) }
     }
 
-    suspend fun pollPairingStatus(pairId: String, pollSecret: String): Result<PairingStatusResponse> = request {
+    /**
+     * `GET /api/v1/auth/device-pairings/status?pair_id=…` — the status endpoint is
+     * identified by `pair_id` ONLY.
+     *
+     * The deployed server (api/routes.py) REJECTS a poll secret on this endpoint:
+     * 400 `poll_secret is accepted only by exchange` when the request carries the
+     * `X-Hermes-Poll-Secret` header or a `poll_secret` query parameter. Therefore
+     * [pollSecret] is optional and UNUSED here — it exists only so existing
+     * call sites that still hold the secret keep compiling; it is never put on
+     * the wire. The secret is sent exclusively by [exchangePairing], as the JSON
+     * body field `poll_secret`.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun pollPairingStatus(pairId: String, pollSecret: String? = null): Result<PairingStatusResponse> = request {
         requireIdentifier(pairId, "pairId")
-        require(pollSecret.isNotBlank()) { "pollSecret must not be blank" }
         executeWithUnversionedFallback(
             primary = url("api", "v1", "auth", "device-pairings", "status"),
             fallback = url("api", "auth", "device-pairings", "status"),
             request = { endpoint ->
                 Request.Builder()
                     .url(endpoint.newBuilder().addQueryParameter("pair_id", pairId).build())
-                    .header("X-Hermes-Poll-Secret", pollSecret)
                     .get()
                     .build()
             },

@@ -28,6 +28,9 @@ class SessionCreateSessionTest {
             val outcome = SessionRepository().createSession(server.url("/").toString(), credential)
             assertTrue(outcome is CreateSessionOutcome.Success)
             assertEquals("abc123", (outcome as CreateSessionOutcome.Success).session.id)
+            // The creation response carries the server-resolved workspace — surfaced
+            // so the caller can echo it on the first chat/start.
+            assertEquals("/root/workspace", outcome.session.workspace)
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/api/session/new", request.path)
