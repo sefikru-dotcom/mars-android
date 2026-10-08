@@ -239,4 +239,81 @@ class TvChatSessionFlowTest {
         val result = flow.ensureSession(credential)
         assertEquals(TvSessionResult.Ready("minted-1"), result)
     }
+
+    // ---- turn lifecycle / stop control ---------------------------------------
+
+    @Test fun `beginTurn arms the stop control before the stream id arrives`() {
+        val (flow, _) = flowWith()
+        assertFalse(flow.canStop)
+        flow.beginTurn()
+        assertTrue(flow.canStop)
+        assertNull(flow.activeStreamId)
+    }
+
+    @Test fun `StreamStarted binds the stream id the stop control cancels`() {
+        val (flow, _) = flowWith()
+        flow.onEvent(ChatEvent.StreamStarted("st-42"))
+        assertEquals("st-42", flow.activeStreamId)
+        assertTrue(flow.canStop)
+    }
+
+    @Test fun `Done disarms the stop control and keeps the completion status`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-1"))
+        flow.onEvent(ChatEvent.Done)
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+        assertEquals("Ответ получен", flow.statusText)
+    }
+
+    @Test fun `Error disarms the stop control and keeps the error status`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-1"))
+        flow.onEvent(ChatEvent.Error("boom"))
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+        assertEquals("Ошибка: boom", flow.statusText)
+    }
+
+    @Test fun `endTurn clears turn state without touching the status line`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-1"))
+        flow.onEvent(ChatEvent.Thought("hmm"))
+        flow.endTurn()
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+        assertEquals("Марс размышляет…", flow.statusText)
+    }
+
+    @Test fun `markTurnStopped reports a server-confirmed cancel as stopped`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-1"))
+        flow.markTurnStopped(serverCancelled = true)
+        assertEquals(TvChatSessionFlow.STOPPED, flow.statusText)
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+    }
+
+    @Test fun `markTurnStopped without server confirmation says so honestly`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.markTurnStopped(serverCancelled = false)
+        assertEquals(TvChatSessionFlow.STOP_FAILED, flow.statusText)
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+    }
+
+    @Test fun `startNewChat also resets the turn state`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-9"))
+        flow.startNewChat()
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+        assertEquals("", flow.statusText)
+    }
 }
