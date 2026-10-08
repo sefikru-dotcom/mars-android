@@ -61,7 +61,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var statusView: TextView
     private val uiState = ChatUiState()
 
-    private lateinit var interactiveView: AlertDialogInteractiveView
+    private lateinit var interactiveView: MarsInteractiveView
     private lateinit var interactiveController: InteractiveRequestController
     private var stream: Job? = null
     private var currentSessionId: String? = null
@@ -93,7 +93,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
-        interactiveView = AlertDialogInteractiveView(this)
+        interactiveView = MarsInteractiveView(this)
         interactiveController = InteractiveRequestController(
             view = interactiveView,
             gateway = RepositoryInteractiveGateway(InteractiveRequestsRepository(), BASE_URL) { store.read() },
