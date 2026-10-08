@@ -29,6 +29,8 @@ object MarsTheme {
     const val BORDER = 0xff212634.toInt()
     const val BORDER_SUBTLE = 0xff171c26.toInt()
     const val BORDER_MUTED = 0xff283042.toInt()
+    /** Thin hairline border for floating modal surfaces (dialogs, sheets). */
+    const val BORDER_DIALOG = 0xff1e2433.toInt()
     
     // Accent Ruby
     const val ACCENT = 0xffef4444.toInt()
