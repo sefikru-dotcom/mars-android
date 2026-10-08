@@ -6,6 +6,7 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.TodoSnapshot
 
 /** UI model for the rich chat transcript. Kept platform independent for unit tests. */
 enum class ChatStatus { IDLE, TYPING, RECEIVED, ERROR }
@@ -54,6 +55,12 @@ class ChatUiState {
     /** Latest context-window fill level from `metering` frames; null until the server reports one. */
     var contextUsage: ChatEvent.ContextUsage? = null
         private set
+
+    /** Latest todo snapshot, shared by cold session load and live SSE updates. */
+    var todoState: TodoSnapshot? = null
+        private set
+
+    fun setTodoState(snapshot: TodoSnapshot?) { todoState = snapshot }
 
     /**
      * Session-scoped YOLO mode (autonomous run without blocking confirmations). Mirrors the
@@ -211,9 +218,9 @@ class ChatUiState {
     fun complete() { status = ChatStatus.RECEIVED; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
     fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 
