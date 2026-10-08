@@ -15,13 +15,24 @@ import kotlinx.coroutines.launch
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.repository.ChatRepository
+import ru.mars.network.repository.SessionRepository
 
 class TvChatActivity : AppCompatActivity() {
     private lateinit var messages: LinearLayout
     private lateinit var input: EditText
     private lateinit var send: Button
+    private lateinit var newChat: Button
+    private lateinit var statusView: TextView
+    private lateinit var contextView: TextView
     private var stream: Job? = null
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
+
+    /**
+     * Pure session + stream state (WebUI parity): chat/start requires a real
+     * session_id, so the flow mints one via POST /api/session/new before the
+     * first send and formats Thought/ToolCall/ContextUsage into TV status text.
+     */
+    private val sessionFlow = TvChatSessionFlow(SessionRepository(), BASE_URL)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,8 +40,13 @@ class TvChatActivity : AppCompatActivity() {
         messages = findViewById(R.id.messages)
         input = findViewById(R.id.messageInput)
         send = findViewById(R.id.sendButton)
-        findViewById<Button>(R.id.backButton).setOnClickListener { finish() }
-        TvFocusLift.attachAll(input, send, findViewById(R.id.backButton))
+        newChat = findViewById(R.id.newChatButton)
+        statusView = findViewById(R.id.statusText)
+        contextView = findViewById(R.id.contextText)
+        val back = findViewById<Button>(R.id.backButton)
+        back.setOnClickListener { finish() }
+        newChat.setOnClickListener { startNewChat() }
+        TvFocusLift.attachAll(input, send, newChat, back)
         send.setOnClickListener { sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
         input.requestFocus()
@@ -41,8 +57,6 @@ class TvChatActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private var currentSessionId: String? = null
-
     private fun sendMessage(): Boolean {
         val text = input.text.toString().trim()
         if (text.isEmpty() || stream?.isActive == true) return false
@@ -51,26 +65,70 @@ class TvChatActivity : AppCompatActivity() {
         append("Вы", text, isUser = true)
         val answer = append("Марс", "", isUser = false)
         send.isEnabled = false
+        sessionFlow.beginTurn()
+        renderStatus()
         stream = lifecycleScope.launch {
             try {
-                ChatRepository().sendMessage(BASE_URL, credential, text, currentSessionId).collect { event ->
-                    when (event) {
-                        is ChatEvent.SessionBound -> currentSessionId = event.sessionId
-                        is ChatEvent.Chunk -> {
-                            answer.text = "${answer.text.toString().removePrefix("Марс: ")}${event.text}"
-                            scrollDown()
-                        }
-                        ChatEvent.Done -> Unit
-                        is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
-                        else -> Unit
+                // Preflight: the server never creates sessions — a null id must not
+                // reach chat/start; the flow reuses the bound id or mints a new one.
+                when (val ensured = sessionFlow.ensureSession(credential)) {
+                    is TvSessionResult.Failed -> {
+                        answer.text = "Сессия не создана: ${ensured.message}"
+                        return@launch
                     }
+                    is TvSessionResult.Ready -> renderStatus()
                 }
+                ChatRepository().sendMessage(BASE_URL, credential, text, sessionFlow.sessionId)
+                    .collect { event ->
+                        sessionFlow.onEvent(event)
+                        when (event) {
+                            is ChatEvent.Chunk -> {
+                                answer.text = "${answer.text.toString().removePrefix("Марс: ")}${event.text}"
+                                scrollDown()
+                            }
+                            is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
+                            else -> Unit
+                        }
+                        renderStatus()
+                    }
             } finally {
+                renderStatus()
                 send.isEnabled = true
                 input.requestFocus()
             }
         }
         return true
+    }
+
+    /** «Новый чат» from the header: aborts any live stream and resets session + transcript. */
+    private fun startNewChat() {
+        stream?.cancel()
+        stream = null
+        sessionFlow.startNewChat()
+        messages.removeAllViews()
+        send.isEnabled = true
+        renderStatus()
+        input.text.clear()
+        input.requestFocus()
+    }
+
+    /**
+     * Header status strip: live reasoning/tool status line plus the context-fill pill
+     * (green <=50%, orange <=75%, red above — WebUI ring parity). Both hide when unknown.
+     */
+    private fun renderStatus() {
+        val status = sessionFlow.statusText
+        statusView.text = status
+        statusView.visibility = if (status.isEmpty()) View.GONE else View.VISIBLE
+        val usageText = sessionFlow.contextUsageText
+        contextView.text = usageText.orEmpty()
+        contextView.visibility = if (usageText == null) View.GONE else View.VISIBLE
+        val percent = sessionFlow.contextUsage?.percent ?: 0
+        contextView.setTextColor(ContextCompat.getColor(this, when {
+            percent > 75 -> R.color.mars_status_error
+            percent > 50 -> R.color.mars_status_warning
+            else -> R.color.mars_status_online
+        }))
     }
 
     /**
