@@ -58,6 +58,8 @@ import ru.mars.network.repository.ModelsRepository
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
+import ru.mars.network.repository.ReasoningRepository
+import ru.mars.network.repository.ReasoningStatusResult
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.SessionYoloRepository
 import ru.mars.network.repository.YoloLookup
@@ -90,6 +92,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var explicitStatus: String? = null
     private lateinit var modelSelection: ModelSelection
     private var modelBtn: Button? = null
+    private lateinit var reasoningSelection: ReasoningEffortSelection
+    private var reasoningBtn: Button? = null
     private lateinit var activityModeSelection: ActivityModeSelection
     private var activityModeBtn: Button? = null
     private lateinit var workspaceSelection: WorkspaceSelection
@@ -141,6 +145,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             Toast.makeText(this, if (enabled) "YOLO включён — Марс работает без подтверждений" else "YOLO выключен", Toast.LENGTH_SHORT).show()
         }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
+        reasoningSelection = ReasoningEffortSelection(PrefsReasoningChoiceStorage(getSharedPreferences("mars-reasoning-choice", MODE_PRIVATE)))
         activityModeSelection = ActivityModeSelection(PrefsActivityModeStorage(getSharedPreferences("mars-activity-mode", MODE_PRIVATE)))
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
@@ -187,6 +192,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         MarsMusicPlayer.registerListener(this)
         loadSessions()
         refreshModelCatalog()
+        refreshReasoningStatus()
         loadWorkspaces()
     }
 
@@ -431,6 +437,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         titleRow.addView(modelBtn, LinearLayout.LayoutParams(-2, -2))
+        reasoningBtn = Button(this).apply {
+            text = "· Авто"
+            textSize = 11f
+            contentDescription = "Уровень размышлений"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            // Hidden until the server says this model has an effort ladder (unknown state is safe).
+            visibility = View.GONE
+            setOnClickListener { chooseReasoningEffort() }
+        }
+        titleRow.addView(reasoningBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
         activityModeBtn = Button(this).apply {
             text = "· ${activityModeSelection.buttonLabel()}"
             textSize = 11f
@@ -1673,6 +1695,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (picked != null) {
                         updateModelButton()
                         statusView.text = "Модель: ${picked.modelId}"
+                        // The effort ladder is per-model: re-read it after a model change.
+                        refreshReasoningStatus()
                     }
                 }
                 .show()
@@ -1692,6 +1716,100 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun updateModelButton() {
         modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
+    }
+
+    /**
+     * Reasoning-effort chip (WebUI composer-chip parity, static/ui.js). The ladder is
+     * server-driven (`GET /api/reasoning` → `supported_efforts` for the active model);
+     * an explicit pick is persisted server-side via `POST /api/reasoning` and only then
+     * recorded locally — `chat/start` itself carries NO reasoning field: the server
+     * resolves the effort per turn from its own session/override/config state.
+     */
+    private fun chooseReasoningEffort() {
+        val c = store.read()
+        if (c == null) { statusView.text = "Уровень размышлений недоступен: нет авторизации"; return }
+        lifecycleScope.launch {
+            statusView.text = "Загружаю уровни размышлений…"
+            val model = modelSelection.current
+            val fetched = withContext(Dispatchers.IO) {
+                ReasoningRepository().fetchStatus(BASE_URL, c, model?.modelId, model?.providerId, currentSessionId)
+            }
+            when (fetched) {
+                is ReasoningStatusResult.Status -> reasoningSelection.applyStatus(fetched.status)
+                is ReasoningStatusResult.Failed -> {
+                    reasoningSelection.applyStatus(null)
+                    updateReasoningButton()
+                    statusView.text = "Уровень размышлений недоступен: ${fetched.message}"
+                    return@launch
+                }
+            }
+            updateReasoningButton()
+            val options = reasoningSelection.options()
+            if (options.isEmpty()) {
+                statusView.text = "У этой модели нет уровней размышлений"
+                return@launch
+            }
+            val labels = options.map { it.label }.toTypedArray()
+            val effective = reasoningSelection.effectiveEffort()
+            val checked = options.indexOfFirst { it.effort == effective }
+            android.app.AlertDialog.Builder(this@ChatActivity)
+                .setTitle("Уровень размышлений")
+                .setSingleChoiceItems(labels, checked) { d, which ->
+                    d.dismiss()
+                    applyReasoningEffort(options[which].effort)
+                }
+                .show()
+        }
+    }
+
+    /** POST /api/reasoning; the pick is persisted locally only after the server confirmed it. */
+    private fun applyReasoningEffort(effort: String?) {
+        val c = store.read()
+        if (c == null) { statusView.text = "Уровень размышлений недоступен: нет авторизации"; return }
+        lifecycleScope.launch {
+            statusView.text = "Сохраняю уровень размышлений…"
+            val model = modelSelection.current
+            val result = withContext(Dispatchers.IO) {
+                ReasoningRepository().setEffort(BASE_URL, c, effort, model?.modelId, model?.providerId, currentSessionId)
+            }
+            when (result) {
+                is ReasoningStatusResult.Status -> {
+                    reasoningSelection.select(effort)
+                    reasoningSelection.applyStatus(result.status)
+                    updateReasoningButton()
+                    statusView.text = "Уровень размышлений: ${reasoningSelection.label(result.status.reasoningEffort)}"
+                }
+                is ReasoningStatusResult.Failed ->
+                    statusView.text = "Не удалось изменить уровень размышлений: ${result.message}"
+            }
+        }
+    }
+
+    /**
+     * Silent status sync (startup and after model picks): on any failure the chip hides —
+     * an unknown reasoning state must never show a stale ladder.
+     */
+    private fun refreshReasoningStatus() {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val model = modelSelection.current
+            val fetched = withContext(Dispatchers.IO) {
+                ReasoningRepository().fetchStatus(BASE_URL, c, model?.modelId, model?.providerId, currentSessionId)
+            }
+            when (fetched) {
+                is ReasoningStatusResult.Status -> reasoningSelection.applyStatus(fetched.status)
+                is ReasoningStatusResult.Failed -> reasoningSelection.applyStatus(null)
+            }
+            updateReasoningButton()
+        }
+    }
+
+    private fun updateReasoningButton() {
+        val label = reasoningSelection.buttonLabel()
+        reasoningBtn?.apply {
+            visibility = if (label == null) View.GONE else View.VISIBLE
+            text = "· $label"
+        }
     }
 
     /** Activity display mode picker — parity with the WebUI header switch. */
