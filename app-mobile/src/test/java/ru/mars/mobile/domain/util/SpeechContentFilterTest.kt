@@ -1,4 +1,4 @@
-package ru.mars.mobile
+package ru.mars.mobile.domain.util
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -228,5 +228,83 @@ class SpeechContentFilterTest {
         listOf("#", "**", "```", "|", "https://").forEach {
             assertFalse("output must not contain «$it»", out.contains(it))
         }
+    }
+
+    // --- emoji and decorative glyphs -------------------------------------------------------------
+
+    @Test
+    fun `emoji are dropped but sentence words kept`() {
+        val out = filter.filterForSpeech("Готово ✅\n🚀 Запустил **деплой** ⭐")
+        assertFalse(out.contains("✅"))
+        assertFalse(out.contains("🚀"))
+        assertFalse(out.contains("⭐"))
+        assertTrue(out.contains("Готово"))
+        assertTrue(out.contains("Запустил деплой"))
+    }
+
+    @Test
+    fun `zwj sequences and variation selectors leave no residue`() {
+        val out = filter.filterForSpeech("Отчёт 👨\u200D💻 обновлён ✔\uFE0F")
+        assertFalse(out.contains("👨"))
+        assertFalse(out.contains("💻"))
+        assertFalse(out.contains("✔"))
+        assertFalse(out.contains("\u200D"))
+        assertFalse(out.contains("\uFE0F"))
+        assertTrue(out.contains("Отчёт"))
+        assertTrue(out.contains("обновлён"))
+    }
+
+    @Test
+    fun `unicode arrow glyph is removed`() {
+        val out = filter.filterForSpeech("было → стало")
+        assertFalse(out.contains("→"))
+        assertTrue(out.contains("было"))
+        assertTrue(out.contains("стало"))
+    }
+
+    @Test
+    fun `emoji-only message yields empty speakable text`() {
+        assertEquals("", filter.filterForSpeech("✅🎉👍"))
+    }
+
+    @Test
+    fun `code-only answer with emoji still gets the dedicated sentence`() {
+        val out = filter.filterForSpeech("✅\n```sh\n./deploy.sh\n```")
+        assertEquals(SpeechContentFilter.CODE_ONLY_REPLY, out)
+    }
+
+    // --- more markdown edge cases ------------------------------------------------------------------
+
+    @Test
+    fun `link with empty anchor leaves no brackets`() {
+        val out = filter.filterForSpeech("Смотри [](https://x.ru) сюда.")
+        assertFalse(out.contains("["))
+        assertFalse(out.contains("]"))
+        assertFalse(out.contains("x.ru"))
+        assertTrue(out.contains("Смотри"))
+        assertTrue(out.contains("сюда."))
+    }
+
+    @Test
+    fun `reference-style link keeps anchor text only`() {
+        val out = filter.filterForSpeech("Читай [доки][d] и всё.\n\n[d]: https://mars.ru/docs")
+        assertTrue(out.contains("доки"))
+        assertFalse(out.contains("[d]"))
+        assertFalse(out.contains("mars.ru"))
+    }
+
+    @Test
+    fun `double-backtick inline code keeps clean flag name`() {
+        val out = filter.filterForSpeech("Флаг ``--force`` работает.")
+        assertFalse(out.contains("`"))
+        assertTrue(out.contains("--force"))
+    }
+
+    @Test
+    fun `numbered list content is preserved`() {
+        val out = filter.filterForSpeech("План:\n1. первое\n2. второе")
+        assertTrue(out.contains("первое"))
+        assertTrue(out.contains("второе"))
+        assertFalse(out.contains("#"))
     }
 }

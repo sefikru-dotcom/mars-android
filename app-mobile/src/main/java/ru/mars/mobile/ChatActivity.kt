@@ -39,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.domain.util.SpeechContentFilter
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
