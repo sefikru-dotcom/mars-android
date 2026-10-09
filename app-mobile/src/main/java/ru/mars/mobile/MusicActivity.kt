@@ -4,9 +4,13 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -39,11 +43,18 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var artwork: ImageView
     private var tracks = emptyList<MusicTrack>()
     private var job: Job? = null
-    private var favoritesTab = false
+
+    /** Which pill tab is active: chart, favorites, or the live playback queue. */
+    private enum class MusicTab { CHART, FAVORITES, QUEUE }
+
+    private var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
     private val heartButtons = HashMap<String, MutableList<ImageButton>>()
     private lateinit var chartTabButton: TextView
     private lateinit var favoritesTabButton: TextView
+    private lateinit var queueTabButton: TextView
+    private lateinit var searchInput: EditText
+    private lateinit var clearSearchBtn: ImageButton
     private lateinit var statusText: TextView
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
@@ -115,15 +126,17 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         header.addView(titleHeader, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(header)
 
-        // Tabs: Чарт / Избранное (pill toggles)
+        // Tabs: Чарт / Избранное / Очередь (pill toggles)
         val tabRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        chartTabButton = tabButton("Чарт") { selectTab(false) }
-        favoritesTabButton = tabButton("Избранное") { selectTab(true) }
+        chartTabButton = tabButton("Чарт") { selectTab(MusicTab.CHART) }
+        favoritesTabButton = tabButton("Избранное") { selectTab(MusicTab.FAVORITES) }
+        queueTabButton = tabButton("Очередь") { selectTab(MusicTab.QUEUE) }
         tabRow.addView(chartTabButton, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
-        tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(0, -2, 1f))
+        tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
+        tabRow.addView(queueTabButton, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(tabRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Transient status line (favorites/queue feedback), hidden by default
@@ -144,7 +157,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 14)
             setPadding(dp(12), dp(4), dp(8), dp(4))
         }
-        val searchInput = EditText(this).apply {
+        searchInput = EditText(this).apply {
             hint = "Поиск трека или исполнителя…"
             setSingleLine()
             setTextColor(MarsTheme.TEXT_STRONG)
@@ -152,8 +165,47 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             textSize = 15f
             background = null
             setPadding(dp(4), dp(10), dp(4), dp(10))
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    search(searchInput.text.toString())
+                    hideKeyboard()
+                    true
+                } else {
+                    false
+                }
+            }
         }
         searchContainer.addView(searchInput, LinearLayout.LayoutParams(0, -2, 1f))
+
+        // Clear-search (visible only while the field has text); reloads the active tab
+        clearSearchBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_close,
+            "Очистить поиск",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 28
+        ).apply {
+            visibility = View.GONE
+            setOnClickListener {
+                searchInput.setText("")
+                visibility = View.GONE
+                hideKeyboard()
+                reloadActiveTab()
+            }
+        }
+        searchContainer.addView(
+            clearSearchBtn,
+            LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(6) }
+        )
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                clearSearchBtn.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         val searchBtn = MarsTheme.circleIconButton(
             this,
@@ -336,6 +388,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             )
             seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
             updateQueueIcons()
+            // Keep the queue tab in sync with player state (active track, play/pause,
+            // auto-advance): re-render it whenever the queue view is on screen.
+            if (currentTab == MusicTab.QUEUE && ::results.isInitialized) renderQueue()
             track?.thumbnail?.let {
                 artwork.visibility = View.VISIBLE
                 ImageLoader.load(it, artwork)
@@ -548,7 +603,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setTextColor(MarsTheme.TEXT_MUTED)
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
-        setPadding(dp(12), dp(9), dp(12), dp(9))
+        isSingleLine = true
+        setPadding(dp(8), dp(9), dp(8), dp(9))
         isClickable = true
         isFocusable = true
         setOnClickListener { onClick() }
@@ -563,17 +619,166 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 MarsTheme.pill(this, MarsTheme.SURFACE)
             }
         }
-        style(chartTabButton, !favoritesTab)
-        style(favoritesTabButton, favoritesTab)
+        style(chartTabButton, currentTab == MusicTab.CHART)
+        style(favoritesTabButton, currentTab == MusicTab.FAVORITES)
+        style(queueTabButton, currentTab == MusicTab.QUEUE)
     }
 
-    private fun selectTab(favorites: Boolean) {
-        if (favoritesTab == favorites) return
-        favoritesTab = favorites
+    private fun selectTab(tab: MusicTab) {
+        if (currentTab == tab) return
+        currentTab = tab
         updateTabStyles()
         showStatus(null)
         job?.cancel()
-        if (favorites) loadFavorites() else loadHome()
+        when (tab) {
+            MusicTab.CHART -> loadHome()
+            MusicTab.FAVORITES -> loadFavorites()
+            MusicTab.QUEUE -> renderQueue()
+        }
+    }
+
+    /** Re-loads the content of the currently active tab (used by the clear-search button). */
+    private fun reloadActiveTab() {
+        showStatus(null)
+        job?.cancel()
+        when (currentTab) {
+            MusicTab.CHART -> loadHome()
+            MusicTab.FAVORITES -> loadFavorites()
+            MusicTab.QUEUE -> renderQueue()
+        }
+    }
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+        imm.hideSoftInputFromWindow(searchInput.windowToken, 0)
+    }
+
+    /**
+     * Renders the live playback queue from [MarsMusicPlayer]: header with a clear action,
+     * then one row per queued track. The active track gets an accent border and accent
+     * title; tapping a row jumps to it, the trash button removes it from the queue.
+     */
+    private fun renderQueue() {
+        tracks = emptyList() // stale chart cards must not stay clickable under the queue
+        results.removeAllViews()
+        heartButtons.clear()
+
+        val queue = MarsMusicPlayer.tracks
+        if (queue.isEmpty()) {
+            results.addView(TextView(this).apply {
+                text = "Очередь воспроизведения пуста"
+                setTextColor(MarsTheme.TEXT_MUTED)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(32), 0, dp(32))
+            })
+            return
+        }
+
+        // Header: queue size + clear action
+        val headerRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), dp(10))
+        }
+        headerRow.addView(TextView(this).apply {
+            text = "В очереди: ${queue.size}"
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        val clearQueueBtn = TextView(this).apply {
+            text = "Очистить очередь"
+            textSize = 13f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT_BG, 10, MarsTheme.ACCENT)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                MarsMusicPlayer.clearQueue()
+                renderQueue()
+            }
+        }
+        headerRow.addView(clearQueueBtn, LinearLayout.LayoutParams(-2, -2))
+        results.addView(headerRow, LinearLayout.LayoutParams(-1, -2))
+
+        val activeIndex = MarsMusicPlayer.index
+        queue.forEachIndexed { i, t ->
+            val active = i == activeIndex
+            val row = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(8), dp(8), dp(8))
+                background = MarsTheme.card(
+                    this@MusicActivity,
+                    if (active) MarsTheme.ACCENT_BG else MarsTheme.SURFACE,
+                    radiusDp = 12,
+                    strokeColor = if (active) MarsTheme.ACCENT else MarsTheme.BORDER
+                )
+                setOnClickListener { MarsMusicPlayer.playQueueAt(i) }
+            }
+
+            val image = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
+                clipToOutline = true
+            }
+            val thumb = t.thumbnail
+            if (!thumb.isNullOrBlank()) ImageLoader.load(thumb, image)
+            row.addView(image, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+            val trackInfo = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), 0, dp(8), 0)
+            }
+            trackInfo.addView(TextView(this).apply {
+                text = t.title
+                textSize = 15f
+                setTextColor(if (active) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_STRONG)
+                typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            trackInfo.addView(TextView(this).apply {
+                text = if (active && MarsMusicPlayer.isPlaying) "Сейчас играет · ${t.artist}" else "${t.artist} · ${t.duration}"
+                textSize = 12f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
+
+            // Quick jump to this queue position
+            val jumpBtn = MarsTheme.circleIconButton(
+                this,
+                R.drawable.ic_play,
+                "Перейти к треку",
+                bg = if (active) MarsTheme.ACCENT else MarsTheme.SURFACE_SUBTLE,
+                iconTint = if (active) Color.WHITE else MarsTheme.ACCENT,
+                sizeDp = 34
+            ).apply {
+                setOnClickListener { MarsMusicPlayer.playQueueAt(i) }
+            }
+            row.addView(jumpBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+            // Remove this track from the queue
+            val removeBtn = MarsTheme.circleIconButton(
+                this,
+                R.drawable.ic_trash,
+                "Убрать из очереди",
+                bg = MarsTheme.SURFACE_SUBTLE,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 34
+            ).apply {
+                setOnClickListener {
+                    val removed = MarsMusicPlayer.removeFromQueue(i)
+                    if (removed != null) showStatus("Удалено из очереди: ${removed.title}")
+                    renderQueue()
+                }
+            }
+            row.addView(removeBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
+            results.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        }
     }
 
     private fun showStatus(message: String?) {
@@ -646,7 +851,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     favoriteIds -= track.id
                     refreshHeart(track.id)
                     showStatus("Удалено из избранного: ${track.title}")
-                    if (favoritesTab) {
+                    if (currentTab == MusicTab.FAVORITES) {
                         val rest = tracks.filterNot { it.id == track.id }
                         if (rest.isEmpty()) loadFavorites() else showTracks(rest)
                     }
