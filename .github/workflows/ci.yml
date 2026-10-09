@@ -36,8 +36,8 @@ jobs:
           cache: gradle
       - name: Make wrapper executable
         run: chmod +x ./gradlew
-      - name: Run core-network tests
-        run: ./gradlew --no-daemon --stacktrace :core-network:test :app-mobile:testDebugUnitTest
+      - name: Run core-network and TV/mobile tests
+        run: ./gradlew --no-daemon --stacktrace :core-network:test :app-tv:testDebugUnitTest :app-mobile:testDebugUnitTest
       - name: Assemble TV debug APK
         run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
       - name: Assemble mobile debug APK
