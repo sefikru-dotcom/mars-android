@@ -2,6 +2,8 @@ package ru.mars.mobile
 
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
 import ru.mars.network.model.MusicTrack
 
 /** Process-scoped player; its MediaPlayer survives Activity recreation and screen changes. */
@@ -18,8 +20,12 @@ object MarsMusicPlayer {
     /** Pure queue logic (order, shuffle, repeat, growth); the UI mirrors and toggles it. */
     val queueManager = MusicQueueManager()
 
-    /** Consecutive stream failures; circuit breaker so a broken queue can't retry forever. */
-    private var consecutiveFailures = 0
+    /** Pure retry/circuit-breaker decision core (backoff, error classification, skip streaks). */
+    private val retryPolicy = PlaybackRetryPolicy()
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var pendingRetry: Runnable? = null
+    /** Position the next prepared stream must seek to (mid-track retry); 0 = start over. */
+    private var retryResumeMs = 0
 
     @Volatile var currentTrack: MusicTrack? = null
         private set
@@ -51,7 +57,7 @@ object MarsMusicPlayer {
     @Synchronized
     fun playTrack(index: Int, queue: List<MusicTrack>) {
         if (index !in queue.indices) return
-        consecutiveFailures = 0
+        retryPolicy.onPlaybackReady()
         queueManager.setQueue(queue, index)
         syncQueueState()
         startCurrentTrack()
@@ -68,7 +74,7 @@ object MarsMusicPlayer {
         val shouldStart = queueManager.addToQueue(track)
         syncQueueState()
         if (shouldStart) {
-            consecutiveFailures = 0
+            retryPolicy.onPlaybackReady()
             startCurrentTrack()
         } else {
             notifyState()
@@ -91,8 +97,18 @@ object MarsMusicPlayer {
         return mode
     }
 
-    private fun startCurrentTrack() {
+    /**
+     * Prepares and starts the current queue track. [isRetry] marks a backoff retry of the
+     * SAME track scheduled by [handlePlaybackFailure]: it keeps the per-track retry budget
+     * and may resume from [retryResumeMs] instead of restarting the song.
+     */
+    private fun startCurrentTrack(isRetry: Boolean = false) {
         val track = queueManager.currentTrack ?: return
+        cancelPendingRetry()
+        if (!isRetry) {
+            retryPolicy.onTrackSelected()
+            retryResumeMs = 0
+        }
         currentPosition = 0
         duration = 0
         setPlaying(false)
@@ -100,8 +116,14 @@ object MarsMusicPlayer {
         mediaPlayer = MediaPlayer().apply {
             setAudioStreamType(AudioManager.STREAM_MUSIC)
             setOnPreparedListener {
-                consecutiveFailures = 0
+                retryPolicy.onPlaybackReady()
                 MarsMusicPlayer.duration = it.duration.coerceAtLeast(0)
+                val resume = retryResumeMs
+                retryResumeMs = 0
+                if (resume in 1 until it.duration) {
+                    it.seekTo(resume)
+                    MarsMusicPlayer.currentPosition = resume
+                }
                 MarsMusicPlayer.isPlaying = true
                 it.start()
                 notifyState()
@@ -109,15 +131,16 @@ object MarsMusicPlayer {
             }
             // Track finished: advance through the queue manager (honors shuffle/repeat).
             setOnCompletionListener { next() }
-            setOnErrorListener { _, _, _ ->
-                handlePlaybackFailure(track.id)
+            setOnErrorListener { _, what, extra ->
+                handlePlaybackFailure(track.id, what, extra)
                 true
             }
             try {
                 setDataSource("$BASE_URL/api/stream/${track.id}")
                 prepareAsync()
-            } catch (_: Exception) {
-                handlePlaybackFailure(track.id)
+            } catch (error: Exception) {
+                // setDataSource/prepareAsync threw: map onto the same decision path.
+                handlePlaybackFailure(track.id, PlaybackRetryPolicy.codeFor(error), 0)
             }
         }
         notifyState()
@@ -157,7 +180,7 @@ object MarsMusicPlayer {
     @Synchronized
     fun playQueueAt(index: Int) {
         if (queueManager.playAt(index) == null) return
-        consecutiveFailures = 0
+        retryPolicy.onPlaybackReady()
         syncQueueState()
         startCurrentTrack()
     }
@@ -179,7 +202,7 @@ object MarsMusicPlayer {
         if (queueManager.currentTrack == null || queueManager.isFinished) {
             stopPlayback()
         } else {
-            consecutiveFailures = 0
+            retryPolicy.onPlaybackReady()
             startCurrentTrack()
         }
         return removed
@@ -188,12 +211,14 @@ object MarsMusicPlayer {
     /** Stops playback and empties the queue; listeners see the cleared state. */
     @Synchronized
     fun clearQueue() {
+        cancelPendingRetry()
         mediaPlayer?.release()
         mediaPlayer = null
         setPlaying(false)
         currentPosition = 0
         duration = 0
-        consecutiveFailures = 0
+        retryResumeMs = 0
+        retryPolicy.onPlaybackReady()
         queueManager.clear()
         syncQueueState()
         notifyState()
@@ -230,31 +255,52 @@ object MarsMusicPlayer {
      * list itself is kept for the UI, and the next [enqueue] resumes playback.
      */
     private fun stopPlayback() {
+        cancelPendingRetry()
         mediaPlayer?.release()
         mediaPlayer = null
         setPlaying(false)
         currentPosition = 0
         duration = 0
+        retryResumeMs = 0
         queueManager.markFinished()
         syncQueueState() // currentTrack <- null (finished), tracks kept
         notifyState()
         notifyProgress()
     }
 
+    /**
+     * Stream failure entry point: asks [retryPolicy] (pure, unit-tested) what to do and
+     * applies the verdict — backoff retry of the same track (resuming mid-track when the
+     * failure happened during playback), skip to the next one, or stop on a full failed
+     * pass over the queue.
+     */
     @Synchronized
-    private fun handlePlaybackFailure(failedId: String) {
+    private fun handlePlaybackFailure(failedId: String, what: Int, extra: Int) {
         setPlaying(false)
         notifyState()
-        consecutiveFailures++
-        if (consecutiveFailures >= queueManager.size.coerceAtLeast(1)) {
-            // A full pass over the queue failed — stop instead of retrying forever.
-            consecutiveFailures = 0
-            stopPlayback()
-            return
+        // A player in the error state may throw on currentPosition; fall back to the last
+        // notified progress so a mid-track network drop can resume instead of restarting.
+        val position = runCatching { mediaPlayer?.currentPosition ?: currentPosition }
+            .getOrDefault(currentPosition)
+        when (val decision = retryPolicy.decide(what, extra, queueManager.size, position, duration)) {
+            is RetryDecision.RetryTrack -> {
+                // Release the broken player now; the retry re-prepares a fresh one.
+                retryResumeMs = decision.resumeFromMs
+                mediaPlayer?.release()
+                mediaPlayer = null
+                scheduleRetry(decision.delayMs)
+            }
+            RetryDecision.SkipTrack -> skipFailedTrack(failedId)
+            RetryDecision.Stop -> stopPlayback()
         }
+    }
+
+    /**
+     * Skips a track whose retry budget is spent. Repeat-one must not re-select the same
+     * broken stream: navigate once as if repeat were OFF, then restore the user's mode.
+     */
+    private fun skipFailedTrack(failedId: String) {
         if (queueManager.repeatMode == MusicQueueManager.RepeatMode.ONE && queueManager.currentTrack?.id == failedId) {
-            // Repeat-one must not endlessly retry the same broken stream: navigate once
-            // as if repeat were OFF, then restore the user's mode.
             queueManager.setRepeatMode(MusicQueueManager.RepeatMode.OFF)
             val moved = queueManager.next() != null
             queueManager.setRepeatMode(MusicQueueManager.RepeatMode.ONE)
@@ -262,11 +308,28 @@ object MarsMusicPlayer {
                 syncQueueState()
                 startCurrentTrack()
             } else {
-                consecutiveFailures = 0
                 stopPlayback()
             }
             return
         }
         next()
+    }
+
+    /** Posts the backoff retry on the main looper; at most one retry can be pending. */
+    private fun scheduleRetry(delayMs: Long) {
+        cancelPendingRetry()
+        val retry = Runnable {
+            synchronized(MarsMusicPlayer) {
+                pendingRetry = null
+                startCurrentTrack(isRetry = true)
+            }
+        }
+        pendingRetry = retry
+        mainHandler.postDelayed(retry, delayMs)
+    }
+
+    private fun cancelPendingRetry() {
+        pendingRetry?.let { mainHandler.removeCallbacks(it) }
+        pendingRetry = null
     }
 }
