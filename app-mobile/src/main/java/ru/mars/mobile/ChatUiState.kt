@@ -220,6 +220,20 @@ class ChatUiState {
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
     fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
+
+    /**
+     * Rows for the sessions drawer (WebUI parity #5244/#5305): delegated
+     * subagent children ([SessionItem.isSubagent]) are hidden from the main
+     * list by default — the WebUI sidebar stacks them under the parent's
+     * lineage and suppresses them when the parent is out of scope, so the
+     * flat mobile drawer must not promote them to top-level rows.
+     * [showSubagents] reveals them (drawer toggle, marked with a «субагент»
+     * badge); the currently-open session always stays visible so the active
+     * row never disappears mid-delegation.
+     */
+    fun drawerSessions(showSubagents: Boolean = false, currentSessionId: String? = null): List<SessionItem> =
+        sessions.filter { showSubagents || !it.isSubagent || it.id == currentSessionId }
+
     fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }

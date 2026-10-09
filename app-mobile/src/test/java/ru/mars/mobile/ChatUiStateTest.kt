@@ -117,4 +117,24 @@ class ChatUiStateTest {
         // Transcript trace only — the composer restore is an Activity-side concern.
         assertTrue(state.messages.last().thoughts.any { it.contains("Направление не доставлено") && it.contains("добавь тесты") })
     }
+
+    @Test fun drawerHidesSubagentSessionsByDefault() {
+        val state = ChatUiState()
+        val webui = SessionItem("w1", "Работа", sourceTag = "webui", sessionSource = "webui")
+        val sub = SessionItem("sub1", "Subagent Session", sourceTag = "subagent", rawSource = "subagent", sessionSource = "other", readOnly = true, parentSessionId = "w1")
+        state.setSessions(listOf(webui, sub))
+        // WebUI parity #5244/#5305: delegated children never surface as top-level rows.
+        assertEquals(listOf("w1"), state.drawerSessions().map { it.id })
+        // The toggle reveals them (the drawer marks them with a «субагент» badge).
+        assertEquals(listOf("w1", "sub1"), state.drawerSessions(showSubagents = true).map { it.id })
+    }
+
+    @Test fun drawerKeepsCurrentSessionVisibleEvenWhenSubagent() {
+        val state = ChatUiState()
+        val sub = SessionItem("sub1", "Subagent Session", sourceTag = "subagent", readOnly = true, parentSessionId = "w1")
+        val other = SessionItem("sub2", "Subagent Session", sourceTag = "subagent", readOnly = true, parentSessionId = "w1")
+        state.setSessions(listOf(sub, other))
+        // The open session's row must not disappear mid-delegation.
+        assertEquals(listOf("sub1"), state.drawerSessions(currentSessionId = "sub1").map { it.id })
+    }
 }

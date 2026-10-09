@@ -59,4 +59,47 @@ class SessionRepositoryTest {
             assertEquals("Hello", detail.messages.single().content)
         }
     }
+
+    /**
+     * `GET /api/sessions` provenance fields (Session.compact + state.db source
+     * overlay): delegated subagent children carry `source_tag`/`raw_source` ==
+     * "subagent", `read_only == true` and `parent_session_id`; [SessionItem.isSubagent]
+     * is the drawer's hide-by-default marker (WebUI parity #5244/#5305).
+     */
+    @Test fun parsesSubagentProvenanceFields() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                "{\"sessions\":[" +
+                    "{\"session_id\":\"sub1\",\"title\":\"Subagent Session\",\"source_tag\":\"subagent\",\"raw_source\":\"subagent\",\"session_source\":\"other\",\"source_label\":\"Subagent\",\"read_only\":true,\"parent_session_id\":\"parent1\",\"message_count\":52}," +
+                    "{\"session_id\":\"w1\",\"title\":\"Chat\",\"source_tag\":\"webui\",\"raw_source\":\"webui\",\"session_source\":\"webui\",\"source_label\":\"WebUI\",\"read_only\":false}" +
+                    "]}"
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sessions = repo.getSessions(server.url("/").toString(), c)
+            assertEquals(2, sessions.size)
+            val sub = sessions[0]
+            assertTrue(sub.isSubagent)
+            assertEquals("subagent", sub.sourceTag)
+            assertEquals("subagent", sub.rawSource)
+            assertEquals("other", sub.sessionSource)
+            assertEquals("Subagent", sub.sourceLabel)
+            assertTrue(sub.readOnly)
+            assertEquals("parent1", sub.parentSessionId)
+            val normal = sessions[1]
+            assertTrue(!normal.isSubagent)
+            assertNull(normal.parentSessionId)
+            assertTrue(!normal.readOnly)
+        }
+    }
+
+    /** Rows without provenance fields (older servers) are never subagents — backward compatible. */
+    @Test fun legacyRowsWithoutSourceAreNotSubagents() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"sessions\":[{\"session_id\":\"s1\",\"title\":\"Chat\"}]}"))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sessions = repo.getSessions(server.url("/").toString(), c)
+            assertTrue(!sessions.single().isSubagent)
+            assertNull(sessions.single().sourceTag)
+        }
+    }
 }
