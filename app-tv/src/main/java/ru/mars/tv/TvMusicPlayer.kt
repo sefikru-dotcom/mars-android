@@ -7,9 +7,15 @@ import ru.mars.network.model.MusicTrack
 /**
  * Process-wide (global) TV playback transport: a Kotlin object whose MediaPlayer survives
  * Activity recreation and screen changes (mobile MarsMusicPlayer parity). Music keeps
- * playing after the music screen closes — only an explicit [stop] (or a new [play], which
- * replaces the stream) tears the player down. The controller talks to it through the
- * [TvMusicTransport] seam, so unit tests never touch this Android code.
+ * playing after the music screen closes — only an explicit [stop] (or a new [play]/
+ * [playPlaylist], which replaces the stream) tears the player down. The controller talks
+ * to it through the [TvMusicTransport] seam, so unit tests never touch this Android code.
+ *
+ * Continuous playback: [playPlaylist] binds a whole list; when a track completes the
+ * transport auto-advances to its successor and goes idle once the list is exhausted. A
+ * dead stream is skipped to the successor as well, until one full pass over the playlist
+ * has failed (circuit breaker) — every navigation decision is delegated to the pure
+ * [TvPlaylistPolicy], which is what the unit tests cover.
  *
  * Stream URL contract: `GET {MUSIC_BASE_URL}/api/stream/{id}` — MusicRepository.getStreamUrl
  * parity. A dead/unreachable stream is recorded in [lastError] and never crashes the app.
@@ -31,19 +37,53 @@ object TvMusicPlayer : TvMusicTransport {
     var lastError: String? = null
         private set
 
+    /** Tracks bound for continuous playback (a single [play] binds a one-track list). */
+    @Volatile
+    var playlist: List<MusicTrack> = emptyList()
+        private set
+
+    /** Playlist position of [currentTrack]; -1 when idle. */
+    @Volatile
+    var currentIndex: Int = -1
+        private set
+
     private var mediaPlayer: MediaPlayer? = null
+
+    /** Consecutive stream failures; circuit-breaker input for [TvPlaylistPolicy.skipAfterFailure]. */
+    private var consecutiveFailures = 0
 
     /**
      * Screen observer (UI thread only): fired after every transport state transition —
-     * play/stop, prepared, completion, stream error — so the music screen can refresh its
-     * now-playing line and row highlight while audio state changes asynchronously.
-     * Null when no screen is attached; the transport never blocks on observers.
+     * play/stop, prepared, completion, auto-advance, stream error — so the music screen
+     * can refresh its now-playing line and row highlight while audio state changes
+     * asynchronously. Null when no screen is attached; the transport never blocks on
+     * observers.
      */
     @Volatile
     var onTransportChanged: (() -> Unit)? = null
 
     @Synchronized
     override fun play(track: MusicTrack) {
+        playPlaylistInternal(listOf(track), 0)
+    }
+
+    @Synchronized
+    override fun playPlaylist(tracks: List<MusicTrack>, startIndex: Int) {
+        val index = TvPlaylistPolicy.startIndex(tracks.size, startIndex) ?: return
+        playPlaylistInternal(tracks, index)
+    }
+
+    /** Binds the playlist and starts the track at [startIndex] (already sanitized). */
+    private fun playPlaylistInternal(tracks: List<MusicTrack>, startIndex: Int) {
+        playlist = tracks
+        currentIndex = startIndex
+        consecutiveFailures = 0
+        startCurrentTrack()
+    }
+
+    /** (Re)builds the MediaPlayer for [playlist]@[currentIndex]; callers hold the lock. */
+    private fun startCurrentTrack() {
+        val track = playlist.getOrNull(currentIndex) ?: return
         releasePlayer()
         currentTrack = track
         lastError = null
@@ -54,35 +94,79 @@ object TvMusicPlayer : TvMusicTransport {
             player.setOnPreparedListener { prepared ->
                 prepared.start()
                 isPlaying = true
+                consecutiveFailures = 0
                 notifyChanged()
             }
-            player.setOnCompletionListener {
-                isPlaying = false
-                notifyChanged()
-            }
+            // Track finished naturally: continue the playlist (TvPlaylistPolicy decides).
+            player.setOnCompletionListener { onTrackCompleted() }
             player.setOnErrorListener { _, what, extra ->
-                isPlaying = false
-                lastError = "Ошибка воспроизведения ($what/$extra)"
-                notifyChanged()
+                onTrackFailed(what, extra)
                 true
             }
             player.setDataSource(streamUrlFor(track.id))
             player.prepareAsync()
         } catch (error: Exception) {
-            // A dead stream must not crash the screen: park the transport in the idle state.
+            // A dead stream must not crash the screen: treat it like a player error
+            // (onTrackFailed releases the half-built player and decides skip-vs-park).
             isPlaying = false
-            lastError = error.message ?: error.javaClass.simpleName
-            releasePlayer()
+            onTrackFailed(0, 0, error.message ?: error.javaClass.simpleName)
         }
         notifyChanged()
     }
 
+    /**
+     * Auto-advance on natural completion: move to the successor while the playlist has
+     * one; when it is exhausted the transport goes fully idle ([stop]) — continuous
+     * playback walks the list once, it does not loop.
+     */
+    @Synchronized
+    private fun onTrackCompleted() {
+        isPlaying = false
+        val next = TvPlaylistPolicy.nextIndex(playlist.size, currentIndex)
+        if (next != null) {
+            currentIndex = next
+            startCurrentTrack()
+        } else {
+            stopInternal()
+        }
+    }
+
+    /**
+     * Dead-stream handling (mobile parity): record the error, then skip to the successor
+     * while [TvPlaylistPolicy.skipAfterFailure] allows it; once a full pass over the
+     * playlist has failed (or there is no successor) park the transport on the error so
+     * the screen can show «Не играет» instead of retrying forever.
+     */
+    @Synchronized
+    private fun onTrackFailed(what: Int, extra: Int, message: String? = null) {
+        isPlaying = false
+        lastError = message ?: "Ошибка воспроизведения ($what/$extra)"
+        releasePlayer()
+        consecutiveFailures++
+        val skip = TvPlaylistPolicy.skipAfterFailure(consecutiveFailures, playlist.size) &&
+            TvPlaylistPolicy.nextIndex(playlist.size, currentIndex) != null
+        if (skip) {
+            currentIndex = currentIndex + 1
+            startCurrentTrack() // clears lastError for the successor
+        } else {
+            notifyChanged()
+        }
+    }
+
     @Synchronized
     override fun stop() {
+        stopInternal()
+    }
+
+    /** Full idle: releases the player and forgets the playlist. Callers hold the lock. */
+    private fun stopInternal() {
         releasePlayer()
         currentTrack = null
+        playlist = emptyList()
+        currentIndex = -1
         lastError = null
         isPlaying = false
+        consecutiveFailures = 0
         notifyChanged()
     }
 
