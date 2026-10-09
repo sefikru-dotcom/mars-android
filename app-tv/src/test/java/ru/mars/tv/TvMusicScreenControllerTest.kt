@@ -51,8 +51,15 @@ class TvMusicScreenControllerTest {
 
     private class FakeTransport : TvMusicTransport {
         val played = mutableListOf<MusicTrack>()
+
+        /** Playlist bindings from [playPlaylist]: the bound list plus the start index. */
+        val playlists = mutableListOf<Pair<List<MusicTrack>, Int>>()
         var stops = 0
         override fun play(track: MusicTrack) { played += track }
+        override fun playPlaylist(tracks: List<MusicTrack>, startIndex: Int) {
+            playlists += tracks to startIndex
+            tracks.getOrNull(startIndex)?.let { played += it }
+        }
         override fun stop() { stops++ }
     }
 
@@ -299,6 +306,8 @@ class TvMusicScreenControllerTest {
         h.search("q")
         h.controller.onTrackActivated(1)
         assertEquals(listOf(found[1]), h.transport.played)
+        // Search results are continuous-playback playlists just like the charts.
+        assertEquals(listOf(found to 1), h.transport.playlists)
     }
 
     @Test
@@ -328,8 +337,11 @@ class TvMusicScreenControllerTest {
         h.load()
         h.controller.onTrackActivated(2)
         assertEquals(listOf(tracks[2]), h.transport.played)
+        // Continuous playback: the WHOLE shown list is bound as the playlist, not one track.
+        assertEquals(listOf(tracks to 2), h.transport.playlists)
         h.controller.onTrackActivated(0)
         assertEquals(listOf(tracks[2], tracks[0]), h.transport.played)
+        assertEquals(listOf(tracks to 2, tracks to 0), h.transport.playlists)
     }
 
     @Test
@@ -351,6 +363,7 @@ class TvMusicScreenControllerTest {
         h.controller.onTrackActivated(5)
         h.controller.onTrackActivated(-1)
         assertTrue("no phantom playback", h.transport.played.isEmpty())
+        assertTrue("no phantom playlist binding", h.transport.playlists.isEmpty())
     }
 
     @Test

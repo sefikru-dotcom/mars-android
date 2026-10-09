@@ -35,6 +35,17 @@ interface TvMusicGateway {
  */
 interface TvMusicTransport {
     fun play(track: MusicTrack)
+
+    /**
+     * Binds [tracks] as the playback playlist and starts it on [startIndex]; when a
+     * track completes the transport auto-advances to its successor ([TvPlaylistPolicy])
+     * and goes idle once the playlist is exhausted. Out-of-range is a no-op. The default
+     * degrades to a single-track [play], so simple transports stay playlist-agnostic.
+     */
+    fun playPlaylist(tracks: List<MusicTrack>, startIndex: Int) {
+        tracks.getOrNull(startIndex)?.let { play(it) }
+    }
+
     fun stop()
 }
 
@@ -72,9 +83,10 @@ sealed interface TvMusicUiState {
  *   so the D-pad «Повторить» button recovers exactly what failed.
  * - [clearSearch] returns the screen to the charts without touching the transport:
  *   music that is already playing keeps playing across the list swap.
- * - [onTrackActivated] routes a valid track to the global transport; without loaded
- *   content (Loading/Empty/Error, invalid index) it is a silent no-op — activating a
- *   nonexistent track must not crash.
+ * - [onTrackActivated] routes the shown list plus the selected row to the global
+ *   transport, which plays the row and auto-advances through the rest (continuous
+ *   playlist, [TvPlaylistPolicy]); without loaded content (Loading/Empty/Error, invalid
+ *   index) it is a silent no-op — activating a nonexistent track must not crash.
  * - The transport is process-global: [destroy] never stops playback (music outlives the
  *   screen); only an explicit [stopPlayback] does. After [destroy] the controller
  *   publishes no state and performs no action.
@@ -164,13 +176,16 @@ class TvMusicScreenController(
     }
 
     /**
-     * D-pad select on a track row: plays it through the global transport. Without loaded
-     * content or with an out-of-range index this is a no-op — there is simply no track.
+     * D-pad select on a track row: binds the whole shown list as the transport playlist
+     * and starts it on [index], so playback continues through the list automatically
+     * after this track completes. Without loaded content or with an out-of-range index
+     * this is a no-op — there is simply no track.
      */
     fun onTrackActivated(index: Int) {
         if (destroyed) return
-        val track = (state as? TvMusicUiState.Content)?.tracks?.getOrNull(index) ?: return
-        transport.play(track)
+        val tracks = (state as? TvMusicUiState.Content)?.tracks ?: return
+        if (tracks.getOrNull(index) == null) return
+        transport.playPlaylist(tracks, index)
     }
 
     /** Explicit user stop of the global transport (leaving the screen does NOT stop music). */
