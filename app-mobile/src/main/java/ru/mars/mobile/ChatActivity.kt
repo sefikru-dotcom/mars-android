@@ -262,15 +262,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onProgress(currentMs: Int, totalMs: Int) {}
 
     private fun updateMiniPlayer(track: MusicTrack?, isPlaying: Boolean) {
-        if (track == null) {
-            miniPlayerBox.visibility = View.GONE
-        } else {
-            miniPlayerBox.visibility = View.VISIBLE
-            miniPlayerTitle.text = "${track.title} · ${track.artist}"
-            miniPlayerPlayBtn.setImageDrawable(
-                ContextCompat.getDrawable(this, if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
-            )
-        }
+        // Presentation logic (visibility, header formatting, play/pause status) is pure — MiniPlayerPresenter.
+        val state = MiniPlayerPresenter.resolve(track, isPlaying)
+        miniPlayerBox.visibility = if (state.visible) View.VISIBLE else View.GONE
+        if (!state.visible) return
+        miniPlayerTitle.text = state.titleText
+        miniPlayerPlayBtn.contentDescription = state.statusLabel
+        miniPlayerPlayBtn.setImageDrawable(
+            ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
+        )
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -619,6 +619,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         miniPlayerBox.addView(miniPlayerTitle, LinearLayout.LayoutParams(0, -2, 1f))
 
+        val miniPrevBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_skip_prev,
+            "Предыдущий",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { MarsMusicPlayer.previous() }
+        }
+        miniPlayerBox.addView(miniPrevBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+
         miniPlayerPlayBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_play,
@@ -629,7 +641,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         ).apply {
             setOnClickListener { MarsMusicPlayer.togglePlay() }
         }
-        miniPlayerBox.addView(miniPlayerPlayBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        miniPlayerBox.addView(miniPlayerPlayBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
 
         val miniNextBtn = MarsTheme.circleIconButton(
             this,
