@@ -119,6 +119,8 @@ class TvChatActivity : AppCompatActivity() {
         input.text.clear()
         append("Вы", text, isUser = true)
         val answer = append("Марс", "", isUser = false)
+        // Drops the «Марс: » placeholder exactly once (first chunk), then concatenates verbatim.
+        val accumulator = TvAnswerAccumulator(answer.text.toString())
         sessionFlow.beginTurn()
         renderSendControl()
         renderStatus()
@@ -141,7 +143,7 @@ class TvChatActivity : AppCompatActivity() {
                         interactive.onEvent(event)
                         when (event) {
                             is ChatEvent.Chunk -> {
-                                answer.text = "${answer.text.toString().removePrefix("Марс: ")}${event.text}"
+                                answer.text = accumulator.onChunk(event.text)
                                 scrollDown()
                             }
                             is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
