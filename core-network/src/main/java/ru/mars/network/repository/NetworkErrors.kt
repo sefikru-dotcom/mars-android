@@ -67,3 +67,24 @@ internal fun describeNetworkError(error: Throwable): String {
     }
     return error.message ?: "Неизвестная ошибка сети"
 }
+
+/**
+ * HTTP-level failure of a chat request (non-2xx `POST /api/chat/start`, the SSE `GET`
+ * or the legacy `/chat`): keeps the status code AND surfaces the server's JSON reason.
+ *
+ * The WebUI backend answers failures with `{"error": "<reason>"}` (routes.py: 400
+ * "message is required", 401 "unauthorized", 404 "stream not found", 502 gateway …).
+ * A bare "HTTP 400" bubble gives the user nothing to act on, while the reason was
+ * already on the wire. Same pattern the rest of the module uses (uploadAttachment,
+ * SessionRepository.createSession).
+ *
+ * Result format: `"HTTP <code>: <server error>"` when the body parses and carries a
+ * non-blank `error`, else the plain `"HTTP <code>"`. Both shapes stay compatible with
+ * the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
+ * StreamReattachPolicy `\b404\b` / "not found").
+ */
+internal fun describeHttpError(code: Int, body: String?): String {
+    val serverMessage = StreamEventMapper.parseObject(body.orEmpty())
+        ?.get("error")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    return if (serverMessage != null) "HTTP $code: $serverMessage" else "HTTP $code"
+}

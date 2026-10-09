@@ -72,7 +72,7 @@ class ChatRepositoryAttachStreamTest {
         }
     }
 
-    /** Unknown/expired stream: the server answers 404 `{"error":"stream not found"}` — surfaced as a terminal ChatEvent.Error. */
+    /** Unknown/expired stream: the server answers 404 `{"error":"stream not found"}` — surfaced as a terminal ChatEvent.Error carrying the status AND the server reason. */
     @Test fun attachToDeadStreamSurfacesHttpError() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(404).setBody("{\"error\":\"stream not found\"}"))
@@ -80,7 +80,7 @@ class ChatRepositoryAttachStreamTest {
             assertEquals(2, events.size)
             assertEquals(ChatEvent.StreamStarted("gone"), events[0])
             assertTrue(events[1] is ChatEvent.Error)
-            assertEquals("HTTP 404", (events[1] as ChatEvent.Error).message)
+            assertEquals("HTTP 404: stream not found", (events[1] as ChatEvent.Error).message)
         }
     }
 
