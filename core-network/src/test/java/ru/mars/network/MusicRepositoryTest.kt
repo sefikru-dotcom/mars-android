@@ -22,6 +22,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
@@ -84,6 +85,98 @@ class MusicRepositoryTest {
             val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
             assertEquals(emptyList<MusicTrack>(), repo.getFavorites())
         }
+    }
+
+    @Test
+    fun flowMapsResultsEnvelope() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"success\":true,\"results\":[{\"type\":\"song\",\"id\":\"fl1\",\"title\":\"Flow One\",\"artist\":\"A\",\"duration\":\"3:00\"},{\"type\":\"song\",\"id\":\"fl2\",\"title\":\"Flow Two\",\"artist\":\"B\"}]}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val flow = repo.getFlow()
+            assertEquals(listOf("fl1", "fl2"), flow.map { it.id })
+            assertEquals("3:00", flow[0].duration)
+            assertEquals("--:--", flow[1].duration) // missing duration falls back
+            assertEquals("/music/api/flow", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun flowMapsTracksEnvelopeAndSurfacesFailure() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"tracks\":[{\"id\":\"t1\",\"title\":\"Tracks Key\",\"artist\":\"A\"}]}"))
+            server.enqueue(MockResponse().setBody("{\"success\":false,\"error\":\"flow unavailable\"}"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            // The `{tracks}` envelope key is the third fallback after results/favorites.
+            assertEquals("t1", repo.getFlow().single().id)
+            val failure = runCatching { repo.getFlow() }.exceptionOrNull()
+            assertNotNull(failure)
+            assertTrue(failure!!.message!!.contains("flow unavailable"))
+        }
+    }
+
+    @Test
+    fun radioUsesVideoIdPathAndMapsTracks() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"success\":true,\"results\":[{\"id\":\"r1\",\"title\":\"Radio One\",\"artist\":\"A\",\"duration\":\"2:30\"},{\"id\":\"r2\",\"title\":\"Radio Two\",\"artist\":\"B\"}]}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val radio = repo.getRadio("v1")
+            assertEquals(listOf("r1", "r2"), radio.map { it.id })
+            assertEquals("2:30", radio[0].duration)
+            assertEquals("/music/api/radio/v1", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun radioRejectsBlankVideoId() {
+        val error = runBlocking {
+            runCatching { MusicRepository("http://localhost/music").getRadio(" ") }.exceptionOrNull()
+        }
+        assertTrue("expected IllegalArgumentException, got $error", error is IllegalArgumentException)
+    }
+
+    @Test
+    fun lyricsParsesAllFieldsAndSendsEncodedQuery() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"lyrics\":\"Line one\\nLine two\",\"synced\":\"[00:12.00] Line one\",\"source\":\"musixmatch\"}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val lyrics = repo.getLyrics("v1", title = "Rock & Roll", artist = "The Band")
+            assertEquals(LyricsResult("Line one\nLine two", "[00:12.00] Line one", "musixmatch"), lyrics)
+            assertEquals("/music/api/lyrics/v1?title=Rock%20%26%20Roll&artist=The%20Band", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun lyricsOmitsNullQueryParamsAndToleratesMissingFields() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            // No title/artist → no query string at all; empty body → all-null result.
+            assertEquals(LyricsResult(null, null, null), repo.getLyrics("v1"))
+            assertEquals("/api/lyrics/v1", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun lyricsSurfacesHttpAndMalformedErrors() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(MockResponse().setBody("not json"))
+            val repo = MusicRepository(server.url("/").toString().removeSuffix("/"))
+            val httpError = runCatching { repo.getLyrics("v1") }.exceptionOrNull()
+            assertNotNull(httpError)
+            assertTrue(httpError!!.message!!.contains("404"))
+            val malformed = runCatching { repo.getLyrics("v1") }.exceptionOrNull()
+            assertTrue("expected IOException for malformed body, got $malformed", malformed is IOException)
+            assertTrue(malformed!!.message!!.contains("Malformed"))
+        }
+    }
+
+    @Test
+    fun lyricsRejectsBlankVideoId() {
+        val error = runBlocking {
+            runCatching { MusicRepository("http://localhost/music").getLyrics("") }.exceptionOrNull()
+        }
+        assertTrue("expected IllegalArgumentException, got $error", error is IllegalArgumentException)
     }
 
     @Test

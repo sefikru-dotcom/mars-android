@@ -48,6 +48,10 @@ object MarsTheme {
     const val TEXT_STRONG = 0xffffffff.toInt()
     const val TEXT_MUTED = 0xff8b95a5.toInt()
     const val TEXT_EM = 0xffcbd5e1.toInt()
+
+    // Thoughts (blue subtle tone for reasoning accordion)
+    const val THOUGHT_BG = 0x143b82f6.toInt()
+    const val THOUGHT_BORDER = 0x333b82f6.toInt()
     
     // Chat & Code
     const val USER_BUBBLE = 0xff1c2436.toInt()

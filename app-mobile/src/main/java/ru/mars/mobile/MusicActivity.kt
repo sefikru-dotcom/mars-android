@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -50,8 +51,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Monotonic id of the in-flight search run; stale runs are dropped by [SearchRunGuard]. */
     private var searchRunId = 0
 
-    /** Which pill tab is active: chart, favorites, or the live playback queue. */
-    private enum class MusicTab { CHART, FAVORITES, QUEUE }
+    /** Which pill tab is active: chart, personal flow, favorites, or the live playback queue. */
+    private enum class MusicTab { CHART, FLOW, FAVORITES, QUEUE }
 
     private var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
@@ -69,6 +70,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     )
     private val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
     private lateinit var chartTabButton: TextView
+    private lateinit var flowTabButton: TextView
     private lateinit var favoritesTabButton: TextView
     private lateinit var queueTabButton: TextView
     private lateinit var searchInput: EditText
@@ -79,6 +81,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var statusText: TextView
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
+    /** «Радио по треку» in the player bar: appends similar tracks to the queue. */
+    private lateinit var radioBtn: ImageButton
+    /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
+    private lateinit var lyricsBtn: ImageButton
+    /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
+    private var radioJob: Job? = null
+    /** In-flight lyrics fetch; the dialog body is updated when it completes. */
+    private var lyricsJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
@@ -158,18 +168,25 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         header.addView(titleHeader, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(header)
 
-        // Tabs: Чарт / Избранное / Очередь (pill toggles)
+        // Tabs: Чарт / Волна / Избранное / Очередь (pill toggles). Horizontally scrollable:
+        // four weighted pills clip «Избранное» on narrow screens, chips must stay whole.
         val tabRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         chartTabButton = tabButton("Чарт") { selectTab(MusicTab.CHART) }
+        flowTabButton = tabButton("Волна") { selectTab(MusicTab.FLOW) }
         favoritesTabButton = tabButton("Избранное") { selectTab(MusicTab.FAVORITES) }
         queueTabButton = tabButton("Очередь") { selectTab(MusicTab.QUEUE) }
-        tabRow.addView(chartTabButton, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
-        tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
-        tabRow.addView(queueTabButton, LinearLayout.LayoutParams(0, -2, 1f))
-        root.addView(tabRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        tabRow.addView(chartTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        tabRow.addView(flowTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        tabRow.addView(queueTabButton, LinearLayout.LayoutParams(-2, -2))
+        val tabScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(tabRow, ViewGroup.LayoutParams(-2, -2))
+        }
+        root.addView(tabScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Transient status line (favorites/queue feedback), hidden by default
         statusText = TextView(this).apply {
@@ -325,6 +342,33 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         info.addView(artistView)
 
         trackRow.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+
+        // Per-track actions: «Радио» (append similar tracks) and «Текст песни» (lyrics dialog).
+        // Disabled until something is loaded in the player (see updatePlayerActionStates).
+        radioBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_radio,
+            "Радио по треку",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onRadioClicked() }
+        }
+        trackRow.addView(radioBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
+
+        lyricsBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_lyrics,
+            "Текст песни",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onLyricsClicked() }
+        }
+        trackRow.addView(lyricsBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(6) })
+
         playerPanel.addView(trackRow)
 
         // Progress Seek Bar
@@ -448,6 +492,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             )
             seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
             updateQueueIcons()
+            updatePlayerActionStates()
             refreshTrackRows()
             // Keep the queue tab in sync with player state (active track, play/pause,
             // auto-advance): re-render it whenever the queue view is on screen.
@@ -680,9 +725,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         search(entry)
     }
 
-    private fun showTracks(items: List<MusicTrack>) {
+    /**
+     * Renders a track list (chart/search/favorites/flow rows). [header] is an optional
+     * section card placed above the rows — used by «Волна» for its stream action.
+     */
+    private fun showTracks(items: List<MusicTrack>, header: View? = null) {
         tracks = items
         resetList()
+        header?.let { results.addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }) }
         if (items.isEmpty()) {
             results.addView(TextView(this).apply {
                 text = "Треки не найдены"
@@ -790,7 +840,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
         isSingleLine = true
-        setPadding(dp(8), dp(9), dp(8), dp(9))
+        setPadding(dp(14), dp(9), dp(14), dp(9))
         isClickable = true
         isFocusable = true
         setOnClickListener { onClick() }
@@ -806,6 +856,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
         style(chartTabButton, currentTab == MusicTab.CHART)
+        style(flowTabButton, currentTab == MusicTab.FLOW)
         style(favoritesTabButton, currentTab == MusicTab.FAVORITES)
         style(queueTabButton, currentTab == MusicTab.QUEUE)
     }
@@ -818,6 +869,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         job?.cancel()
         when (tab) {
             MusicTab.CHART -> loadHome()
+            MusicTab.FLOW -> loadFlow()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
         }
@@ -829,6 +881,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         job?.cancel()
         when (currentTab) {
             MusicTab.CHART -> loadHome()
+            MusicTab.FLOW -> loadFlow()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
         }
@@ -996,6 +1049,201 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 showStatus("Избранное недоступно")
             }
         }
+    }
+
+    /**
+     * Loads the personal stream («Волна»): the server-picked Mars Flow track list with a
+     * «Включить поток» primary action that starts playback of the whole stream.
+     */
+    private fun loadFlow() {
+        job?.cancel()
+        showStatus(null)
+        resetList()
+        results.addView(TextView(this).apply {
+            text = "Настраиваем волну…"
+            setTextColor(MarsTheme.TEXT_MUTED)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(32), 0, dp(32))
+        })
+        job = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { repository.getFlow() } }
+            result.onSuccess { flow ->
+                if (flow.isEmpty()) {
+                    tracks = emptyList()
+                    resetList()
+                    results.addView(TextView(this@MusicActivity).apply {
+                        text = "Волна пока пуста — сервер не подобрал треки"
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                        gravity = Gravity.CENTER
+                        setPadding(0, dp(32), 0, dp(32))
+                    })
+                } else {
+                    showTracks(flow, header = flowHeader(flow))
+                }
+            }.onFailure {
+                showListError(
+                    message = "Волна недоступна — проверьте сеть",
+                    retryDescription = "Повторить загрузку волны",
+                    onRetry = { loadFlow() },
+                )
+            }
+        }
+    }
+
+    /** «Волна» section card: title, stream size and the accent «Включить поток» button. */
+    private fun flowHeader(items: List<MusicTrack>): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 14)
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+        }
+        card.addView(TextView(this).apply {
+            text = "Волна"
+            textSize = 17f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        card.addView(TextView(this).apply {
+            text = "Персональный поток Марса · ${items.size} треков"
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(2), 0, dp(12))
+        })
+        val playFlowBtn = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT, 12)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Включить поток"
+            setOnClickListener {
+                if (tracks.isEmpty()) return@setOnClickListener
+                MarsMusicPlayer.playTrack(0, tracks)
+                showStatus("Волна включена")
+            }
+        }
+        playFlowBtn.addView(ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_play))
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+        }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
+        playFlowBtn.addView(TextView(this).apply {
+            text = "Включить поток"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        card.addView(playFlowBtn, LinearLayout.LayoutParams(-1, -2))
+        return card
+    }
+
+    /**
+     * «Радио по треку»: fetches similar tracks for the current track and appends the
+     * deduplicated additions (pure [RadioQueuePolicy]) to the queue — playback continues
+     * seamlessly because enqueuing never restarts a track that is already playing.
+     */
+    private fun onRadioClicked() {
+        val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
+        if (radioJob?.isActive == true) return
+        radioBtn.isEnabled = false
+        radioBtn.alpha = 0.4f
+        showStatus("Собираем радио по треку «${track.title}»…")
+        radioJob = lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getRadio(track.id) } }
+            fetched.onSuccess { candidates ->
+                val additions = RadioQueuePolicy.tracksToAdd(
+                    fetched = candidates,
+                    queuedIds = MarsMusicPlayer.tracks.map { it.id },
+                    currentTrackId = MarsMusicPlayer.currentTrack?.id,
+                )
+                additions.forEach { MarsMusicPlayer.enqueue(it) }
+                showStatus(
+                    if (additions.isEmpty()) "Радио: новых похожих треков нет"
+                    else "Радио: +${additions.size} треков в очередь"
+                )
+                if (currentTab == MusicTab.QUEUE) renderQueue()
+            }.onFailure {
+                showStatus("Радио недоступно — проверьте сеть")
+            }
+            updatePlayerActionStates()
+        }
+    }
+
+    /**
+     * «Текст песни»: opens the themed lyrics dialog immediately (with a loading body) and
+     * fills it when `/api/lyrics` answers. The answer→view mapping is pure
+     * ([LyricsViewPolicy]): plain lyrics win, synced LRC loses its timestamps.
+     */
+    private fun onLyricsClicked() {
+        val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
+        if (lyricsJob?.isActive == true) return
+
+        val metaView = TextView(this).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+            setPadding(0, 0, 0, dp(10))
+        }
+        val bodyView = TextView(this).apply {
+            text = "Загружаем текст…"
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setLineSpacing(dp(4).toFloat(), 1f)
+            setTextIsSelectable(true)
+        }
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Текст песни", null))
+            root.addView(TextView(this).apply {
+                text = "${track.title} — ${track.artist}"
+                textSize = 13f
+                setTextColor(MarsTheme.ACCENT_TEXT)
+                typeface = Typeface.DEFAULT_BOLD
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, 0, 0, dp(10))
+            })
+            root.addView(metaView)
+            root.addView(bodyView)
+            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
+            emptyList()
+        }
+
+        lyricsJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.getLyrics(track.id, title = track.title, artist = track.artist) }
+            }
+            result.onSuccess { lyrics ->
+                when (val state = LyricsViewPolicy.resolve(lyrics)) {
+                    is LyricsUiState.Text -> {
+                        bodyView.text = state.body
+                        bodyView.setTextColor(MarsTheme.TEXT_EM)
+                        val labels = buildList {
+                            if (state.synced) add("синхронизированный текст")
+                            state.source?.takeIf { it.isNotBlank() }?.let { add("источник: $it") }
+                        }
+                        if (labels.isNotEmpty()) {
+                            metaView.text = labels.joinToString(" · ")
+                            metaView.visibility = View.VISIBLE
+                        }
+                    }
+                    LyricsUiState.Missing -> bodyView.text = "Текст не найден — сервер вернул пустой ответ"
+                }
+            }.onFailure {
+                bodyView.text = "Текст недоступен — проверьте сеть"
+            }
+        }
+    }
+
+    /** Radio/lyrics act on the current track only: dim and disable both without one. */
+    private fun updatePlayerActionStates() {
+        if (!::radioBtn.isInitialized || !::lyricsBtn.isInitialized) return
+        val hasTrack = MarsMusicPlayer.currentTrack != null
+        val busy = radioJob?.isActive == true
+        radioBtn.isEnabled = hasTrack && !busy
+        radioBtn.alpha = if (hasTrack && !busy) 1f else 0.4f
+        lyricsBtn.isEnabled = hasTrack
+        lyricsBtn.alpha = if (hasTrack) 1f else 0.4f
     }
 
     /** Prefetches favorite ids so hearts render filled on the charts/search rows. */

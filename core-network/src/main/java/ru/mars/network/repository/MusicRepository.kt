@@ -18,6 +18,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
@@ -58,6 +59,35 @@ class MusicRepository(
      * `{"favorites": [...]}` envelope (same track shape as charts/home).
      */
     suspend fun getFavorites(): List<MusicTrack> = fetchTracks("api/favorites")
+
+    /**
+     * GET /api/flow — the personalized track feed. Same track shape as charts; the
+     * live service may answer with `{results}`, `{favorites}` or `{tracks}`.
+     */
+    suspend fun getFlow(): List<MusicTrack> = fetchTracks("api/flow")
+
+    /**
+     * GET /api/radio/{videoId} — a radio queue seeded from [videoId].
+     */
+    suspend fun getRadio(videoId: String): List<MusicTrack> {
+        require(videoId.isNotBlank()) { "videoId must not be blank" }
+        return fetchTracks("api/radio/$videoId")
+    }
+
+    /**
+     * GET /api/lyrics/{videoId} — lyrics for a track. Optional [title]/[artist] are
+     * forwarded as query parameters to help the server match the right lyrics.
+     */
+    suspend fun getLyrics(videoId: String, title: String? = null, artist: String? = null): LyricsResult {
+        require(videoId.isNotBlank()) { "videoId must not be blank" }
+        val query = buildList {
+            title?.let { add("title" to it) }
+            artist?.let { add("artist" to it) }
+        }
+        return getJson("api/lyrics/$videoId", query) { body ->
+            moshi.adapter(LyricsResult::class.java).fromJson(body.source()) ?: LyricsResult(null, null, null)
+        }
+    }
 
     /**
      * POST /api/favorite/toggle — adds or removes [videoId] from favorites and returns the
@@ -122,6 +152,45 @@ class MusicRepository(
             })
         }
 
+    /** GETs [path] with optional [query] parameters and maps the successful response through [parse]. */
+    private suspend fun <T> getJson(path: String, query: List<Pair<String, String>> = emptyList(), parse: (ResponseBody) -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            val request = Request.Builder()
+                .url(baseUrl.toHttpUrl().newBuilder().addPathSegments(path).apply { query.forEach { (key, value) -> addQueryParameter(key, value) } }.build())
+                .get()
+                .build()
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        val body = resp.body
+                        when {
+                            !resp.isSuccessful -> continuation.resumeWithException(
+                                IllegalStateException("HTTP ${resp.code} for /$path"),
+                            )
+                            body == null -> continuation.resumeWithException(
+                                IOException("Empty body from /$path"),
+                            )
+                            else -> {
+                                val result = runCatching { parse(body) }
+                                if (result.isSuccess) {
+                                    continuation.resume(result.getOrThrow())
+                                } else {
+                                    continuation.resumeWithException(
+                                        IOException("Malformed response from /$path", result.exceptionOrNull()),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            })
+        }
+
     suspend fun search(query: String): List<MusicTrack> {
         require(query.isNotBlank()) { "query must not be blank" }
         return fetchTracks("api/search", "q" to query)
@@ -140,7 +209,7 @@ class MusicRepository(
                             if (!it.isSuccessful) error("HTTP ${it.code}")
                             val parsed = listAdapter.fromJson(it.body?.string().orEmpty()) ?: error("Empty music response")
                             if (parsed.success == false) error(parsed.error ?: "Music request failed")
-                            val items = parsed.results.ifEmpty { parsed.favorites }
+                            val items = parsed.results.ifEmpty { parsed.favorites }.ifEmpty { parsed.tracks }
                             continuation.resume(items.map { item -> item.toModel() })
                         } catch (e: Throwable) { if (continuation.isActive) continuation.resumeWithException(e) }
                     }
@@ -254,13 +323,15 @@ class MusicRepository(
 
     /**
      * `results` is the charts/search envelope key; `favorites` is what `/api/favorites`
-     * uses. `success == false` (with `error`) surfaces as an exception.
+     * uses and `tracks` is what flow/radio may answer with. `success == false`
+     * (with `error`) surfaces as an exception.
      */
     @JsonClass(generateAdapter = false)
     private data class TrackListEnvelope(
         val success: Boolean? = null,
         val results: List<TrackDto> = emptyList(),
         val favorites: List<TrackDto> = emptyList(),
+        val tracks: List<TrackDto> = emptyList(),
         val error: String? = null,
     )
     @JsonClass(generateAdapter = false)

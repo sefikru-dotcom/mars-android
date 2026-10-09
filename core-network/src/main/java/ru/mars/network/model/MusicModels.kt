@@ -25,3 +25,10 @@ data class MusicPlayerState(
 data class MusicSearchResult(
     val tracks: List<MusicTrack>,
 )
+
+/** Lyrics for a track from GET /api/lyrics/{videoId}; any field may be absent. */
+data class LyricsResult(
+    val lyrics: String?,
+    val synced: String?,
+    val source: String?,
+)
