@@ -87,6 +87,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
+    /** Черновики несент-сообщений по диалогам: чистая политика [SessionDraftController]. */
+    private lateinit var drafts: SessionDraftController
 
     private val firstSessionFlow = FirstSessionFlow(SessionRepository(), BASE_URL)
     private var explicitStatus: String? = null
@@ -156,6 +158,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         activityModeSelection = ActivityModeSelection(PrefsActivityModeStorage(getSharedPreferences("mars-activity-mode", MODE_PRIVATE)))
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
+        drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences("mars-session-drafts", MODE_PRIVATE)))
         compressionController = ContextCompressionController(
             host = CompressionHostBridge(),
             gateway = RepositoryContextCompressionGateway(ContextCompressionRepository(), BASE_URL) { store.read() },
@@ -184,6 +187,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         })
         setContentView(buildView())
+        // При старте/пересоздании экрана композитор сразу получает черновик текущего диалога.
+        restoreComposerDraft()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -217,6 +222,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onResume() {
         super.onResume()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
+    }
+
+    override fun onPause() {
+        // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
+        persistComposerDraft()
+        super.onPause()
     }
 
     override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) {
@@ -784,6 +795,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val credential = store.read() ?: run { uiState.cancel(); leaveChat(); return }
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(input.windowToken, 0)
         input.text.clear()
+        // Отправка принята локально (текст ушёл в поток) — черновик диалога очищается.
+        drafts.onSendAccepted(currentSessionId)
         explicitStatus = null
         // Own outgoing message always takes the reader to the latest.
         autoScroll.pinToBottom()
@@ -886,6 +899,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
             if (accepted) {
                 if (input.text.toString().trim() == text) input.text.clear()
+                drafts.onSendAccepted(id)
                 statusView.text = "Направление отправлено"
             } else {
                 statusView.text = "Направление не принято — текст сохранён"
@@ -1497,6 +1511,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun loadSession(session: SessionItem) {
         val c = store.read() ?: return
+        // Черновик покидаемого диалога сохраняется до смены текущего session_id.
+        persistComposerDraft()
         interactiveController.dismissAll()
         compressionController.onSessionChanged()
         lifecycleScope.launch {
@@ -1507,6 +1523,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 uiState.setActiveTurn(detail.activeTurn)
                 uiState.setTodoState(detail.todoState)
                 currentSessionId = detail.id
+                restoreComposerDraft()
                 autoScroll.pinToBottom()
                 renderMessages()
                 setStatus()
@@ -1614,6 +1631,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val c = store.read() ?: return
         lifecycleScope.launch {
             if (SessionRepository().deleteSession(BASE_URL, c, session.id)) {
+                drafts.onSessionRemoved(session.id)
                 uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
                 if (currentSessionId == session.id) {
                     interactiveController.dismissAll()
@@ -2099,6 +2117,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun startNewChat() {
+        // Черновик текущего диалога сохраняется до сброса session_id.
+        persistComposerDraft()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -2107,11 +2127,26 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         uiState.startNewSession()
         currentSessionId = null
         explicitStatus = null
+        restoreComposerDraft()
         autoScroll.pinToBottom()
         renderMessages()
         setStatus()
         updateControls()
         updateYoloPill()
+    }
+
+    // --- Черновики несент-сообщений ------------------------------------------------------------
+
+    /** Сохраняет текст композитора как черновик текущего диалога (до смены диалога/ухода с экрана). */
+    private fun persistComposerDraft() {
+        if (!::drafts.isInitialized || !::input.isInitialized) return
+        drafts.saveDraft(currentSessionId, input.text.toString())
+    }
+
+    /** Показывает сохранённый черновик текущего диалога (null — отдельный черновик нового чата). */
+    private fun restoreComposerDraft() {
+        if (!::drafts.isInitialized || !::input.isInitialized) return
+        input.setText(drafts.draftFor(currentSessionId).orEmpty())
     }
 
     // --- YOLO mode ------------------------------------------------------------------------------
@@ -2211,6 +2246,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 runCatching { flow.finish() }.getOrNull()
             }
             closeSessionLocally(report)
+            // Закрытая сессия не имеет черновика: чистим и показываем черновик нового чата.
+            drafts.onSessionRemoved(sid)
+            restoreComposerDraft()
             // YOLO does not outlive the session being closed; make the pill reflect reality.
             if (report != null) uiState.setYoloEnabled(false)
             updateYoloPill()
