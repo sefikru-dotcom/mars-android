@@ -50,15 +50,27 @@ class StreamReattachPolicy {
         }
 
     /**
-     * core-network maps a non-2xx stream response to `ChatEvent.Error("HTTP <code>")`, so a dead
-     * stream surfaces as "HTTP 404"; a textual "not found" is tolerated for gateway rewrites.
+     * core-network maps a non-2xx stream response to `ChatEvent.Error("HTTP <code>[: <reason>]")`
+     * (`describeHttpError`), and routes.py's reason for a dead stream is `"stream not found"`,
+     * so the terminal shape is always `"HTTP 404"`-prefixed and/or carries that exact reason.
+     *
+     * The markers MUST stay anchored: the SSE mapper maps in-stream `error`/`apperror` frames
+     * (tool failures journaled mid-turn and REPLAYED on reattach — "command not found",
+     * "File not found: …", "…404 retries…") onto the same `ChatEvent.Error`, while the stream
+     * itself is alive and keeps running. A bare `\b404\b`/"not found" match anywhere in the
+     * text misclassified those as terminal and abandoned live reattaches (regression test:
+     * StreamReattachPolicyTest).
      */
     private fun isStreamGoneMessage(message: String): Boolean {
-        val lower = message.lowercase()
-        return HTTP_404.containsMatchIn(lower) || "not found" in lower
+        val lower = message.trim().lowercase()
+        return HTTP_404_PREFIX.containsMatchIn(lower) || STREAM_NOT_FOUND in lower
     }
 
     companion object {
-        private val HTTP_404 = Regex("""\b404\b""")
+        /** Terminal attach failure: the message STARTS with the 404 status line ("HTTP 404…"). */
+        private val HTTP_404_PREFIX = Regex("""^http 404\b""")
+
+        /** routes.py's verbatim reason for an unknown/expired stream — survives gateway rewrites. */
+        private const val STREAM_NOT_FOUND = "stream not found"
     }
 }
