@@ -386,7 +386,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Chart fetch failed (both endpoints): say so and offer an explicit retry. */
-    private fun showHomeError() {
+    private fun showHomeError() = showListError(
+        message = "Чарт недоступен — проверьте сеть",
+        retryDescription = "Повторить загрузку чарта",
+        onRetry = { loadHome() },
+    )
+
+    /**
+     * Shared error/retry state for the track list. Clears the previous cards and the
+     * [tracks] backing list first, so a failed load can never leave a stale chart on
+     * screen that still starts playback on tap; then shows [message] with a retry.
+     */
+    private fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
+        tracks = emptyList()
         results.removeAllViews()
         heartButtons.clear()
         val box = LinearLayout(this).apply {
@@ -395,19 +407,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(0, dp(32), 0, dp(32))
         }
         box.addView(TextView(this).apply {
-            text = "Чарт недоступен — проверьте сеть"
+            text = message
             setTextColor(MarsTheme.TEXT_MUTED)
             gravity = Gravity.CENTER
         })
         val retryBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_refresh,
-            "Повторить загрузку чарта",
+            retryDescription,
             bg = MarsTheme.SURFACE,
             iconTint = MarsTheme.ACCENT,
             sizeDp = 42
         ).apply {
-            setOnClickListener { loadHome() }
+            setOnClickListener { onRetry() }
         }
         box.addView(retryBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { topMargin = dp(12) })
         results.addView(box, LinearLayout.LayoutParams(-1, -2))
@@ -419,7 +431,17 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         job = lifecycleScope.launch {
             runCatching { repository.search(q) }
                 .onSuccess { showStatus(null); showTracks(it) }
-                .onFailure { showStatus("Поиск недоступен") }
+                .onFailure {
+                    // HTTP/parse failure: the previous (chart) cards must not stay
+                    // clickable — drop them plus the tracks list and show the same
+                    // error/retry state, with a retry for this very query.
+                    showStatus(null)
+                    showListError(
+                        message = "Поиск недоступен — проверьте сеть",
+                        retryDescription = "Повторить поиск",
+                        onRetry = { search(q) },
+                    )
+                }
         }
     }
 
