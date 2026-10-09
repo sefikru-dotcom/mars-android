@@ -163,4 +163,89 @@ class SessionDraftControllerTest {
         assertEquals("как новый чат", controller.draftFor(null))
         assertEquals("как новый чат", controller.draftFor("  "))
     }
+
+    // --- Асинхронная смена диалога: onSessionSwitch ---------------------------------------------
+
+    @Test
+    fun `session switch saves text typed during async load under the old dialog`() {
+        controller.saveDraft("sA", "старый текст A")
+        tick()
+        controller.saveDraft("sB", "черновик B")
+
+        // Пока грузились детали B, пользователь дописал текст в диалоге A;
+        // в момент присвоения session_id он сохраняется в черновик A.
+        val shown = controller.onSessionSwitch("sA", "sB", "старый текст A + дописано во время загрузки")
+
+        assertEquals("черновик B", shown)
+        assertEquals("старый текст A + дописано во время загрузки", controller.draftFor("sA"))
+        assertEquals("черновик B", controller.draftFor("sB"))
+    }
+
+    @Test
+    fun `session switch from new chat keeps its typed text separate`() {
+        val shown = controller.onSessionSwitch(null, "sB", "набрал в новом чате")
+
+        assertEquals("набрал в новом чате", controller.draftFor(null))
+        assertNull(shown)
+    }
+
+    @Test
+    fun `session switch with emptied composer removes the old draft`() {
+        controller.saveDraft("sA", "был текст")
+
+        val shown = controller.onSessionSwitch("sA", "sB", "   ")
+
+        assertNull(controller.draftFor("sA"))
+        assertNull(shown)
+    }
+
+    // --- Асинхронный финиш сессии: onSessionFinished ---------------------------------------------
+
+    @Test
+    fun `finish drops untouched old text and removes the session draft`() {
+        controller.saveDraft("s1", "текст закрытой сессии")
+        tick()
+        controller.saveDraft(null, "черновик нового чата")
+
+        // Композитор не трогали во время финиша: старый текст удаляется по контракту.
+        val shown = controller.onSessionFinished("s1", "текст закрытой сессии", "текст закрытой сессии")
+
+        assertEquals("черновик нового чата", shown)
+        assertNull(controller.draftFor("s1"))
+    }
+
+    @Test
+    fun `finish keeps text typed after the operation started`() {
+        controller.saveDraft("s1", "старое сообщение")
+
+        // Во время асинхронного финиша пользователь набрал новый текст — он переживает
+        // закрытие сессии как черновик нового чата.
+        val shown = controller.onSessionFinished("s1", "старое сообщение", "набрал, пока закрывалось")
+
+        assertEquals("набрал, пока закрывалось", shown)
+        assertEquals("набрал, пока закрывалось", controller.draftFor(null))
+        assertNull(controller.draftFor("s1"))
+    }
+
+    @Test
+    fun `finish without new typing does not resurrect a stale new-chat draft`() {
+        controller.saveDraft("s1", "текст сессии")
+
+        val shown = controller.onSessionFinished("s1", "текст сессии", "текст сессии")
+
+        assertNull(shown)
+        assertNull(controller.draftFor(null))
+    }
+
+    @Test
+    fun `finish clears only the finished session draft`() {
+        controller.saveDraft("s1", "закрываемая")
+        tick()
+        controller.saveDraft("s2", "живая")
+
+        controller.onSessionFinished("s1", "закрываемая", "закрываемая")
+
+        assertNull(controller.draftFor("s1"))
+        assertEquals("живая", controller.draftFor("s2"))
+    }
 }

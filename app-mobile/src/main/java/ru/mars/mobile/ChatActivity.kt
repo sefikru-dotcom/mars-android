@@ -89,6 +89,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var currentStreamId: String? = null
     /** Черновики несент-сообщений по диалогам: чистая политика [SessionDraftController]. */
     private lateinit var drafts: SessionDraftController
+    /** Guard асинхронной навигации по диалогам (pure): побеждает последняя загрузка. */
+    private val sessionNavigation = SessionNavigationPolicy()
+    /** Одноразовая очистка локальных plaintext-данных при выходе из авторизации. */
+    private lateinit var authExitCleanup: AuthExitCleanup
 
     private val firstSessionFlow = FirstSessionFlow(SessionRepository(), BASE_URL)
     private var explicitStatus: String? = null
@@ -158,7 +162,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         activityModeSelection = ActivityModeSelection(PrefsActivityModeStorage(getSharedPreferences("mars-activity-mode", MODE_PRIVATE)))
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
-        drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences("mars-session-drafts", MODE_PRIVATE)))
+        drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)))
+        // Выход из авторизации (logout/реавторизация) обязан стереть локальные plaintext-данные
+        // до finish(), и после этого черновики больше не сохраняются (onPause не пишет назад).
+        authExitCleanup = AuthExitCleanup(
+            listOf(
+                PrefsClearableStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)),
+                PrefsClearableStore(getSharedPreferences(MUSIC_HISTORY_PREFS, MODE_PRIVATE)),
+            )
+        )
         compressionController = ContextCompressionController(
             host = CompressionHostBridge(),
             gateway = RepositoryContextCompressionGateway(ContextCompressionRepository(), BASE_URL) { store.read() },
@@ -1515,9 +1527,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         persistComposerDraft()
         interactiveController.dismissAll()
         compressionController.onSessionChanged()
+        // Токен навигации: устаревший callback (пользователь открыл другой диалог/новый чат
+        // или закрыл сессию, пока грузились детали) не перетирает актуальное состояние.
+        val token = sessionNavigation.beginNavigation()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, session.id)
-            if (detail != null) {
+            if (detail != null && sessionNavigation.isCurrent(token)) {
+                // Текст, набранный ВО ВРЕМЯ загрузки, сохраняется в черновик старого диалога
+                // непосредственно перед присвоением нового session_id.
+                drafts.onSessionSwitch(currentSessionId, detail.id, input.text.toString())
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 // Active-turn/attention banner state from the freshly loaded detail.
                 uiState.setActiveTurn(detail.activeTurn)
@@ -1634,10 +1652,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 drafts.onSessionRemoved(session.id)
                 uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
                 if (currentSessionId == session.id) {
+                    // Удаление текущего диалога: его текст не должен «уезжать» в новый чат —
+                    // композитор переключается на черновик нового чата, а pending-загрузка
+                    // удалённой сессии инвалидируется (её callback уже не применится).
+                    sessionNavigation.invalidatePending()
                     interactiveController.dismissAll()
                     compressionController.onSessionChanged()
                     uiState.startNewSession()
                     currentSessionId = null
+                    restoreComposerDraft()
                 }
                 renderSessionList()
             }
@@ -2119,6 +2142,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun startNewChat() {
         // Черновик текущего диалога сохраняется до сброса session_id.
         persistComposerDraft()
+        // Pending-загрузка диалога больше не актуальна: её callback не должен переключить
+        // композитор и состояние обратно на старый session_id после «нового чата».
+        sessionNavigation.invalidatePending()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -2140,6 +2166,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Сохраняет текст композитора как черновик текущего диалога (до смены диалога/ухода с экрана). */
     private fun persistComposerDraft() {
         if (!::drafts.isInitialized || !::input.isInitialized) return
+        // После logout/реавторизации сохранение запрещено: onPause закрывающегося экрана
+        // не должен записывать черновик обратно в уже очищенное приватное хранилище.
+        if (::authExitCleanup.isInitialized && !authExitCleanup.draftPersistenceAllowed) return
         drafts.saveDraft(currentSessionId, input.text.toString())
     }
 
@@ -2210,6 +2239,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val wasStreaming = uiState.status == ChatStatus.TYPING
         val capturedApproval = uiState.pendingApproval
         val capturedClarify = uiState.pendingClarify
+        val textAtStart = if (::input.isInitialized) input.text.toString() else ""
+        // Pending-загрузка закрываемой сессии инвалидируется: её callback не должен
+        // «воскресить» диалог, который сейчас завершается.
+        sessionNavigation.invalidatePending()
 
         // Local stream teardown first so no more events land while the close is in flight.
         stream?.cancel()
@@ -2249,13 +2282,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 })
                 runCatching { flow.finish() }.getOrNull()
             }
-            closeSessionLocally(report)
-            // Закрытая сессия не имеет черновика: чистим и показываем черновик нового чата.
-            drafts.onSessionRemoved(sid)
-            restoreComposerDraft()
-            // YOLO does not outlive the session being closed; make the pill reflect reality.
-            if (report != null) uiState.setYoloEnabled(false)
-            updateYoloPill()
+            if (currentSessionId == sid) {
+                // Сессия не сменилась, пока шёл финиш: старый черновик удаляется по контракту,
+                // а текст, набранный ПОСЛЕ начала операции, переживает закрытие как черновик
+                // нового чата (не перетирается).
+                drafts.onSessionFinished(sid, textAtStart, input.text.toString())
+                closeSessionLocally(report)
+                restoreComposerDraft()
+                // YOLO does not outlive the session being closed; make the pill reflect reality.
+                if (report != null) uiState.setYoloEnabled(false)
+                updateYoloPill()
+            } else {
+                // Пользователь ушёл в другой диалог во время финиша — его состояние и
+                // композитор не трогаем; черновик закрытой сессии чистим в любом случае.
+                drafts.onSessionRemoved(sid)
+            }
         }
     }
 
@@ -2285,6 +2326,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun leaveChat() {
         stream?.cancel()
+        // Локальные plaintext-данные (черновики, история поиска музыки) стираются синхронно
+        // ДО finish() и независимо от асинхронного best-effort revoke; pending-навигация
+        // инвалидируется, а повторное сохранение черновика в onPause блокируется.
+        sessionNavigation.invalidatePending()
+        authExitCleanup.run()
         lifecycleScope.launch {
             // Best-effort server revoke; the local credential is cleared regardless of the
             // outcome so a 401/network failure can never lock the user in a stale auth state.
@@ -2306,6 +2352,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         stream?.cancel()
         stream = null
         currentStreamId = null
+        // Черновики и история поиска стираются до finish(): новая авторизация на этом
+        // устройстве не должна видеть plaintext-данные предыдущей; onPause после этого
+        // черновик уже не сохраняет.
+        sessionNavigation.invalidatePending()
+        authExitCleanup.run()
         runCatching { store.clear() }
         startActivity(
             Intent(this, MainActivity::class.java)
@@ -2318,6 +2369,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
+        /** Privately-stored plaintext data cleared on every auth-exit path. */
+        private const val DRAFTS_PREFS = "mars-session-drafts"
+        private const val MUSIC_HISTORY_PREFS = "mars-music-search-history"
         /** Status line while a reattach to the session's live stream is being established. */
         private const val REATTACH_STATUS = "Подключение к активному ходу…"
     }
