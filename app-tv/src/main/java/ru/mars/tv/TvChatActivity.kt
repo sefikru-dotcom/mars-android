@@ -119,7 +119,10 @@ class TvChatActivity : AppCompatActivity() {
         input.text.clear()
         append("Вы", text, isUser = true)
         val answer = append("Марс", "", isUser = false)
-        // Drops the «Марс: » placeholder exactly once (first chunk), then concatenates verbatim.
+        // Per-turn answer state machine: the «Марс: » placeholder is dropped exactly once
+        // (first chunk), chunks concatenate verbatim, and the FIRST terminal event (Done/Error)
+        // locks the bubble — late frames can no longer clobber the outcome. A new turn builds
+        // a fresh accumulator, so the next answer streams normally.
         val accumulator = TvAnswerAccumulator(answer.text.toString())
         sessionFlow.beginTurn()
         renderSendControl()
@@ -142,11 +145,18 @@ class TvChatActivity : AppCompatActivity() {
                         // a silent `else -> Unit` (P0: the turn would hang with no way to answer).
                         interactive.onEvent(event)
                         when (event) {
+                            // Terminal lock lives in the accumulator (first Done/Error wins):
+                            // a late chunk after Error no longer clobbers «Ошибка: …», a late
+                            // chunk after Done no longer mutates the finished answer, and a
+                            // tail Error after Done no longer overwrites it. null = ignore.
                             is ChatEvent.Chunk -> {
-                                answer.text = accumulator.onChunk(event.text)
-                                scrollDown()
+                                accumulator.onChunk(event.text)?.let { rendered ->
+                                    answer.text = rendered
+                                    scrollDown()
+                                }
                             }
-                            is ChatEvent.Error -> answer.text = "Ошибка: ${event.message}"
+                            is ChatEvent.Error -> accumulator.onError(event.message)?.let { answer.text = it }
+                            is ChatEvent.Done -> accumulator.onDone()
                             is ChatEvent.ApprovalRequired -> scrollDown() // card rendered by the surface
                             is ChatEvent.ClarifyRequired -> scrollDown()
                             else -> Unit
