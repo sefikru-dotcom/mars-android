@@ -2146,7 +2146,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Показывает сохранённый черновик текущего диалога (null — отдельный черновик нового чата). */
     private fun restoreComposerDraft() {
         if (!::drafts.isInitialized || !::input.isInitialized) return
-        input.setText(drafts.draftFor(currentSessionId).orEmpty())
+        val text = drafts.draftFor(currentSessionId).orEmpty()
+        input.setText(text)
+        if (text.isNotEmpty()) {
+            input.setSelection(text.length)
+        }
     }
 
     // --- YOLO mode ------------------------------------------------------------------------------
