@@ -2286,7 +2286,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Сессия не сменилась, пока шёл финиш: старый черновик удаляется по контракту,
                 // а текст, набранный ПОСЛЕ начала операции, переживает закрытие как черновик
                 // нового чата (не перетирается).
-                drafts.onSessionFinished(sid, textAtStart, input.text.toString())
+                if (authExitCleanup.draftPersistenceAllowed) {
+                    drafts.onSessionFinished(sid, textAtStart, input.text.toString())
+                }
                 closeSessionLocally(report)
                 restoreComposerDraft()
                 // YOLO does not outlive the session being closed; make the pill reflect reality.
