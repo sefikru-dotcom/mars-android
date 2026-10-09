@@ -371,4 +371,25 @@ class StreamEventMapperTest {
         assertNull(StreamEventMapper.sideEvent("state_saved", "{}"))
         assertNull(StreamEventMapper.sideEvent(null, """{"title":"x"}"""))
     }
+
+    // ---- SSE edge payloads reaching the mapper (SseChunkParser boundary) ----
+
+    /** JSON, склеенный из multiline `data:`-строк (SseChunkParser джойнит через `\n` — валидный whitespace). */
+    @Test fun mapsChunkFromJsonSplitAcrossDataLines() {
+        assertEquals(
+            ChatEvent.Chunk("hi", "e5"),
+            StreamEventMapper.map("token", "e5", "{\"text\":\n\"hi\"}")
+        )
+    }
+
+    /** Пустой data-кадр (`data:` без значения / EOF-хвост): без падений и без мусора в чате. */
+    @Test fun emptyPayloadFramesAreDroppedSafely() {
+        assertNull(StreamEventMapper.map("token", null, ""))
+        assertNull(StreamEventMapper.map(null, null, ""))
+        assertNull(StreamEventMapper.map("warning", null, ""))
+        assertNull(StreamEventMapper.map("reasoning", null, ""))
+        assertNull(StreamEventMapper.map("interim_assistant", null, ""))
+        assertEquals(ChatEvent.Error("Ошибка потока"), StreamEventMapper.map("error", null, ""))
+        assertEquals(ChatEvent.Done, StreamEventMapper.map("done", null, ""))
+    }
 }
