@@ -1,12 +1,16 @@
 package ru.mars.tv
 
 import android.os.Bundle
+import android.text.TextUtils
+import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -18,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.SessionItem
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.SessionRepository
@@ -30,6 +35,15 @@ import ru.mars.network.repository.SessionRepository
  * before tearing the local stream down. «Новый чат» and BACK/onDestroy cancel the server
  * turn best-effort as well — the TV client has no stream re-attach, so a merely abandoned
  * turn would keep executing invisibly (tokens, commands, or blocked on an approval card).
+ *
+ * «Диалоги» opens the session browser overlay: the list fetch
+ * ([SessionRepository.getSessions]) and the detail load ([SessionRepository.getSessionDetail])
+ * happen here, while every DECISION — which rows are listed (subagent children hidden),
+ * how each row reads, where the D-pad focus opens and how it steps, how a loaded
+ * [ru.mars.network.model.SessionDetail] turns into transcript bubbles — lives in the pure
+ * [TvSessionBrowserPolicy] (JVM unit-tested). Opening a session tears the current turn down
+ * exactly like «Новый чат» does, then binds the loaded id into [sessionFlow] so the next
+ * send continues that dialog.
  */
 class TvChatActivity : AppCompatActivity() {
     private lateinit var messages: LinearLayout
@@ -38,6 +52,24 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var newChat: Button
     private lateinit var statusView: TextView
     private lateinit var contextView: TextView
+    private lateinit var chatRoot: LinearLayout
+    private lateinit var sessionsButton: Button
+    private lateinit var sessionsOverlay: View
+    private lateinit var sessionsStatus: TextView
+    private lateinit var sessionList: LinearLayout
+    private lateinit var closeSessions: Button
+    private val sessionRowViews = mutableListOf<View>()
+    private var browserRows: List<TvSessionBrowserPolicy.SessionRow> = emptyList()
+    private var browserReturnFocus: View? = null
+    private lateinit var browserBackCallback: OnBackPressedCallback
+
+    /**
+     * Navigation token: a session-list/session-detail fetch that returns AFTER the user
+     * opened something else (another dialog, «Новый чат», closed overlay) must not clobber
+     * the current screen (mobile `sessionNavigation` parity).
+     */
+    private var sessionLoadToken = 0
+
     private var stream: Job? = null
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
 
@@ -74,9 +106,22 @@ class TvChatActivity : AppCompatActivity() {
         statusView = findViewById(R.id.statusText)
         contextView = findViewById(R.id.contextText)
         val back = findViewById<Button>(R.id.backButton)
+        chatRoot = findViewById(R.id.chatRoot)
+        sessionsButton = findViewById(R.id.sessionsButton)
+        sessionsOverlay = findViewById(R.id.sessionsOverlay)
+        sessionsStatus = findViewById(R.id.sessionsStatus)
+        sessionList = findViewById(R.id.sessionList)
+        closeSessions = findViewById(R.id.closeSessionsButton)
         back.setOnClickListener { finish() }
         newChat.setOnClickListener { startNewChat() }
-        TvFocusLift.attachAll(input, send, newChat, back)
+        sessionsButton.setOnClickListener { openSessionBrowser() }
+        closeSessions.setOnClickListener { closeSessionBrowser() }
+        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions)
+        // BACK closes the session dialog first; only a closed overlay exits the screen.
+        browserBackCallback = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() { closeSessionBrowser() }
+        }
+        onBackPressedDispatcher.addCallback(this, browserBackCallback)
         controlGateway = RepositoryTvChatControlGateway.create(BASE_URL, store)
         // While a turn is live the same button becomes «Остановить» (mobile parity).
         send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
@@ -181,6 +226,9 @@ class TvChatActivity : AppCompatActivity() {
 
     /** «Новый чат» from the header: cancels the live server turn, aborts the stream, resets session + transcript. */
     private fun startNewChat() {
+        // Any in-flight browser fetch or session load is stale from this point on.
+        sessionLoadToken++
+        closeSessionBrowser()
         // The session is dropped for good — cancel the server turn first (best-effort) so the
         // agent does not keep running for a transcript nobody will ever see again.
         cancelServerTurnBestEffort()
@@ -295,11 +343,184 @@ class TvChatActivity : AppCompatActivity() {
     private fun scrollDown() { findViewById<ScrollView>(R.id.messageScroll).post { findViewById<ScrollView>(R.id.messageScroll).fullScroll(View.FOCUS_DOWN) } }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
+    // --- Session browser («Диалоги») ---------------------------------------------------------------
+
+    /**
+     * Opens the session dialog: shows the overlay, freezes the chat behind it (focus cannot
+     * escape into the transcript/composer) and fetches the session list. All fetch/render
+     * decisions come from [TvSessionBrowserPolicy]; a stale fetch (token moved on) is dropped.
+     */
+    private fun openSessionBrowser() {
+        val credential = store.read() ?: return
+        browserReturnFocus = currentFocus
+        chatRoot.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        browserBackCallback.isEnabled = true
+        sessionsOverlay.visibility = View.VISIBLE
+        sessionRowViews.clear()
+        browserRows = emptyList()
+        sessionList.removeAllViews()
+        sessionsStatus.text = LOADING_SESSIONS
+        sessionsStatus.visibility = View.VISIBLE
+        closeSessions.requestFocus()
+        lifecycleScope.launch {
+            val token = ++sessionLoadToken
+            val sessions = SessionRepository().getSessions(BASE_URL, credential)
+            if (token != sessionLoadToken) return@launch
+            renderSessionBrowser(sessions)
+        }
+    }
+
+    /** Hides the overlay, re-enables chat focus and restores it where the dialog was opened. */
+    private fun closeSessionBrowser() {
+        if (!::sessionsOverlay.isInitialized || sessionsOverlay.visibility != View.VISIBLE) return
+        sessionLoadToken++ // an in-flight list fetch must not re-render a closed dialog
+        sessionsOverlay.visibility = View.GONE
+        browserBackCallback.isEnabled = false
+        chatRoot.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        val restore = browserReturnFocus?.takeIf { it.isAttachedToWindow && it.visibility == View.VISIBLE }
+        browserReturnFocus = null
+        (restore ?: sessionsButton).requestFocus()
+    }
+
+    /** Builds the D-pad focusable rows; the initial focus lands per policy (current session, else first). */
+    private fun renderSessionBrowser(sessions: List<SessionItem>) {
+        browserRows = TvSessionBrowserPolicy.rows(sessions, sessionFlow.sessionId)
+        sessionList.removeAllViews()
+        sessionRowViews.clear()
+        if (browserRows.isEmpty()) {
+            sessionsStatus.text = TvSessionBrowserPolicy.EMPTY_LIST
+            sessionsStatus.visibility = View.VISIBLE
+            closeSessions.requestFocus()
+            return
+        }
+        sessionsStatus.visibility = View.GONE
+        browserRows.forEachIndexed { index, row ->
+            val card = buildSessionCard(index, row)
+            sessionRowViews += card
+            sessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        }
+        val selection = TvSessionBrowserPolicy.initialSelection(browserRows, sessionFlow.sessionId)
+        sessionRowViews.getOrNull(selection)?.requestFocus() ?: closeSessions.requestFocus()
+    }
+
+    /**
+     * One dialog row: title + preview + meta card. UP/DOWN stepping is explicit through
+     * [TvSessionBrowserPolicy.move] (deterministic, clamped at the edges — focus never
+     * escapes the list into the chat behind); at an edge the key falls through to the
+     * platform focus search (towards «Закрыть»).
+     */
+    private fun buildSessionCard(index: Int, row: TvSessionBrowserPolicy.SessionRow): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_focus_sidebar_item)
+            isFocusable = true
+            isClickable = true
+            setPadding(dp(22), dp(14), dp(22), dp(14))
+            setOnClickListener { onSessionRowPicked(row) }
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                val delta = when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN -> 1
+                    KeyEvent.KEYCODE_DPAD_UP -> -1
+                    else -> return@setOnKeyListener false
+                }
+                val target = TvSessionBrowserPolicy.move(index, sessionRowViews.size, delta)
+                val view = sessionRowViews.getOrNull(target)
+                if (view != null && target != index) {
+                    view.requestFocus()
+                    true
+                } else false
+            }
+            TvFocusLift.attach(this)
+        }
+        card.addView(TextView(this).apply {
+            text = row.title
+            textSize = 20f
+            setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        row.subtitle?.let { subtitle ->
+            card.addView(TextView(this).apply {
+                text = subtitle
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+        row.meta?.let { meta ->
+            card.addView(TextView(this).apply {
+                text = meta
+                textSize = 14f
+                setTextColor(ContextCompat.getColor(context, R.color.mars_status_info))
+                isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(2), 0, 0)
+            })
+        }
+        return card
+    }
+
+    /** A row was activated: close the dialog and load that session. */
+    private fun onSessionRowPicked(row: TvSessionBrowserPolicy.SessionRow) {
+        closeSessionBrowser()
+        openSession(row.id)
+    }
+
+    /**
+     * Loads one session and continues the chat inside it (mobile `loadSessionById` parity,
+     * minus drafts/reattach which the TV client does not have): the current turn is torn
+     * down exactly like «Новый чат» (server cancel first — the TV has no stream re-attach),
+     * the fetched detail binds into [sessionFlow] via [ChatEvent.SessionBound] so the next
+     * send reuses that session_id, and the persisted transcript renders as bubbles.
+     */
+    private fun openSession(sessionId: String) {
+        val credential = store.read() ?: return
+        cancelServerTurnBestEffort()
+        stream?.cancel()
+        stream = null
+        stopping = false
+        if (::interactive.isInitialized) interactive.dismissAll()
+        val token = ++sessionLoadToken
+        statusView.text = OPENING_SESSION
+        statusView.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val detail = SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            // The user opened something newer mid-fetch («Новый чат», another dialog):
+            // that navigation owns the screen now — never clobber it with a stale load.
+            if (token != sessionLoadToken) return@launch
+            when (val outcome = TvSessionBrowserPolicy.loadOutcome(detail)) {
+                is TvSessionBrowserPolicy.LoadOutcome.Failed -> {
+                    statusView.text = outcome.message
+                    statusView.visibility = View.VISIBLE
+                    input.requestFocus()
+                }
+                is TvSessionBrowserPolicy.LoadOutcome.Open -> {
+                    sessionFlow.startNewChat()
+                    sessionFlow.onEvent(ChatEvent.SessionBound(outcome.detail.id))
+                    messages.removeAllViews()
+                    TvSessionBrowserPolicy.transcript(outcome.detail).forEach { row ->
+                        append(row.author, row.text, row.isUser)
+                    }
+                    renderSendControl()
+                    renderStatus()
+                    input.text.clear()
+                    input.requestFocus()
+                    scrollDown()
+                }
+            }
+        }
+    }
+
     companion object {
         private const val BASE_URL = "https://marscore.ru"
         private const val SEND_LABEL = "Отправить"
         private const val STOP_LABEL = "Остановить"
         private const val STOPPING = "Останавливаю…"
+        private const val LOADING_SESSIONS = "Загружаю список…"
+        private const val OPENING_SESSION = "Открываю диалог…"
 
         /** Process-wide scope for fire-and-forget server cancels that must outlive the Activity. */
         private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
