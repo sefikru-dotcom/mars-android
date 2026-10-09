@@ -126,6 +126,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drawerFilter: EditText
     private var drawerFilterQuery: String = ""
 
+    /**
+     * Reveals delegated subagent children in the drawer (WebUI parity
+     * #5244/#5305: they are hidden from the main list by default).
+     */
+    private var drawerShowSubagents: Boolean = false
+    private var drawerSubagentToggle: Button? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
@@ -339,6 +346,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         searchBox.addView(drawerFilter, LinearLayout.LayoutParams(0, -2, 1f))
         panel.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+
+        // Subagent visibility toggle: delegated children are hidden from the
+        // main list by default (WebUI parity #5244/#5305); the toggle reveals
+        // them marked with a «субагент» badge.
+        drawerSubagentToggle = Button(this).apply {
+            textSize = 11f
+            setPadding(dp(10), dp(2), dp(10), dp(2))
+            isAllCaps = false
+            setOnClickListener {
+                drawerShowSubagents = !drawerShowSubagents
+                renderSessionList()
+            }
+        }
+        panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
 
         val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         listOf(
@@ -1332,7 +1353,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun renderSessionList() {
         if (!::drawerSessionList.isInitialized) return
         drawerSessionList.removeAllViews()
-        val filtered = uiState.sessions
+        // Delegated subagent children are hidden from the main list by default
+        // (WebUI parity #5244/#5305); the toggle reveals them, and the
+        // currently-open session always stays visible.
+        val subagentCount = uiState.sessions.count { it.isSubagent }
+        drawerSubagentToggle?.apply {
+            text = if (drawerShowSubagents) "Субагенты: $subagentCount ✓" else "Субагенты: скрыты ($subagentCount)"
+            setTextColor(if (drawerShowSubagents) MarsTheme.TEXT_STRONG else MarsTheme.TEXT_MUTED)
+            background = MarsTheme.button(
+                this@ChatActivity,
+                if (drawerShowSubagents) MarsTheme.SURFACE_CARD else MarsTheme.SURFACE,
+                radiusDp = 8,
+                strokeColor = if (drawerShowSubagents) MarsTheme.ACCENT else MarsTheme.BORDER_SUBTLE,
+            )
+            visibility = if (subagentCount > 0 || drawerShowSubagents) View.VISIBLE else View.GONE
+        }
+        val filtered = uiState.drawerSessions(drawerShowSubagents, currentSessionId)
             .filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
             .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
         if (filtered.isEmpty()) {
@@ -1404,6 +1440,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
                     setPadding(dp(4), 0, dp(40), dp(2))
+                })
+            }
+
+            // Subagent marker for revealed delegated children (read-only on the
+            // server; hidden from the main list by default).
+            if (session.isSubagent) {
+                card.addView(TextView(this).apply {
+                    text = buildString {
+                        append("↳ ")
+                        append(session.sourceLabel?.takeIf { it.isNotBlank() } ?: "субагент")
+                        if (session.readOnly) append(" · только чтение")
+                    }
+                    textSize = 11f
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(40), 0)
                 })
             }
 

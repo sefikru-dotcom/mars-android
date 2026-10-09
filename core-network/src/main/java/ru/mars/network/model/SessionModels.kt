@@ -94,7 +94,18 @@ data class TodoSnapshot(
     val source: String? = null,
 )
 
-/** A session shown in the WebUI session list. */
+/**
+ * A session shown in the WebUI session list (`GET /api/sessions` rows,
+ * `Session.compact()` wire contract).
+ *
+ * Provenance fields (hermes-webui models.py `_state_db_source` overlay +
+ * `normalize_agent_session_source`, PR #1294): [sourceTag]/[rawSource] carry
+ * the raw state.db source (`"webui"`, `"subagent"`, `"cron"`, …),
+ * [sessionSource] the normalized bucket (`"webui"`/`"cli"`/`"messaging"`/
+ * `"cron"`/`"other"`/`"fork"`), [sourceLabel] the human label. Delegated
+ * subagent children additionally get `read_only = true` and a
+ * [parentSessionId] pointing at the delegating session.
+ */
 data class SessionItem(
     val id: String,
     val title: String? = null,
@@ -104,7 +115,32 @@ data class SessionItem(
     val messageCount: Int? = null,
     /** Active-turn metadata for reattach (`active_stream_id`/`is_streaming`/...); idle default when absent. */
     val activeTurn: ActiveTurnInfo = ActiveTurnInfo(),
-)
+    /** Normalized source bucket (`session_source`): `webui`/`cli`/`messaging`/`cron`/`other`/`fork`. */
+    val sessionSource: String? = null,
+    /** Raw state.db source tag (`source_tag`): `webui`, `subagent`, `cron`, … */
+    val sourceTag: String? = null,
+    /** Raw source alias (`raw_source`), same vocabulary as [sourceTag]. */
+    val rawSource: String? = null,
+    /** Human-readable source label (`source_label`): `WebUI`, `Subagent`, … */
+    val sourceLabel: String? = null,
+    /** Server-side read-only flag (`read_only`) — true for delegated subagent children. */
+    val readOnly: Boolean = false,
+    /** Delegating/branch parent (`parent_session_id`), null for top-level sessions. */
+    val parentSessionId: String? = null,
+) {
+    /**
+     * True for delegated subagent children (WebUI parity #5244/#5305): the
+     * WebUI sidebar never promotes them to top-level rows — they stack under
+     * their parent's lineage and are suppressed when the parent is out of
+     * scope. The normalized [sessionSource] for them is `"other"`, so the
+     * reliable marker is the raw source tag. The drawer hides these rows by
+     * default (toggle to reveal); see `ChatUiState.drawerSessions`.
+     */
+    val isSubagent: Boolean
+        get() = "subagent".equals(sourceTag?.trim(), ignoreCase = true) ||
+            "subagent".equals(rawSource?.trim(), ignoreCase = true) ||
+            "subagent".equals(sessionSource?.trim(), ignoreCase = true)
+}
 
 /**
  * A message persisted in a chat session. For `role == "user"` the content is
