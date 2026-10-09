@@ -1,7 +1,7 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 
 android { namespace = "ru.mars.tv"; compileSdk = 34
-    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 6; versionName = "1.0.5" }
+    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 7; versionName = "1.0.6" }
 }
 
 dependencies {
