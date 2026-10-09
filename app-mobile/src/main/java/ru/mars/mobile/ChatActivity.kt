@@ -1405,31 +1405,35 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             }, LinearLayout.LayoutParams(0, -2, 1f))
 
-            val renameBtn = MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_edit,
-                "Переименовать",
-                bg = Color.TRANSPARENT,
-                iconTint = MarsTheme.TEXT_MUTED,
-                sizeDp = 32,
-                strokeColor = 0
-            ).apply {
-                setOnClickListener { renameSession(session) }
-            }
-            row.addView(renameBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+            // Rename/delete only for manageable rows; the server `read_only`
+            // flag is the single authority (pure policy in SessionRowActions).
+            if (SessionRowActions.canManage(session)) {
+                val renameBtn = MarsTheme.circleIconButton(
+                    this,
+                    R.drawable.ic_edit,
+                    "Переименовать",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 32,
+                    strokeColor = 0
+                ).apply {
+                    setOnClickListener { renameSession(session) }
+                }
+                row.addView(renameBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
 
-            val deleteBtn = MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_trash,
-                "Удалить",
-                bg = Color.TRANSPARENT,
-                iconTint = MarsTheme.STATUS_ERROR,
-                sizeDp = 32,
-                strokeColor = 0
-            ).apply {
-                setOnClickListener { deleteSession(session) }
+                val deleteBtn = MarsTheme.circleIconButton(
+                    this,
+                    R.drawable.ic_trash,
+                    "Удалить",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.STATUS_ERROR,
+                    sizeDp = 32,
+                    strokeColor = 0
+                ).apply {
+                    setOnClickListener { deleteSession(session) }
+                }
+                row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
             }
-            row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
             card.addView(row)
 
             if (!session.preview.isNullOrBlank()) {
