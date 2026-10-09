@@ -70,11 +70,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var statusText: TextView
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
+    /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
+    private var isDraggingSeek = false
+    /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
+    private var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
     private val ticker = object : Runnable {
         override fun run() {
             if (::seek.isInitialized) {
-                seek.progress = MarsMusicPlayer.currentPosition
-                time.text = "${fmt(MarsMusicPlayer.currentPosition)} / ${fmt(MarsMusicPlayer.duration)}"
+                // Skip thumb/time updates mid-drag, otherwise the 500 ms ticker keeps
+                // snapping the thumb back and precise seeking on touch is impossible.
+                if (SeekDragPolicy.tickerMayUpdate(isDraggingSeek)) {
+                    seek.progress = MarsMusicPlayer.currentPosition
+                    time.text = "${fmt(MarsMusicPlayer.currentPosition)} / ${fmt(MarsMusicPlayer.duration)}"
+                }
                 seek.postDelayed(this, 500)
             }
         }
@@ -295,10 +303,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             thumbTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(b: SeekBar?, p: Int, u: Boolean) {
-                    if (u) MarsMusicPlayer.seekTo(p)
+                    if (!u) return
+                    // During the drag only the time label previews the position; the player
+                    // is seeked once on release — no MediaPlayer.seekTo spam mid-gesture.
+                    pendingSeekMs = p
+                    time.text = "${fmt(p)} / ${fmt(MarsMusicPlayer.duration)}"
                 }
-                override fun onStartTrackingTouch(b: SeekBar?) {}
-                override fun onStopTrackingTouch(b: SeekBar?) {}
+                override fun onStartTrackingTouch(b: SeekBar?) { isDraggingSeek = true }
+                override fun onStopTrackingTouch(b: SeekBar?) {
+                    isDraggingSeek = false
+                    SeekDragPolicy.pendingSeekTarget(pendingSeekMs, MarsMusicPlayer.duration)
+                        ?.let { MarsMusicPlayer.seekTo(it) }
+                    pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
+                }
             })
         }
         playerPanel.addView(seek, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
@@ -416,6 +433,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onProgress(currentMs: Int, totalMs: Int) {
         runOnUiThread {
             seek.max = totalMs.coerceAtLeast(1)
+            if (isDraggingSeek) return@runOnUiThread // thumb belongs to the finger, not the player
             seek.progress = currentMs
             time.text = "${fmt(currentMs)} / ${fmt(totalMs)}"
         }
@@ -953,4 +971,25 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     companion object {
         private const val BASE_URL = "https://marscore.ru/music"
     }
+}
+
+/**
+ * Pure seek-bar drag policy for [MusicActivity]: while the user's finger owns the thumb,
+ * the periodic progress ticker and player callbacks must not snap it back (on a touch
+ * screen the thumb visibly fights the drag), and the player is seeked exactly once — on
+ * release — instead of on every intermediate progress change. Android-free for JVM tests.
+ */
+object SeekDragPolicy {
+    /** Initial/reset value of the pending drag position: nothing has been dragged. */
+    const val NO_PENDING_SEEK = -1
+
+    /** The ticker may move the thumb and time label only when no drag is in progress. */
+    fun tickerMayUpdate(isDragging: Boolean): Boolean = !isDragging
+
+    /**
+     * The position to seek to on release: [pendingMs] clamped into the track, or null when
+     * nothing is pending (any negative value) — then the player must not be touched.
+     */
+    fun pendingSeekTarget(pendingMs: Int, durationMs: Int): Int? =
+        if (pendingMs < 0) null else pendingMs.coerceIn(0, durationMs.coerceAtLeast(0))
 }
