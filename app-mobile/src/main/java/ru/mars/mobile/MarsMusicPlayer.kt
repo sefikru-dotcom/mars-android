@@ -153,6 +153,53 @@ object MarsMusicPlayer {
         // At the start of the queue (repeat off) the current track simply keeps playing.
     }
 
+    /** Jumps to the queue track at [index] and starts playing it; out-of-range is a no-op. */
+    @Synchronized
+    fun playQueueAt(index: Int) {
+        if (queueManager.playAt(index) == null) return
+        consecutiveFailures = 0
+        syncQueueState()
+        startCurrentTrack()
+    }
+
+    /**
+     * Removes the queue track at [index] and returns it (null when out of range). When the
+     * removed track was the current one, playback continues on the successor selected by
+     * [MusicQueueManager]; if none remains (queue empty or the session finished) playback stops.
+     */
+    @Synchronized
+    fun removeFromQueue(index: Int): MusicTrack? {
+        val wasCurrent = index == queueManager.currentIndex && queueManager.currentTrack != null
+        val removed = queueManager.removeAt(index) ?: return null
+        syncQueueState()
+        if (!wasCurrent) {
+            notifyState()
+            return removed
+        }
+        if (queueManager.currentTrack == null || queueManager.isFinished) {
+            stopPlayback()
+        } else {
+            consecutiveFailures = 0
+            startCurrentTrack()
+        }
+        return removed
+    }
+
+    /** Stops playback and empties the queue; listeners see the cleared state. */
+    @Synchronized
+    fun clearQueue() {
+        mediaPlayer?.release()
+        mediaPlayer = null
+        setPlaying(false)
+        currentPosition = 0
+        duration = 0
+        consecutiveFailures = 0
+        queueManager.clear()
+        syncQueueState()
+        notifyState()
+        notifyProgress()
+    }
+
     @Synchronized fun seekTo(ms: Int) {
         val target = ms.coerceAtLeast(0)
         runCatching { mediaPlayer?.seekTo(target); currentPosition = target; notifyProgress() }

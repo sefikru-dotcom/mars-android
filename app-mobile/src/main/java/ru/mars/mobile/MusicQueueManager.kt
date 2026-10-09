@@ -214,6 +214,71 @@ class MusicQueueManager(private val random: Random = Random.Default) {
         return playOrder.subList(start, playOrder.size).mapNotNull { queue.getOrNull(it) }
     }
 
+    /**
+     * Removes the track at [index] and returns it; null when the index is out of range.
+     *
+     * Removing a track before the current one shifts the selection down; the current track
+     * itself stays selected. Removing the current track selects its successor in play order
+     * (the next shuffled entry when [isShuffled]). Removing the tail of the queue while it is
+     * current finishes the session ([isFinished], selection dropped — same contract as [next]
+     * running out), except with [RepeatMode.ALL] where the selection wraps to the start of the
+     * play order. Removing the only track leaves the manager empty and not finished.
+     */
+    fun removeAt(index: Int): MusicTrack? {
+        if (index !in queue.indices) return null
+        val removed = queue[index]
+        val wasCurrent = index == currentIndex
+        // Position of the removed index in the old play order (shuffle); the entry after it
+        // slides into this position and becomes the successor of a removed current track.
+        val removedOrderPos = if (isShuffled) playOrder.indexOf(index) else index
+        queue = queue.filterIndexed { i, _ -> i != index }
+        playOrder = playOrder.filter { it != index }.map { if (it > index) it - 1 else it }
+        if (queue.isEmpty()) {
+            playOrder = emptyList()
+            orderPosition = -1
+            currentIndex = -1
+            isFinished = false
+            return removed
+        }
+        if (!wasCurrent) {
+            if (index < currentIndex) currentIndex -= 1
+            orderPosition = if (isShuffled) playOrder.indexOf(currentIndex) else currentIndex
+            return removed
+        }
+        if (isShuffled) {
+            when {
+                removedOrderPos in playOrder.indices -> {
+                    orderPosition = removedOrderPos
+                    currentIndex = playOrder[orderPosition]
+                }
+                repeatMode == RepeatMode.ALL -> {
+                    orderPosition = 0
+                    currentIndex = playOrder[0]
+                }
+                else -> {
+                    isFinished = true
+                    currentIndex = -1
+                    orderPosition = -1
+                }
+            }
+            return removed
+        }
+        // Sequential: the successor already slid into the removed position.
+        when {
+            currentIndex in queue.indices -> orderPosition = currentIndex
+            repeatMode == RepeatMode.ALL -> {
+                currentIndex = 0
+                orderPosition = 0
+            }
+            else -> {
+                isFinished = true
+                currentIndex = -1
+                orderPosition = -1
+            }
+        }
+        return removed
+    }
+
     /** Empties the queue and drops the current selection. */
     fun clear() {
         queue = emptyList()
