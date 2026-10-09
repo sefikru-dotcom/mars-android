@@ -194,6 +194,99 @@ class StreamEventMapperTest {
         assertEquals(ChatEvent.Phase("Compressing context"), StreamEventMapper.map("compressing", null, """{"session_id":"s1","message":"Compressing context"}"""))
     }
 
+    // ---- subagent/delegation frames: readable trace in thoughts, NEVER body text ----
+    // Wire verified against hermes-agent tools/delegate_tool_progress.py (_ChildProgressRelay)
+    // and gateway api_server_runs.py `_SUBAGENT_EVENT_KEYS`.
+
+    @Test fun mapsSubagentStartToThoughtTraceNotChunk() {
+        val payload = """{"event":"subagent.start","run_id":"r1","preview":"Собрать релиз","goal":"Собрать релиз",
+            "task_index":1,"task_count":2,"child_session_id":"c1","delegation_id":"d1"}"""
+        val event = StreamEventMapper.map("subagent.start", "e1", payload)
+        assertTrue(event is ChatEvent.Thought)
+        assertTrue((event as ChatEvent.Thought).text.contains("Субагент 1/2 запущен"))
+        assertTrue(event.text.contains("Собрать релиз"))
+    }
+
+    @Test fun mapsSubagentCompleteWithSummaryToThoughtAndNeverLeaksOutputTail() {
+        val wall = "СТЕНА СЫРОГО ТЕКСТА ДОЧЕРНЕГО АГЕНТА ".repeat(4)
+        val payload = """{"event":"subagent.complete","status":"completed","goal":"Сборка APK",
+            "summary":"APK собран, тесты зелёные","output_tail":"$wall","task_index":2,"task_count":2}"""
+        val event = StreamEventMapper.map("subagent.complete", null, payload) as ChatEvent.Thought
+        assertTrue(event.text.contains("Субагент 2/2 завершён (completed)"))
+        assertTrue(event.text.contains("APK собран"))
+        assertFalse(event.text.contains("СТЕНА"))
+    }
+
+    @Test fun mapsSubagentFailureWithReasonToThought() {
+        val payload = """{"event":"subagent.complete","status":"failed","goal":"Деплой","failure_reason":"child timeout","output_tail":"x"}"""
+        val event = StreamEventMapper.map("subagent.complete", null, payload) as ChatEvent.Thought
+        assertTrue(event.text.contains("не справился"))
+        assertTrue(event.text.contains("child timeout"))
+    }
+
+    @Test fun mapsDelegateLifecycleAliasesLikeSubagentFrames() {
+        assertTrue(StreamEventMapper.map("delegate.task_spawned", null, """{"goal":"Проверить CI"}""") is ChatEvent.Thought)
+        assertTrue(StreamEventMapper.map("delegate.task_completed", null, """{"status":"completed","summary":"ok"}""") is ChatEvent.Thought)
+        assertTrue(StreamEventMapper.map("delegate.task_failed", null, """{"status":"failed","failure_reason":"boom"}""") is ChatEvent.Thought)
+    }
+
+    @Test fun subagentChildNoiseFramesAreDroppedAndNeverLeakIntoText() {
+        val noisy = """{"text":"child wall of output","content":"more raw text","output_tail":"raw","preview":"p"}"""
+        for (name in listOf(
+            "subagent.text", "subagent.thinking", "subagent.tool", "subagent.progress",
+            "subagent_progress", "delegate.task_progress", "delegate.task_thinking",
+            "delegate.tool_started", "delegate.tool_completed",
+        )) {
+            assertNull("frame '$name' leaked into the ChatEvent flow", StreamEventMapper.map(name, null, noisy))
+        }
+    }
+
+    @Test fun mapsGatewayRunMessageDeltaToChunkStringOnly() {
+        assertEquals(
+            ChatEvent.Chunk("Привет", "r:3"),
+            StreamEventMapper.map("message.delta", "r:3", """{"event":"message.delta","run_id":"r1","delta":"Привет"}""")
+        )
+        // Structured delta → dropped, never toString()-dumped into the bubble.
+        assertNull(StreamEventMapper.map("message.delta", null, """{"delta":{"parts":["a","b"]}}"""))
+    }
+
+    // ---- anti-gibberish contract: structured text fields never reach the bubble ----
+
+    @Test fun structuredTextFieldsNeverDumpIntoChunk() {
+        // A snapshot-shaped payload delivered under the server's `message` fallback event
+        // name (routes.py _runner_event_name / _replay_run_journal): `content` is a LIST.
+        val snapshot = """{"messages":[{"role":"assistant","content":"hi"}],"content":[{"text":"a"}],"last_assistant_text":"x"}"""
+        assertNull(StreamEventMapper.map("message", null, snapshot))
+        assertNull(StreamEventMapper.map("token", null, """{"text":{"nested":"obj"}}"""))
+        assertNull(StreamEventMapper.map(null, null, """{"content":["wall","of","json"]}"""))
+        assertNull(StreamEventMapper.map("interim_assistant", null, """{"text":["list"],"already_streamed":false}"""))
+        // Plain strings keep flowing exactly as before.
+        assertEquals(ChatEvent.Chunk("ok", null), StreamEventMapper.map("message", null, """{"content":"ok"}"""))
+        assertEquals(ChatEvent.Chunk("привет", null), StreamEventMapper.map(null, null, """{"text":"привет"}"""))
+    }
+
+    @Test fun reasoningWithStructuredContentIsDroppedNotDumped() {
+        assertNull(StreamEventMapper.map("reasoning", null, """{"content":{"parts":["a"]}}"""))
+    }
+
+    @Test fun phaseNeverShowsRawJsonPayload() {
+        // Parsed JSON without a readable field → human label from the event name.
+        assertEquals(ChatEvent.Phase("Сжатие контекста"), StreamEventMapper.map("compressing", null, """{"session_id":"s1"}"""))
+        assertEquals(ChatEvent.Phase("Контекст сжат"), StreamEventMapper.map("compressed", null, """{"session_id":"s1","usage":{}}"""))
+        assertEquals(ChatEvent.Phase("status"), StreamEventMapper.map("status", null, """{"session_id":"s1","code":7}"""))
+        // Legacy plain-text payload stays verbatim.
+        assertEquals(ChatEvent.Phase("final"), StreamEventMapper.map("status", null, "final"))
+    }
+
+    @Test fun errorWithoutMessageFieldsNeverDumpsRawJson() {
+        assertEquals(ChatEvent.Error("Ошибка потока"), StreamEventMapper.map("apperror", null, """{"code":500}"""))
+        assertEquals(ChatEvent.Error("Gateway rejected"), StreamEventMapper.map("error", null, """{"label":"Gateway rejected","type":"gateway_auth_error"}"""))
+        // Non-JSON body preserved verbatim (nothing structured to leak).
+        assertEquals(ChatEvent.Error("raw failure"), StreamEventMapper.map("error", null, "raw failure"))
+        // message/error keep priority.
+        assertEquals(ChatEvent.Error("boom"), StreamEventMapper.map("error", null, """{"message":"boom","label":"L"}"""))
+    }
+
     // ---- side-channel metadata frames: title text / goal / goal_continue -----
     // Verified against hermes-webui api/streaming.py: put_event('title', {session_id,
     // title}), put('goal', {session_id, state, message, message_key, message_args?,
