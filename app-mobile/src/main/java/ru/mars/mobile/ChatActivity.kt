@@ -225,7 +225,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         refreshReasoningStatus()
         loadWorkspaces()
         // Пересоздание экрана (поворот/тема/смерть процесса): открытый диалог восстанавливается
-        // из savedInstanceState; на холодном старте savedInstanceState == null → новый чат.
+        // из savedInstanceState; на холодном старте savedInstanceState == null -> новый чат.
         restoreOpenSession(savedInstanceState)
     }
 
@@ -559,7 +559,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         titleRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(6) })
         updateYoloPill()
-        titleBox.addView(titleRow)
+        // Scrollable pill row (POCO F5-class viewports): the model/reasoning/mode/workspace/YOLO
+        // pills scroll horizontally instead of clipping when they exceed the header width.
+        titleBox.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(titleRow)
+        })
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
 
         val musicBtn = MarsTheme.circleIconButton(
@@ -1081,9 +1086,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "clarify" -> "уточнения"
             else -> attention.kind
         }
-        val count = if (attention.count > 1) " ×${attention.count}" else ""
-        val prefix = if (attention.severity == "critical") "❗ " else ""
-        return "${prefix}Ожидает $kind$count"
+        val count = if (attention.count > 1) " x${attention.count}" else ""
+        // Textual severity marker — the exclamation emoji renders font-dependent across skins.
+        return if (attention.severity == "critical") {
+            "Критично — ожидает $kind$count"
+        } else {
+            "Ожидает $kind$count"
+        }
     }
 
     private fun phaseLabel(value: String) = when {
@@ -1113,12 +1122,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
             val labelRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             if (!isUser) {
-                val dot = TextView(this).apply {
-                    text = "● "
-                    setTextColor(MarsTheme.STATUS_ONLINE)
-                    textSize = 10f
-                }
-                labelRow.addView(dot)
+                // Vector status dot (WebUI parity) — the font bullet glyph has OEM-dependent
+                // metrics/color, so the theme draws the dot instead.
+                val dot = MarsTheme.statusDot(this, MarsTheme.STATUS_ONLINE)
+                labelRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
             }
             val label = TextView(this).apply {
                 text = if (isUser) "Вы" else "Марс"
@@ -1178,14 +1185,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (message.thoughts.isNotEmpty()) {
                 val thoughtBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.card(this@ChatActivity, 0x143b82f6.toInt(), radiusDp = 10, strokeColor = 0x333b82f6.toInt())
+                    background = MarsTheme.card(this@ChatActivity, MarsTheme.THOUGHT_BG, radiusDp = 10, strokeColor = MarsTheme.THOUGHT_BORDER)
                     setPadding(dp(10), dp(6), dp(10), dp(6))
                 }
                 val toggle = Button(this).apply {
-                    text = "${if (message.thoughtsExpanded) "▲" else "▼"}  Мысли Марса"
+                    text = "Мысли Марса"
                     textSize = 12f
                     setTypeface(null, Typeface.BOLD)
                     setTextColor(MarsTheme.ACCENT_TEXT)
+                    chevronStart(
+                        if (message.thoughtsExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                        MarsTheme.ACCENT_TEXT,
+                    )
                     background = null
                     isAllCaps = false
                     setPadding(0, 0, 0, 0)
@@ -1225,10 +1236,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
                 val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
                 val toggle = Button(this).apply {
-                    text = "${if (tool.expanded) "▲" else "▼"}  ${tool.name}"
+                    text = tool.name
                     textSize = 12f
                     setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
                     setTextColor(MarsTheme.ACCENT_TEXT)
+                    chevronStart(
+                        if (tool.expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                        MarsTheme.ACCENT_TEXT,
+                    )
                     background = null
                     isAllCaps = false
                     setPadding(0, 0, 0, 0)
@@ -1368,7 +1383,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     box.addView(HorizontalScrollView(this).apply {
                         addView(TextView(this@ChatActivity).apply {
                             text = view.visibleCode
-                            setTextColor(0xffe6edf3.toInt())
+                            setTextColor(MarsTheme.TEXT)
                             typeface = Typeface.MONOSPACE
                             textSize = 13f
                             setPadding(0, dp(4), dp(16), dp(8))
@@ -1378,10 +1393,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     val toggleLabel = view.toggleLabel
                     if (toggleLabel != null) {
                         box.addView(Button(this).apply {
-                            text = "${if (view.expanded) "▲" else "▼"}  $toggleLabel"
+                            text = toggleLabel
                             textSize = 11f
                             setTypeface(null, Typeface.BOLD)
                             setTextColor(MarsTheme.ACCENT_TEXT)
+                            chevronStart(
+                                if (view.expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                                MarsTheme.ACCENT_TEXT,
+                            )
                             background = null
                             isAllCaps = false
                             setPadding(0, 0, 0, 0)
@@ -1416,7 +1435,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 is InlineSpan.Monospace -> {
                     builder.append(span.text)
                     builder.setSpan(TypefaceSpan("monospace"), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                    builder.setSpan(BackgroundColorSpan(0x33283143.toInt()), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    builder.setSpan(BackgroundColorSpan(MarsTheme.SURFACE_SUBTLE), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
                 is InlineSpan.Link -> {
                     builder.append(span.title)
@@ -1441,7 +1460,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // currently-open session always stays visible.
         val subagentCount = uiState.sessions.count { it.isSubagent }
         drawerSubagentToggle?.apply {
-            text = if (drawerShowSubagents) "Субагенты: $subagentCount ✓" else "Субагенты: скрыты ($subagentCount)"
+            text = if (drawerShowSubagents) "Субагенты: $subagentCount (активны)" else "Субагенты: скрыты ($subagentCount)"
             setTextColor(if (drawerShowSubagents) MarsTheme.TEXT_STRONG else MarsTheme.TEXT_MUTED)
             background = MarsTheme.button(
                 this@ChatActivity,
@@ -1535,7 +1554,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (session.isSubagent) {
                 card.addView(TextView(this).apply {
                     text = buildString {
-                        append("↳ ")
                         append(session.sourceLabel?.takeIf { it.isNotBlank() } ?: "субагент")
                         if (session.readOnly) append(" · только чтение")
                     }
@@ -1550,10 +1568,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Active-turn/attention badge: which sessions are live or waiting for the user.
             val turn = session.activeTurn
             val turnAttention = turn.attention
+            // Clean textual badges — status is carried by the themed color, not symbol glyphs.
             val badge: Pair<String, Int>? = when {
-                turnAttention != null -> "⚠ ${attentionLabel(turnAttention)}" to MarsTheme.STATUS_WARNING
-                turn.isStreaming -> "● Активный ход" to MarsTheme.STATUS_ONLINE
-                turn.hasPendingUserMessage -> "↑ Сообщение в очереди" to MarsTheme.STATUS_INFO
+                turnAttention != null -> attentionLabel(turnAttention) to MarsTheme.STATUS_WARNING
+                turn.isStreaming -> "Активный ход" to MarsTheme.STATUS_ONLINE
+                turn.hasPendingUserMessage -> "Сообщение в очереди" to MarsTheme.STATUS_INFO
                 else -> null
             }
             if (badge != null) {
@@ -1852,9 +1871,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         attachmentChips.visibility = if (attachments.isEmpty()) View.GONE else View.VISIBLE
         attachments.forEachIndexed { i, a ->
             attachmentChips.addView(Button(this).apply {
-                text = "${a.name}  ✕"
+                text = a.name
                 textSize = 11f
                 setTextColor(Color.WHITE)
+                contentDescription = "Убрать вложение ${a.name}"
+                // Vector `ic_close` as the trailing affordance — replaces the cross text glyph.
+                setCompoundDrawablesRelativeWithIntrinsicBounds(
+                    null, null, ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_close), null
+                )
+                compoundDrawableTintList = ColorStateList.valueOf(Color.WHITE)
+                compoundDrawablePadding = dp(6)
                 background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.ACCENT)
                 setOnClickListener { attachments.removeAt(i); renderAttachmentChips() }
             }, LinearLayout.LayoutParams(-2, dp(30)).apply { marginEnd = dp(6) })
@@ -1909,7 +1935,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /**
      * Reasoning-effort chip (WebUI composer-chip parity, static/ui.js). The ladder is
-     * server-driven (`GET /api/reasoning` → `supported_efforts` for the active model);
+     * server-driven (`GET /api/reasoning` -> `supported_efforts` for the active model);
      * an explicit pick is persisted server-side via `POST /api/reasoning` and only then
      * recorded locally — `chat/start` itself carries NO reasoning field: the server
      * resolves the effort per turn from its own session/override/config state.
@@ -2278,11 +2304,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     // --- YOLO mode ------------------------------------------------------------------------------
 
-    /** Header pill: accent + «YOLO ●» while the session runs autonomously, muted while off. */
+    /** Header pill: clean «YOLO» label — accent tint while autonomous, muted while off. */
     private fun updateYoloPill() {
         val btn = yoloBtn ?: return
         val on = uiState.yoloEnabled
-        btn.text = if (on) "YOLO ●" else "YOLO"
+        btn.text = "YOLO"
+        btn.contentDescription = if (on) {
+            "Режим YOLO включён — автономная работа без подтверждений"
+        } else {
+            "Режим YOLO выключен — работа с подтверждениями"
+        }
         btn.setTextColor(if (on) Color.WHITE else MarsTheme.TEXT_MUTED)
         btn.background = MarsTheme.pill(
             this,
@@ -2462,6 +2493,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun dp(value: Int) = MarsTheme.dp(this, value)
+
+    /**
+     * Tinted vector chevron at the start of a toggle button — replaces the triangle arrow text
+     * glyphs (font-dependent rendering across OEM skins, same anti-pattern as emojis).
+     */
+    private fun Button.chevronStart(drawableRes: Int, tint: Int) {
+        setCompoundDrawablesRelativeWithIntrinsicBounds(
+            ContextCompat.getDrawable(context, drawableRes), null, null, null
+        )
+        compoundDrawableTintList = ColorStateList.valueOf(tint)
+        compoundDrawablePadding = dp(6)
+    }
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
