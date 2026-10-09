@@ -87,4 +87,24 @@ class TvDesignSystemTest {
             assertTrue("$name must handle focus", text.contains("state_focused"))
         }
     }
+
+    @Test
+    fun `every button on music and projects screens is D-pad focusable with a theme focus selector`() {
+        // A TV window navigates only while a view holds focus: a non-focusable button is
+        // unreachable for the D-pad, and a hardcoded background shows no focus highlight.
+        val buttonBlock = Regex("<Button\\b[^>]*?/>", RegexOption.DOT_MATCHES_ALL)
+        listOf("activity_tv_music.xml", "activity_tv_projects.xml").forEach { name ->
+            val buttons = buttonBlock.findAll(File(resDir, "layout/$name").readText()).toList()
+            assertTrue("$name must contain buttons", buttons.isNotEmpty())
+            buttons.forEach { block ->
+                val text = block.value
+                val id = Regex("android:id=\"@\\+id/(\\w+)\"").find(text)?.groupValues?.get(1) ?: "<no id>"
+                assertTrue("$name/$id must be focusable", text.contains("android:focusable=\"true\""))
+                assertTrue(
+                    "$name/$id must use a theme focus selector background",
+                    Regex("android:background=\"@drawable/bg_focus_\\w+\"").containsMatchIn(text),
+                )
+            }
+        }
+    }
 }
