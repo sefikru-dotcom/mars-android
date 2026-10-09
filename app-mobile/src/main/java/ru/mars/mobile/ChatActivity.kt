@@ -1,11 +1,15 @@
 package ru.mars.mobile
 
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -16,6 +20,7 @@ import android.speech.tts.TextToSpeech
 import android.text.ClipboardManager
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextPaint
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
@@ -69,6 +74,8 @@ import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
 import ru.mars.network.repository.WorkspaceRepository
 import ru.mars.network.repository.readBoundedUploadPayload
+import java.net.HttpURLConnection
+import java.net.URL
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var store: AndroidKeyStoreCredentialStore
@@ -403,24 +410,29 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
 
-        val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        // Быстрые разделы: сетка 2×2 (Проекты/Музыка, Память/Скиллы).
         listOf(
             "Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
-            "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) }
-        ).forEach { (title, action) ->
-            quickRow.addView(Button(this).apply {
-                text = title
-                textSize = 12f
-                setTextColor(MarsTheme.TEXT)
-                background = MarsTheme.button(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
-                setPadding(dp(10), dp(4), dp(10), dp(4))
-                setOnClickListener {
-                    drawer.closeDrawer(GravityCompat.START)
-                    action()
-                }
-            }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(6) })
+            "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
+            "Память" to { startActivity(Intent(this@ChatActivity, MemoryActivity::class.java)) },
+            "Скиллы" to { startActivity(Intent(this@ChatActivity, SkillsActivity::class.java)) }
+        ).chunked(2).forEach { rowActions ->
+            val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            rowActions.forEach { (title, action) ->
+                quickRow.addView(Button(this).apply {
+                    text = title
+                    textSize = 12f
+                    setTextColor(MarsTheme.TEXT)
+                    background = MarsTheme.button(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
+                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                    setOnClickListener {
+                        drawer.closeDrawer(GravityCompat.START)
+                        action()
+                    }
+                }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(6) })
+            }
+            panel.addView(quickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
         }
-        panel.addView(quickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         drawerSessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val listScroll = ScrollView(this).apply { addView(drawerSessionList, ViewGroup.LayoutParams(-1, -2)) }
@@ -1166,6 +1178,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     setOnClickListener { copyMessage(message.text) }
                 }
                 actionsRow.addView(copyBtn)
+                // «⋮» button: full message-actions sheet (copy/quote/share), WebUI parity.
+                val moreBtn = MarsTheme.circleIconButton(
+                    this,
+                    R.drawable.ic_more_vert,
+                    "Действия с сообщением",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 30,
+                    strokeColor = 0
+                ).apply {
+                    setOnClickListener { showMessageActions(message) }
+                }
+                actionsRow.addView(moreBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
                 if (!isUser) {
                     // Speaker button: read Mars's answer aloud through the speech filter.
                     val speakBtn = MarsTheme.circleIconButton(
@@ -1293,6 +1318,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val params = LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .88).toInt(), -2).apply {
                 topMargin = dp(8)
                 gravity = if (isUser) Gravity.END else Gravity.START
+            }
+            if (message.text.isNotBlank()) {
+                // Long-press anywhere on the bubble opens the message-actions sheet.
+                card.setOnLongClickListener { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    showMessageActions(message)
+                    true
+                }
             }
             messages.addView(card, params)
         }
@@ -1486,13 +1519,29 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     builder.append(span.title)
                     builder.setSpan(object : ClickableSpan() {
                         override fun onClick(widget: View) {
-                            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(span.url))) }
+                            // Image links open in the fullscreen lightbox, everything else in a browser.
+                            if (ImageLightboxPolicy.isImageUrl(span.url)) {
+                                openImageLightbox(span.url)
+                            } else {
+                                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(span.url))) }
+                            }
                         }
                     }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
                 is InlineSpan.Strikethrough -> {
                     builder.append(span.text)
                     builder.setSpan(StrikethroughSpan(), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Image -> {
+                    // Markdown image: a clickable accent label — tap opens the fullscreen viewer.
+                    builder.append(ImageLightboxPolicy.inlineLabel(span.alt))
+                    builder.setSpan(object : ClickableSpan() {
+                        override fun onClick(widget: View) = openImageLightbox(span.url)
+                        override fun updateDrawState(ds: TextPaint) {
+                            ds.color = MarsTheme.ACCENT_TEXT
+                            ds.isUnderlineText = true
+                        }
+                    }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
             }
         }
@@ -1915,15 +1964,165 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         statusView.text = "Скопировано"
     }
 
+    /**
+     * Message-actions sheet (WebUI parity): copy / quote / share for one message.
+     * Opened by the «⋮» button and by a long-press anywhere on the bubble.
+     * Labels, quote formatting and the empty-text guard live in [MessageActionPolicy].
+     */
+    private fun showMessageActions(message: ChatMessage) {
+        val actions = MessageActionPolicy.actionsFor(message.text)
+        if (actions.isEmpty()) return
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Действия с сообщением", null))
+            val stack = MarsDialog.pillStack(this, actions.map { kind ->
+                kind.label to {
+                    dialog?.dismiss()
+                    performMessageAction(kind, message)
+                }
+            })
+            root.addView(stack)
+            listOf(stack)
+        }
+        dialog?.window?.setDimAmount(0.8f)
+    }
+
+    private fun performMessageAction(kind: MessageActionKind, message: ChatMessage) {
+        when (kind) {
+            MessageActionKind.COPY -> {
+                copyMessage(message.text)
+                Toast.makeText(this, MessageActionPolicy.COPY_TOAST, Toast.LENGTH_SHORT).show()
+            }
+            MessageActionKind.QUOTE -> {
+                val quote = MessageActionPolicy.composeQuote(input.text.toString(), message.text)
+                input.setText(quote.text)
+                input.setSelection(quote.cursor.coerceIn(0, input.length()))
+                input.requestFocus()
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                    ?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+                statusView.text = "Цитата вставлена в поле ввода"
+            }
+            MessageActionKind.SHARE -> {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, MessageActionPolicy.SHARE_SUBJECT)
+                    putExtra(Intent.EXTRA_TEXT, MessageActionPolicy.shareBody(message.text))
+                }
+                runCatching { startActivity(Intent.createChooser(intent, "Поделиться сообщением")) }
+                    .onFailure { statusView.text = "Некому открыть сообщение для шаринга" }
+            }
+        }
+    }
+
+    /**
+     * Fullscreen image viewer (lightbox): dark backdrop, async bitmap load,
+     * close button + backdrop tap dismiss. URL resolution and the image-link
+     * heuristic live in [ImageLightboxPolicy]/[ThumbnailUrlResolver].
+     */
+    private fun openImageLightbox(rawUrl: String) {
+        val url = ImageLightboxPolicy.resolveUrl(rawUrl, BASE_URL)
+        if (url == null) {
+            statusView.text = "Изображение недоступно"
+            return
+        }
+        val dialog = Dialog(this)
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(0xE6000000.toInt())
+            fitsSystemWindows = true
+            setOnClickListener { dialog.dismiss() }
+        }
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            contentDescription = "Просмотр изображения"
+        }
+        val progress = TextView(this).apply {
+            text = "Загрузка…"
+            setTextColor(MarsTheme.TEXT_MUTED)
+            textSize = 13f
+            gravity = Gravity.CENTER
+        }
+        root.addView(image, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        root.addView(progress, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ))
+        val closeBtn = MarsTheme.circleIconButton(
+            this, R.drawable.ic_close, "Закрыть просмотр",
+            bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT_STRONG, sizeDp = 40
+        ).apply { setOnClickListener { dialog.dismiss() } }
+        root.addView(closeBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(16)
+            marginEnd = dp(16)
+        })
+        dialog.setContentView(root)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setDimAmount(1f)
+        }
+        dialog.show()
+        lifecycleScope.launch {
+            val bitmap = withContext(Dispatchers.IO) { fetchBitmapForViewer(url) }
+            if (!dialog.isShowing) return@launch
+            if (bitmap != null) {
+                image.setImageBitmap(bitmap)
+                progress.visibility = View.GONE
+            } else {
+                progress.text = "Не удалось загрузить изображение"
+            }
+        }
+    }
+
+    /** Bounded bitmap fetch for the lightbox: ≤25 MB payload, downscaled above 4096 px. */
+    private fun fetchBitmapForViewer(url: String): Bitmap? = runCatching {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 10000
+            connection.readTimeout = 15000
+            val bytes = connection.inputStream.use { stream ->
+                val buffer = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(16 * 1024)
+                var total = 0L
+                while (true) {
+                    val read = stream.read(chunk)
+                    if (read <= 0) break
+                    total += read
+                    if (total > MAX_VIEWER_IMAGE_BYTES) return null
+                    buffer.write(chunk, 0, read)
+                }
+                buffer.toByteArray()
+            }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (bounds.outWidth / sample > MAX_VIEWER_IMAGE_DIMENSION ||
+                bounds.outHeight / sample > MAX_VIEWER_IMAGE_DIMENSION
+            ) {
+                sample *= 2
+            }
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        } finally {
+            connection.disconnect()
+        }
+    }.getOrNull()
+
     private fun renderAttachmentChips() {
         attachmentChips.removeAllViews()
         attachmentChips.visibility = if (attachments.isEmpty()) View.GONE else View.VISIBLE
         attachments.forEachIndexed { i, a ->
+            val previewable = a.isImage == true || a.mime.startsWith("image/")
             attachmentChips.addView(Button(this).apply {
                 text = a.name
                 textSize = 11f
                 setTextColor(Color.WHITE)
-                contentDescription = "Убрать вложение ${a.name}"
+                contentDescription = if (previewable) {
+                    "Убрать вложение ${a.name}, долгое нажатие — просмотр"
+                } else {
+                    "Убрать вложение ${a.name}"
+                }
                 // Vector `ic_close` as the trailing affordance — replaces the cross text glyph.
                 setCompoundDrawablesRelativeWithIntrinsicBounds(
                     null, null, ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_close), null
@@ -1932,6 +2131,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 compoundDrawablePadding = dp(6)
                 background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.ACCENT)
                 setOnClickListener { attachments.removeAt(i); renderAttachmentChips() }
+                if (previewable) {
+                    // Long-press previews the uploaded image in the fullscreen lightbox.
+                    setOnLongClickListener {
+                        it.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        openImageLightbox(a.path)
+                        true
+                    }
+                }
             }, LinearLayout.LayoutParams(-2, dp(30)).apply { marginEnd = dp(6) })
         }
     }
@@ -2154,33 +2361,26 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Composer context pill: `NN%` + used/total tokens, colored like the WebUI
      * ring (green ≤50, orange ≤75, red above). Hidden while unknown — an
      * unresolved window must not become a fake percentage (#1436 parity).
+     * Text, thresholds and visibility rules live in [ContextBudgetPolicy] (JVM-tested);
+     * this layer only maps the level to a theme color.
      */
     private fun updateContextIndicator() {
         val view = contextIndicator ?: return
-        val usage = uiState.contextUsage
-        // In-flight compression job: the pill becomes the progress marker (WebUI ctx-ring parity —
-        // the ring is locked while a manual compression runs).
-        if (compressionRunning) {
-            view.visibility = View.VISIBLE
-            view.text = "Сжатие…"
-            view.setTextColor(MarsTheme.STATUS_WARNING)
-            view.contentDescription = "Идёт сжатие контекста"
-            return
-        }
-        if (usage == null || usage.maxTokens <= 0) {
+        val pill = ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning)
+        if (!pill.visible) {
             view.visibility = View.GONE
             return
         }
         view.visibility = View.VISIBLE
-        view.text = "${usage.percent}% · ${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.maxTokens)}"
+        view.text = pill.text
         view.setTextColor(
-            when {
-                usage.percent > 75 -> MarsTheme.STATUS_ERROR
-                usage.percent > 50 -> MarsTheme.STATUS_WARNING
-                else -> MarsTheme.STATUS_ONLINE
+            when (pill.level) {
+                ContextBudgetLevel.CRITICAL -> MarsTheme.STATUS_ERROR
+                ContextBudgetLevel.WARNING -> MarsTheme.STATUS_WARNING
+                ContextBudgetLevel.NORMAL, null -> MarsTheme.STATUS_ONLINE
             }
         )
-        view.contentDescription = "Заполнение контекста: ${usage.percent}%"
+        view.contentDescription = pill.contentDescription
     }
 
     /**
@@ -2193,13 +2393,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val usage = uiState.contextUsage
         val config = autoCompressionStorage.load()
         val details = TextView(this).apply {
-            text = if (usage != null && usage.maxTokens > 0) {
-                "Заполнено: ${usage.percent}%\n" +
-                    "Использовано токенов: ${formatTokenCount(usage.usedTokens)}\n" +
-                    "Размер окна: ${formatTokenCount(usage.maxTokens)}"
-            } else {
-                "Заполнение ещё не измерено — данные появятся после первого хода."
-            }
+            text = ContextBudgetPolicy.detailsText(usage)
             setTextColor(Color.WHITE)
         }
         val topicInput = EditText(this).apply {
@@ -2557,6 +2751,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
+
+        /** Lightbox guards: payload cap and max decoded dimension (memory discipline). */
+        private const val MAX_VIEWER_IMAGE_BYTES = 25L * 1024 * 1024
+        private const val MAX_VIEWER_IMAGE_DIMENSION = 4096
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         private const val KEY_OPEN_SESSION_ID = "open_session_id"
         /** Privately-stored plaintext data cleared on every auth-exit path. */

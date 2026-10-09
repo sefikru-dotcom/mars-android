@@ -1,0 +1,368 @@
+package ru.mars.mobile
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Bundle
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.method.LinkMovementMethod
+import android.text.style.BackgroundColorSpan
+import android.text.style.ClickableSpan
+import android.text.style.StrikethroughSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.HorizontalScrollView
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TableLayout
+import android.widget.TableRow
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import ru.mars.network.api.MarsApi
+import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.MemoryContent
+import ru.mars.network.repository.MemoryRepository
+
+/**
+ * Экран «Память Марса»: MEMORY.md / USER.md / SOUL.md / AGENTS.md из `GET /api/memory`.
+ * UI-слой тонкий: выбор секции и состояние тела — чистый [MemoryTabPolicy],
+ * загрузка — [MemoryRepository], рендер — [MarkdownFormatter] в view палитры [MarsTheme].
+ */
+class MemoryActivity : ComponentActivity() {
+    private lateinit var store: AndroidKeyStoreCredentialStore
+    private val repository = MemoryRepository()
+
+    private lateinit var chipsRow: LinearLayout
+    private lateinit var body: LinearLayout
+    private lateinit var progress: ProgressBar
+    private lateinit var copyBtn: ImageButton
+
+    private var currentTab = MemoryTab.MEMORY
+    private var content: MemoryContent? = null
+    private var loading = false
+    private var failure: String? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        store = AndroidKeyStoreCredentialStore(this)
+        setContentView(buildView())
+        load()
+    }
+
+    private fun buildView(): View {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(MarsTheme.BG)
+            setPadding(dp(16), dp(16), dp(16), dp(12))
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
+            insets
+        }
+
+        // Header: back / title / progress / refresh / copy
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        header.addView(
+            MarsTheme.circleIconButton(this, R.drawable.ic_arrow_back, "Назад", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
+                .apply { setOnClickListener { finish() } },
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
+        )
+        header.addView(TextView(this).apply {
+            text = "Память Марса"
+            textSize = 22f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.05f
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        progress = ProgressBar(this).apply {
+            visibility = View.GONE
+            isIndeterminate = true
+        }
+        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
+        header.addView(
+            MarsTheme.circleIconButton(this, R.drawable.ic_refresh, "Обновить", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
+                .apply { setOnClickListener { load() } },
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(8) }
+        )
+        copyBtn = MarsTheme.circleIconButton(this, R.drawable.ic_copy, "Копировать секцию", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
+            .apply { setOnClickListener { copyCurrentSection() } }
+        header.addView(copyBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
+        root.addView(header)
+
+        // Tab chips: Память / Профиль / SOUL / Контекст
+        chipsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chipsRow, ViewGroup.LayoutParams(-2, -2))
+        }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+
+        body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(
+            ScrollView(this).apply {
+                isFillViewport = true
+                addView(body, ViewGroup.LayoutParams(-1, -2))
+            },
+            LinearLayout.LayoutParams(-1, 0, 1f)
+        )
+
+        renderChips()
+        renderBody()
+        return root
+    }
+
+    private fun renderChips() {
+        chipsRow.removeAllViews()
+        MemoryTab.entries.forEachIndexed { index, tab ->
+            val selected = tab == currentTab
+            val chip = MarsDialog.pill(
+                this,
+                tab.label,
+                bg = if (selected) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
+                fg = if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED,
+                border = if (selected) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
+            ) {
+                if (currentTab != tab) {
+                    currentTab = tab
+                    renderChips()
+                    renderBody()
+                }
+            }
+            chipsRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply {
+                if (index > 0) marginStart = dp(8)
+            })
+        }
+    }
+
+    private fun renderBody() {
+        val state = MemoryTabPolicy.resolve(currentTab, content, loading, failure)
+        copyBtn.alpha = if (MemoryTabPolicy.canCopy(currentTab, content)) 1f else 0.4f
+        body.removeAllViews()
+        when (state) {
+            is MemorySectionState.Loading -> statusText("Загрузка ${currentTab.fileName}…", MarsTheme.TEXT_MUTED)
+            is MemorySectionState.Failure -> statusText(state.message, MarsTheme.STATUS_WARNING)
+            is MemorySectionState.Empty -> statusText(state.message, MarsTheme.TEXT_MUTED)
+            is MemorySectionState.Body -> renderMarkdown(state.text, body)
+        }
+    }
+
+    private fun statusText(message: String, color: Int) {
+        body.addView(TextView(this).apply {
+            text = message
+            textSize = 14f
+            setTextColor(color)
+            setPadding(0, dp(24), 0, 0)
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
+    }
+
+    private fun load() {
+        if (loading || isFinishing) return
+        val credential = store.read()
+        if (credential == null) {
+            content = null
+            failure = MemoryTabPolicy.SIGNED_OUT_FAILURE
+            renderBody()
+            return
+        }
+        loading = true
+        failure = null
+        renderBody()
+        lifecycleScope.launch {
+            val result = repository.getMemory(MarsApi.BASE_URL, credential)
+            loading = false
+            if (result == null) {
+                content = null
+                failure = MemoryTabPolicy.DEFAULT_FAILURE
+            } else {
+                content = result
+                failure = null
+            }
+            renderBody()
+        }
+    }
+
+    private fun copyCurrentSection() {
+        val text = MemoryTabPolicy.textFor(currentTab, content)
+        if (text.isBlank()) {
+            Toast.makeText(this, "Нечего копировать", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText(currentTab.fileName, text))
+        Toast.makeText(this, "Скопировано: ${currentTab.fileName}", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Markdown-рендер секции: заголовки, списки, цитаты, код, таблицы — палитра MarsTheme. */
+    private fun renderMarkdown(raw: String, parent: LinearLayout) {
+        MarkdownFormatter.parseBlocks(raw).forEach { block ->
+            when (block) {
+                is ContentBlock.Text -> block.lines.forEach { line ->
+                    val tv = TextView(this).apply {
+                        movementMethod = LinkMovementMethod.getInstance()
+                        setTextColor(MarsTheme.TEXT)
+                        textSize = 15f
+                        setPadding(0, dp(2), 0, dp(2))
+                        setLineSpacing(dp(2).toFloat(), 1f)
+                    }
+                    val ssb = SpannableStringBuilder()
+                    when (line) {
+                        is RichLine.Header -> {
+                            tv.textSize = when (line.level) {
+                                1 -> 19f
+                                2 -> 17f
+                                else -> 16f
+                            }
+                            tv.setTypeface(null, Typeface.BOLD)
+                            tv.setTextColor(MarsTheme.TEXT_STRONG)
+                            tv.setPadding(0, dp(10), 0, dp(4))
+                            appendInlineSpans(ssb, line.spans)
+                        }
+                        is RichLine.Bullet -> {
+                            ssb.append("•  ")
+                            appendInlineSpans(ssb, line.spans)
+                        }
+                        is RichLine.Numbered -> {
+                            ssb.append("${line.number} ")
+                            appendInlineSpans(ssb, line.spans)
+                        }
+                        is RichLine.Quote -> {
+                            ssb.append("▎ ")
+                            appendInlineSpans(ssb, line.spans)
+                            tv.setTypeface(null, Typeface.ITALIC)
+                            tv.setTextColor(MarsTheme.TEXT_EM)
+                        }
+                        is RichLine.Normal -> appendInlineSpans(ssb, line.spans)
+                        is RichLine.Divider -> {
+                            ssb.append("─".repeat(24))
+                            tv.setTextColor(MarsTheme.BORDER_MUTED)
+                        }
+                    }
+                    tv.text = ssb
+                    parent.addView(tv)
+                }
+                is ContentBlock.Code -> {
+                    val box = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(12), dp(10), dp(12), dp(10))
+                        background = MarsTheme.card(this@MemoryActivity, MarsTheme.CODE_BG, radiusDp = 10, strokeColor = MarsTheme.CODE_BORDER)
+                    }
+                    if (block.language.isNotBlank()) {
+                        box.addView(TextView(this).apply {
+                            text = block.language
+                            textSize = 11f
+                            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                            setTextColor(MarsTheme.ACCENT_TEXT)
+                            setPadding(0, 0, 0, dp(4))
+                        })
+                    }
+                    box.addView(HorizontalScrollView(this).apply {
+                        isHorizontalScrollBarEnabled = false
+                        addView(TextView(this@MemoryActivity).apply {
+                            text = block.code
+                            setTextColor(MarsTheme.TEXT)
+                            typeface = Typeface.MONOSPACE
+                            textSize = 13f
+                            setTextIsSelectable(true)
+                        })
+                    })
+                    parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply {
+                        topMargin = dp(6)
+                        bottomMargin = dp(6)
+                    })
+                }
+                is ContentBlock.Table -> {
+                    val card = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = MarsTheme.card(this@MemoryActivity, MarsTheme.SURFACE_CARD, radiusDp = 12)
+                        setPadding(dp(2), dp(2), dp(2), dp(2))
+                    }
+                    val table = TableLayout(this)
+                    fun buildRow(cells: List<List<InlineSpan>>, headerRow: Boolean) = TableRow(this).apply {
+                        if (headerRow) setBackgroundColor(MarsTheme.SURFACE_SUBTLE)
+                        cells.forEach { spans ->
+                            addView(TextView(this@MemoryActivity).apply {
+                                movementMethod = LinkMovementMethod.getInstance()
+                                textSize = 13f
+                                setLineSpacing(dp(2).toFloat(), 1f)
+                                setPadding(dp(12), dp(8), dp(12), dp(8))
+                                if (headerRow) {
+                                    setTextColor(MarsTheme.TEXT_STRONG)
+                                    setTypeface(null, Typeface.BOLD)
+                                } else {
+                                    setTextColor(MarsTheme.TEXT)
+                                }
+                                val cellText = SpannableStringBuilder()
+                                appendInlineSpans(cellText, spans)
+                                text = cellText
+                            })
+                        }
+                    }
+                    table.addView(buildRow(block.headers, headerRow = true))
+                    block.rows.forEach { row -> table.addView(buildRow(row, headerRow = false)) }
+                    card.addView(HorizontalScrollView(this).apply { addView(table) })
+                    parent.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+                        topMargin = dp(6)
+                        bottomMargin = dp(6)
+                    })
+                }
+            }
+        }
+    }
+
+    private fun appendInlineSpans(builder: SpannableStringBuilder, spans: List<InlineSpan>) {
+        spans.forEach { span ->
+            val start = builder.length
+            when (span) {
+                is InlineSpan.Normal -> builder.append(span.text)
+                is InlineSpan.Bold -> {
+                    builder.append(span.text)
+                    builder.setSpan(StyleSpan(Typeface.BOLD), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Italic -> {
+                    builder.append(span.text)
+                    builder.setSpan(StyleSpan(Typeface.ITALIC), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Monospace -> {
+                    builder.append(span.text)
+                    builder.setSpan(TypefaceSpan("monospace"), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    builder.setSpan(BackgroundColorSpan(MarsTheme.SURFACE_SUBTLE), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Link -> {
+                    builder.append(span.title)
+                    builder.setSpan(object : ClickableSpan() {
+                        override fun onClick(widget: View) {
+                            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(span.url))) }
+                        }
+                    }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Strikethrough -> {
+                    builder.append(span.text)
+                    builder.setSpan(StrikethroughSpan(), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Image -> {
+                    // Memory preview has no lightbox: show the alt label as plain text.
+                    builder.append(ImageLightboxPolicy.inlineLabel(span.alt))
+                }
+            }
+        }
+    }
+
+    private fun dp(v: Int) = MarsTheme.dp(this, v)
+}

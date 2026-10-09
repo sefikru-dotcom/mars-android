@@ -7,6 +7,12 @@ sealed class InlineSpan {
     data class Monospace(val text: String) : InlineSpan()
     data class Link(val title: String, val url: String) : InlineSpan()
     data class Strikethrough(val text: String) : InlineSpan()
+
+    /**
+     * Markdown-изображение `![alt](url)`: в транскрипте становится кликабельной
+     * подписью, которая открывает полноэкранный lightbox (ChatActivity).
+     */
+    data class Image(val alt: String, val url: String) : InlineSpan()
 }
 
 sealed class RichLine {
@@ -37,6 +43,7 @@ object MarkdownFormatter {
     private val CODE_BLOCK_REGEX = Regex("```(\\w*)\\r?\\n([\\s\\S]*?)```")
     private val OPEN_CODE_BLOCK_REGEX = Regex("```(\\w*)\\r?\\n([\\s\\S]*)$")
     private val LINK_REGEX = Regex("\\[([^\\]]+)\\]\\((https?://[^\\s)]+)\\)")
+    private val IMAGE_REGEX = Regex("!\\[([^\\]]*)\\]\\((https?://[^\\s)]+)\\)")
     private val BOLD_REGEX = Regex("\\*\\*(.+?)\\*\\*")
     private val CODE_INLINE_REGEX = Regex("`([^`]+)`")
     private val STRIKE_REGEX = Regex("~~(.+?)~~")
@@ -160,6 +167,26 @@ object MarkdownFormatter {
     }
 
     fun parseInline(raw: String): List<InlineSpan> {
+        if (raw.isEmpty()) return emptyList()
+        val spans = mutableListOf<InlineSpan>()
+
+        // 0. Images first (![alt](url)) so the `!` is consumed with the image and the
+        //    inner [alt](url) never degrades into a plain link.
+        var imageCursor = 0
+        for (m in IMAGE_REGEX.findAll(raw)) {
+            if (m.range.first > imageCursor) {
+                spans.addAll(parseLinkSegment(raw.substring(imageCursor, m.range.first)))
+            }
+            spans.add(InlineSpan.Image(m.groupValues[1], m.groupValues[2]))
+            imageCursor = m.range.last + 1
+        }
+        if (imageCursor < raw.length) {
+            spans.addAll(parseLinkSegment(raw.substring(imageCursor)))
+        }
+        return spans
+    }
+
+    private fun parseLinkSegment(raw: String): List<InlineSpan> {
         if (raw.isEmpty()) return emptyList()
         val spans = mutableListOf<InlineSpan>()
 
