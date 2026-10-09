@@ -131,6 +131,80 @@ class SseChunkParserTest {
     }
 
     /**
+     * WHATWG SSE: "One leading U+FEFF BYTE ORDER MARK character must be ignored."
+     * Без этого BOM приклеивается к имени первого поля ("\uFEFFdata"/"\uFEFFevent"),
+     * поле становится неизвестным — и ПЕРВЫЙ кадр потока (обычно `session`-привязка)
+     * молча теряется: чат не привязан к сессии.
+     */
+    @Test
+    fun leadingBomIsIgnoredOnFirstFrame() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("\uFEFFevent: session\ndata: {\"session_id\":\"s1\"}\n\n") + parser.end()
+        assertEquals(
+            listOf(SseChunkParser.Frame("session", null, "{\"session_id\":\"s1\"}")),
+            frames,
+        )
+
+        // BOM может прийти отдельным пакетом — фрагментация не должна менять результат.
+        val parser2 = SseChunkParser()
+        val frames2 = parser2.feed("\uFEFF") + parser2.feed("data: x\n\n") + parser2.end()
+        assertEquals(listOf(SseChunkParser.Frame(null, null, "x")), frames2)
+    }
+
+    /** BOM снимается только в самом начале потока; внутри данных он легитимен. */
+    @Test
+    fun bomInsideStreamIsPreservedAsData() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("data: a\uFEFFb\n\n") + parser.end()
+        assertEquals(listOf(SseChunkParser.Frame(null, null, "a\uFEFFb")), frames)
+    }
+
+    /** EOF сразу после одиночного \r (без \n): последний кадр всё равно обязан доехать. */
+    @Test
+    fun endFlushesFrameAfterTrailingLoneCr() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("event: chunk\rdata: tail\r")
+        assertTrue(frames.isEmpty())
+        assertEquals(listOf(SseChunkParser.Frame("chunk", null, "tail")), parser.end())
+    }
+
+    /** Пустые кадры: подряд идущие blank-строки и пустые feed не создают фантомов и ничего не ломают. */
+    @Test
+    fun consecutiveBlankLinesAndEmptyFeedsAreHarmless() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("data: a\n\n\n\n") + parser.feed("") +
+            parser.feed("event: chunk\n\n\n") + parser.feed("data: b\n\n") + parser.end()
+        assertEquals(
+            listOf(
+                SseChunkParser.Frame(null, null, "a"),
+                // `event: chunk` без data дропается, и имя события по спеке сбрасывается —
+                // следующий data-кадр не должен унаследовать "chunk".
+                SseChunkParser.Frame(null, null, "b"),
+            ),
+            frames,
+        )
+    }
+
+    /** `data:` с пустым значением — валидный (пустой) кадр по спеке; mapper его безопасно дропает. */
+    @Test
+    fun emptyDataValueStillDispatchesFrame() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("event: token\ndata:\n\n") + parser.end()
+        assertEquals(listOf(SseChunkParser.Frame("token", null, "")), frames)
+    }
+
+    /**
+     * Multiline data на границе с маппером: JSON, разбитый сервером на несколько
+     * `data:`-строк, возвращается склеенным через `\n` — валидный JSON-whitespace.
+     */
+    @Test
+    fun multiLineDataKeepsJsonParsable() {
+        val parser = SseChunkParser()
+        val frames = parser.feed("data: {\"text\":\ndata: \"hi\"}\n\n") + parser.end()
+        assertEquals(listOf(SseChunkParser.Frame(null, null, "{\"text\":\n\"hi\"}")), frames)
+    }
+
+    /**
      * Property-style check: the same stream split at arbitrary random boundaries yields
      * identical frames. Catches any buffer-loss regression at split points the hand-written
      * cases don't cover.

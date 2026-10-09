@@ -12,6 +12,9 @@ package ru.mars.network.repository
  * the last parsed events before the terminal `ChatEvent.Error` instead of hanging.
  *
  * Semantics follow the SSE spec (WHATWG EventSource):
+ * - one leading U+FEFF BOM (if any) is ignored at the very start of the stream —
+ *   otherwise it glues onto the first field name (`\uFEFFdata`/`\uFEFFevent`) and the
+ *   FIRST frame (typically the session binding) is silently dropped;
  * - line terminators: `\n`, `\r\n` and bare `\r`; a CRLF pair split across two feeds is
  *   still ONE terminator (tracked via [pendingCr]);
  * - lines starting with `:` are comments (keep-alive probes) and are ignored;
@@ -26,6 +29,8 @@ internal class SseChunkParser {
 
     private val lineBuffer = StringBuilder()
     private var pendingCr = false
+    /** True until the first stream character is seen: WHATWG requires ignoring one leading BOM. */
+    private var atStreamStart = true
 
     private var event: String? = null
     private var id: String? = null
@@ -40,6 +45,10 @@ internal class SseChunkParser {
     fun feed(chunk: String): List<Frame> {
         val frames = mutableListOf<Frame>()
         for (c in chunk) {
+            if (atStreamStart) {
+                atStreamStart = false
+                if (c == '\uFEFF') continue // one leading BOM is ignored per spec, nowhere else
+            }
             if (pendingCr) {
                 pendingCr = false
                 if (c == '\n') continue // second half of a \r\n split across packets
