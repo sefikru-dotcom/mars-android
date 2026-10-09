@@ -180,11 +180,140 @@ class MarkdownFormatterTest {
         assertEquals(0, MarkdownFormatter.parseInline("").size)
     }
 
+    // ── Таблицы и зачёркивание ───────────────────────────────────────────────
+
+    @Test
+    fun testStrikethroughSpan() {
+        val spans = MarkdownFormatter.parseInline("~~зачеркнуто~~")
+        assertEquals(1, spans.size)
+        assertTrue(spans[0] is InlineSpan.Strikethrough)
+        assertEquals("зачеркнуто", (spans[0] as InlineSpan.Strikethrough).text)
+    }
+
+    @Test
+    fun testStrikethroughMixedWithOtherFormatting() {
+        val spans = MarkdownFormatter.parseInline("было ~~old~~ стало **new**")
+        assertTrue(spans.any { it is InlineSpan.Strikethrough && it.text == "old" })
+        assertTrue(spans.any { it is InlineSpan.Bold && it.text == "new" })
+        assertEquals("было old стало new", spans.plainText())
+    }
+
+    @Test
+    fun testCodeSpanProtectsStrikethrough() {
+        val spans = MarkdownFormatter.parseInline("синтаксис `~~not strike~~` виден")
+        val mono = spans.filterIsInstance<InlineSpan.Monospace>()
+        assertEquals(1, mono.size)
+        assertEquals("~~not strike~~", mono[0].text)
+        assertTrue(spans.none { it is InlineSpan.Strikethrough })
+    }
+
+    @Test
+    fun testTableTwoByTwo() {
+        val raw = "| Заголовок 1 | Заголовок 2 |\n|---|---|\n| Данные 1 | Данные 2 |"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as ContentBlock.Table
+        assertEquals(2, table.headers.size)
+        assertEquals("Заголовок 1", table.headers[0].plainText())
+        assertEquals("Заголовок 2", table.headers[1].plainText())
+        assertEquals(1, table.rows.size)
+        assertEquals(2, table.rows[0].size)
+        assertEquals("Данные 1", table.rows[0][0].plainText())
+        assertEquals("Данные 2", table.rows[0][1].plainText())
+    }
+
+    @Test
+    fun testTableWithAlignmentSeparatorAndMultipleRows() {
+        val raw = "| a | b |\n| :--- | ---: |\n| 1 | 2 |\n| 3 | 4 |"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as ContentBlock.Table
+        assertEquals(listOf("a", "b"), table.headers.map { it.plainText() })
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("1", "2"), table.rows[0].map { it.plainText() })
+        assertEquals(listOf("3", "4"), table.rows[1].map { it.plainText() })
+    }
+
+    @Test
+    fun testTableWithoutLeadingAndTrailingPipes() {
+        val raw = "a | b\n--- | ---\n1 | 2"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as ContentBlock.Table
+        assertEquals(listOf("a", "b"), table.headers.map { it.plainText() })
+        assertEquals(listOf("1", "2"), table.rows.single().map { it.plainText() })
+    }
+
+    @Test
+    fun testTableWithInlineFormatting() {
+        val raw = "| Колонка | Значение |\n|---|---|\n" +
+            "| **жирный** | [ссылка](https://example.com) |\n" +
+            "| `код` | ~~старое~~ |\n" +
+            "| *курсив* | обычный |"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as ContentBlock.Table
+        assertEquals(3, table.rows.size)
+        assertTrue(table.rows[0][0].any { it is InlineSpan.Bold && it.text == "жирный" })
+        assertTrue(table.rows[0][1].any { it is InlineSpan.Link && it.title == "ссылка" && it.url == "https://example.com" })
+        assertTrue(table.rows[1][0].any { it is InlineSpan.Monospace && it.text == "код" })
+        assertTrue(table.rows[1][1].any { it is InlineSpan.Strikethrough && it.text == "старое" })
+        assertTrue(table.rows[2][0].any { it is InlineSpan.Italic && it.text == "курсив" })
+        assertEquals("обычный", table.rows[2][1].plainText())
+    }
+
+    @Test
+    fun testTableBetweenParagraphs() {
+        val raw = "Вводный абзац\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nЗаключительный абзац"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertEquals(3, blocks.size)
+        assertTrue(blocks[0] is ContentBlock.Text)
+        assertTrue(blocks[1] is ContentBlock.Table)
+        assertTrue(blocks[2] is ContentBlock.Text)
+        val before = blocks[0] as ContentBlock.Text
+        assertEquals("Вводный абзац", before.lines.filterIsInstance<RichLine.Normal>().joinToString("") { it.spans.plainText() }.trim())
+        val after = blocks[2] as ContentBlock.Text
+        assertEquals("Заключительный абзац", after.lines.filterIsInstance<RichLine.Normal>().joinToString("") { it.spans.plainText() }.trim())
+    }
+
+    @Test
+    fun testTableAfterCodeBlock() {
+        val raw = "```kotlin\nval x = 1\n```\n| a |\n|---|\n| b |"
+        val blocks = MarkdownFormatter.parseBlocks(raw)
+        assertTrue(blocks[0] is ContentBlock.Code)
+        assertTrue(blocks.last() is ContentBlock.Table)
+        val table = blocks.last() as ContentBlock.Table
+        assertEquals("a", table.headers.single().plainText())
+        assertEquals("b", table.rows.single().single().plainText())
+    }
+
+    @Test
+    fun testDividerAndTextPipesAreNotTables() {
+        // A divider without pipes stays a divider; no table is created.
+        val blocks = MarkdownFormatter.parseBlocks("до\n---\nпосле")
+        assertEquals(1, blocks.size)
+        assertTrue(blocks[0] is ContentBlock.Text)
+        // A pipe line without a following separator row stays plain text.
+        val text = MarkdownFormatter.parseBlocks("итого | 5").single() as ContentBlock.Text
+        assertEquals("итого | 5", text.lines.single().let { (it as RichLine.Normal).spans.plainText() })
+    }
+
+    @Test
+    fun testTableCellWithEscapedPipe() {
+        val raw = "| a | b |\n|---|---|\n| x \\| y | z |"
+        val table = MarkdownFormatter.parseBlocks(raw).single() as ContentBlock.Table
+        assertEquals("x | y", table.rows.single()[0].plainText())
+        assertEquals("z", table.rows.single()[1].plainText())
+    }
+
     private fun InlineSpan.text(): String = when (this) {
         is InlineSpan.Normal -> text
         is InlineSpan.Bold -> text
         is InlineSpan.Italic -> text
         is InlineSpan.Monospace -> text
         is InlineSpan.Link -> title
+        is InlineSpan.Strikethrough -> text
     }
+
+    private fun List<InlineSpan>.plainText(): String = joinToString("") { it.text() }
 }

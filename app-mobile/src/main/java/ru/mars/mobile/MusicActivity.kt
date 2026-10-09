@@ -85,6 +85,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var radioBtn: ImageButton
     /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
     private lateinit var lyricsBtn: ImageButton
+    /** «Звук» in the header: opens the equalizer/preset/Bass Boost dialog. */
+    private lateinit var eqBtn: ImageButton
+    /** Persisted sound settings (preset, on/off, Bass Boost); pure logic in [AudioFxPolicy]. */
+    private lateinit var audioFx: AudioFxSettings
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
     private var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
@@ -113,11 +117,17 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         searchHistory = MusicSearchHistory(
             PrefsMusicSearchHistoryStorage(getSharedPreferences("mars-music-search-history", MODE_PRIVATE))
         )
+        audioFx = AudioFxSettings(
+            PrefsAudioFxStorage(getSharedPreferences("mars-music-audiofx", MODE_PRIVATE))
+        )
+        // The process-scoped player re-applies the saved preset to every fresh audio session.
+        MarsMusicPlayer.setAudioFx(audioFx.state)
         setContentView(buildView())
         MarsMusicPlayer.registerListener(this)
         seek.post(ticker)
         updateTabStyles()
         updateQueueIcons()
+        updateEqIcon()
         refreshFavoriteIds()
         loadHome()
     }
@@ -166,6 +176,18 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             letterSpacing = 0.05f
         }
         header.addView(titleHeader, LinearLayout.LayoutParams(0, -2, 1f))
+
+        eqBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_volume,
+            "Эквалайзер и звук",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onEqClicked() }
+        }
+        header.addView(eqBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
         root.addView(header)
 
         // Tabs: Чарт / Волна / Избранное / Очередь (pill toggles). Horizontally scrollable:
@@ -1366,6 +1388,107 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
     private fun dp(v: Int) = MarsTheme.dp(this, v)
+
+    /**
+     * «Звук»: тёмный обсидиановый [MarsDialog] с тумблером обработки звука, выбором
+     * пресета эквалайзера (паритет с WebUI EQ_PRESETS) и ползунком Bass Boost.
+     * Каждое изменение сразу уходит в живой плеер ([MarsMusicPlayer.setAudioFx]) и
+     * сохраняется через [AudioFxSettings]; тело диалога перерисовывается на месте.
+     */
+    private fun onEqClicked() {
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Звук", audioFx.state.preset.title))
+            renderEqBody(body)
+            root.addView(body, LinearLayout.LayoutParams(-1, -2))
+            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
+            emptyList()
+        }
+    }
+
+    /** Fills the dialog body: on/off toggle, preset stack, Bass Boost slider. */
+    private fun renderEqBody(body: LinearLayout) {
+        body.removeAllViews()
+        val state = audioFx.state
+
+        body.addView(MarsDialog.caption(this, "Обработка звука"))
+        val toggle = MarsDialog.pill(
+            this,
+            if (state.enabled) "Включена" else "Выключена",
+            bg = if (state.enabled) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
+            fg = if (state.enabled) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED,
+            border = if (state.enabled) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
+        ) {
+            audioFx.setEnabled(!state.enabled)
+            onAudioFxChanged()
+            renderEqBody(body)
+        }
+        body.addView(toggle, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
+
+        body.addView(MarsDialog.caption(this, "Пресет эквалайзера"))
+        AudioFxPreset.values().forEach { preset ->
+            val selected = state.preset == preset
+            val pill = MarsDialog.pill(
+                this,
+                preset.title,
+                bg = if (selected) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
+                fg = if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_EM,
+                border = if (selected) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
+            ) {
+                audioFx.setPreset(preset)
+                onAudioFxChanged()
+                renderEqBody(body)
+            }
+            body.addView(pill, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+
+        val bassLabel = TextView(this).apply {
+            text = bassBoostCaption(state.bassBoost)
+            textSize = 10f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        body.addView(bassLabel, LinearLayout.LayoutParams(-1, -2))
+        val bassSeek = SeekBar(this).apply {
+            max = AudioFxPolicy.MAX_BASS_BOOST
+            progress = state.bassBoost
+            progressTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
+            thumbTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
+            isEnabled = state.enabled
+            alpha = if (state.enabled) 1f else 0.4f
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    audioFx.setBassBoost(value)
+                    bassLabel.text = bassBoostCaption(audioFx.state.bassBoost)
+                    onAudioFxChanged()
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) {}
+                override fun onStopTrackingTouch(bar: SeekBar?) {}
+            })
+        }
+        body.addView(bassSeek, LinearLayout.LayoutParams(-1, -2))
+    }
+
+    /** Pushes the persisted state into the live player and refreshes the header icon. */
+    private fun onAudioFxChanged() {
+        MarsMusicPlayer.setAudioFx(audioFx.state)
+        updateEqIcon()
+    }
+
+    /** Header «Звук» glows ruby while sound processing is enabled. */
+    private fun updateEqIcon() {
+        if (!::eqBtn.isInitialized || !::audioFx.isInitialized) return
+        eqBtn.imageTintList = ColorStateList.valueOf(
+            if (audioFx.state.enabled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
+        )
+    }
+
+    /** «BASS BOOST · 65%»: hardware scale 0..1000 shown as percent, WebUI-style caption. */
+    private fun bassBoostCaption(strength: Int): String =
+        "BASS BOOST · ${AudioFxPolicy.sanitizeStrength(strength) / 10}%"
 
     companion object {
         private const val BASE_URL = "https://marscore.ru/music"

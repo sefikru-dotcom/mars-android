@@ -2,6 +2,9 @@ package ru.mars.mobile
 
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.BassBoost
+import android.media.audiofx.Equalizer
 import android.os.Handler
 import android.os.Looper
 import ru.mars.network.model.MusicTrack
@@ -16,6 +19,10 @@ object MarsMusicPlayer {
     private const val BASE_URL = "https://marscore.ru/music"
     private var mediaPlayer: MediaPlayer? = null
     private val listeners = LinkedHashSet<MarsMusicListener>()
+
+    /** Session audio effects bound to the current MediaPlayer's audio session. */
+    private var equalizer: Equalizer? = null
+    private var bassBoost: BassBoost? = null
 
     /** Pure queue logic (order, shuffle, repeat, growth); the UI mirrors and toggles it. */
     val queueManager = MusicQueueManager()
@@ -42,6 +49,9 @@ object MarsMusicPlayer {
     @Volatile var isShuffled: Boolean = false
         private set
     @Volatile var repeatMode: MusicQueueManager.RepeatMode = MusicQueueManager.RepeatMode.OFF
+        private set
+    /** Current sound settings (preset, on/off, Bass Boost); survives track changes. */
+    @Volatile var audioFxState: AudioFxState = AudioFxState()
         private set
 
     private fun setPlaying(value: Boolean) { isPlaying = value }
@@ -143,7 +153,80 @@ object MarsMusicPlayer {
                 handlePlaybackFailure(track.id, PlaybackRetryPolicy.codeFor(error), 0)
             }
         }
+        // Effects attach to the fresh audio session so the saved preset survives track changes.
+        mediaPlayer?.let { attachAudioFx(it.audioSessionId) }
         notifyState()
+    }
+
+    /**
+     * Updates the sound settings (persisted by AudioFxSettings in the UI layer) and applies
+     * them to the live session immediately; a fresh MediaPlayer picks them up via
+     * [attachAudioFx] on the next track.
+     */
+    @Synchronized
+    fun setAudioFx(state: AudioFxState) {
+        audioFxState = AudioFxPolicy.sanitizeState(state)
+        applyAudioFx(audioFxState.preset, audioFxState.bassBoost.toShort())
+    }
+
+    /**
+     * Applies [preset] to the attached [Equalizer] and [bassBoostStrength] (0..1000) to the
+     * attached [BassBoost], honoring [audioFxState].enabled. Fully fail-safe: effects are
+     * optional hardware, so every call is guarded (try-catch) and each status is checked
+     * against [AudioEffect.SUCCESS] — playback never depends on them.
+     */
+    @Synchronized
+    fun applyAudioFx(preset: AudioFxPreset, bassBoostStrength: Short) {
+        val enabled = audioFxState.enabled
+        equalizer?.let { eq ->
+            runCatching {
+                if (eq.getEnabled() != enabled && eq.setEnabled(enabled) != AudioEffect.SUCCESS) {
+                    return@runCatching
+                }
+                if (!enabled) return@runCatching
+                val range = eq.getBandLevelRange() ?: return@runCatching
+                val levels = AudioFxPolicy.bandLevelsMb(
+                    preset,
+                    eq.getNumberOfBands().toInt(),
+                    range[0].toInt(),
+                    range[1].toInt(),
+                )
+                // setBandLevel is void: a rejected band throws and is caught by runCatching.
+                for (band in levels.indices) {
+                    eq.setBandLevel(band.toShort(), levels[band])
+                }
+            }
+        }
+        bassBoost?.let { bb ->
+            runCatching {
+                val strength = AudioFxPolicy.sanitizeStrength(bassBoostStrength.toInt()).toShort()
+                val wanted = enabled && strength > 0 && bb.getStrengthSupported()
+                if (bb.getEnabled() != wanted && bb.setEnabled(wanted) != AudioEffect.SUCCESS) {
+                    return@runCatching
+                }
+                if (wanted) bb.setStrength(strength) // void: failure throws into runCatching
+            }
+        }
+    }
+
+    /**
+     * Attaches Equalizer + BassBoost to a new MediaPlayer audio session. Construction throws
+     * on unsupported hardware/runtime failures — degrade silently, music plays without effects.
+     */
+    private fun attachAudioFx(sessionId: Int) {
+        releaseAudioFx()
+        if (sessionId == 0) return // AudioEffect.ERROR_BAD_VALUE: invalid session
+        equalizer = runCatching { Equalizer(0, sessionId) }.getOrNull()
+        bassBoost = runCatching { BassBoost(0, sessionId) }.getOrNull()
+        applyAudioFx(audioFxState.preset, audioFxState.bassBoost.toShort())
+    }
+
+    /** Releases session effects alongside the MediaPlayer they are bound to. */
+    private fun releaseAudioFx() {
+        equalizer?.let { effect -> runCatching { effect.release() } }
+        bassBoost?.let { effect -> runCatching { effect.release() } }
+        equalizer = null
+        bassBoost = null
     }
 
     @Synchronized fun togglePlay() { if (isPlaying) pause() else play() }
@@ -214,6 +297,7 @@ object MarsMusicPlayer {
         cancelPendingRetry()
         mediaPlayer?.release()
         mediaPlayer = null
+        releaseAudioFx()
         setPlaying(false)
         currentPosition = 0
         duration = 0
@@ -258,6 +342,7 @@ object MarsMusicPlayer {
         cancelPendingRetry()
         mediaPlayer?.release()
         mediaPlayer = null
+        releaseAudioFx()
         setPlaying(false)
         currentPosition = 0
         duration = 0
@@ -288,6 +373,7 @@ object MarsMusicPlayer {
                 retryResumeMs = decision.resumeFromMs
                 mediaPlayer?.release()
                 mediaPlayer = null
+                releaseAudioFx()
                 scheduleRetry(decision.delayMs)
             }
             RetryDecision.SkipTrack -> skipFailedTrack(failedId)

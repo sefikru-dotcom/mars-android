@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -18,6 +19,7 @@ import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
+import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.view.Gravity
@@ -1415,6 +1417,49 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                     parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
                 }
+                is ContentBlock.Table -> {
+                    // Card with a HorizontalScrollView around a TableLayout so wide tables
+                    // scroll sideways smoothly instead of breaking the phone layout.
+                    val card = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.BORDER)
+                        setPadding(dp(2), dp(2), dp(2), dp(2))
+                    }
+                    val table = TableLayout(this).apply {
+                        // Thin themed divider between rows instead of hardcoded paints.
+                        dividerDrawable = GradientDrawable().apply {
+                            setColor(MarsTheme.BORDER)
+                            setSize(dp(1), dp(1))
+                        }
+                        showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
+                    }
+                    fun buildTableRow(cells: List<List<InlineSpan>>, header: Boolean): TableRow =
+                        TableRow(this).apply {
+                            if (header) setBackgroundColor(MarsTheme.SURFACE_SUBTLE)
+                            cells.forEach { spans ->
+                                val cell = TextView(this@ChatActivity).apply {
+                                    movementMethod = LinkMovementMethod.getInstance()
+                                    textSize = 13f
+                                    setLineSpacing(dp(2).toFloat(), 1f)
+                                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                                    if (header) {
+                                        setTextColor(MarsTheme.TEXT_STRONG)
+                                        setTypeface(null, Typeface.BOLD)
+                                    } else {
+                                        setTextColor(MarsTheme.TEXT)
+                                    }
+                                    val cellText = SpannableStringBuilder()
+                                    appendInlineSpans(cellText, spans)
+                                    text = cellText
+                                }
+                                addView(cell)
+                            }
+                        }
+                    table.addView(buildTableRow(block.headers, header = true))
+                    block.rows.forEach { row -> table.addView(buildTableRow(row, header = false)) }
+                    card.addView(HorizontalScrollView(this).apply { addView(table) })
+                    parent.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                }
             }
         }
     }
@@ -1444,6 +1489,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                             runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(span.url))) }
                         }
                     }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                is InlineSpan.Strikethrough -> {
+                    builder.append(span.text)
+                    builder.setSpan(StrikethroughSpan(), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
             }
         }

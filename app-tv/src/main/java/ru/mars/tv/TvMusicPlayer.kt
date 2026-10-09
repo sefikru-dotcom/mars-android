@@ -158,6 +158,49 @@ object TvMusicPlayer : TvMusicTransport {
         stopInternal()
     }
 
+    /**
+     * Pauses rendering while keeping the position and the bound playlist (chat
+     * mini-player control): no-op when nothing is playing. [resume] continues from
+     * this point; [stop] still releases the player and forgets the playlist.
+     */
+    @Synchronized
+    fun pause() {
+        val player = mediaPlayer ?: return
+        if (!isPlaying) return
+        try {
+            player.pause()
+            isPlaying = false
+            notifyChanged()
+        } catch (_: IllegalStateException) {
+            // The player slipped into a bad state: keep the flag honest, no crash.
+            isPlaying = false
+        }
+    }
+
+    /**
+     * Continues a paused track: no-op while already playing or when no player is
+     * bound (idle transport). A start on a not-yet-prepared player is rejected by
+     * MediaPlayer and swallowed — the prepared callback starts the audio anyway.
+     */
+    @Synchronized
+    fun resume() {
+        val player = mediaPlayer ?: return
+        if (isPlaying) return
+        try {
+            player.start()
+            isPlaying = true
+            notifyChanged()
+        } catch (_: IllegalStateException) {
+            isPlaying = false
+        }
+    }
+
+    /** Play/Pause transport toggle for the chat mini player. */
+    @Synchronized
+    fun togglePlayPause() {
+        if (isPlaying) pause() else resume()
+    }
+
     /** Full idle: releases the player and forgets the playlist. Callers hold the lock. */
     private fun stopInternal() {
         releasePlayer()
