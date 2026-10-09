@@ -4,7 +4,10 @@ import android.content.res.ColorStateList
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -42,15 +45,19 @@ internal object TvMusicFocusPolicy {
  * [TvMusicScreenController] loads the real charts through [RepositoryTvMusicGateway]
  * (core-network MusicRepository over `https://marscore.ru/music`) and renders one of the
  * four states — loading / error (with a D-pad «Повторить» retry) / empty / content.
+ * The search row queries the SAME repository seam (`/api/search`): the field's IME
+ * «search» action and the explicit «Найти» button submit, «Чарт» returns to the charts
+ * without stopping playback, and «Повторить» retries exactly the last operation — so
+ * the remote user never depends on the soft keyboard being reachable or dismissable.
  * Selecting a track row routes playback to the process-global [TvMusicPlayer] transport,
  * which keeps playing after this screen closes; «Остановить» ends it explicitly.
  * The screen observes the transport ([TvMusicPlayer.onTransportChanged]) so the header
  * line and the current track's row highlight follow asynchronous state transitions
  * (prepared / completion / stream error) without user interaction; row restyling never
  * rebuilds the list, so D-pad focus survives. Presentation rules are pure
- * ([TvMusicNowPlayingSpec]). Every interactive element is focusable for the D-pad, and
- * disappearing affordances never leave the window unfocused ([TvMusicFocusPolicy]);
- * theme colors only, no emojis.
+ * ([TvMusicNowPlayingSpec], [TvMusicSearchSpec]). Every interactive element is focusable
+ * for the D-pad, and disappearing affordances never leave the window unfocused
+ * ([TvMusicFocusPolicy]); theme colors only, no emojis.
  */
 class TvMusicActivity : AppCompatActivity() {
 
@@ -66,6 +73,9 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var backButton: Button
     private lateinit var nowText: TextView
     private lateinit var trackList: LinearLayout
+    private lateinit var searchInput: EditText
+    private lateinit var searchButton: Button
+    private lateinit var chartsButton: Button
 
     /** Rendered track rows (trackId to view) — restyled in place on transport changes. */
     private val trackRows = mutableListOf<Pair<String, Button>>()
@@ -79,17 +89,47 @@ class TvMusicActivity : AppCompatActivity() {
         backButton = findViewById(R.id.backButton)
         nowText = findViewById(R.id.nowText)
         trackList = findViewById(R.id.trackList)
+        searchInput = findViewById(R.id.searchInput)
+        searchButton = findViewById(R.id.searchButton)
+        chartsButton = findViewById(R.id.chartsButton)
         backButton.setOnClickListener { finish() }
-        retryButton.setOnClickListener { controller.load() }
+        // Retry repeats the LAST operation (charts or the failed search query).
+        retryButton.setOnClickListener { controller.retry() }
         stopButton.setOnClickListener { controller.stopPlayback() }
+        // The IME «search» action and the explicit «Найти» button are the same submit;
+        // «Чарт» empties the field and returns to the charts WITHOUT touching the
+        // transport — music that is playing keeps playing across the list swap.
+        searchInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                submitSearch()
+                true
+            } else {
+                false
+            }
+        }
+        searchButton.setOnClickListener { submitSearch() }
+        chartsButton.setOnClickListener {
+            searchInput.setText("")
+            controller.clearSearch()
+        }
         TvFocusLift.attach(backButton)
         TvFocusLift.attach(retryButton)
         TvFocusLift.attach(stopButton)
+        TvFocusLift.attach(searchInput)
+        TvFocusLift.attach(searchButton)
+        TvFocusLift.attach(chartsButton)
         controller.onStateChanged = ::render
         TvMusicPlayer.onTransportChanged = ::renderTransportState
         controller.load()
         render(controller.state)
         backButton.requestFocus()
+    }
+
+    /** Submits the field text as a search and dismisses the IME so results stay visible. */
+    private fun submitSearch() {
+        controller.search(searchInput.text.toString())
+        val ime = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        ime.hideSoftInputFromWindow(searchInput.windowToken, 0)
     }
 
     override fun onDestroy() {
@@ -117,7 +157,8 @@ class TvMusicActivity : AppCompatActivity() {
             }
             is TvMusicUiState.Empty -> {
                 stateText.visibility = View.VISIBLE
-                stateText.text = "Треков пока нет"
+                // Charts-empty and search-empty read differently (TvMusicSearchSpec).
+                stateText.text = TvMusicSearchSpec.emptyMessage(state.query)
                 // Empty is terminal (no retry affordance of its own): a re-render hid
                 // «Повторить» and could have taken D-pad focus with it — the stable
                 // header must hold focus or navigation stalls with no way to recover.
