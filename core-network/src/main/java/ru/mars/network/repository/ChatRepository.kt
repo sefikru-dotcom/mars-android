@@ -126,11 +126,15 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
                 return@flow
             }
             val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace)).execute().use { response ->
+                val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    emit(ChatEvent.Error("HTTP ${response.code}"))
+                    // The server answers start failures with `{"error": "<reason>"}`
+                    // (400 message required, 401 unauthorized, 502 gateway…): surface
+                    // the reason, not just the code (parity with uploadAttachment).
+                    emit(ChatEvent.Error(describeHttpError(response.code, body)))
                     return@flow
                 }
-                extractStartResponse(response.body?.string().orEmpty())
+                extractStartResponse(body)
                     ?: run { emit(ChatEvent.Error("Missing stream_id")); return@flow }
             }
             startResp.streamId.let { emit(ChatEvent.StreamStarted(it)) }
@@ -165,7 +169,9 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      *   that cursor are replayed first (gap-checked), then live frames continue;
      * - dead-but-journaled stream → full journal replay, then terminal frames;
      * - unknown/expired stream → HTTP 404 `{"error":"stream not found"}`, surfaced here as
-     *   [ChatEvent.Error] `"HTTP 404"` — the caller should fall back to reloading history.
+     *   [ChatEvent.Error] `"HTTP 404: stream not found"` (status code + server reason;
+     *   both StreamReattachPolicy markers — `\b404\b` and "not found" — still match) —
+     *   the caller should fall back to reloading history.
      *
      * [lastEventId] is the optional resume cursor: the `id:` value (`stream_id:seq`) of the
      * last SSE event the client actually processed, sent as the `Last-Event-ID` header (the
@@ -369,7 +375,13 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         emit: suspend (ChatEvent) -> Unit,
     ) {
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) { emit(ChatEvent.Error("HTTP ${response.code}")); return }
+            if (!response.isSuccessful) {
+                // Same contract as the start POST: non-2xx bodies carry `{"error": ...}`
+                // ("stream not found", gateway failures); keep the reason for the user.
+                val errorBody = response.body?.string().orEmpty()
+                emit(ChatEvent.Error(describeHttpError(response.code, errorBody)))
+                return
+            }
             val byteStream = response.body?.byteStream()
             if (byteStream == null) {
                 // A 200 with no body must not leave the UI waiting forever.
