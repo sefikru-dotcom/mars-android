@@ -82,6 +82,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Transcript auto-scroll decisions (pure policy): a reader scrolled up must survive SSE tokens. */
     private var autoScroll = AutoScrollPolicy()
+    /** Scroll-to-bottom FAB visibility (pure policy): hysteresis over the distance from the tail. */
+    private var scrollToBottomPolicy = ScrollToBottomPolicy()
+    private var scrollToBottomFab: ImageButton? = null
     /** Stream-recovery decisions (pure policy): reattach plan + dead-stream (404) detection. */
     private val reattachPolicy = StreamReattachPolicy()
     private var stream: Job? = null
@@ -182,6 +185,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
         uiState.setActivityMode(activityModeSelection.current)
         autoScroll = AutoScrollPolicy(bottomThresholdPx = dp(56))
+        scrollToBottomPolicy = ScrollToBottomPolicy(showThresholdPx = dp(120), hideThresholdPx = dp(56))
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
         // Voice-input state machine: guards the recognizer session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
@@ -678,13 +682,40 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             clipToPadding = false
             setPadding(0, dp(4), 0, dp(8))
         }
-        // Feed live scroll positions into the policy so scrolling back down re-pins the viewport.
+        // Feed live scroll positions into the policies so scrolling back down re-pins the
+        // viewport and hides the scroll-to-bottom FAB.
         scroll.setOnScrollChangeListener { _, _, _, _, _ ->
-            autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
+            val distance = distanceFromBottomPx()
+            autoScroll.onViewportDistanceFromBottom(distance)
+            scrollToBottomPolicy.onViewportDistanceFromBottom(distance)
+            syncScrollToBottomFab()
         }
         messages = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(messages, ViewGroup.LayoutParams(-1, -2))
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        // Transcript frame: overlays the scroll-to-bottom FAB on the transcript's bottom-right,
+        // right above the chips rows and the composer, so it never covers the input bar.
+        val transcriptFrame = FrameLayout(this)
+        transcriptFrame.addView(scroll, ViewGroup.LayoutParams(-1, -1))
+        scrollToBottomFab = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_chevron_down,
+            "К последнему сообщению",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT,
+            sizeDp = 40,
+            strokeColor = MarsTheme.BORDER
+        ).apply {
+            visibility = View.GONE
+            setOnClickListener { jumpToLatestFromFab() }
+        }
+        transcriptFrame.addView(
+            scrollToBottomFab,
+            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.BOTTOM or Gravity.END).apply {
+                marginEnd = dp(12)
+                bottomMargin = dp(10)
+            }
+        )
+        root.addView(transcriptFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
         // Quick suggestions / chips
         quickChipsScroll = HorizontalScrollView(this).apply {
@@ -1066,6 +1097,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // mutation): a user scrolled up reading history stays put while SSE tokens keep coming;
         // only a pinned viewport follows the stream to the bottom.
         autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
+        scrollToBottomPolicy.onViewportDistanceFromBottom(distanceFromBottomPx())
         messages.removeAllViews()
         uiState.messages.forEachIndexed { index, message ->
             val isUser = message.role == "user"
@@ -1248,7 +1280,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             messages.addView(card, params)
         }
         renderSmartChips()
-        if (autoScroll.shouldScrollOnContentChanged()) scrollToBottom()
+        if (autoScroll.shouldScrollOnContentChanged()) scrollToBottom() else syncScrollToBottomFab()
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
@@ -2169,7 +2201,27 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun scrollToBottom() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
+    private fun scrollToBottom() {
+        // Any explicit jump to the latest hides the FAB right away instead of waiting for the
+        // posted fullScroll to report back through the scroll listener.
+        scrollToBottomPolicy.onJumpToLatest()
+        syncScrollToBottomFab()
+        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    /**
+     * FAB tap: one-tap return to the latest message — re-pins the stream-following viewport
+     * ([AutoScrollPolicy]) so incoming tokens pull the reader along again, then scrolls down.
+     */
+    private fun jumpToLatestFromFab() {
+        autoScroll.pinToBottom()
+        scrollToBottom()
+    }
+
+    /** Applies the pure [ScrollToBottomPolicy] decision to the FAB; safe before the view exists. */
+    private fun syncScrollToBottomFab() {
+        scrollToBottomFab?.visibility = if (scrollToBottomPolicy.visible) View.VISIBLE else View.GONE
+    }
 
     /**
      * Distance (px) between the bottom of the transcript content and the bottom of the visible
