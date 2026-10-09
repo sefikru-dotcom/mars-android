@@ -411,18 +411,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
     }
 
     private fun bearer(credential: ConsumedDeviceCredential) = "Bearer ${credential.accessToken}"
-    private fun jsonString(value: String) = buildString {
-        append('"')
-        value.forEach {
-            when (it) {
-                '\\' -> append("\\\\")
-                '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> append(it)
-            }
-        }
-        append('"')
-    }
+
+    /** Delegates to the module-wide strict escaper (single point — see [JsonStringEncoding]). */
+    private fun jsonString(value: String) = JsonStringEncoding.escape(value)
 }
