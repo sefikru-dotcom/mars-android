@@ -50,6 +50,18 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
     private val heartButtons = HashMap<String, MutableList<ImageButton>>()
+
+    /** Rendered chart/search row views per track id, so playback state can re-style them live. */
+    private class TrackRowHolder(
+        val trackId: String,
+        val artist: String,
+        val duration: String,
+        val row: View,
+        val titleView: TextView,
+        val subTitleView: TextView,
+        val playButton: ImageButton,
+    )
+    private val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
     private lateinit var chartTabButton: TextView
     private lateinit var favoritesTabButton: TextView
     private lateinit var queueTabButton: TextView
@@ -388,6 +400,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             )
             seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
             updateQueueIcons()
+            refreshTrackRows()
             // Keep the queue tab in sync with player state (active track, play/pause,
             // auto-advance): re-render it whenever the queue view is on screen.
             if (currentTab == MusicTab.QUEUE && ::results.isInitialized) renderQueue()
@@ -430,8 +443,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Explicit loading placeholder for the chart list (also shown before a retry). */
     private fun showLoading() {
         showStatus(null)
-        results.removeAllViews()
-        heartButtons.clear()
+        resetList()
         results.addView(TextView(this).apply {
             text = "Загружаем чарт…"
             setTextColor(MarsTheme.TEXT_MUTED)
@@ -454,8 +466,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      */
     private fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
         tracks = emptyList()
-        results.removeAllViews()
-        heartButtons.clear()
+        resetList()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -502,8 +513,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun showTracks(items: List<MusicTrack>) {
         tracks = items
-        results.removeAllViews()
-        heartButtons.clear()
+        resetList()
         if (items.isEmpty()) {
             results.addView(TextView(this).apply {
                 text = "Треки не найдены"
@@ -519,7 +529,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), dp(8), dp(8), dp(8))
                 background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
-                setOnClickListener { MarsMusicPlayer.playTrack(i, tracks) }
+                setOnClickListener { onTrackRowClicked(i) }
             }
 
             val image = ImageView(this).apply {
@@ -537,20 +547,22 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(12), 0, dp(8), 0)
             }
-            trackInfo.addView(TextView(this).apply {
+            val titleView = TextView(this).apply {
                 text = t.title
                 textSize = 15f
                 setTextColor(MarsTheme.TEXT_STRONG)
                 isSingleLine = true
                 ellipsize = android.text.TextUtils.TruncateAt.END
-            })
-            trackInfo.addView(TextView(this).apply {
+            }
+            trackInfo.addView(titleView)
+            val subTitleView = TextView(this).apply {
                 text = "${t.artist} · ${t.duration}"
                 textSize = 12f
                 setTextColor(MarsTheme.TEXT_MUTED)
                 isSingleLine = true
                 ellipsize = android.text.TextUtils.TruncateAt.END
-            })
+            }
+            trackInfo.addView(subTitleView)
             row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
 
             val playTrackBtn = MarsTheme.circleIconButton(
@@ -561,7 +573,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 iconTint = MarsTheme.ACCENT,
                 sizeDp = 34
             ).apply {
-                setOnClickListener { MarsMusicPlayer.playTrack(i, tracks) }
+                setOnClickListener { onTrackRowClicked(i) }
             }
             row.addView(playTrackBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
@@ -594,6 +606,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
 
             results.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+
+            // Register the row so player state changes can highlight the current track live.
+            val holder = TrackRowHolder(t.id, t.artist, t.duration, row, titleView, subTitleView, playTrackBtn)
+            trackRows.getOrPut(t.id) { mutableListOf() }.add(holder)
+            applyTrackRowState(holder)
         }
     }
 
@@ -660,8 +677,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      */
     private fun renderQueue() {
         tracks = emptyList() // stale chart cards must not stay clickable under the queue
-        results.removeAllViews()
-        heartButtons.clear()
+        resetList()
 
         val queue = MarsMusicPlayer.tracks
         if (queue.isEmpty()) {
@@ -795,8 +811,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 favoriteIds += favs.map { it.id }
                 if (favs.isEmpty()) {
                     tracks = emptyList()
-                    results.removeAllViews()
-                    heartButtons.clear()
+                    resetList()
                     results.addView(TextView(this@MusicActivity).apply {
                         text = "В избранном пусто — нажмите сердечко на треке"
                         setTextColor(MarsTheme.TEXT_MUTED)
@@ -808,8 +823,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             }.onFailure {
                 tracks = emptyList()
-                results.removeAllViews()
-                heartButtons.clear()
+                resetList()
                 showStatus("Избранное недоступно")
             }
         }
@@ -832,6 +846,45 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             button.setImageResource(if (filled) R.drawable.ic_favorite else R.drawable.ic_favorite_border)
             button.imageTintList = ColorStateList.valueOf(if (filled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
         }
+    }
+
+    /** Clears the rendered list plus per-row caches (hearts, highlighted rows). */
+    private fun resetList() {
+        results.removeAllViews()
+        heartButtons.clear()
+        trackRows.clear()
+    }
+
+    /** Applies the pure [TrackRowUiState] to a rendered row: accent card, title, play/pause icon. */
+    private fun applyTrackRowState(holder: TrackRowHolder) {
+        val state = TrackRowUiState.resolve(holder.trackId, MarsMusicPlayer.currentTrack?.id, MarsMusicPlayer.isPlaying)
+        holder.row.background = MarsTheme.card(
+            this,
+            if (state.active) MarsTheme.ACCENT_BG else MarsTheme.SURFACE,
+            radiusDp = 12,
+            strokeColor = if (state.active) MarsTheme.ACCENT else MarsTheme.BORDER,
+        )
+        holder.titleView.setTextColor(if (state.active) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_STRONG)
+        holder.titleView.typeface = if (state.active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        holder.subTitleView.text = if (state.active && MarsMusicPlayer.isPlaying) {
+            "Сейчас играет · ${holder.artist}"
+        } else {
+            "${holder.artist} · ${holder.duration}"
+        }
+        holder.playButton.setImageResource(if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
+        holder.playButton.contentDescription = if (state.showPauseIcon) "Пауза" else "Воспроизвести"
+    }
+
+    /** Re-styles every rendered chart/search row from the current player state (UI thread). */
+    private fun refreshTrackRows() {
+        trackRows.values.forEach { holders -> holders.forEach(::applyTrackRowState) }
+    }
+
+    /** Row tap: an inactive row starts playback, the active row toggles play/pause. */
+    private fun onTrackRowClicked(index: Int) {
+        val track = tracks.getOrNull(index) ?: return
+        val state = TrackRowUiState.resolve(track.id, MarsMusicPlayer.currentTrack?.id, MarsMusicPlayer.isPlaying)
+        if (state.tapStartsPlayback) MarsMusicPlayer.playTrack(index, tracks) else MarsMusicPlayer.togglePlay()
     }
 
     private fun onHeartClicked(track: MusicTrack, button: ImageButton) {

@@ -161,14 +161,17 @@ class ProjectsActivity : ComponentActivity() {
         list.removeAllViews()
         parsed.host?.let { addHost(it) }
         parsed.services.forEach { addService(it) }
-        updated.text = "Обновлено в ${clock()}"
+        val summary = ProjectsSummary.of(parsed.services)
+        updated.text = ProjectsSummary.statusLine(summary, clock())
+        updated.setTextColor(if (summary.hasOffline) MarsTheme.STATUS_WARNING else MarsTheme.TEXT_MUTED)
         if (list.childCount == 0) renderFallback()
     }
 
     private fun renderFallback() {
         list.removeAllViews()
         MarsProjects.all.forEach { addCard(it.name, it.description, it.url, it.status, null) }
-        updated.text = "Офлайн-режим · проектов: ${MarsProjects.all.size}"
+        updated.text = ProjectsSummary.offlineLine(MarsProjects.all.size)
+        updated.setTextColor(MarsTheme.STATUS_WARNING)
     }
 
     private fun addService(s: ParsedService) {
