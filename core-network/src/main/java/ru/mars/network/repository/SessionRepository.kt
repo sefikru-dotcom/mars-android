@@ -173,21 +173,32 @@ class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : Ses
     private fun execute(url: String, c: ConsumedDeviceCredential): String? =
         try { client.newCall(Request.Builder().url(url).header("Authorization", bearer(c)).get().build()).execute().use { if (it.isSuccessful) it.body?.string() else null } } catch (_: Exception) { null }
     private fun parseMap(json: String): Map<String, Any?>? = try { moshi.adapter<Map<String, Any?>>(mapType).fromJson(json) } catch (_: Exception) { null }
-    private fun sessionItem(o: Map<*, *>) = SessionItem(
-        id = string(o, "id", "session_id").orEmpty(),
-        title = string(o, "title"),
-        preview = string(o, "preview", "last_message", "summary"),
-        createdAt = string(o, "created_at", "createdAt"),
-        updatedAt = string(o, "updated_at", "updatedAt"),
-        messageCount = (o["message_count"] as? Number)?.toInt(),
-        activeTurn = activeTurn(o),
-        sessionSource = string(o, "session_source"),
-        sourceTag = string(o, "source_tag"),
-        rawSource = string(o, "raw_source"),
-        sourceLabel = string(o, "source_label"),
-        readOnly = o["read_only"] as? Boolean ?: false,
-        parentSessionId = string(o, "parent_session_id"),
-    )
+    /**
+     * List row → [SessionItem]. Nullable by contract: a row without a non-blank
+     * `id`/`session_id` is dropped (getSessions' mapNotNull) instead of surfacing a
+     * phantom `SessionItem(id = "")` in the drawer — such an item can't be opened,
+     * renamed or deleted. [string] already rejects blank values, so a whitespace-only
+     * id is dropped too. Legacy key order (`id`, then `session_id`) and the
+     * source/read-only provenance parse are unchanged.
+     */
+    private fun sessionItem(o: Map<*, *>): SessionItem? {
+        val id = string(o, "id", "session_id") ?: return null
+        return SessionItem(
+            id = id,
+            title = string(o, "title"),
+            preview = string(o, "preview", "last_message", "summary"),
+            createdAt = string(o, "created_at", "createdAt"),
+            updatedAt = string(o, "updated_at", "updatedAt"),
+            messageCount = (o["message_count"] as? Number)?.toInt(),
+            activeTurn = activeTurn(o),
+            sessionSource = string(o, "session_source"),
+            sourceTag = string(o, "source_tag"),
+            rawSource = string(o, "raw_source"),
+            sourceLabel = string(o, "source_label"),
+            readOnly = o["read_only"] as? Boolean ?: false,
+            parentSessionId = string(o, "parent_session_id"),
+        )
+    }
 
     /**
      * Active-turn metadata shared by the detail and list payloads (hermes-webui

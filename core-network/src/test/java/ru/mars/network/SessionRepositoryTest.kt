@@ -102,4 +102,43 @@ class SessionRepositoryTest {
             assertNull(sessions.single().sourceTag)
         }
     }
+
+    /**
+     * A row without `id`/`session_id` never becomes a phantom `SessionItem(id = "")`:
+     * such an item can't be opened/renamed/deleted, so getSessions drops it (mapNotNull
+     * over the nullable sessionItem) and the neighbouring valid rows survive untouched.
+     */
+    @Test fun dropsRowsWithoutSessionId() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                "{\"sessions\":[" +
+                    "{\"title\":\"Ghost row without any id\",\"message_count\":3}," +
+                    "{\"session_id\":\"s1\",\"title\":\"Chat\"}" +
+                    "]}"
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sessions = repo.getSessions(server.url("/").toString(), c)
+            assertEquals(listOf("s1"), sessions.map { it.id })
+            assertEquals("/api/sessions", server.takeRequest().path)
+        }
+    }
+
+    /** A whitespace-only id is blank, not an id: the row is dropped, the neighbouring legacy `id` row (with provenance) is kept. */
+    @Test fun dropsRowsWithWhitespaceSessionId() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                "{\"sessions\":[" +
+                    "{\"session_id\":\"   \",\"title\":\"Blank id row\"}," +
+                    "{\"id\":\"legacy1\",\"title\":\"Legacy Chat\",\"source_tag\":\"webui\",\"read_only\":false}" +
+                    "]}"
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sessions = repo.getSessions(server.url("/").toString(), c)
+            assertEquals(listOf("legacy1"), sessions.map { it.id })
+            // Legacy `id` key and the source/read-only parse still work for the surviving row.
+            assertEquals("Legacy Chat", sessions.single().title)
+            assertEquals("webui", sessions.single().sourceTag)
+            assertTrue(!sessions.single().readOnly)
+        }
+    }
 }
