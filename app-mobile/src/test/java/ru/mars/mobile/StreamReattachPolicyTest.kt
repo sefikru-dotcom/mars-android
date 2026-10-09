@@ -53,11 +53,19 @@ class StreamReattachPolicyTest {
     @Test
     fun `terminal HTTP 404 error means the stream is gone`() {
         assertEquals(ReattachEventOutcome.StreamGone, policy.outcomeOf(ChatEvent.Error("HTTP 404")))
+        // The exact core-network terminal shape (describeHttpError + routes.py reason).
+        assertEquals(
+            ReattachEventOutcome.StreamGone,
+            policy.outcomeOf(ChatEvent.Error("HTTP 404: stream not found")),
+        )
     }
 
     @Test
-    fun `textual not-found phrasing also counts as gone`() {
+    fun `textual stream-not-found phrasing also counts as gone`() {
         assertEquals(ReattachEventOutcome.StreamGone, policy.outcomeOf(ChatEvent.Error("Stream not found")))
+        // Case/whitespace tolerance for gateway rewrites of the status line.
+        assertEquals(ReattachEventOutcome.StreamGone, policy.outcomeOf(ChatEvent.Error("http 404: Not Found")))
+        assertEquals(ReattachEventOutcome.StreamGone, policy.outcomeOf(ChatEvent.Error("  HTTP 404 ")))
     }
 
     @Test
@@ -65,6 +73,36 @@ class StreamReattachPolicyTest {
         assertEquals(ReattachEventOutcome.Continue, policy.outcomeOf(ChatEvent.Error("HTTP 500")))
         assertEquals(ReattachEventOutcome.Continue, policy.outcomeOf(ChatEvent.Error("Сеть недоступна")))
         assertEquals(ReattachEventOutcome.Continue, policy.outcomeOf(ChatEvent.Error("HTTP 4040")))
+    }
+
+    // REGRESSION: journaled in-turn `error`/`apperror` frames are replayed on reattach and map
+    // onto the SAME ChatEvent.Error while the stream stays alive. The old unanchored markers
+    // (`\b404\b` / bare "not found" anywhere) misread them as terminal and abandoned the live
+    // reattach — the running turn froze into a history reload.
+    @Test
+    fun `replayed in-turn tool errors with not-found text do not kill a live reattach`() {
+        assertEquals(
+            ReattachEventOutcome.Continue,
+            policy.outcomeOf(ChatEvent.Error("bash: gradlew: command not found")),
+        )
+        assertEquals(
+            ReattachEventOutcome.Continue,
+            policy.outcomeOf(ChatEvent.Error("File not found: /tmp/report.pdf")),
+        )
+        assertEquals(ReattachEventOutcome.Continue, policy.outcomeOf(ChatEvent.Error("Not Found")))
+    }
+
+    @Test
+    fun `a 404 token in the middle of another error is not terminal`() {
+        assertEquals(
+            ReattachEventOutcome.Continue,
+            policy.outcomeOf(ChatEvent.Error("HTTP 500: gateway gave up after 404 retries")),
+        )
+        assertEquals(ReattachEventOutcome.Continue, policy.outcomeOf(ChatEvent.Error("404")))
+        assertEquals(
+            ReattachEventOutcome.Continue,
+            policy.outcomeOf(ChatEvent.Error("Ошибка потока")),
+        )
     }
 
     @Test
