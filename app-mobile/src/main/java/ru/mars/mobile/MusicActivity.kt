@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -25,6 +26,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.model.MusicTrack
@@ -43,6 +45,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var artwork: ImageView
     private var tracks = emptyList<MusicTrack>()
     private var job: Job? = null
+    /** Local history of successful searches (newest first); pure policy in [MusicSearchHistoryPolicy]. */
+    private lateinit var searchHistory: MusicSearchHistory
+    /** Monotonic id of the in-flight search run; stale runs are dropped by [SearchRunGuard]. */
+    private var searchRunId = 0
 
     /** Which pill tab is active: chart, favorites, or the live playback queue. */
     private enum class MusicTab { CHART, FAVORITES, QUEUE }
@@ -67,6 +73,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var queueTabButton: TextView
     private lateinit var searchInput: EditText
     private lateinit var clearSearchBtn: ImageButton
+    /** Overlay with recent searches; floats above the results list, never replaces it. */
+    private lateinit var historyOverlay: ScrollView
+    private lateinit var historyPanel: LinearLayout
     private lateinit var statusText: TextView
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
@@ -91,6 +100,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         repository = MusicRepository(BASE_URL)
+        searchHistory = MusicSearchHistory(
+            PrefsMusicSearchHistoryStorage(getSharedPreferences("mars-music-search-history", MODE_PRIVATE))
+        )
         setContentView(buildView())
         MarsMusicPlayer.registerListener(this)
         seek.post(ticker)
@@ -195,6 +207,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     false
                 }
             }
+            // The history overlay follows the focus: shown only while the
+            // field is empty and focused (pure SearchHistoryPanelPolicy).
+            setOnFocusChangeListener { _, _ -> updateSearchHistoryOverlay() }
         }
         searchContainer.addView(searchInput, LinearLayout.LayoutParams(0, -2, 1f))
 
@@ -223,6 +238,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 clearSearchBtn.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
+                updateSearchHistoryOverlay()
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -240,15 +256,30 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         searchContainer.addView(searchBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
         root.addView(searchContainer, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
 
-        // Track list
+        // Track list; the search-history overlay floats above it (FrameLayout),
+        // so showing history never displaces the tab content or the player.
         results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(
-            ScrollView(this).apply {
-                addView(results, ViewGroup.LayoutParams(-1, -2))
-                isFillViewport = true
-            },
-            LinearLayout.LayoutParams(-1, 0, 1f)
-        )
+        val listScroll = ScrollView(this).apply {
+            addView(results, ViewGroup.LayoutParams(-1, -2))
+            isFillViewport = true
+        }
+        historyPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_CARD, radiusDp = 14, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
+        }
+        historyOverlay = ScrollView(this).apply {
+            addView(historyPanel, ViewGroup.LayoutParams(-1, -2))
+            visibility = View.GONE
+            // Swallow taps so they don't fall through to the list underneath.
+            isClickable = true
+            isFocusable = true
+        }
+        val listArea = FrameLayout(this).apply {
+            addView(listScroll, FrameLayout.LayoutParams(-1, -1))
+            addView(historyOverlay, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        }
+        root.addView(listArea, LinearLayout.LayoutParams(-1, 0, 1f))
 
         // Bottom Player Bar
         val playerPanel = LinearLayout(this).apply {
@@ -509,16 +540,28 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         results.addView(box, LinearLayout.LayoutParams(-1, -2))
     }
 
-    private fun search(q: String) {
-        if (q.isBlank()) return
+    /**
+     * Runs one search as a guarded run: supersedes the previous job and tags the
+     * new one with a monotonic [searchRunId]. Only a live, current run may touch
+     * the UI or the history ([SearchRunGuard]) — a cancelled/superseded run never
+     * shows an error, never overwrites a stale tab and never enters the history.
+     * Only a *successful* search is recorded ([MusicSearchHistory.recordSuccess]).
+     */
+    private fun search(rawQuery: String) {
+        val q = MusicSearchHistoryPolicy.normalize(rawQuery) ?: return
         job?.cancel()
+        val runId = ++searchRunId
+        showSearchLoading(q)
         job = lifecycleScope.launch {
-            runCatching { repository.search(q) }
-                .onSuccess { showStatus(null); showTracks(it) }
-                .onFailure {
-                    // HTTP/parse failure: the previous (chart) cards must not stay
-                    // clickable — drop them plus the tracks list and show the same
-                    // error/retry state, with a retry for this very query.
+            val found = try {
+                repository.search(q)
+            } catch (error: Exception) {
+                // Cancellation (new query, tab switch, clear-search) is not a failure.
+                if (SearchRunGuard.isCancellation(error)) throw error
+                // HTTP/parse failure: the previous (chart) cards must not stay
+                // clickable — drop them plus the tracks list and show the same
+                // error/retry state, with a retry for this very query.
+                if (SearchRunGuard.mayApplyResult(runId, searchRunId, !isActive)) {
                     showStatus(null)
                     showListError(
                         message = "Поиск недоступен — проверьте сеть",
@@ -526,7 +569,115 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                         onRetry = { search(q) },
                     )
                 }
+                return@launch
+            }
+            if (!SearchRunGuard.mayApplyResult(runId, searchRunId, !isActive)) return@launch
+            searchHistory.recordSuccess(q)
+            showStatus(null)
+            showTracks(found)
         }
+    }
+
+    /** Explicit «searching» placeholder so the list never looks stale/empty mid-search. */
+    private fun showSearchLoading(query: String) {
+        showStatus(null)
+        resetList()
+        results.addView(TextView(this).apply {
+            text = "Ищем «$query»…"
+            setTextColor(MarsTheme.TEXT_MUTED)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(32), 0, dp(32))
+        })
+    }
+
+    /**
+     * Re-evaluates overlay visibility (pure [SearchHistoryPanelPolicy]): shown
+     * only while the search field is empty and focused and the history is not
+     * empty; the overlay floats above the list, so tab content and the player
+     * stay untouched underneath.
+     */
+    private fun updateSearchHistoryOverlay() {
+        if (!::historyOverlay.isInitialized || !::searchHistory.isInitialized) return
+        val visible = SearchHistoryPanelPolicy.isVisible(
+            fieldText = searchInput.text?.toString(),
+            fieldFocused = searchInput.hasFocus(),
+            historyEmpty = searchHistory.entries.isEmpty(),
+        )
+        if (visible) renderSearchHistory()
+        historyOverlay.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    /** Fills the overlay: header with «Очистить» plus one tappable row per stored query. */
+    private fun renderSearchHistory() {
+        historyPanel.removeAllViews()
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        header.addView(TextView(this).apply {
+            text = "История поиска"
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(TextView(this).apply {
+            text = "Очистить"
+            textSize = 13f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT_BG, 10, MarsTheme.ACCENT)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Очистить историю поиска"
+            setOnClickListener {
+                searchHistory.clear()
+                showStatus("История поиска очищена")
+                updateSearchHistoryOverlay()
+            }
+        }, LinearLayout.LayoutParams(-2, -2))
+        historyPanel.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+        searchHistory.entries.forEach { entry ->
+            val row = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(4), dp(6), dp(4))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onHistoryEntryClicked(entry) }
+            }
+            row.addView(TextView(this).apply {
+                text = entry
+                textSize = 14f
+                setTextColor(MarsTheme.TEXT_STRONG)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            val deleteBtn = MarsTheme.circleIconButton(
+                this,
+                R.drawable.ic_trash,
+                "Удалить из истории: $entry",
+                bg = MarsTheme.SURFACE_SUBTLE,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30
+            ).apply {
+                setOnClickListener {
+                    searchHistory.delete(entry)
+                    showStatus("Удалено из истории: $entry")
+                    updateSearchHistoryOverlay()
+                }
+            }
+            row.addView(deleteBtn, LinearLayout.LayoutParams(dp(30), dp(30)))
+            historyPanel.addView(row, LinearLayout.LayoutParams(-1, -2))
+        }
+    }
+
+    /** Tapping a history row repeats that search: text back into the field, overlay hides. */
+    private fun onHistoryEntryClicked(entry: String) {
+        searchInput.setText(entry) // the watcher hides the overlay and reveals the clear button
+        hideKeyboard()
+        search(entry)
     }
 
     private fun showTracks(items: List<MusicTrack>) {
