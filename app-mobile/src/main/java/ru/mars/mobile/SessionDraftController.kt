@@ -51,6 +51,32 @@ class SessionDraftController(
         storage.remove(keyFor(sessionId))
     }
 
+    /**
+     * Момент применения асинхронной смены диалога (детали загружены, session_id сейчас
+     * будет присвоен): текст композитора сохраняется в черновик СТАРОГО диалога — включая
+     * набранный уже после начала загрузки, — а для нового возвращается его черновик.
+     * Вызывать строго до присвоения нового session_id.
+     */
+    fun onSessionSwitch(fromSessionId: String?, toSessionId: String?, composerText: String): String? {
+        saveDraft(fromSessionId, composerText)
+        return draftFor(toSessionId)
+    }
+
+    /**
+     * Момент применения асинхронного «финиша» сессии: старый черновик удаляется по
+     * контракту (закрытая сессия черновика не имеет), но текст, ИЗМЕНЁННЫЙ в композиторе
+     * после начала операции ([textAtFinish] != [textAtStart]), переживает закрытие как
+     * черновик нового чата; не тронутый старый текст удаляется вместе с сессией.
+     * Возвращает текст, который хост должен показать в композиторе нового чата.
+     */
+    fun onSessionFinished(finishedSessionId: String, textAtStart: String, textAtFinish: String): String? {
+        onSessionRemoved(finishedSessionId)
+        if (textAtFinish != textAtStart) {
+            saveDraft(null, textAtFinish)
+        }
+        return draftFor(null)
+    }
+
     /** Ключ хранения: реальный session_id либо отдельный ключ нового чата. */
     fun keyFor(sessionId: String?): String =
         sessionId?.takeIf { it.isNotBlank() } ?: NEW_CHAT_KEY
