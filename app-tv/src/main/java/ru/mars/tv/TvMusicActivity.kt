@@ -49,12 +49,14 @@ internal object TvMusicFocusPolicy {
  * «search» action and the explicit «Найти» button submit, «Чарт» returns to the charts
  * without stopping playback, and «Повторить» retries exactly the last operation — so
  * the remote user never depends on the soft keyboard being reachable or dismissable.
- * Selecting a track row routes playback to the process-global [TvMusicPlayer] transport,
- * which keeps playing after this screen closes; «Остановить» ends it explicitly.
+ * Selecting a track row binds the shown list as the process-global [TvMusicPlayer]
+ * transport's playlist and starts it on that row; the transport keeps playing after this
+ * screen closes, auto-advances to the next track when one completes ([TvPlaylistPolicy])
+ * and goes idle at the end of the list; «Остановить» ends it explicitly.
  * The screen observes the transport ([TvMusicPlayer.onTransportChanged]) so the header
  * line and the current track's row highlight follow asynchronous state transitions
- * (prepared / completion / stream error) without user interaction; row restyling never
- * rebuilds the list, so D-pad focus survives. Presentation rules are pure
+ * (prepared / completion / auto-advance / stream error) without user interaction; row
+ * restyling never rebuilds the list, so D-pad focus survives. Presentation rules are pure
  * ([TvMusicNowPlayingSpec], [TvMusicSearchSpec]). Every interactive element is focusable
  * for the D-pad, and disappearing affordances never leave the window unfocused
  * ([TvMusicFocusPolicy]); theme colors only, no emojis.
