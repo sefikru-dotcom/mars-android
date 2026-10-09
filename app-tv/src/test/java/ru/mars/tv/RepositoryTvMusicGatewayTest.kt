@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
+import java.net.URLDecoder
 
 /**
  * Contract tests for [RepositoryTvMusicGateway] — the production seam that binds the REAL
@@ -100,6 +101,72 @@ class RepositoryTvMusicGatewayTest {
             val gateway = gatewayFor(server)
             assertTrue(gateway.fetchCharts() is TvMusicChartsResult.Loaded)
             assertEquals(TvMusicChartsResult.Loaded(emptyList()), gateway.fetchCharts())
+        }
+    }
+
+    // --- search (GET /api/search?q=…) -------------------------------------------------------------
+
+    @Test
+    fun searchEnvelopeMapsToLoadedTracksAndHitsSearchPath() {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"success":true,"results":[
+                       {"type":"song","id":"s1","title":"Radio","artist":"A","duration":"3:01"}]}""",
+                ),
+            )
+            val result = gatewayFor(server).search("radio")
+            assertEquals(
+                TvMusicChartsResult.Loaded(
+                    listOf(MusicTrack(id = "s1", title = "Radio", artist = "A", duration = "3:01")),
+                ),
+                result,
+            )
+            assertEquals("/music/api/search?q=radio", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun searchQueryIsUrlEncoded() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":true,"results":[]}"""))
+            gatewayFor(server).search("ночь & день")
+            val path = server.takeRequest().path!!
+            assertTrue("expected the search path, got $path", path.startsWith("/music/api/search?q="))
+            assertEquals(
+                "ночь & день",
+                URLDecoder.decode(path.substringAfter("q="), Charsets.UTF_8.name()),
+            )
+        }
+    }
+
+    @Test
+    fun emptySearchResultsMapToLoadedEmptyList() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":true,"results":[]}"""))
+            assertEquals(TvMusicChartsResult.Loaded(emptyList()), gatewayFor(server).search("неттакого"))
+        }
+    }
+
+    @Test
+    fun searchHttpErrorMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500))
+            val result = gatewayFor(server).search("q")
+            assertTrue("expected Failed, got $result", result is TvMusicChartsResult.Failed)
+            assertTrue((result as TvMusicChartsResult.Failed).message.isNotBlank())
+        }
+    }
+
+    @Test
+    fun blankQueryIsContainedAsFailedNotException() {
+        // The controller never sends a blank query (TvMusicSearchSpec), but the seam must
+        // still contain the repository's require(query.isNotBlank()) instead of throwing.
+        MockWebServer().use { server ->
+            val result = gatewayFor(server).search("  ")
+            assertTrue("expected Failed, got $result", result is TvMusicChartsResult.Failed)
+            assertTrue((result as TvMusicChartsResult.Failed).message.isNotBlank())
+            assertEquals("a rejected query must not hit the network", 0, server.requestCount)
         }
     }
 }
