@@ -91,6 +91,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drafts: SessionDraftController
     /** Guard асинхронной навигации по диалогам (pure): побеждает последняя загрузка. */
     private val sessionNavigation = SessionNavigationPolicy()
+    /** Сохранение открытого диалога при пересоздании экрана (pure policy). */
+    private val recreationPolicy = SessionRecreationPolicy()
     /** Одноразовая очистка локальных plaintext-данных при выходе из авторизации. */
     private lateinit var authExitCleanup: AuthExitCleanup
 
@@ -218,6 +220,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         refreshModelCatalog()
         refreshReasoningStatus()
         loadWorkspaces()
+        // Пересоздание экрана (поворот/тема/смерть процесса): открытый диалог восстанавливается
+        // из savedInstanceState; на холодном старте savedInstanceState == null → новый чат.
+        restoreOpenSession(savedInstanceState)
     }
 
     override fun onDestroy() {
@@ -240,6 +245,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
         super.onPause()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // Открытый диалог обязан пережить пересоздание Activity (поворот, тёмная тема,
+        // смерть процесса): session_id уходит в bundle, onCreate заново откроет его.
+        recreationPolicy.stateToPersist(currentSessionId)
+            ?.let { outState.putString(KEY_OPEN_SESSION_ID, it) }
     }
 
     override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) {
@@ -1521,7 +1534,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun loadSession(session: SessionItem) {
+    private fun loadSession(session: SessionItem) = loadSessionById(session.id)
+
+    /**
+     * Открывает диалог по id — клик по drawer'у или восстановление после пересоздания экрана.
+     */
+    private fun loadSessionById(sessionId: String) {
         val c = store.read() ?: return
         // Черновик покидаемого диалога сохраняется до смены текущего session_id.
         persistComposerDraft()
@@ -1531,7 +1549,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // или закрыл сессию, пока грузились детали) не перетирает актуальное состояние.
         val token = sessionNavigation.beginNavigation()
         lifecycleScope.launch {
-            val detail = SessionRepository().getSessionDetail(BASE_URL, c, session.id)
+            val detail = SessionRepository().getSessionDetail(BASE_URL, c, sessionId)
             if (detail != null && sessionNavigation.isCurrent(token)) {
                 // Текст, набранный ВО ВРЕМЯ загрузки, сохраняется в черновик старого диалога
                 // непосредственно перед присвоением нового session_id.
@@ -1551,6 +1569,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 reattachActiveTurn(detail.activeTurn)
             }
         }
+    }
+
+    /**
+     * Восстановление открытого диалога после пересоздания Activity (поворот, тёмная тема,
+     * смерть процесса): чистая политика [SessionRecreationPolicy] решает по savedInstanceState,
+     * открывать ли сохранённый session_id заново. Загрузка идёт через общий guard
+     * [sessionNavigation], а одноразовость политики исключает повторное восстановление
+     * в этом же экземпляре экрана. Холодный старт (savedInstanceState == null) — новый чат.
+     */
+    private fun restoreOpenSession(savedInstanceState: Bundle?) {
+        val plan = recreationPolicy.planFor(savedInstanceState?.getString(KEY_OPEN_SESSION_ID))
+        if (plan is RecreationPlan.Reopen) loadSessionById(plan.sessionId)
     }
 
     /**
@@ -2371,6 +2401,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
+        /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
+        private const val KEY_OPEN_SESSION_ID = "open_session_id"
         /** Privately-stored plaintext data cleared on every auth-exit path. */
         private const val DRAFTS_PREFS = "mars-session-drafts"
         private const val MUSIC_HISTORY_PREFS = "mars-music-search-history"
