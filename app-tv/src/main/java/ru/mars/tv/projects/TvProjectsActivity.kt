@@ -121,6 +121,9 @@ class TvProjectsActivity : AppCompatActivity() {
     }
 
     private fun render(metrics: TvProjectsMetrics) {
+        // Автообновление раз в 30 с пересобирает карточки: запоминаем позицию D-pad фокуса
+        // и возвращаем её на ту же карточку, чтобы просмотр не сбрасывался на шапку.
+        val focusedIndex = cardsContainer.indexOfChild(cardsContainer.findFocus())
         cardsContainer.removeAllViews()
         cardsContainer.addView(hostCard(metrics.host))
         if (metrics.services.isEmpty()) {
@@ -133,6 +136,9 @@ class TvProjectsActivity : AppCompatActivity() {
         if (first.id == View.NO_ID) first.id = View.generateViewId()
         first.nextFocusUpId = R.id.backButton
         backButton.nextFocusDownId = first.id
+        if (focusedIndex >= 0) {
+            cardsContainer.getChildAt(focusedIndex)?.requestFocus()
+        }
 
         statusView.text = if (metrics.timestamp.isNotBlank()) {
             "Обновлено: ${metrics.timestamp}"

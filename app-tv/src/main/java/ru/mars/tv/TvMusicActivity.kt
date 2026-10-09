@@ -1,5 +1,6 @@
 package ru.mars.tv
 
+import android.content.res.ColorStateList
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -17,7 +18,12 @@ import ru.mars.network.model.MusicTrack
  * four states — loading / error (with a D-pad «Повторить» retry) / empty / content.
  * Selecting a track row routes playback to the process-global [TvMusicPlayer] transport,
  * which keeps playing after this screen closes; «Остановить» ends it explicitly.
- * Every interactive element is focusable for the D-pad; theme colors only, no emojis.
+ * The screen observes the transport ([TvMusicPlayer.onTransportChanged]) so the header
+ * line and the current track's row highlight follow asynchronous state transitions
+ * (prepared / completion / stream error) without user interaction; row restyling never
+ * rebuilds the list, so D-pad focus survives. Presentation rules are pure
+ * ([TvMusicNowPlayingSpec]). Every interactive element is focusable for the D-pad;
+ * theme colors only, no emojis.
  */
 class TvMusicActivity : AppCompatActivity() {
 
@@ -33,6 +39,9 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var nowText: TextView
     private lateinit var trackList: LinearLayout
 
+    /** Rendered track rows (trackId to view) — restyled in place on transport changes. */
+    private val trackRows = mutableListOf<Pair<String, Button>>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_music)
@@ -43,14 +52,12 @@ class TvMusicActivity : AppCompatActivity() {
         trackList = findViewById(R.id.trackList)
         findViewById<Button>(R.id.backButton).setOnClickListener { finish() }
         retryButton.setOnClickListener { controller.load() }
-        stopButton.setOnClickListener {
-            controller.stopPlayback()
-            renderNowPlaying()
-        }
+        stopButton.setOnClickListener { controller.stopPlayback() }
         TvFocusLift.attach(findViewById(R.id.backButton))
         TvFocusLift.attach(retryButton)
         TvFocusLift.attach(stopButton)
         controller.onStateChanged = ::render
+        TvMusicPlayer.onTransportChanged = ::renderTransportState
         controller.load()
         render(controller.state)
         findViewById<View>(R.id.backButton).requestFocus()
@@ -60,11 +67,13 @@ class TvMusicActivity : AppCompatActivity() {
         // The transport is global: teardown silences the controller but music keeps playing.
         controller.destroy()
         controller.onStateChanged = null
+        TvMusicPlayer.onTransportChanged = null
         super.onDestroy()
     }
 
     private fun render(state: TvMusicUiState) {
         trackList.removeAllViews()
+        trackRows.clear()
         retryButton.visibility = View.GONE
         when (state) {
             is TvMusicUiState.Loading -> {
@@ -86,8 +95,7 @@ class TvMusicActivity : AppCompatActivity() {
                 renderTracks(state.tracks)
             }
         }
-        stopButton.visibility = if (TvMusicPlayer.currentTrack != null) View.VISIBLE else View.GONE
-        renderNowPlaying()
+        renderTransportState()
     }
 
     private fun renderTracks(tracks: List<MusicTrack>) {
@@ -98,16 +106,15 @@ class TvMusicActivity : AppCompatActivity() {
                 textSize = 20f
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 setPadding(dp(24), 0, dp(24), 0)
+                compoundDrawablePadding = dp(14)
                 setBackgroundResource(R.drawable.bg_focus_card)
                 setTextColor(ContextCompat.getColor(context, R.color.mars_text))
                 isFocusable = true
-                setOnClickListener {
-                    controller.onTrackActivated(index)
-                    stopButton.visibility = View.VISIBLE
-                    renderNowPlaying()
-                }
+                setOnClickListener { controller.onTrackActivated(index) }
             }
             TvFocusLift.attach(row)
+            applyRowState(row, track.id)
+            trackRows += track.id to row
             trackList.addView(
                 row,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(72)).apply {
@@ -121,15 +128,35 @@ class TvMusicActivity : AppCompatActivity() {
         }
     }
 
+    /** Transport snapshot to the UI: stop affordance, header line, row highlight. */
+    private fun renderTransportState() {
+        stopButton.visibility = if (TvMusicPlayer.currentTrack != null) View.VISIBLE else View.GONE
+        renderNowPlaying()
+        trackRows.forEach { (trackId, row) -> applyRowState(row, trackId) }
+    }
+
     private fun renderNowPlaying() {
-        val track = TvMusicPlayer.currentTrack
-        nowText.text = when {
-            track == null -> ""
-            TvMusicPlayer.isPlaying -> "Сейчас играет: ${track.title} — ${track.artist}"
-            TvMusicPlayer.lastError != null -> "Не играет: ${track.title}. ${TvMusicPlayer.lastError}"
-            else -> "Загружаю: ${track.title}…"
+        val line = TvMusicNowPlayingSpec.nowPlayingLine(
+            track = TvMusicPlayer.currentTrack,
+            isPlaying = TvMusicPlayer.isPlaying,
+            error = TvMusicPlayer.lastError,
+        )
+        nowText.text = line
+        nowText.visibility = if (line.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Highlights the transport's current row (accent text + icon), rest without a marker. */
+    private fun applyRowState(row: Button, trackId: String) {
+        if (TvMusicNowPlayingSpec.isCurrent(trackId, TvMusicPlayer.currentTrack?.id)) {
+            row.setTextColor(ContextCompat.getColor(this, R.color.mars_accent_text))
+            row.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_music, 0, 0, 0)
+            row.compoundDrawableTintList =
+                ColorStateList.valueOf(ContextCompat.getColor(this, R.color.mars_accent))
+        } else {
+            row.setTextColor(ContextCompat.getColor(this, R.color.mars_text))
+            row.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0)
+            row.compoundDrawableTintList = null
         }
-        nowText.visibility = if (nowText.text.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun trackLabel(track: MusicTrack): String {

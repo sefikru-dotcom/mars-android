@@ -33,6 +33,15 @@ object TvMusicPlayer : TvMusicTransport {
 
     private var mediaPlayer: MediaPlayer? = null
 
+    /**
+     * Screen observer (UI thread only): fired after every transport state transition —
+     * play/stop, prepared, completion, stream error — so the music screen can refresh its
+     * now-playing line and row highlight while audio state changes asynchronously.
+     * Null when no screen is attached; the transport never blocks on observers.
+     */
+    @Volatile
+    var onTransportChanged: (() -> Unit)? = null
+
     @Synchronized
     override fun play(track: MusicTrack) {
         releasePlayer()
@@ -45,11 +54,16 @@ object TvMusicPlayer : TvMusicTransport {
             player.setOnPreparedListener { prepared ->
                 prepared.start()
                 isPlaying = true
+                notifyChanged()
             }
-            player.setOnCompletionListener { isPlaying = false }
+            player.setOnCompletionListener {
+                isPlaying = false
+                notifyChanged()
+            }
             player.setOnErrorListener { _, what, extra ->
                 isPlaying = false
                 lastError = "Ошибка воспроизведения ($what/$extra)"
+                notifyChanged()
                 true
             }
             player.setDataSource(streamUrlFor(track.id))
@@ -60,6 +74,7 @@ object TvMusicPlayer : TvMusicTransport {
             lastError = error.message ?: error.javaClass.simpleName
             releasePlayer()
         }
+        notifyChanged()
     }
 
     @Synchronized
@@ -68,6 +83,16 @@ object TvMusicPlayer : TvMusicTransport {
         currentTrack = null
         lastError = null
         isPlaying = false
+        notifyChanged()
+    }
+
+    /** Observer callback: invoked on the caller/listener thread (main in production). */
+    private fun notifyChanged() {
+        try {
+            onTransportChanged?.invoke()
+        } catch (_: Exception) {
+            // A broken observer must never take the transport down.
+        }
     }
 
     private fun releasePlayer() {
