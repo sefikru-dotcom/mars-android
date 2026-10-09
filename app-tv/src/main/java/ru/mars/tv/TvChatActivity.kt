@@ -58,6 +58,16 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var sessionsStatus: TextView
     private lateinit var sessionList: LinearLayout
     private lateinit var closeSessions: Button
+
+    // Mini player in the header: mirrors the global TvMusicPlayer transport
+    // (rules: TvMiniPlayerSpec). Hidden while no track is bound.
+    private lateinit var miniPlayerRow: View
+    private lateinit var miniPlayerText: TextView
+    private lateinit var miniPlayerToggle: Button
+
+    // Quick chips above the composer (content/activation/D-pad rules: TvQuickChipsPolicy).
+    private lateinit var quickChipsRow: LinearLayout
+    private val chipButtons = mutableListOf<Button>()
     private val sessionRowViews = mutableListOf<View>()
     private var browserRows: List<TvSessionBrowserPolicy.SessionRow> = emptyList()
     private var browserReturnFocus: View? = null
@@ -112,11 +122,19 @@ class TvChatActivity : AppCompatActivity() {
         sessionsStatus = findViewById(R.id.sessionsStatus)
         sessionList = findViewById(R.id.sessionList)
         closeSessions = findViewById(R.id.closeSessionsButton)
+        miniPlayerRow = findViewById(R.id.miniPlayerRow)
+        miniPlayerText = findViewById(R.id.miniPlayerText)
+        miniPlayerToggle = findViewById(R.id.miniPlayerToggle)
+        quickChipsRow = findViewById(R.id.quickChipsRow)
         back.setOnClickListener { finish() }
         newChat.setOnClickListener { startNewChat() }
         sessionsButton.setOnClickListener { openSessionBrowser() }
         closeSessions.setOnClickListener { closeSessionBrowser() }
-        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions)
+        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, miniPlayerToggle)
+        miniPlayerToggle.setOnClickListener {
+            TvMusicPlayer.togglePlayPause()
+            renderMiniPlayer()
+        }
         // BACK closes the session dialog first; only a closed overlay exits the screen.
         browserBackCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() { closeSessionBrowser() }
@@ -127,8 +145,24 @@ class TvChatActivity : AppCompatActivity() {
         send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
         wireInteractive()
+        buildQuickChips()
         renderSendControl()
         input.requestFocus()
+    }
+
+    /**
+     * Attaches the header mini player to the global transport: the chat mirrors
+     * TvMusicPlayer while it is visible (the music screen does the same on its own).
+     */
+    override fun onResume() {
+        super.onResume()
+        TvMusicPlayer.onTransportChanged = { runOnUiThread { renderMiniPlayer() } }
+        renderMiniPlayer()
+    }
+
+    override fun onPause() {
+        TvMusicPlayer.onTransportChanged = null
+        super.onPause()
     }
 
     /** Builds the controller/surface pair: cards live in [messages], focus returns to the composer. */
@@ -302,6 +336,91 @@ class TvChatActivity : AppCompatActivity() {
             if (liveTurn) R.drawable.ic_stop else R.drawable.ic_send, 0, 0, 0)
         send.compoundDrawableTintList = ContextCompat.getColorStateList(this, R.color.mars_on_accent)
         send.isEnabled = true
+        renderChips()
+    }
+
+    /**
+     * Quick-chip row above the composer: one D-pad tap sends a canned full turn.
+     * Buttons are built once; activation and LEFT/RIGHT stepping follow
+     * [TvQuickChipsPolicy] (clamped at the edges, no wrap).
+     */
+    private fun buildQuickChips() {
+        quickChipsRow.removeAllViews()
+        chipButtons.clear()
+        val padH = dp(20)
+        val padV = dp(10)
+        TvQuickChipsPolicy.chips.forEachIndexed { index, chip ->
+            val button = Button(this).apply {
+                text = chip.label
+                textSize = 18f
+                isAllCaps = false
+                setTextColor(ContextCompat.getColor(this@TvChatActivity, R.color.mars_text))
+                setBackgroundResource(R.drawable.bg_focus_card)
+                minWidth = 0
+                minHeight = 0
+                minimumWidth = 0
+                minimumHeight = 0
+                setPadding(padH, padV, padH, padV)
+                isFocusable = true
+                setOnClickListener { activateQuickChip(chip) }
+                // D-pad LEFT/RIGHT stepping inside the row (TvQuickChipsPolicy.move).
+                setOnKeyListener { _, keyCode, event ->
+                    val delta = when {
+                        event.action != KeyEvent.ACTION_DOWN -> null
+                        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT -> 1
+                        keyCode == KeyEvent.KEYCODE_DPAD_LEFT -> -1
+                        else -> null
+                    }
+                    if (delta == null) return@setOnKeyListener false
+                    val next = TvQuickChipsPolicy.move(index, chipButtons.size, delta)
+                    val target = chipButtons.getOrNull(next) ?: return@setOnKeyListener false
+                    target.requestFocus()
+                    true
+                }
+            }
+            TvFocusLift.attach(button)
+            quickChipsRow.addView(button, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(12) })
+            chipButtons += button
+        }
+        renderChips()
+    }
+
+    /** A chip is a full turn: its text goes into the composer and is sent immediately. */
+    private fun activateQuickChip(chip: QuickChip) {
+        if (!chipsLive()) return
+        input.setText(chip.text)
+        sendMessage()
+    }
+
+    /** Chips follow the send rule: dead while a turn streams or the input is blocked. */
+    private fun chipsLive(): Boolean = TvQuickChipsPolicy.chipsEnabled(
+        streamActive = sessionFlow.canStop || stream?.isActive == true,
+        inputBlocked = !input.isEnabled,
+    )
+
+    private fun renderChips() {
+        val live = chipsLive()
+        chipButtons.forEach { button ->
+            button.isEnabled = live
+            button.alpha = if (live) 1f else 0.4f
+        }
+    }
+
+    /** Mirrors the global transport into the header plate (rules: [TvMiniPlayerSpec]). */
+    private fun renderMiniPlayer() {
+        val track = TvMusicPlayer.currentTrack
+        val visible = TvMiniPlayerSpec.visible(track)
+        miniPlayerRow.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) return
+        miniPlayerText.text = TvMiniPlayerSpec.line(track)
+        val playing = TvMusicPlayer.isPlaying
+        miniPlayerToggle.text = TvMiniPlayerSpec.toggleLabel(playing)
+        miniPlayerToggle.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (playing) R.drawable.ic_pause else R.drawable.ic_play, 0, 0, 0)
+        miniPlayerToggle.compoundDrawableTintList =
+            ContextCompat.getColorStateList(this, R.color.icon_focus_tint)
     }
 
     /**
