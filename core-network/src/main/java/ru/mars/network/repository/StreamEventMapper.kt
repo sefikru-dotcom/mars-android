@@ -39,6 +39,20 @@ import ru.mars.network.model.TodoSnapshot
  *   else `last_prompt_tokens` — NEVER the cumulative `input_tokens`, #1436) over
  *   `context_length`, clamped to 0..100.
  * - `done` is NOT terminal: `title` and `stream_end` follow it; `stream_end`/`cancel`/`error`/`apperror` are terminal.
+ * - subagent/delegation frames — hermes-agent `tools/delegate_tool_progress.py` (`_ChildProgressRelay`)
+ *   and the gateway runs API (`gateway/platforms/api_server_runs.py` `_SUBAGENT_EVENT_KEYS`) emit
+ *   `subagent.start` / `subagent.complete` (`{goal, task_index, task_count, status, summary,
+ *   failure_reason, output_tail, ...}`) plus `delegate.*` lifecycle aliases: mapped to a readable
+ *   [ChatEvent.Thought] trace, NEVER body text. Child noise (`subagent.text`/`subagent.thinking`/
+ *   `subagent.tool`/`subagent.progress`, `subagent_progress`, `delegate.task_progress`/`task_thinking`/
+ *   `tool_started`/`tool_completed`) is dropped (WebUI parity). `message.delta` (gateway runs text
+ *   delta, runner-relay reattach) maps to [ChatEvent.Chunk] like `token`.
+ * - ANTI-GIBBERISH CONTRACT: text-bearing fields (`text`/`delta`/`content`) are extracted
+ *   STRING-TYPED only ([stringOnly]). A frame delivered under the server's `message` fallback
+ *   event name (routes.py `_runner_event_name` / `_replay_run_journal`) can carry a
+ *   snapshot-shaped payload whose `content` is a LIST of message objects — coercing that with
+ *   toString() would dump a `{role=assistant, ...}` sheet into the bubble. Same rule for the
+ *   phase label and the error message: raw JSON never reaches the transcript.
  */
 object StreamEventMapper {
 
@@ -58,12 +72,28 @@ object StreamEventMapper {
             "tool_result", "tool_complete" -> toolResult(obj)
             "approval" -> approvalPayload(obj)?.let { ChatEvent.ApprovalRequired(it) }
             "clarify" -> clarifyPayload(obj)?.let { ChatEvent.ClarifyRequired(it) }
-            "warning" -> (stringField(obj, "message") ?: payload.trim().ifBlank { null })
+            // `message` string-only; the raw payload is a fallback ONLY for non-JSON
+            // bodies so a parsed frame without a message can't dump JSON into thoughts.
+            "warning" -> (stringOnly(obj, "message")
+                ?: (if (obj == null) payload.trim().ifBlank { null } else null))
                 ?.let { ChatEvent.Thought("Предупреждение: $it") }
-            "pending_steer_leftover" -> stringField(obj, "text")
+            "pending_steer_leftover" -> stringOnly(obj, "text")
                 ?.let { ChatEvent.SteerLeftover(it) }
             "status", "phase", "compressing", "compressed" -> phase(obj, payload, eventName)
             "metering", "context", "context_usage", "usage" -> contextUsage(obj)
+            // ---- subagent/delegation lifecycle: readable trace in the THOUGHTS area,
+            // never body text. Explicit branches so these frames can never fall through
+            // to the `message`/null text-chunk path below.
+            "subagent.start", "delegate.task_spawned" -> subagentTrace(obj, started = true)
+            "subagent.complete", "delegate.task_completed", "delegate.task_failed" -> subagentTrace(obj, started = false)
+            // Child progress noise dropped explicitly (WebUI static/ui.js keeps only the
+            // delegate_task tool card + lifecycle; api/gateway_chat drops these as noise).
+            // The child's raw `output_tail`/free text must never surface in the parent chat.
+            "subagent.text", "subagent.thinking", "subagent.tool", "subagent.progress",
+            "subagent_progress", "delegate.task_progress", "delegate.task_thinking",
+            "delegate.tool_started", "delegate.tool_completed" -> null
+            // Gateway runs text delta (runner-relay reattach path): body text, string-only.
+            "message.delta" -> stringOnly(obj, "delta")?.let { ChatEvent.Chunk(it, eventId) }
             "token", "delta", "chunk", "message", null -> chunk(obj, payload, eventId)
             // Unknown frames (state_saved, ...) carry no chat content;
             // `todo_state` is deliberately NOT mapped onto ChatEvent — it is
@@ -197,7 +227,7 @@ object StreamEventMapper {
         if (obj == null) return null
         // Duplicate guard: text already streamed as token chunks must not be appended twice.
         if (obj["already_streamed"] == true) return null
-        val text = obj["text"]?.toString()?.trim().orEmpty()
+        val text = stringOnly(obj, "text")?.trim().orEmpty()
         if (text.isEmpty()) return null
         return ChatEvent.Chunk(text, eventId)
     }
@@ -222,8 +252,11 @@ object StreamEventMapper {
 
     private fun chunk(obj: Map<String, Any?>?, payload: String, eventId: String?): ChatEvent? {
         if (obj == null) return null
-        val text = listOf("text", "delta", "content").firstNotNullOfOrNull { obj[it]?.toString() } ?: return null
-        if (text.isEmpty()) return null
+        // STRING-typed fields only ([stringOnly]): structured `text`/`content` values
+        // (Map/List — e.g. a snapshot-shaped payload under the server's `message`
+        // fallback event name) are dropped instead of being toString()-dumped into
+        // the bubble as a gibberish sheet.
+        val text = listOf("text", "delta", "content").firstNotNullOfOrNull { stringOnly(obj, it) } ?: return null
         return ChatEvent.Chunk(text, eventId)
     }
 
@@ -288,24 +321,88 @@ object StreamEventMapper {
     private fun positiveInt(value: Any?): Int? = (value as? Number)?.toInt()?.takeIf { it > 0 }
 
     private fun phase(obj: Map<String, Any?>?, payload: String, eventName: String?): ChatEvent.Phase? {
-        val name = obj?.let { (it["name"] ?: it["phase"] ?: it["status"] ?: it["message"])?.toString() }
-            ?.ifBlank { null }
-        return ChatEvent.Phase(name ?: payload.trim().ifBlank { eventName ?: "status" })
+        val name = obj?.let { m ->
+            listOf("name", "phase", "status", "message").firstNotNullOfOrNull { stringOnly(m, it) }
+        }
+        // A parsed JSON payload without a human-readable field must NEVER become the phase
+        // label (raw `{"session_id":...}` in the status line reads as gibberish): fall back
+        // to [phaseLabel]. Legacy plain-text payloads (obj == null) stay verbatim.
+        val raw = if (obj == null) payload.trim().ifBlank { null } else null
+        return ChatEvent.Phase(name ?: raw ?: phaseLabel(eventName))
+    }
+
+    /** Human-readable fallback for phase-like frames that carry no label field. */
+    private fun phaseLabel(eventName: String?): String = when (eventName?.trim()) {
+        "compressing" -> "Сжатие контекста"
+        "compressed" -> "Контекст сжат"
+        else -> eventName?.trim()?.ifEmpty { null } ?: "status"
     }
 
     private fun errorMessage(obj: Map<String, Any?>?, payload: String): String =
-        stringField(obj, "message") ?: stringField(obj, "error") ?: payload.trim()
+        listOf("message", "error", "label", "hint").firstNotNullOfOrNull { stringOnly(obj, it) }
+            // Raw payload only when it is NOT a JSON object; a parsed frame without any
+            // message-like string field yields the generic label instead of dumping JSON
+            // into the bubble (ChatUiState appends Error text to the transcript).
+            ?: (if (obj == null) payload.trim().ifBlank { null } else null)
+            ?: "Ошибка потока"
 
-    private fun textOf(obj: Map<String, Any?>?, payload: String): String? = obj?.let { m ->
-        listOf("text", "content", "message", "thought", "reasoning")
-            .firstNotNullOfOrNull { stringField(m, it) }
-    } ?: payload.trim().ifBlank { null }
+    private fun textOf(obj: Map<String, Any?>?, payload: String): String? {
+        // Parsed JSON frames: string-typed fields only; when none is present the frame
+        // carries nothing renderable and is DROPPED — the raw payload must not become a
+        // JSON wall in the thoughts area. The payload fallback applies ONLY to non-JSON
+        // (legacy plain-text) reasoning frames.
+        if (obj != null) {
+            return listOf("text", "content", "message", "thought", "reasoning")
+                .firstNotNullOfOrNull { stringOnly(obj, it) }
+        }
+        return payload.trim().ifBlank { null }
+    }
+
+    /**
+     * Subagent/delegation lifecycle frame → readable [ChatEvent.Thought] trace.
+     * Wire fields per gateway `api_server_runs.py` `_SUBAGENT_EVENT_KEYS`: preview,
+     * goal, task_index, task_count, status, summary, failure_reason, output_tail, ...
+     *
+     * The child's raw output (`output_tail`) is deliberately NEVER surfaced: a wall of
+     * another agent's transcript inside the parent bubble is exactly the streaming
+     * "gibberish sheet" this mapper must prevent.
+     */
+    private fun subagentTrace(obj: Map<String, Any?>?, started: Boolean): ChatEvent.Thought? {
+        obj ?: return null
+        val goal = stringOnly(obj, "goal") ?: stringOnly(obj, "preview")
+        val index = positiveInt(obj["task_index"])
+        val count = positiveInt(obj["task_count"])
+        val label = if (index != null && count != null && index <= count) "Субагент $index/$count" else "Субагент"
+        if (started) return ChatEvent.Thought(if (goal != null) "$label запущен: $goal" else "$label запущен")
+        val status = stringOnly(obj, "status")
+        val failure = stringOnly(obj, "failure_reason")
+        val failed = failure != null || (status != null && status in SUBAGENT_FAILED_STATUSES)
+        val state = when {
+            failed -> "не справился"
+            status != null -> "завершён ($status)"
+            else -> "завершён"
+        }
+        val detail = failure ?: stringOnly(obj, "summary") ?: goal
+        return ChatEvent.Thought(if (detail != null) "$label $state: $detail" else "$label $state")
+    }
+
+    private val SUBAGENT_FAILED_STATUSES = setOf("failed", "error", "timeout")
 
     private fun sessionId(obj: Map<String, Any?>?, payload: String): String? =
         stringField(obj, "session_id") ?: stringField(obj, "id")
 
     private fun stringField(obj: Map<String, Any?>?, key: String): String? =
         obj?.get(key)?.toString()?.takeIf { it.isNotBlank() }
+
+    /**
+     * STRING-TYPED field extraction: unlike [stringField] this never coerces a
+     * structured value (Map/List) with toString() — a Kotlin dump of a parsed JSON
+     * structure (`{role=assistant, content=[...]}`) in a chat bubble is exactly the
+     * streaming "gibberish" this mapper must prevent. All text-bearing extractions
+     * (chunk, interim_assistant, textOf, phase label, error message) go through here.
+     */
+    private fun stringOnly(obj: Map<String, Any?>?, key: String): String? =
+        (obj?.get(key) as? String)?.takeIf { it.isNotBlank() }
 
     fun parseObject(payload: String): Map<String, Any?>? = try {
         @Suppress("UNCHECKED_CAST")
