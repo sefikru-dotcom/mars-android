@@ -306,6 +306,37 @@ class MarkdownFormatterTest {
         assertEquals("z", table.rows.single()[1].plainText())
     }
 
+    @Test
+    fun testImageSyntaxBecomesImageSpan() {
+        val spans = MarkdownFormatter.parseInline("![Скриншот](https://x.ru/a.png)")
+        assertEquals(1, spans.size)
+        val image = spans.single() as InlineSpan.Image
+        assertEquals("Скриншот", image.alt)
+        assertEquals("https://x.ru/a.png", image.url)
+    }
+
+    @Test
+    fun testImageMixedWithTextAndLinks() {
+        val spans = MarkdownFormatter.parseInline("до ![alt](https://x.ru/i.jpg) после [ссылка](https://y.ru)")
+        assertEquals("до ", (spans[0] as InlineSpan.Normal).text)
+        val image = spans[1] as InlineSpan.Image
+        assertEquals("alt", image.alt)
+        assertEquals("https://x.ru/i.jpg", image.url)
+        assertEquals(" после ", (spans[2] as InlineSpan.Normal).text)
+        val link = spans[3] as InlineSpan.Link
+        assertEquals("ссылка", link.title)
+    }
+
+    @Test
+    fun testImageWithEmptyAltAndNonHttpUrlStaysText() {
+        // Empty alt is allowed: ![](url) -> Image("", url).
+        val empty = MarkdownFormatter.parseInline("![](https://x.ru/i.png)").single() as InlineSpan.Image
+        assertEquals("", empty.alt)
+        // Non-http image paths do not open a viewer; they stay literal text (no link either).
+        val literal = MarkdownFormatter.parseInline("![a](/local/i.png)").plainText()
+        assertEquals("![a](/local/i.png)", literal)
+    }
+
     private fun InlineSpan.text(): String = when (this) {
         is InlineSpan.Normal -> text
         is InlineSpan.Bold -> text
@@ -313,6 +344,7 @@ class MarkdownFormatterTest {
         is InlineSpan.Monospace -> text
         is InlineSpan.Link -> title
         is InlineSpan.Strikethrough -> text
+        is InlineSpan.Image -> alt
     }
 
     private fun List<InlineSpan>.plainText(): String = joinToString("") { it.text() }
