@@ -13,6 +13,11 @@ import ru.mars.network.model.PairingResponse
 import ru.mars.network.model.PairingStatusResponse
 
 interface MarsApi {
+    companion object {
+        /** Default backend base URL shared by all Mars clients. */
+        const val BASE_URL: String = "https://marscore.ru"
+    }
+
     @POST("api/v1/auth/device-pairings")
     suspend fun createPairing(): Response<PairingResponse>
 
