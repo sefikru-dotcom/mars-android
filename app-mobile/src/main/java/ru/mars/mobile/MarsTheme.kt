@@ -4,12 +4,14 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.core.content.ContextCompat
 
 /**
@@ -150,5 +152,124 @@ object MarsTheme {
                 setColor(color)
             }
         }
+    }
+
+    // =====================================================================
+    // Obsidian Depth — layered surfaces & gradient cards (see MarsGradients)
+    // =====================================================================
+
+    // Background depth layers: farthest -> nearest (Obsidian Deep Glass ramp).
+    /** Deepest app background (obsidian). */
+    const val DEPTH_BG = MarsGradients.BG
+    /** Base surface layer (screens, panels). */
+    const val SURFACE_0 = MarsGradients.SURFACE_0
+    /** Raised layer (cards, lists). */
+    const val SURFACE_1 = MarsGradients.SURFACE_1
+    /** Higher layer (popovers, dialogs). */
+    const val SURFACE_2 = MarsGradients.SURFACE_2
+    /** Nearest layer (menus, floating capsules). */
+    const val SURFACE_3 = MarsGradients.SURFACE_3
+
+    /** Running/done status accents (online/error/warning/info live above). */
+    const val STATUS_RUNNING = MarsGradients.STATUS_RUNNING
+    const val STATUS_DONE = MarsGradients.STATUS_DONE
+
+    /** Maps a pure [MarsGradients.Angle] onto the Android gradient orientation. */
+    private fun orientationOf(angle: MarsGradients.Angle): GradientDrawable.Orientation = when (angle) {
+        MarsGradients.Angle.TOP_BOTTOM -> GradientDrawable.Orientation.TOP_BOTTOM
+        MarsGradients.Angle.TL_BR -> GradientDrawable.Orientation.TL_BR
+        MarsGradients.Angle.LEFT_RIGHT -> GradientDrawable.Orientation.LEFT_RIGHT
+    }
+
+    /**
+     * Builds the gradient card drawable for a [MarsGradients.GradientSpec]:
+     * two-stop LINEAR_GRADIENT fill, hairline stroke, rounded corners (999 dp = capsule).
+     */
+    fun gradientCard(context: Context, spec: MarsGradients.GradientSpec): GradientDrawable {
+        val radius = if (spec.isCapsule) dp(context, 999).toFloat() else dp(context, spec.radiusDp).toFloat()
+        return GradientDrawable(
+            orientationOf(spec.angle),
+            intArrayOf(spec.startColor, spec.endColor)
+        ).apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            if (spec.hasStroke) {
+                setStroke(dp(context, spec.strokeWidthDp), spec.strokeColor)
+            }
+        }
+    }
+
+    /** User bubble: deep noble sapphire gradient with a thin rim light. */
+    fun userBubble(context: Context): GradientDrawable = gradientCard(context, MarsGradients.USER_BUBBLE)
+
+    /** Bot message card: deep graphite gradient with a micro border. */
+    fun botMessageCard(context: Context): GradientDrawable = gradientCard(context, MarsGradients.BOT_CARD)
+
+    /** Thinking ("Мысли") card: translucent sapphire haze gradient. */
+    fun thinkingCard(context: Context): GradientDrawable = gradientCard(context, MarsGradients.THINKING_CARD)
+
+    /** Tool call card: matte technical graphite gradient. */
+    fun toolCallCard(context: Context): GradientDrawable = gradientCard(context, MarsGradients.TOOL_CARD)
+
+    /** Composer capsule: floating layered pill with a thin frame and a soft glow color. */
+    fun composerCapsule(context: Context): GradientDrawable = gradientCard(context, MarsGradients.COMPOSER_CAPSULE)
+
+    /**
+     * Soft ambient glow behind a floating surface (e.g. composer): a translucent
+     * tinted capsule drawn with an inset, meant as layer 0 of a LayerDrawable.
+     */
+    fun glowBackdrop(context: Context, glowColor: Int, radiusDp: Int = 999): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(context, radiusDp).toFloat()
+            setColor(glowColor)
+        }
+    }
+
+    /**
+     * Status dot with an ambient glow ring: solid core + translucent halo of the
+     * same hue (vector shapes only — no glyphs). Size the host view 12–14 dp;
+     * the core occupies the inner ~55%.
+     */
+    fun glowingStatusDot(context: Context, color: Int): View {
+        val glow = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(MarsGradients.glowRing(color))
+        }
+        val core = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+        }
+        val inset = dp(context, 3)
+        val layers = LayerDrawable(arrayOf(glow, core))
+        layers.setLayerInset(1, inset, inset, inset, inset)
+        return View(context).apply { background = layers }
+    }
+
+    /**
+     * Status badge pill drawable for [MarsGradients.Status]: translucent tinted
+     * background, hairline stroke of the same hue. Pair with [applyStatusBadge].
+     */
+    fun statusBadge(context: Context, status: MarsGradients.Status): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(context, 999).toFloat()
+            setColor(status.badge.bg)
+            setStroke(dp(context, 1), status.badge.stroke)
+        }
+    }
+
+    /**
+     * Styles [view] as a status badge: ASCII label, contrasting opaque text,
+     * translucent pill background and a comfortable tap-safe padding.
+     */
+    fun applyStatusBadge(view: TextView, status: MarsGradients.Status) {
+        view.text = status.badge.label
+        view.setTextColor(status.badge.text)
+        view.background = statusBadge(view.context, status)
+        val hPad = dp(view.context, 8)
+        val vPad = dp(view.context, 3)
+        view.setPadding(hPad, vPad, hPad, vPad)
+        view.gravity = Gravity.CENTER
     }
 }
