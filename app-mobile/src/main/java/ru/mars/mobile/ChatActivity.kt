@@ -48,10 +48,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.domain.util.SpeechContentFilter
+import ru.mars.network.cache.SessionOfflineCache
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
@@ -106,6 +109,24 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Transcript auto-scroll decisions (pure policy): a reader scrolled up must survive SSE tokens. */
     private var autoScroll = AutoScrollPolicy()
+
+    // --- Устойчивость к обрыву связи -------------------------------------------------------------
+    // Чистые политики (покрыты JVM-тестами): состояние сети, баннер, очередь неотправленных
+    // сообщений; платформенная обвязка — NetworkConnectivityObserver (детектор) и
+    // SharedPreferences-адаптеры хранилищ. Офлайн-кэш сессий/транскриптов — SessionOfflineCache
+    // из core-network: список диалогов и последние сообщения переживают обрыв связи.
+    private val networkPolicy = NetworkStatePolicy()
+    private val bannerPolicy = NetworkBannerPolicy()
+    private lateinit var networkObserver: NetworkConnectivityObserver
+    private lateinit var offlineCache: SessionOfflineCache
+    private lateinit var offlineQueue: OfflineMessageQueuePolicy
+    private lateinit var networkBanner: TextView
+
+    /**
+     * Первичное восстановление открытой сессии завершено (транскрипт привязан). До него
+     * автофлаш офлайн-очереди запрещён: отправка перекрасила бы чужой загружаемый диалог.
+     */
+    private var initialRestoreDone = false
     /** Scroll-to-bottom FAB visibility (pure policy): hysteresis over the distance from the tail. */
     private var scrollToBottomPolicy = ScrollToBottomPolicy()
     private var scrollToBottomFab: ImageButton? = null
@@ -192,12 +213,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", MODE_PRIVATE)))
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
         drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)))
+        // Офлайн-устойчивость: кэш сессий/транскриптов (core-network) и персистентная очередь
+        // неотправленных сообщений. Оба хранилища — приватные plaintext-данные, поэтому входят
+        // в cleanup при logout/реавторизации вместе с черновиками.
+        val offlineCachePrefs = getSharedPreferences(OFFLINE_CACHE_PREFS, MODE_PRIVATE)
+        val pendingQueuePrefs = getSharedPreferences(PENDING_QUEUE_PREFS, MODE_PRIVATE)
+        offlineCache = SessionOfflineCache(SharedPreferencesKeyValueStore(offlineCachePrefs))
+        val pendingMessageStore = PrefsPendingMessageStore(pendingQueuePrefs)
+        offlineQueue = OfflineMessageQueuePolicy(pendingMessageStore)
         // Выход из авторизации (logout/реавторизация) обязан стереть локальные plaintext-данные
         // до finish(), и после этого черновики больше не сохраняются (onPause не пишет назад).
         authExitCleanup = AuthExitCleanup(
             listOf(
                 PrefsClearableStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)),
                 PrefsClearableStore(getSharedPreferences(MUSIC_HISTORY_PREFS, MODE_PRIVATE)),
+                PrefsClearableStore(offlineCachePrefs),
+                pendingMessageStore,
             )
         )
         compressionController = ContextCompressionController(
@@ -229,6 +260,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         })
         setContentView(buildView())
+        // Мониторинг сети: детектор стартует после построения UI (start() синхронно публикует
+        // снимок текущего состояния — баннер корректен с первого кадра); переходы обновляют
+        // баннер и запускают автофлаш офлайн-очереди.
+        networkObserver = NetworkConnectivityObserver(this, networkPolicy) { transition ->
+            onNetworkTransition(transition)
+        }
+        networkObserver.start()
         // При старте/пересоздании экрана композитор сразу получает черновик текущего диалога.
         restoreComposerDraft()
 
@@ -254,6 +292,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onDestroy() {
+        if (::networkObserver.isInitialized) networkObserver.stop()
         if (::interactiveController.isInitialized) interactiveController.destroy()
         if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
@@ -580,6 +619,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         header.addView(logoutBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
 
         root.addView(header)
+
+        // Баннер сетевого статуса: видимость/текст/тон решает чистая NetworkBannerPolicy,
+        // хост лишь мапит тон на токены MarsTheme (полоса под хедером, над мини-плеером).
+        networkBanner = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            visibility = View.GONE
+        }
+        root.addView(networkBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
         // Mini-player strip
         miniPlayerBox = LinearLayout(this).apply {
@@ -1061,13 +1110,28 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val rawInput = input.text.toString().trim()
         val text = composerLayoutPresenter.outgoingText(rawInput)
         val outgoingAttachments = attachments.toList()
+        // Офлайн-буферизация (OfflineMessageQueuePolicy): без сети обычный текст уходит в
+        // персистентную очередь с локальным эхом и будет отправлен автоматически после
+        // восстановления связи. Вложения не буферизуются — multipart-загрузку офлайн не
+        // повторить, чипы остаются в композиторе до восстановления.
+        if (!networkPolicy.state.sendAllowed) {
+            if (outgoingAttachments.isNotEmpty()) {
+                explicitStatus = OFFLINE_ATTACHMENT_STATUS
+                setStatus()
+                return
+            }
+            when (val decision = offlineQueue.onSendRequested(canSend = false, text = text, sessionId = currentSessionId)) {
+                is SendDecision.Buffer -> { onMessageBuffered(decision.message); return }
+                else -> return // Пустой текст — отправлять/буферизовать нечего
+            }
+        }
         if (!uiState.begin(text, outgoingAttachments.map { it.name })) return
         attachments.clear()
         renderAttachmentChips()
         composerLayoutPresenter.clearQuote()
         updateQuotePlate()
         val credential = store.read() ?: run { uiState.cancel(); leaveChat(); return }
-        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(input.windowToken, 0)
+        hideKeyboard()
         input.text.clear()
         // Отправка принята локально (текст ушёл в поток) — черновик диалога очищается.
         drafts.onSendAccepted(currentSessionId)
@@ -1076,68 +1140,202 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         autoScroll.pinToBottom()
         renderMessages()
         updateControls()
-        stream = lifecycleScope.launch {
-            var credentialRejected = false
-            try {
-                if (currentSessionId == null) {
-                    explicitStatus = "Создаю сессию…"
-                    setStatus()
-                }
-                when (val ensured = firstSessionFlow.ensureSession(currentSessionId, credential)) {
-                    is EnsureSessionResult.Ready -> {
-                        currentSessionId = ensured.sessionId
-                        explicitStatus = null
+        stream = startSendStream(text, outgoingAttachments, currentSessionId, credential)
+    }
+
+    /**
+     * Общая корутина отправки для прямого send и флаша офлайн-очереди (раньше — inline
+     * в [sendMessage]). [onTurnFailed] вызывается, только если сообщение НЕ дошло до
+     * сервера (сессия не создана / стрим не стартовал / ошибка до первого события):
+     * очередь возвращает такое сообщение на повтор, а доставленное не дублирует.
+     */
+    private fun startSendStream(
+        text: String,
+        outgoingAttachments: List<ChatAttachment>,
+        targetSessionId: String?,
+        credential: ConsumedDeviceCredential,
+        onTurnFailed: (() -> Unit)? = null,
+    ): Job = lifecycleScope.launch {
+        var credentialRejected = false
+        var turnFailed = false
+        var delivered = false
+        try {
+            if (targetSessionId == null) {
+                explicitStatus = "Создаю сессию…"
+                setStatus()
+            }
+            when (val ensured = firstSessionFlow.ensureSession(targetSessionId, credential)) {
+                is EnsureSessionResult.Ready -> {
+                    currentSessionId = ensured.sessionId
+                    explicitStatus = null
+                    // Первая отправка нового чата создала сессию: остальные сообщения
+                    // офлайн-всплеска (ключ null) перепривязываются к ней — продолжают
+                    // тот же диалог вместо плодения отдельных сессий.
+                    if (targetSessionId == null && ::offlineQueue.isInitialized) {
+                        offlineQueue.adoptSession(null, ensured.sessionId)
                     }
-                    is EnsureSessionResult.Failed -> {
-                        uiState.cancel()
-                        // A 401 here means the stored credential is dead server-side: route
-                        // to login instead of leaving the user retrying the same failure.
-                        if (AuthRejectionPolicy.isCredentialRejected(ensured.message)) {
-                            requestReauthentication()
-                        } else {
-                            explicitStatus = "Сессия не создана: ${ensured.message}"
-                        }
-                        return@launch
-                    }
                 }
-                val choice = modelSelection.current
-                // WebUI parity: the wire message carries the `[Workspace::v1: <path>]`
-                // sentinel; the transcript above keeps showing the raw text.
-                val wireText = workspaceSelection.outgoingMessage(text)
-                ChatRepository().sendMessage(
-                    BASE_URL, credential, wireText, currentSessionId, outgoingAttachments,
-                    model = choice?.modelId,
-                    modelProvider = choice?.providerId,
-                    explicitModelPick = choice?.explicitPick == true,
-                    onTodoState = todoCallback(currentSessionId)
-                ).collect { event ->
-                    uiState.onEvent(event)
-                    if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
-                    if (event is ChatEvent.SessionBound) {
-                        currentSessionId = event.sessionId
-                        refreshYoloState()
+                is EnsureSessionResult.Failed -> {
+                    uiState.cancel()
+                    turnFailed = true
+                    // A 401 here means the stored credential is dead server-side: route
+                    // to login instead of leaving the user retrying the same failure.
+                    if (AuthRejectionPolicy.isCredentialRejected(ensured.message)) {
+                        credentialRejected = true
+                        requestReauthentication()
+                    } else {
+                        explicitStatus = "Сессия не создана: ${ensured.message}"
                     }
-                    if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
-                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
-                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
-                    interactiveController.onEvent(event)
-                    if (::compressionController.isInitialized) compressionController.onEvent(event)
-                    renderMessages()
-                    setStatus()
+                    return@launch
                 }
-                if (credentialRejected) { requestReauthentication(); return@launch }
-                if (uiState.status == ChatStatus.TYPING) uiState.complete()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                uiState.fail()
-                if (credentialRejected) { requestReauthentication(); return@launch }
-            } finally {
+            }
+            val choice = modelSelection.current
+            // WebUI parity: the wire message carries the `[Workspace::v1: <path>]`
+            // sentinel; the transcript above keeps showing the raw text.
+            val wireText = workspaceSelection.outgoingMessage(text)
+            ChatRepository().sendMessage(
+                BASE_URL, credential, wireText, currentSessionId, outgoingAttachments,
+                model = choice?.modelId,
+                modelProvider = choice?.providerId,
+                explicitModelPick = choice?.explicitPick == true,
+                onTodoState = todoCallback(currentSessionId)
+            ).collect { event ->
+                // Любое не-ошибочное событие доказывает: сервер принял запрос, сообщение
+                // доставлено. Ошибка ДО доставки (HTTP-отказ вместо стрима) — turnFailed.
+                if (event !is ChatEvent.Error) delivered = true
+                uiState.onEvent(event)
+                if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
+                if (event is ChatEvent.Error && !delivered) turnFailed = true
+                if (event is ChatEvent.SessionBound) {
+                    currentSessionId = event.sessionId
+                    refreshYoloState()
+                }
+                if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                if (event is ChatEvent.ContextUsage) updateContextIndicator()
+                if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
+                interactiveController.onEvent(event)
+                if (::compressionController.isInitialized) compressionController.onEvent(event)
                 renderMessages()
                 setStatus()
-                updateControls()
+            }
+            if (credentialRejected) { requestReauthentication(); return@launch }
+            if (uiState.status == ChatStatus.TYPING) uiState.complete()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            if (!delivered) turnFailed = true
+            uiState.fail()
+            if (credentialRejected) { requestReauthentication(); return@launch }
+        } finally {
+            renderMessages()
+            setStatus()
+            updateControls()
+            updateNetworkBanner()
+            // Отменённый пользователем стрим (кнопка «стоп», выход с экрана) автофлаш НЕ
+            // запускает: осознанная остановка не должна продолжать очередь — остальные
+            // сообщения ждут следующего триггера (переход сети, открытие диалога, отправка).
+            if (coroutineContext[Job]?.isCancelled != true) {
+                if (turnFailed && !credentialRejected) onTurnFailed?.invoke()
+                flushOfflineQueue()
             }
         }
+    }
+
+    // --- Сеть и офлайн-очередь -------------------------------------------------------------------
+
+    /** Обработчик перехода сети: баннер обновляется всегда, восстановление связи запускает флаш. */
+    private fun onNetworkTransition(transition: NetworkTransition) {
+        updateNetworkBanner()
+        if (transition.restored) flushOfflineQueue()
+    }
+
+    /** Баннер: решение (видимость/текст/тон) — чистая NetworkBannerPolicy; хост мапит тон на MarsTheme. */
+    private fun updateNetworkBanner() {
+        if (!::networkBanner.isInitialized) return
+        val pendingCount = if (::offlineQueue.isInitialized) offlineQueue.size else 0
+        val banner = bannerPolicy.bannerFor(networkPolicy.state, pendingCount)
+        networkBanner.visibility = if (banner.visible) View.VISIBLE else View.GONE
+        if (!banner.visible) return
+        val tone = when (banner.tone) {
+            NetworkBannerUi.Tone.OK -> MarsTheme.STATUS_ONLINE
+            NetworkBannerUi.Tone.WARNING -> MarsTheme.STATUS_WARNING
+            NetworkBannerUi.Tone.ERROR -> MarsTheme.STATUS_ERROR
+            NetworkBannerUi.Tone.INFO -> MarsTheme.STATUS_INFO
+        }
+        networkBanner.text = banner.text
+        networkBanner.setTextColor(tone)
+        networkBanner.background = MarsTheme.card(this, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = tone)
+    }
+
+    /**
+     * Автоотправка буферизованных сообщений ТЕКУЩЕГО диалога (FIFO, по одному; следующее
+     * диспетчеризуется из finally предыдущего хода). Не выполняется до первичного
+     * восстановления диалога ([initialRestoreDone]), без сети и во время активного хода.
+     */
+    private fun flushOfflineQueue() {
+        if (!initialRestoreDone || !::offlineQueue.isInitialized) return
+        if (!networkPolicy.state.sendAllowed) return
+        if (uiState.status == ChatStatus.TYPING) return
+        val queued = offlineQueue.nextFor(currentSessionId) ?: run { updateNetworkBanner(); return }
+        dispatchQueuedMessage(queued)
+    }
+
+    /** Флаш одного сообщения очереди: PENDING-эхо становится обычным ходом; недоставка — обратно в очередь. */
+    private fun dispatchQueuedMessage(queued: QueuedMessage) {
+        // Нет креденшелов (logout/реавторизация): отправлять некому. Сообщение сбрасывается
+        // БЕЗ persist — иначе requeue перезапишет хранилище поверх logout-cleanup.
+        val credential = store.read() ?: return
+        if (!uiState.beginQueuedSend(queued.text)) {
+            offlineQueue.requeue(queued)
+            return
+        }
+        explicitStatus = null
+        autoScroll.pinToBottom()
+        renderMessages()
+        setStatus()
+        updateControls()
+        updateNetworkBanner()
+        stream = startSendStream(
+            text = queued.text,
+            outgoingAttachments = emptyList(),
+            targetSessionId = queued.sessionId,
+            credential = credential,
+            onTurnFailed = {
+                // Сессия могла создаться до сбоя потока: возврат в очередь под актуальным
+                // ключом, иначе сообщение застрянет под null и не дождётся флаша диалога.
+                val retry = queued.copy(sessionId = currentSessionId ?: queued.sessionId)
+                if (!offlineQueue.requeue(retry)) {
+                    explicitStatus = MESSAGE_NOT_DELIVERED_STATUS
+                    setStatus()
+                }
+            },
+        )
+    }
+
+    /** Сообщение ушло в очередь: локальное PENDING-эхо в транскрипте, композитор чист, баннер со счётчиком. */
+    private fun onMessageBuffered(message: QueuedMessage) {
+        uiState.beginQueuedEcho(message.text)
+        composerLayoutPresenter.clearQuote()
+        updateQuotePlate()
+        hideKeyboard()
+        input.text.clear()
+        drafts.onSendAccepted(currentSessionId)
+        explicitStatus = null
+        autoScroll.pinToBottom()
+        renderMessages()
+        updateControls()
+        updateNetworkBanner()
+    }
+
+    /** Локальное эхо сообщений очереди текущего диалога (после привязки транскрипта/«нового чата»). */
+    private fun echoPendingOfflineMessages() {
+        if (!::offlineQueue.isInitialized) return
+        offlineQueue.pendingFor(currentSessionId).forEach { uiState.beginQueuedEcho(it.text) }
+    }
+
+    private fun hideKeyboard() {
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(input.windowToken, 0)
     }
 
     private fun cancelStream() {
@@ -2138,7 +2336,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun loadSessions() {
         val c = store.read() ?: return
         lifecycleScope.launch {
-            uiState.setSessions(SessionRepository().getSessions(BASE_URL, c))
+            val fresh = SessionRepository().getSessions(BASE_URL, c)
+            // Пустой ответ (сбой сети — репозиторий не бросает исключение, — или диалогов
+            // действительно нет) сверяется с офлайн-кэшем: на сбое drawer показывает
+            // последний сохранённый снимок вместо пустого списка.
+            uiState.setSessions(withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) })
             renderSessionList()
         }
     }
@@ -2159,6 +2361,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val token = sessionNavigation.beginNavigation()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, sessionId)
+            if (detail != null) {
+                // Успешная загрузка обновляет офлайн-кэш транскрипта диалога.
+                withContext(Dispatchers.IO) { offlineCache.saveMessages(detail.id, detail.messages) }
+            }
             if (detail != null && sessionNavigation.isCurrent(token)) {
                 // Текст, набранный ВО ВРЕМЯ загрузки, сохраняется в черновик старого диалога
                 // непосредственно перед присвоением нового session_id.
@@ -2177,8 +2383,45 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Stream recovery: a session that is still streaming server-side must resume
                 // live instead of showing a frozen transcript.
                 reattachActiveTurn(detail.activeTurn)
+                // Сообщения этого диалога из офлайн-очереди возвращают локальное эхо; если
+                // сеть уже есть — сразу отправляются. Первичное восстановление завершено.
+                echoPendingOfflineMessages()
+                initialRestoreDone = true
+                flushOfflineQueue()
+            } else if (detail == null && sessionNavigation.isCurrent(token)) {
+                showOfflineSessionCopy(sessionId)
             }
         }
+    }
+
+    /**
+     * Сбой сети при загрузке деталей диалога: вместо пустого экрана показывается
+     * сохранённая копия транскрипта из офлайн-кэша ([SessionOfflineCache]); строка
+     * статуса явно говорит, что это сохранённые данные, а не живой диалог.
+     */
+    private suspend fun showOfflineSessionCopy(sessionId: String) {
+        // Флаг ставится даже без кэша: автофлаш очереди не должен блокироваться вечно.
+        initialRestoreDone = true
+        val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
+        drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
+        uiState.bindSession(
+            sessionId,
+            uiState.sessions.firstOrNull { it.id == sessionId }?.title,
+            historyMessages(SessionDetail(sessionId, messages = cached)),
+        )
+        // Кэш намеренно не хранит active_turn: копия загружается idle-состоянием.
+        uiState.setActiveTurn(ActiveTurnInfo())
+        currentSessionId = sessionId
+        restoreComposerDraft()
+        echoPendingOfflineMessages()
+        autoScroll.pinToBottom()
+        explicitStatus = OFFLINE_SESSION_HINT
+        renderMessages()
+        setStatus()
+        updateControls()
+        updateTodoWidget()
+        updateYoloPill()
+        flushOfflineQueue()
     }
 
     /**
@@ -2190,7 +2433,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      */
     private fun restoreOpenSession(savedInstanceState: Bundle?) {
         val plan = recreationPolicy.planFor(savedInstanceState?.getString(KEY_OPEN_SESSION_ID))
-        if (plan is RecreationPlan.Reopen) loadSessionById(plan.sessionId)
+        if (plan is RecreationPlan.Reopen) {
+            loadSessionById(plan.sessionId)
+        } else {
+            // Холодный старт — новый чат: эхо буферизованных сообщений нового чата и
+            // разрешение автофлаша очереди (сам флаш guarded состоянием сети/хода).
+            initialRestoreDone = true
+            echoPendingOfflineMessages()
+            flushOfflineQueue()
+        }
     }
 
     /**
@@ -2255,6 +2506,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 renderMessages()
                 setStatus()
                 updateControls()
+                // Переоткрытый ход завершён штатно — можно доотправить буферизованные
+                // сообщения диалога. Отмена пользователем триггером не является, а
+                // streamGone уже обрабатывается reloadCurrentSession().
+                if (coroutineContext[Job]?.isCancelled != true && !streamGone) flushOfflineQueue()
             }
         }
     }
@@ -2291,7 +2546,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         lifecycleScope.launch {
             if (SessionRepository().deleteSession(BASE_URL, c, session.id)) {
                 drafts.onSessionRemoved(session.id)
+                // Удалённый диалог больше не существует: его буферизованные сообщения
+                // и офлайн-кэш транскрипта стираются вместе с ним.
+                offlineQueue.removeMessagesFor(session.id)
                 uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
+                withContext(Dispatchers.IO) {
+                    offlineCache.removeMessages(session.id)
+                    offlineCache.saveSessions(uiState.sessions)
+                }
                 if (currentSessionId == session.id) {
                     // Удаление текущего диалога: его текст не должен «уезжать» в новый чат —
                     // композитор переключается на черновик нового чата, а pending-загрузка
@@ -2302,8 +2564,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     uiState.startNewSession()
                     currentSessionId = null
                     restoreComposerDraft()
+                    echoPendingOfflineMessages()
                 }
                 renderSessionList()
+                updateNetworkBanner()
             }
         }
     }
@@ -2967,11 +3231,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         currentSessionId = null
         explicitStatus = null
         restoreComposerDraft()
+        // Буферизованные сообщения нового чата (sessionId == null) возвращают эхо;
+        // при наличии сети они сразу уходят в отправку.
+        echoPendingOfflineMessages()
+        initialRestoreDone = true
         autoScroll.pinToBottom()
         renderMessages()
         setStatus()
         updateControls()
         updateYoloPill()
+        flushOfflineQueue()
     }
 
     // --- Черновики несент-сообщений ------------------------------------------------------------
@@ -3107,6 +3376,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 if (authExitCleanup.draftPersistenceAllowed) {
                     drafts.onSessionFinished(sid, textAtStart, input.text.toString())
                 }
+                // Завершённая сессия закрывается и на сервере: её буферизованные
+                // сообщения уже некому отправлять.
+                offlineQueue.removeMessagesFor(sid)
                 closeSessionLocally(report)
                 restoreComposerDraft()
                 // YOLO does not outlive the session being closed; make the pill reflect reality.
@@ -3116,6 +3388,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Пользователь ушёл в другой диалог во время финиша — его состояние и
                 // композитор не трогаем; черновик закрытой сессии чистим в любом случае.
                 drafts.onSessionRemoved(sid)
+                offlineQueue.removeMessagesFor(sid)
             }
         }
     }
@@ -3137,6 +3410,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         renderMessages()
         setStatus()
         updateControls()
+        // Сброс транскрипта возвращает эхо буферизованных сообщений нового чата;
+        // баннер отражает изменившийся размер очереди.
+        echoPendingOfflineMessages()
+        updateNetworkBanner()
+        flushOfflineQueue()
     }
 
     private fun echoClarifyAnswer(answer: String) {
@@ -3210,6 +3488,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         /** Privately-stored plaintext data cleared on every auth-exit path. */
         private const val DRAFTS_PREFS = "mars-session-drafts"
         private const val MUSIC_HISTORY_PREFS = "mars-music-search-history"
+        /** Приватные хранилища офлайн-устойчивости: кэш сессий и очередь неотправленных. */
+        private const val OFFLINE_CACHE_PREFS = "mars-offline-cache"
+        private const val PENDING_QUEUE_PREFS = "mars-pending-messages"
+        /** Подсказки статуса для офлайн-сценариев (копия из кэша / вложения / лимит очереди). */
+        private const val OFFLINE_SESSION_HINT = "Нет связи — показана сохранённая копия диалога"
+        private const val OFFLINE_ATTACHMENT_STATUS = "Нет связи — сообщение с вложениями будет отправлено после восстановления"
+        private const val MESSAGE_NOT_DELIVERED_STATUS = "Сообщение из очереди не доставлено — лимит попыток исчерпан"
         /** Status line while a reattach to the session's live stream is being established. */
         private const val REATTACH_STATUS = "Подключение к активному ходу…"
     }
