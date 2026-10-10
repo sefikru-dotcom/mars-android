@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- MarsMusicService: фоновое воспроизведение + медиа-нотификация в шторке -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:allowBackup="false"
         android:fullBackupContent="false"
@@ -9,6 +13,10 @@
         android:icon="@drawable/ic_mars">
         <activity android:name=".ChatActivity" />
         <activity android:name=".MusicActivity" />
+        <service
+            android:name=".service.MarsMusicService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
         <activity android:name=".ProjectsActivity" />
         <activity android:name=".MemoryActivity" />
         <activity android:name=".SkillsActivity" />
