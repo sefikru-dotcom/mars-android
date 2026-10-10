@@ -96,5 +96,26 @@ sealed interface ChatEvent {
     data class SteerLeftover(val text: String) : ChatEvent
 
     data object Done : ChatEvent
-    data class Error(val message: String) : ChatEvent
+
+    /**
+     * Terminal error of the turn. [origin] is the transport failure seam: it tells
+     * recovery layers WHY the error exists —
+     * - [ErrorOrigin.TRANSPORT]: the HTTP request/stream itself failed (connect/read
+     *   timeout, dropped socket, non-2xx response — `describeNetworkError` /
+     *   `describeHttpError` output). Only these may be fed to mid-turn reconnect
+     *   policies as retryable network failures.
+     * - [ErrorOrigin.SERVER]: the server's SSE `error`/`apperror` frame — the agent
+     *   runtime reported a TERMINAL failure inside an otherwise healthy stream. The
+     *   message is arbitrary server text (tool output, runtime tracebacks); it must
+     *   never be re-classified as a network failure or re-attached.
+     * The default keeps every pre-seam construction site (`ChatEvent.Error(msg)`)
+     * source-compatible and semantically unchanged (transport).
+     */
+    data class Error(
+        val message: String,
+        val origin: ErrorOrigin = ErrorOrigin.TRANSPORT,
+    ) : ChatEvent
 }
+
+/** Provenance of a [ChatEvent.Error]; see its KDoc for the recovery contract. */
+enum class ErrorOrigin { TRANSPORT, SERVER }

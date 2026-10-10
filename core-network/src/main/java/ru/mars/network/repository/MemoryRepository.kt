@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.MemoryContent
 
@@ -19,7 +20,7 @@ import ru.mars.network.model.MemoryContent
  * failures map to null (memory unavailable) instead of throwing into UI
  * coroutines — same convention as [WorkspaceRepository].
  */
-class MemoryRepository(private val client: OkHttpClient = OkHttpClient()) {
+class MemoryRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     private val mapType = Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
     private val moshi = Moshi.Builder().build()

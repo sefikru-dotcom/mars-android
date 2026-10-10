@@ -5,6 +5,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.ConsumedDeviceCredential
@@ -90,7 +91,7 @@ sealed interface PendingClarifyLookup {
  * Blocking by design (same convention as [ChatRepository.executeControl]); callers run it on a
  * background dispatcher/executor.
  */
-class InteractiveRequestsRepository(private val client: OkHttpClient = OkHttpClient()) {
+class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     /**
      * Answers a pending approval. Body contract (messages.js respondApproval):

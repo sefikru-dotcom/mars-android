@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import java.io.IOException
 
@@ -77,7 +78,7 @@ sealed interface CompressionStatusResult {
  * controller runs them on its own background [java.util.concurrent.Executor] and never on the
  * UI thread, so no suspend/coroutine plumbing is needed here.
  */
-class ContextCompressionRepository(private val client: OkHttpClient = OkHttpClient()) {
+class ContextCompressionRepository(private val client: OkHttpClient = HttpClients.rest) {
     private val mapType = Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
     private val moshi = Moshi.Builder().build()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

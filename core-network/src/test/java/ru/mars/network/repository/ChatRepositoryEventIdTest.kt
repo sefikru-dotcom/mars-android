@@ -18,7 +18,9 @@ import ru.mars.network.model.ConsumedDeviceCredential
  * - EVERY id-bearing SSE frame fires it — tokens, `todo_state` (diverted away from the
  *   ChatEvent flow), `done` — not only frames mapped to [ChatEvent.Chunk];
  * - frames without an `id:` never fire it;
- * - it runs BEFORE mapping/diversion, in wire order;
+ * - it runs AFTER the frame was delivered (emit returned / the todo_state and
+ *   side-event callbacks ran), in wire order — an interrupted delivery never
+ *   advances the cursor past an undelivered frame;
  * - `attachToStream(lastEventId = …)` sends the `Last-Event-ID` header;
  * - the pre-existing signatures (no callback) behave exactly as before.
  */
@@ -180,5 +182,48 @@ class ChatRepositoryEventIdTest {
         ).toList()
         assertTrue(events.contains(ChatEvent.Done))
         assertTrue(events.none { it is ChatEvent.Error })
+    }
+
+    /**
+     * Ack-vs-delivery order, pinned on the producer thread (todo/side callbacks and
+     * onEventId all run there sequentially): a frame's id may be acked ONLY after its
+     * delivery side ran — todo_state after the snapshot callback, side-event frames
+     * after the side callback, mapped frames after emit.
+     */
+    @Test
+    fun `cursor ack follows delivery for every frame kind`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(
+                    "id: st-1:1\nevent: token\ndata: {\"text\":\"a\"}\n\n" +
+                        "id: st-1:2\nevent: todo_state\n" +
+                        "data: {\"todos\":[],\"summary\":{\"total\":0,\"pending\":0,\"in_progress\":0," +
+                        "\"completed\":0,\"cancelled\":0},\"version\":1}\n\n" +
+                        "id: st-1:3\nevent: title\ndata: {\"session_id\":\"s-1\",\"title\":\"T\"}\n\n" +
+                        "id: st-1:4\nevent: token\ndata: {\"text\":\"b\"}\n\n" +
+                        "id: st-1:5\nevent: done\ndata: {}\n\n"
+                )
+        )
+        val log = java.util.Collections.synchronizedList(mutableListOf<String>())
+        repository.attachToStream(
+            baseUrl = server.url("/").toString(),
+            credential = credential,
+            streamId = "st-1",
+            onTodoState = { log.add("todo:st-1:2") },
+            onSideEvent = { log.add("side:${it::class.java.simpleName}") },
+            onEventId = { log.add("ack:$it") },
+        ).toList()
+
+        assertEquals(
+            listOf(
+                "ack:st-1:1",                       // token: acked after emit returned
+                "todo:st-1:2", "ack:st-1:2",        // diverted frame: snapshot callback FIRST
+                "side:SessionTitleUpdate", "ack:st-1:3", // side channel FIRST (title frame)
+                "ack:st-1:4",
+                "ack:st-1:5",
+            ),
+            log.toList(),
+        )
     }
 }
