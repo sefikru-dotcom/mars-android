@@ -162,6 +162,40 @@ class ChatUiState {
         return true
     }
 
+    /**
+     * Локальное эхо сообщения, буферизованного офлайн-очередью
+     * ([OfflineMessageQueuePolicy]): пользовательский пузырь появляется сразу со
+     * статусом PENDING (визуальный признак «ждёт связи»), но ход НЕ начинается —
+     * assistant-пузырь не открывается, статус чата не меняется. False при активном
+     * ходе (TYPING) или пустом тексте.
+     */
+    fun beginQueuedEcho(text: String): Boolean {
+        if (text.isBlank() || status == ChatStatus.TYPING) return false
+        messages += ChatMessage("user", text, status = MessageStatus.PENDING)
+        return true
+    }
+
+    /**
+     * Начало отправки сообщения из офлайн-очереди после восстановления связи:
+     * PENDING-эхо (если оно живо в транскрипте) становится COMPLETE — иначе пузырь
+     * добавляется заново, — и открывается стримящийся assistant-пузырь. False при
+     * активном ходе: flush очереди дождётся его завершения.
+     */
+    fun beginQueuedSend(text: String): Boolean {
+        if (text.isBlank() || status == ChatStatus.TYPING) return false
+        status = ChatStatus.TYPING
+        val echoIndex = messages.indexOfLast {
+            it.role == "user" && it.status == MessageStatus.PENDING && it.text == text
+        }
+        if (echoIndex >= 0) {
+            messages[echoIndex] = messages[echoIndex].copy(status = MessageStatus.COMPLETE)
+        } else {
+            messages += ChatMessage("user", text, status = MessageStatus.COMPLETE)
+        }
+        messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
+        return true
+    }
+
     fun onEvent(event: ChatEvent) {
         // Attention requests are recorded even without a live assistant bubble (e.g. history
         // replay races) so the controller hook never misses a prompt. The context meter is
