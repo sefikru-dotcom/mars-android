@@ -86,6 +86,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var statusView: TextView
     private val uiState = ChatUiState()
 
+    private val composerLayoutPresenter = ComposerLayoutPresenter()
+    private lateinit var composerQuoteView: LinearLayout
+    private lateinit var composerQuoteTitle: TextView
+    private lateinit var composerQuoteExcerpt: TextView
+    private lateinit var liveRunPlate: LinearLayout
+    private lateinit var liveRunLabel: TextView
+    private lateinit var liveRunDetail: TextView
+
     private lateinit var interactiveView: MarsInteractiveView
     private lateinit var interactiveController: InteractiveRequestController
 
@@ -479,107 +487,36 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         header.addView(menuBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
 
         val titleBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(8), 0)
         }
-        val brandRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val logoDot = ImageView(this).apply {
             setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_mars))
         }
-        brandRow.addView(logoDot, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(6) })
-        brandRow.addView(TextView(this).apply {
+        titleBox.addView(logoDot, LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(6) })
+        titleBox.addView(TextView(this).apply {
             text = "МАРС"
             textSize = 17f
             setTextColor(MarsTheme.TEXT_STRONG)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             letterSpacing = 0.08f
         })
-        titleBox.addView(brandRow)
-
-        modelBtn = Button(this).apply {
-            text = modelSelection.buttonLabel() ?: "Модель"
-            textSize = 11f
-            contentDescription = "Модель"
-            background = null
-            setPadding(0, 0, 0, 0)
-            setTextColor(MarsTheme.ACCENT)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.START
-            setOnClickListener { chooseModel() }
-        }
-        val titleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        titleRow.addView(modelBtn, LinearLayout.LayoutParams(-2, -2))
-        reasoningBtn = Button(this).apply {
-            text = "· Авто"
-            textSize = 11f
-            contentDescription = "Уровень размышлений"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            // Hidden until the server says this model has an effort ladder (unknown state is safe).
-            visibility = View.GONE
-            setOnClickListener { chooseReasoningEffort() }
-        }
-        titleRow.addView(reasoningBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
-        activityModeBtn = Button(this).apply {
-            text = "· ${activityModeSelection.buttonLabel()}"
-            textSize = 11f
-            contentDescription = "Режим активности"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setOnClickListener { chooseActivityMode() }
-        }
-        titleRow.addView(activityModeBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
-        workspaceBtn = Button(this).apply {
-            text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
-            textSize = 11f
-            contentDescription = "Рабочее пространство"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            isSingleLine = true
-            maxEms = 14
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setOnClickListener { chooseWorkspace() }
-        }
-        titleRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(8) })
-        yoloBtn = Button(this).apply {
-            text = "YOLO"
-            textSize = 11f
-            contentDescription = "Режим YOLO — автономная работа без подтверждений"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setOnClickListener { interactiveController.setYoloEnabled(!uiState.yoloEnabled) }
-        }
-        titleRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(6) })
-        updateYoloPill()
-        // Scrollable pill row (POCO F5-class viewports): the model/reasoning/mode/workspace/YOLO
-        // pills scroll horizontally instead of clipping when they exceed the header width.
-        titleBox.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(titleRow)
-        })
+        val headerStatusDot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
+        titleBox.addView(headerStatusDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginStart = dp(8) })
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val newChatBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_edit,
+            "Новый диалог",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT,
+            sizeDp = 40
+        ).apply {
+            setOnClickListener { startNewChat() }
+        }
+        header.addView(newChatBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
 
         val musicBtn = MarsTheme.circleIconButton(
             this,
@@ -771,38 +708,214 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         root.addView(smartChipsRow)
 
-        // Floating Glass Composer Bar
-        val composer = LinearLayout(this).apply {
+        // Live Run Status Plate: active runner pulse right above the composer
+        liveRunPlate = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(6), dp(4))
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 22, strokeColor = MarsTheme.BORDER)
+            visibility = View.GONE
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_0, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
+        }
+        val liveRunDot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_RUNNING)
+        liveRunPlate.addView(liveRunDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+        liveRunLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            setTypeface(null, Typeface.BOLD)
+        }
+        liveRunPlate.addView(liveRunLabel)
+        liveRunDetail = TextView(this).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setTypeface(Typeface.MONOSPACE)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        liveRunPlate.addView(liveRunDetail)
+        root.addView(liveRunPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+
+        // Two-Level Floating Glass Composer Capsule (WebUI Parity)
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = MarsTheme.composerCapsule(this@ChatActivity)
         }
 
+        // Top level: Quote/Reply Plate (if active)
+        composerQuoteView = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(8), dp(4), dp(4), dp(4))
+            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_1, radiusDp = 8, strokeColor = MarsTheme.ACCENT_BORDER)
+        }
+        val quoteAccentBar = View(this).apply {
+            setBackgroundColor(MarsTheme.ACCENT)
+        }
+        composerQuoteView.addView(quoteAccentBar, LinearLayout.LayoutParams(dp(3), dp(24)).apply { marginEnd = dp(6) })
+        val quoteTextBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        composerQuoteTitle = TextView(this).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            setTypeface(null, Typeface.BOLD)
+        }
+        quoteTextBox.addView(composerQuoteTitle)
+        composerQuoteExcerpt = TextView(this).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        quoteTextBox.addView(composerQuoteExcerpt)
+        composerQuoteView.addView(quoteTextBox, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val quoteCancelBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_close,
+            "Отменить цитату",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 24,
+            strokeColor = 0
+        ).apply {
+            setOnClickListener {
+                composerLayoutPresenter.clearQuote()
+                updateQuotePlate()
+            }
+        }
+        composerQuoteView.addView(quoteCancelBtn, LinearLayout.LayoutParams(dp(24), dp(24)))
+        composer.addView(composerQuoteView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+
+        // Input field: multiline, clean, responsive
         input = EditText(this).apply {
-            hint = "Сообщение Марсу…"
+            hint = ComposerLayoutPresenter.HINT
             setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
             textSize = 15f
-            maxLines = 4
+            maxLines = ComposerLayoutPresenter.MAX_INPUT_LINES
             isSingleLine = false
             background = null
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setPadding(dp(6), dp(4), dp(6), dp(4))
             imeOptions = 4
             setOnEditorActionListener { _, action, _ ->
                 if (action == 4) { sendMessage(); true } else false
             }
         }
-        // Context-window fill pill (WebUI parity with the composer ring): percent +
-        // used/total tokens from the stream's `metering` frames; hidden until known.
+        composer.addView(input, LinearLayout.LayoutParams(-1, -2))
+
+        // Bottom level: Session Chips on the left + Action Buttons on the right
+        val composerBottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+
+        // Left: horizontal scrollable session chips (Model, Reasoning, ActivityMode, Workspace, YOLO, Context)
+        val chipsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+        }
+        val chipsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        modelBtn = Button(this).apply {
+            text = modelSelection.buttonLabel() ?: "Модель"
+            textSize = 10.5f
+            contentDescription = "Модель"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setOnClickListener { chooseModel() }
+        }
+        chipsRow.addView(modelBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
+
+        reasoningBtn = Button(this).apply {
+            text = "· Авто"
+            textSize = 10.5f
+            contentDescription = "Уровень размышлений"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            visibility = View.GONE
+            setOnClickListener { chooseReasoningEffort() }
+        }
+        chipsRow.addView(reasoningBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
+
+        activityModeBtn = Button(this).apply {
+            text = "· ${activityModeSelection.buttonLabel()}"
+            textSize = 10.5f
+            contentDescription = "Режим активности"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setOnClickListener { chooseActivityMode() }
+        }
+        chipsRow.addView(activityModeBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
+
+        workspaceBtn = Button(this).apply {
+            text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+            textSize = 10.5f
+            contentDescription = "Рабочее пространство"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            isSingleLine = true
+            maxEms = 11
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setOnClickListener { chooseWorkspace() }
+        }
+        chipsRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
+
+        yoloBtn = Button(this).apply {
+            text = "YOLO"
+            textSize = 10.5f
+            contentDescription = "Режим YOLO — автономная работа без подтверждений"
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setOnClickListener { interactiveController.setYoloEnabled(!uiState.yoloEnabled) }
+        }
+        chipsRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
+        updateYoloPill()
+
         contextIndicator = TextView(this).apply {
-            textSize = 10f
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_SUBTLE, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(7), dp(3), dp(7), dp(3))
+            textSize = 9.5f
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(7), dp(2), dp(7), dp(2))
             visibility = View.GONE
             setOnClickListener { showContextUsageDetails() }
         }
-        composer.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
-        composer.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        chipsRow.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2))
+
+        chipsScroll.addView(chipsRow)
+        composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
+
+        // Right: Action buttons (Attach, Voice, Volume, Send/Stop)
+        val actionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
 
         val attachBtn = MarsTheme.circleIconButton(
             this,
@@ -810,12 +923,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "Прикрепить файл",
             bg = Color.TRANSPARENT,
             iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 38,
+            sizeDp = 34,
             strokeColor = 0
         ).apply {
             setOnClickListener { chooseAttachment() }
         }
-        composer.addView(attachBtn, LinearLayout.LayoutParams(dp(38), dp(38)))
+        actionsRow.addView(attachBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         val voiceButton = MarsTheme.circleIconButton(
             this,
@@ -823,13 +936,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "Голосовой ввод",
             bg = Color.TRANSPARENT,
             iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 38,
+            sizeDp = 34,
             strokeColor = 0
         ).apply {
             setOnClickListener { startVoiceInput() }
         }
         voiceBtn = voiceButton
-        composer.addView(voiceButton, LinearLayout.LayoutParams(dp(38), dp(38)))
+        actionsRow.addView(voiceButton, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         val volumeBtn = MarsTheme.circleIconButton(
             this,
@@ -837,12 +950,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "Озвучить ответ",
             bg = Color.TRANSPARENT,
             iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 38,
+            sizeDp = 34,
             strokeColor = 0
         ).apply {
             setOnClickListener { speakLastMessage() }
         }
-        composer.addView(volumeBtn, LinearLayout.LayoutParams(dp(38), dp(38)))
+        actionsRow.addView(volumeBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         sendButton = MarsTheme.circleIconButton(
             this,
@@ -850,7 +963,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "Отправить",
             bg = MarsTheme.ACCENT,
             iconTint = Color.WHITE,
-            sizeDp = 40,
+            sizeDp = 36,
             strokeColor = 0
         ).apply {
             setOnClickListener {
@@ -861,7 +974,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             }
         }
-        composer.addView(sendButton, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(4) })
+        actionsRow.addView(sendButton, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(2) })
+
+        composerBottomBar.addView(actionsRow, LinearLayout.LayoutParams(-2, -2))
+        composer.addView(composerBottomBar, LinearLayout.LayoutParams(-1, -2))
 
         root.addView(composer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         return root
@@ -874,11 +990,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun sendMessage() {
         if (uiState.status == ChatStatus.TYPING) { steerMessage(); return }
-        val text = input.text.toString().trim()
+        val rawInput = input.text.toString().trim()
+        val text = composerLayoutPresenter.outgoingText(rawInput)
         val outgoingAttachments = attachments.toList()
         if (!uiState.begin(text, outgoingAttachments.map { it.name })) return
         attachments.clear()
         renderAttachmentChips()
+        composerLayoutPresenter.clearQuote()
+        updateQuotePlate()
         val credential = store.read() ?: run { uiState.cancel(); leaveChat(); return }
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(input.windowToken, 0)
         input.text.clear()
@@ -1001,6 +1120,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
         sendButton.imageTintList = ColorStateList.valueOf(Color.WHITE)
         updateContextIndicator()
+        updateLiveRunPlate()
+        updateQuotePlate()
         renderSmartChips()
     }
 
@@ -1070,6 +1191,45 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    private fun updateQuotePlate() {
+        if (!::composerQuoteView.isInitialized) return
+        val plate = composerLayoutPresenter.quotePlate
+        if (plate.visible) {
+            composerQuoteView.visibility = View.VISIBLE
+            composerQuoteTitle.text = plate.title
+            composerQuoteExcerpt.text = plate.excerpt
+        } else {
+            composerQuoteView.visibility = View.GONE
+        }
+    }
+
+    private fun updateLiveRunPlate() {
+        if (!::liveRunPlate.isInitialized) return
+        val runningTool = uiState.messages.lastOrNull()?.tools?.lastOrNull { it.result == null }?.name
+        val lastAssistant = uiState.messages.lastOrNull { it.role == "assistant" }
+        val plate = LiveRunStatusPresenter.resolve(
+            status = uiState.status,
+            phase = uiState.phase,
+            runningToolName = runningTool,
+            hasText = lastAssistant?.text?.isNotBlank() == true,
+            hasThoughts = lastAssistant?.thoughts?.isNotEmpty() == true
+        )
+        if (plate.visible) {
+            liveRunPlate.visibility = View.VISIBLE
+            liveRunLabel.text = plate.label
+            liveRunLabel.setTextColor(plate.labelColor)
+            if (plate.detailLabel != null) {
+                liveRunDetail.visibility = View.VISIBLE
+                liveRunDetail.text = plate.detailLabel
+                liveRunDetail.setTextColor(plate.detailColor)
+            } else {
+                liveRunDetail.visibility = View.GONE
+            }
+        } else {
+            liveRunPlate.visibility = View.GONE
+        }
+    }
+
     private fun setStatus() {
         val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
         statusView.text = explicitStatus ?: when {
@@ -1091,6 +1251,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 else -> ""
             }
         }
+        updateLiveRunPlate()
     }
 
     /** Human banner for the session's server-side attention (WebUI `_session_attention_summary` parity). */
@@ -1128,26 +1289,38 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(14), dp(10), dp(14), dp(10))
                 background = if (isUser) {
-                    MarsTheme.card(this@ChatActivity, MarsTheme.USER_BUBBLE, radiusDp = 16, strokeColor = MarsTheme.USER_BORDER)
+                    MarsTheme.userBubble(this@ChatActivity)
                 } else {
-                    MarsTheme.card(this@ChatActivity, MarsTheme.BOT_CARD, radiusDp = 16, strokeColor = MarsTheme.BOT_BORDER)
+                    MarsTheme.botMessageCard(this@ChatActivity)
                 }
             }
 
             val labelRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             if (!isUser) {
-                // Vector status dot (WebUI parity) — the font bullet glyph has OEM-dependent
-                // metrics/color, so the theme draws the dot instead.
-                val dot = MarsTheme.statusDot(this, MarsTheme.STATUS_ONLINE)
+                // Vector status dot with ambient glow (WebUI parity)
+                val dot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
                 labelRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
             }
             val label = TextView(this).apply {
                 text = if (isUser) "Вы" else "Марс"
-                setTextColor(MarsTheme.TEXT_MUTED)
+                setTextColor(if (isUser) MarsTheme.TEXT_MUTED else MarsTheme.TEXT_STRONG)
                 textSize = 12f
                 typeface = Typeface.DEFAULT_BOLD
             }
             labelRow.addView(label)
+
+            if (!isUser) {
+                modelSelection.buttonLabel()?.let { modelName ->
+                    val modelPill = TextView(this).apply {
+                        text = modelName
+                        textSize = 9.5f
+                        setTextColor(MarsTheme.ACCENT_TEXT)
+                        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
+                        setPadding(dp(6), dp(1), dp(6), dp(1))
+                    }
+                    labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                }
+            }
             card.addView(labelRow)
 
             if (message.attachments.isNotEmpty()) {
@@ -1210,85 +1383,141 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
 
             if (message.thoughts.isNotEmpty()) {
-                val thoughtBox = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.card(this@ChatActivity, MarsTheme.THOUGHT_BG, radiusDp = 10, strokeColor = MarsTheme.THOUGHT_BORDER)
-                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                val isStreaming = index == uiState.messages.lastIndex && uiState.status == ChatStatus.TYPING
+                val thinkingView = ThinkingCardPresenter.present(
+                    thoughts = message.thoughts,
+                    expanded = message.thoughtsExpanded,
+                    streaming = isStreaming
+                )
+                if (thinkingView.visible) {
+                    val thoughtBox = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = MarsTheme.thinkingCard(this@ChatActivity)
+                        setPadding(dp(10), dp(6), dp(10), dp(6))
+                    }
+                    val header = LinearLayout(this).apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        isClickable = true
+                        setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
+                    }
+                    val chevron = ImageView(this).apply {
+                        setImageDrawable(ContextCompat.getDrawable(
+                            this@ChatActivity,
+                            if (thinkingView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+                        ))
+                        imageTintList = ColorStateList.valueOf(thinkingView.chipColor)
+                    }
+                    header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+                    val chipTitle = TextView(this).apply {
+                        text = thinkingView.chipLabel
+                        textSize = 12f
+                        setTypeface(null, Typeface.BOLD)
+                        setTextColor(thinkingView.chipColor)
+                    }
+                    header.addView(chipTitle, LinearLayout.LayoutParams(0, -2, 1f))
+
+                    if (thinkingView.statusLabel != null) {
+                        val statusBadge = TextView(this).apply {
+                            text = thinkingView.statusLabel
+                            textSize = 10.5f
+                            setTextColor(if (thinkingView.streaming) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
+                            setPadding(dp(6), dp(2), dp(6), dp(2))
+                            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = 0)
+                        }
+                        header.addView(statusBadge)
+                    }
+                    thoughtBox.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+                    if (thinkingView.expanded) {
+                        val body = TextView(this).apply {
+                            text = thinkingView.bodyText
+                            setTextColor(thinkingView.bodyColor)
+                            textSize = 12.5f
+                            setTypeface(null, Typeface.ITALIC)
+                            setLineSpacing(dp(2).toFloat(), 1f)
+                            setPadding(dp(thinkingView.bodyIndentDp), dp(6), 0, dp(4))
+                        }
+                        thoughtBox.addView(body)
+
+                        val copyBtn = Button(this).apply {
+                            text = thinkingView.copyLabel
+                            textSize = 11f
+                            setTextColor(MarsTheme.TEXT_MUTED)
+                            background = null
+                            isAllCaps = false
+                            setPadding(dp(thinkingView.bodyIndentDp), dp(2), 0, 0)
+                            minimumHeight = 0
+                            minHeight = 0
+                            gravity = Gravity.START
+                            setOnClickListener { copyMessage(thinkingView.copySource) }
+                        }
+                        thoughtBox.addView(copyBtn)
+                    }
+                    card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
                 }
-                val toggle = Button(this).apply {
-                    text = "Мысли Марса"
-                    textSize = 12f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(MarsTheme.ACCENT_TEXT)
-                    chevronStart(
-                        if (message.thoughtsExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
-                        MarsTheme.ACCENT_TEXT,
-                    )
-                    background = null
-                    isAllCaps = false
-                    setPadding(0, 0, 0, 0)
-                    minimumHeight = 0
-                    minHeight = 0
-                    gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                    setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
-                }
-                thoughtBox.addView(toggle, LinearLayout.LayoutParams(-1, dp(26)))
-                if (message.thoughtsExpanded) {
-                    thoughtBox.addView(TextView(this).apply {
-                        text = message.thoughts.joinToString("\n")
-                        setTextColor(MarsTheme.TEXT_EM)
-                        textSize = 13f
-                        setTypeface(null, Typeface.ITALIC)
-                        setLineSpacing(dp(2).toFloat(), 1f)
-                        setPadding(0, dp(4), 0, 0)
-                    })
-                    thoughtBox.addView(Button(this).apply {
-                        text = "Копировать ход мыслей"
-                        textSize = 11f
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        background = null
-                        setPadding(0, dp(2), 0, 0)
-                        gravity = Gravity.START
-                        setOnClickListener { copyMessage(message.thoughts.joinToString("\n")) }
-                    })
-                }
-                card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             }
 
             message.tools.forEachIndexed { toolIndex, tool ->
-                val box = LinearLayout(this).apply {
+                val toolView = ToolCardPresenter.present(tool)
+                val toolBox = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 10, strokeColor = MarsTheme.CODE_BORDER)
+                    background = MarsTheme.toolCallCard(this@ChatActivity)
                     setPadding(dp(10), dp(6), dp(8), dp(6))
                 }
-                val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-                val toggle = Button(this).apply {
-                    text = tool.name
-                    textSize = 12f
-                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                    setTextColor(MarsTheme.ACCENT_TEXT)
-                    chevronStart(
-                        if (tool.expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
-                        MarsTheme.ACCENT_TEXT,
-                    )
-                    background = null
-                    isAllCaps = false
-                    setPadding(0, 0, 0, 0)
-                    minimumHeight = 0
-                    minHeight = 0
-                    gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                val header = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    isClickable = true
                     setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
                 }
-                header.addView(toggle, LinearLayout.LayoutParams(0, dp(30), 1f))
-                val done = tool.result != null
-                header.addView(TextView(this).apply {
-                    text = if (done) "Готово" else "Выполняется…"
-                    textSize = 11f
+                val toolIconRes = when (toolView.kind) {
+                    ToolKind.TERMINAL -> R.drawable.ic_chip
+                    ToolKind.FILESYSTEM -> R.drawable.ic_plan
+                    ToolKind.WEB -> R.drawable.ic_search
+                    ToolKind.MCP -> R.drawable.ic_refresh
+                    ToolKind.GENERIC -> R.drawable.ic_status
+                }
+                val toolIcon = ImageView(this).apply {
+                    setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, toolIconRes))
+                    imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+                }
+                header.addView(toolIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+                val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                val kindBadge = TextView(this).apply {
+                    text = toolView.kindLabel
+                    textSize = 9.5f
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                }
+                titleCol.addView(kindBadge)
+                val toolTitle = TextView(this).apply {
+                    text = toolView.toolName
+                    textSize = 11.5f
+                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                    setTextColor(toolView.titleColor)
+                }
+                titleCol.addView(toolTitle)
+                header.addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
+
+                val stateBadge = TextView(this).apply {
+                    text = toolView.stateLabel
+                    textSize = 9.5f
                     setTypeface(Typeface.MONOSPACE)
-                    setTextColor(if (done) MarsTheme.STATUS_ONLINE else MarsTheme.TEXT_MUTED)
-                    setPadding(dp(6), 0, dp(6), 0)
-                })
-                val copyToolBtn = MarsTheme.circleIconButton(
+                    val statusEnum = if (toolView.state == ToolState.DONE) MarsGradients.Status.DONE else MarsGradients.Status.RUNNING
+                    MarsTheme.applyStatusBadge(this, statusEnum)
+                }
+                header.addView(stateBadge)
+
+                val chevron = ImageView(this).apply {
+                    setImageDrawable(ContextCompat.getDrawable(
+                        this@ChatActivity,
+                        if (toolView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+                    ))
+                    imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+                }
+                header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
+
+                val copyBtn = MarsTheme.circleIconButton(
                     this,
                     R.drawable.ic_copy,
                     "Копировать инструмент",
@@ -1297,22 +1526,72 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     sizeDp = 28,
                     strokeColor = 0
                 ).apply {
-                    setOnClickListener { copyMessage(toolDump(tool)) }
-                }
-                header.addView(copyToolBtn, LinearLayout.LayoutParams(dp(28), dp(28)))
-                box.addView(header, LinearLayout.LayoutParams(-1, -2))
-                if (tool.expanded) {
-                    val body = TextView(this).apply {
-                        text = toolDump(tool)
-                        setTextColor(MarsTheme.TEXT)
-                        textSize = 12f
-                        typeface = Typeface.MONOSPACE
-                        setTextIsSelectable(true)
-                        setPadding(dp(2), dp(4), dp(8), dp(6))
+                    setOnClickListener {
+                        copyMessage(toolView.copySource)
+                        Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
                     }
-                    box.addView(HorizontalScrollView(this).apply { addView(body) })
                 }
-                card.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                header.addView(copyBtn, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(4) })
+                toolBox.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+                if (!toolView.expanded && toolView.detailLabel != null) {
+                    toolBox.addView(TextView(this).apply {
+                        text = toolView.detailLabel
+                        textSize = 11f
+                        typeface = Typeface.MONOSPACE
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                        isSingleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setPadding(dp(22), dp(4), 0, 0)
+                    })
+                }
+
+                if (toolView.expanded) {
+                    toolView.argsSection?.let { section ->
+                        toolBox.addView(TextView(this).apply {
+                            text = section.label
+                            textSize = 10.5f
+                            setTextColor(MarsTheme.TEXT_MUTED)
+                            setTypeface(null, Typeface.BOLD)
+                            setPadding(0, dp(6), 0, dp(2))
+                        })
+                        val argsScroll = HorizontalScrollView(this).apply {
+                            addView(TextView(this@ChatActivity).apply {
+                                text = section.visibleText
+                                textSize = 11f
+                                typeface = Typeface.MONOSPACE
+                                setTextColor(MarsTheme.TEXT)
+                                setTextIsSelectable(true)
+                                setPadding(dp(8), dp(6), dp(8), dp(6))
+                                background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
+                            })
+                        }
+                        toolBox.addView(argsScroll)
+                    }
+
+                    toolView.resultSection?.let { section ->
+                        toolBox.addView(TextView(this).apply {
+                            text = section.label
+                            textSize = 10.5f
+                            setTextColor(MarsTheme.TEXT_MUTED)
+                            setTypeface(null, Typeface.BOLD)
+                            setPadding(0, dp(6), 0, dp(2))
+                        })
+                        val resScroll = HorizontalScrollView(this).apply {
+                            addView(TextView(this@ChatActivity).apply {
+                                text = section.visibleText
+                                textSize = 11f
+                                typeface = Typeface.MONOSPACE
+                                setTextColor(MarsTheme.TEXT)
+                                setTextIsSelectable(true)
+                                setPadding(dp(8), dp(6), dp(8), dp(6))
+                                background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
+                            })
+                        }
+                        toolBox.addView(resScroll)
+                    }
+                }
+                card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             }
 
             val params = LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .88).toInt(), -2).apply {
@@ -1994,13 +2273,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 Toast.makeText(this, MessageActionPolicy.COPY_TOAST, Toast.LENGTH_SHORT).show()
             }
             MessageActionKind.QUOTE -> {
-                val quote = MessageActionPolicy.composeQuote(input.text.toString(), message.text)
-                input.setText(quote.text)
-                input.setSelection(quote.cursor.coerceIn(0, input.length()))
+                val author = if (message.role == "user") "Вы" else "Марс"
+                composerLayoutPresenter.setQuote(author, message.text)
+                updateQuotePlate()
                 input.requestFocus()
                 (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
                     ?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
-                statusView.text = "Цитата вставлена в поле ввода"
+                statusView.text = "Цитата прикреплена к сообщению"
             }
             MessageActionKind.SHARE -> {
                 val intent = Intent(Intent.ACTION_SEND).apply {
