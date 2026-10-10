@@ -228,6 +228,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 PrefsClearableStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)),
                 PrefsClearableStore(getSharedPreferences(MUSIC_HISTORY_PREFS, MODE_PRIVATE)),
                 PrefsClearableStore(offlineCachePrefs),
+                // Офлайн-кэши задач и метрик проектов — тоже приватные plaintext-данные.
+                PrefsClearableStore(getSharedPreferences("mars_todos_offline", MODE_PRIVATE)),
+                PrefsClearableStore(getSharedPreferences("mars_projects_offline", MODE_PRIVATE)),
                 pendingMessageStore,
             )
         )

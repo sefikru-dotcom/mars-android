@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -24,6 +25,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import ru.mars.network.cache.ProjectsOfflineCache
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -37,9 +40,26 @@ class ProjectsActivity : ComponentActivity() {
     private var loading = false
     private var refreshJob: Job? = null
 
+    /** На экране сейчас метрики из кэша (сбой сети их не затирает, лишь добавляет бейдж). */
+    private var cacheShown = false
+
+    /**
+     * Офлайн-кэш сырого JSON метрик (core-network): мгновенный показ при старте,
+     * фоновый HTTP обновляет снимок; при сбое сети остаёмся на кэше с бейджем
+     * «Кэш (N мин назад)» (политика [OfflineCacheUiPolicy]).
+     */
+    private val offlineCache by lazy {
+        ProjectsOfflineCache(
+            SharedPreferencesKeyValueStore(
+                getSharedPreferences(PROJECTS_OFFLINE_PREFS, Context.MODE_PRIVATE),
+            ),
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildView())
+        showCachedMetrics()
         loadMetrics()
         refreshJob = lifecycleScope.launch {
             while (isActive) {
@@ -135,22 +155,95 @@ class ProjectsActivity : ComponentActivity() {
         if (loading || isFinishing) return
         loading = true
         progress.visibility = View.VISIBLE
-        updated.text = "Обновление…"
+        if (!cacheShown) updated.text = "Обновление…"
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { fetch() }.getOrNull() }
+            val raw = withContext(Dispatchers.IO) { runCatching { fetch() }.getOrNull() }
             loading = false
             progress.visibility = View.GONE
-            if (result == null) renderFallback() else render(result)
+            if (raw == null) {
+                onFetchFailure()
+            } else {
+                offlineCache.saveProjectsJson(raw)
+                renderLive(raw)
+            }
         }
     }
 
-    private fun fetch(): JSONObject {
+    /** Сеть отработала: LIVE-рендер свежего JSON (кэш уже сохранён вызывающим). */
+    private fun renderLive(raw: String) {
+        val data = runCatching { JSONObject(raw) }.getOrNull()
+        if (data == null) {
+            onFetchFailure()
+            return
+        }
+        cacheShown = false
+        render(data)
+    }
+
+    /**
+     * Сбой сети: если кэш пригоден — сохраняем отображение кэшированных проектов
+     * (не затираем!), подсвечивая бейджем «Кэш (N мин назад)» и отметкой о сбое;
+     * иначе прежний статический фолбэк.
+     */
+    private fun onFetchFailure() {
+        val decision = decisionFor(OfflineFetchState.FAILURE)
+        if (decision.showCachedContent) {
+            if (!cacheShown) renderCachedContent()
+            if (cacheShown) {
+                updated.text = listOfNotNull(decision.badgeText, decision.bannerText)
+                    .joinToString("  ·  ")
+                updated.setTextColor(MarsTheme.STATUS_WARNING)
+                return
+            }
+        }
+        cacheShown = false
+        renderFallback()
+    }
+
+    /** Мгновенный показ кэшированного JSON метрик при старте экрана (до ответа сети). */
+    private fun showCachedMetrics() {
+        val decision = decisionFor(OfflineFetchState.PENDING)
+        if (!decision.showCachedContent) return
+        renderCachedContent()
+        if (cacheShown) {
+            updated.text = decision.badgeText ?: ""
+            updated.setTextColor(MarsTheme.TEXT_MUTED)
+        }
+    }
+
+    /** Рендер содержимого из кэша; cacheShown=false, если JSON битый или список пуст. */
+    private fun renderCachedContent() {
+        val json = offlineCache.loadProjectsJson()
+        val data = json?.let { runCatching { JSONObject(it) }.getOrNull() }
+        if (data == null) {
+            cacheShown = false
+            return
+        }
+        val parsed = ProjectsMetricsParser.parse(data)
+        list.removeAllViews()
+        parsed.host?.let { addHost(it) }
+        parsed.services.forEach { addService(it) }
+        cacheShown = list.childCount > 0
+        if (!cacheShown) list.removeAllViews()
+    }
+
+    /** Решение политики свежести по фактам: фаза запроса + возраст снимка в кэше. */
+    private fun decisionFor(state: OfflineFetchState): OfflineUiDecision =
+        OfflineCacheUiPolicy.evaluate(
+            surface = MobileOfflineSurface.PROJECTS,
+            fetchState = state,
+            livePayloadEmpty = false,
+            snapshotTakenAtMs = offlineCache.getSavedTimestamp(),
+            nowMs = System.currentTimeMillis(),
+        )
+
+    private fun fetch(): String {
         val c = URL(METRICS_URL).openConnection() as HttpURLConnection
         return try {
             c.connectTimeout = 8000
             c.readTimeout = 10000
             c.requestMethod = "GET"
-            c.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+            c.inputStream.bufferedReader().use { it.readText() }
         } finally {
             c.disconnect()
         }
@@ -279,6 +372,8 @@ class ProjectsActivity : ComponentActivity() {
 
     companion object {
         private const val METRICS_URL = "https://marscore.ru/dashboard/api/metrics"
+        /** Приватный prefs-файл офлайн-кэша метрик проектов (входит в logout-cleanup). */
+        private const val PROJECTS_OFFLINE_PREFS = "mars_projects_offline"
         private val URL_PATTERN = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
     }
 }
