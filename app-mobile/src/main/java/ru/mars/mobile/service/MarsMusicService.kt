@@ -1,5 +1,6 @@
 package ru.mars.mobile.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -135,10 +136,15 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         startedForeground = true
     }
 
+    @SuppressLint("MissingPermission")
     private fun updateNotification(track: MusicTrack?, isPlaying: Boolean) {
         if (!canPostNotifications()) return // Android 13+ without POST_NOTIFICATIONS granted
-        NotificationManagerCompat.from(this)
-            .notify(MusicNotificationPolicy.NOTIFICATION_ID, buildNotification(track, isPlaying))
+        try {
+            NotificationManagerCompat.from(this)
+                .notify(MusicNotificationPolicy.NOTIFICATION_ID, buildNotification(track, isPlaying))
+        } catch (_: SecurityException) {
+            // Best effort when notification permission revoked at runtime
+        }
     }
 
     private fun stopPlaybackService() {
