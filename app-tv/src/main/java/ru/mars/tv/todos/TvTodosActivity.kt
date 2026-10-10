@@ -13,10 +13,13 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import ru.mars.network.api.MarsApi
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
+import ru.mars.network.cache.TodosOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.repository.TodosRepository
 import ru.mars.tv.R
 import ru.mars.tv.TvFocusLift
+import ru.mars.tv.TvOfflineCacheStatus
 import ru.mars.tv.todos.TvTodosPolicy.TodosFilter
 import ru.mars.tv.todos.TvTodosPolicy.StatusToken
 
@@ -35,6 +38,13 @@ import ru.mars.tv.todos.TvTodosPolicy.StatusToken
  * Data/policy слои отделены от UI: [RepositoryTvTodosGateway] (транспорт),
  * [TvTodosPolicy] (чистые решения), [TvTodosController] (оркестрация, generation
  * guard, destroy) — покрыты JVM-тестами.
+ *
+ * Offline-кэш: контроллер внедрён с [TodosOfflineCache] поверх приватного
+ * SharedPreferences-файла ([SharedPreferencesKeyValueStore]). При сетевом сбое экран
+ * рисует последний снимок `todo_state` со статусом [TvOfflineCacheStatus.CACHED] и
+ * плашкой возраста («Снимок из кэша (N мин. назад)») вместо ошибки: контент не пустеет,
+ * фокус пульта не переставляется на «Повторить». Явная ошибка — только когда
+ * показывать нечего (кэш пуст или просрочен).
  */
 class TvTodosActivity : AppCompatActivity() {
 
@@ -56,6 +66,9 @@ class TvTodosActivity : AppCompatActivity() {
     private var filter = TodosFilter.ALL
     private lateinit var controller: TvTodosController
 
+    /** Плашка источника данных из контроллера (LIVE/CACHED); null — данные ещё не показывались. */
+    private var currentBadge: String? = null
+
     private val refreshTick = object : Runnable {
         override fun run() {
             controller.load()
@@ -76,9 +89,16 @@ class TvTodosActivity : AppCompatActivity() {
             statusView.text = "Загрузка задач…"
         }
 
-        override fun showTodos(data: TvTodosData) {
+        override fun showTodos(
+            data: TvTodosData,
+            status: TvOfflineCacheStatus,
+            badgeText: String?,
+        ) {
+            // CACHED рисуется как обычные данные: видимость та же, фокус не трогаем —
+            // мягкое восстановление не должно ломать навигацию с пульта.
             hasData = true
             currentData = data
+            currentBadge = badgeText
             loadingGroup.visibility = View.GONE
             errorGroup.visibility = View.GONE
             dataScroll.visibility = View.VISIBLE
@@ -127,9 +147,15 @@ class TvTodosActivity : AppCompatActivity() {
         retryButton.setOnClickListener { controller.load() }
         chips.forEachIndexed { index, chip -> chip.setOnClickListener { selectFilter(index) } }
 
+        // Офлайн-кэш «текущих» задач: отдельный приватный файл — clear() кэша (гигиена
+        // logout) не должен задевать чужие записи.
+        val offlineCache = TodosOfflineCache(
+            SharedPreferencesKeyValueStore(getSharedPreferences(OFFLINE_CACHE_PREFS, MODE_PRIVATE)),
+        )
         controller = TvTodosController(
             surface,
             RepositoryTvTodosGateway(TodosRepository(), MarsApi.BASE_URL) { store.read() },
+            offlineCache,
         )
         TvFocusLift.attachAll(backButton, refreshButton, retryButton, *chips.toTypedArray())
         selectFilter(0)
@@ -158,7 +184,11 @@ class TvTodosActivity : AppCompatActivity() {
         // фокуса и возвращаем её (clamp по [TvTodosPolicy.restoreSelection], без wrap).
         val focusedIndex = todosContainer.indexOfChild(todosContainer.findFocus())
         todosContainer.removeAllViews()
-        statusView.text = TvTodosPolicy.summaryLine(data.sessionTitle, data.snapshot)
+        // Live-регион: плашка источника («Обновлено только что» / «Снимок из кэша (…)»)
+        // + честная копия прогресса из TvTodosPolicy.
+        val summary = TvTodosPolicy.summaryLine(data.sessionTitle, data.snapshot)
+        val badge = currentBadge
+        statusView.text = if (badge != null) "$badge · $summary" else summary
 
         val rows = TvTodosPolicy.rows(data.snapshot?.todos.orEmpty(), filter)
         val emptyLine = TvTodosPolicy.emptyStateLine(data.sessionTitle, data.snapshot, filter)
@@ -212,6 +242,9 @@ class TvTodosActivity : AppCompatActivity() {
     )
 
     companion object {
+        /** Приватный SharedPreferences-файл офлайн-кэша задач. */
+        private const val OFFLINE_CACHE_PREFS = "tv_todos_offline_cache"
+
         /** Интервал автообновления — паритет TvProjectsActivity. */
         private const val REFRESH_MS = 30_000L
     }
