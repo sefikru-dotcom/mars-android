@@ -53,10 +53,10 @@ class QuickChipsTest {
     @Test
     fun `after a failed turn rollback and explain lead the ribbon`() {
         val chips = QuickChips.visibleChips(ChatStatus.ERROR, hasAssistantReply = true, lastTurnFailed = true)
-        assertEquals(listOf("Откат", "Поясни", "Статус", "Продолжай"), chips.map { it.label })
+        assertEquals(listOf("Повторить", "Откат", "Поясни", "Статус", "Продолжай"), chips.map { it.label })
 
         val afterFailureInIdle = QuickChips.visibleChips(ChatStatus.IDLE, hasAssistantReply = true, lastTurnFailed = true)
-        assertEquals(listOf("Откат", "Поясни", "Статус", "Продолжай"), afterFailureInIdle.map { it.label })
+        assertEquals(listOf("Повторить", "Откат", "Поясни", "Статус", "Продолжай"), afterFailureInIdle.map { it.label })
     }
 
     @Test
@@ -67,5 +67,6 @@ class QuickChipsTest {
         assertTrue(QuickChips.EXPLAIN.message.startsWith("Поясни"))
         assertTrue(QuickChips.PLAN.message.startsWith("Составь пошаговый план"))
         assertTrue(QuickChips.STATUS.message.startsWith("Краткий статус"))
+        assertTrue(QuickChips.RETRY.message.startsWith("Повтори"))
     }
 }

@@ -1,7 +1,7 @@
 package ru.mars.mobile
 
 /** Stable identity of a smart quick chip (icon mapping lives in the Activity). */
-enum class QuickChipId { OK, CONTINUE, ROLLBACK, EXPLAIN, PLAN, STATUS }
+enum class QuickChipId { OK, CONTINUE, ROLLBACK, EXPLAIN, PLAN, STATUS, RETRY }
 
 /**
  * One smart quick-action chip above the composer: [label] is the chip caption,
@@ -20,6 +20,7 @@ object QuickChips {
     val EXPLAIN = QuickChip(QuickChipId.EXPLAIN, "Поясни", "Поясни подробнее своё последнее решение")
     val PLAN = QuickChip(QuickChipId.PLAN, "План", "Составь пошаговый план дальнейших действий")
     val STATUS = QuickChip(QuickChipId.STATUS, "Статус", "Краткий статус: что уже сделано и что сейчас в работе")
+    val RETRY = QuickChip(QuickChipId.RETRY, "Повторить", "Повтори предыдущий запрос")
 
     val ALL: List<QuickChip> = listOf(OK, CONTINUE, ROLLBACK, EXPLAIN, PLAN, STATUS)
 
@@ -37,7 +38,7 @@ object QuickChips {
     ): List<QuickChip> = when {
         !hasAssistantReply -> emptyList()
         status == ChatStatus.TYPING -> emptyList()
-        lastTurnFailed || status == ChatStatus.ERROR -> listOf(ROLLBACK, EXPLAIN, STATUS, CONTINUE)
+        lastTurnFailed || status == ChatStatus.ERROR -> listOf(RETRY, ROLLBACK, EXPLAIN, STATUS, CONTINUE)
         else -> ALL
     }
 }

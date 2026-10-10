@@ -11,6 +11,7 @@ import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
+import android.text.style.ForegroundColorSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
@@ -247,6 +248,19 @@ class MemoryActivity : ComponentActivity() {
                             appendInlineSpans(ssb, line.spans)
                             tv.setTypeface(null, Typeface.ITALIC)
                             tv.setTextColor(MarsTheme.TEXT_EM)
+                        }
+                        is RichLine.TaskItem -> {
+                            if (line.checked) {
+                                ssb.append("☑  ")
+                            } else {
+                                ssb.append("☐  ")
+                            }
+                            val start = ssb.length
+                            appendInlineSpans(ssb, line.spans)
+                            if (line.checked) {
+                                ssb.setSpan(StrikethroughSpan(), start, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                ssb.setSpan(ForegroundColorSpan(MarsTheme.TEXT_MUTED), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            }
                         }
                         is RichLine.Normal -> appendInlineSpans(ssb, line.spans)
                         is RichLine.Divider -> {

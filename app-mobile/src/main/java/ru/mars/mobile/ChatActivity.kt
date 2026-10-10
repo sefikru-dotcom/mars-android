@@ -24,6 +24,7 @@ import android.text.TextPaint
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
+import android.text.style.ForegroundColorSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
@@ -93,6 +94,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var liveRunPlate: LinearLayout
     private lateinit var liveRunLabel: TextView
     private lateinit var liveRunDetail: TextView
+
+    private lateinit var todoWidgetPlate: LinearLayout
+    private lateinit var todoWidgetTitle: TextView
+    private lateinit var todoWidgetChevron: ImageView
+    private lateinit var todoWidgetContainer: LinearLayout
+    private var todoWidgetExpanded: Boolean = false
 
     private lateinit var interactiveView: MarsInteractiveView
     private lateinit var interactiveController: InteractiveRequestController
@@ -345,6 +352,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             letterSpacing = 0.05f
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
+        val settingsBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_settings,
+            "Настройки",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 36
+        ).apply {
+            setOnClickListener {
+                drawer.closeDrawer(GravityCompat.START)
+                startActivity(Intent(this@ChatActivity, SettingsActivity::class.java))
+            }
+        }
+        headerRow.addView(settingsBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(8) })
+
         val closeBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_close,
@@ -418,12 +440,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
 
-        // Быстрые разделы: сетка 2×2 (Проекты/Музыка, Память/Скиллы).
+        // Быстрые разделы: сетка 2-в-ряд (Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Настройки).
         listOf(
+            "Задачи" to { startActivity(Intent(this@ChatActivity, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }) },
+            "Планировщик" to { startActivity(Intent(this@ChatActivity, CronActivity::class.java)) },
             "Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
             "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
             "Память" to { startActivity(Intent(this@ChatActivity, MemoryActivity::class.java)) },
-            "Скиллы" to { startActivity(Intent(this@ChatActivity, SkillsActivity::class.java)) }
+            "Скиллы" to { startActivity(Intent(this@ChatActivity, SkillsActivity::class.java)) },
+            "Настройки" to { startActivity(Intent(this@ChatActivity, SettingsActivity::class.java)) }
         ).chunked(2).forEach { rowActions ->
             val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             rowActions.forEach { (title, action) ->
@@ -707,6 +732,49 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(0, 0, 0, dp(2))
         }
         root.addView(smartChipsRow)
+
+        // Interactive Session Todos Widget (Accordion)
+        todoWidgetPlate = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+
+        val todoHeaderRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            setOnClickListener {
+                todoWidgetExpanded = !todoWidgetExpanded
+                updateTodoWidget()
+            }
+        }
+        val todoIcon = ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_plan))
+            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
+        }
+        todoHeaderRow.addView(todoIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) })
+
+        todoWidgetTitle = TextView(this).apply {
+            textSize = 12.5f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        todoHeaderRow.addView(todoWidgetTitle, LinearLayout.LayoutParams(0, -2, 1f))
+
+        todoWidgetChevron = ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_chevron_down))
+            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+        }
+        todoHeaderRow.addView(todoWidgetChevron, LinearLayout.LayoutParams(dp(16), dp(16)))
+        todoWidgetPlate.addView(todoHeaderRow)
+
+        todoWidgetContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        todoWidgetPlate.addView(todoWidgetContainer)
+        root.addView(todoWidgetPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
         // Live Run Status Plate: active runner pulse right above the composer
         liveRunPlate = LinearLayout(this).apply {
@@ -1122,6 +1190,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         updateContextIndicator()
         updateLiveRunPlate()
         updateQuotePlate()
+        updateTodoWidget()
         renderSmartChips()
     }
 
@@ -1180,6 +1249,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         QuickChipId.EXPLAIN -> R.drawable.ic_help
         QuickChipId.PLAN -> R.drawable.ic_plan
         QuickChipId.STATUS -> R.drawable.ic_status
+        QuickChipId.RETRY -> R.drawable.ic_refresh
     }
 
     private fun todoCallback(sessionId: String?): (ru.mars.network.model.TodoSnapshot) -> Unit = { snapshot ->
@@ -1187,6 +1257,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if ((sessionId == null || currentSessionId == sessionId) && (snapshot.sessionId == null || currentSessionId == snapshot.sessionId)) {
                 uiState.setTodoState(snapshot)
                 setStatus()
+                updateTodoWidget()
             }
         }
     }
@@ -1227,6 +1298,91 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         } else {
             liveRunPlate.visibility = View.GONE
+        }
+    }
+
+    private fun updateTodoWidget() {
+        if (!::todoWidgetPlate.isInitialized) return
+        val card = TodoPresenter.present(uiState.todoState)
+        if (!card.visible) {
+            todoWidgetPlate.visibility = View.GONE
+            return
+        }
+
+        todoWidgetPlate.visibility = View.VISIBLE
+        todoWidgetTitle.text = card.title
+        todoWidgetChevron.setImageDrawable(
+            ContextCompat.getDrawable(this, if (todoWidgetExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down)
+        )
+
+        todoWidgetContainer.removeAllViews()
+        if (todoWidgetExpanded) {
+            card.items.forEach { item ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(3), 0, dp(3))
+                }
+                val dot = MarsTheme.glowingStatusDot(
+                    this,
+                    when {
+                        item.isCompleted -> MarsTheme.STATUS_ONLINE
+                        item.isInProgress -> MarsTheme.STATUS_RUNNING
+                        else -> MarsTheme.TEXT_MUTED
+                    }
+                )
+                row.addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(8) })
+
+                val itemText = TextView(this).apply {
+                    textSize = 12f
+                    if (item.isCompleted) {
+                        val ssb = SpannableStringBuilder(item.content)
+                        ssb.setSpan(StrikethroughSpan(), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        text = ssb
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                    } else {
+                        text = item.content
+                        setTextColor(if (item.isInProgress) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
+                        if (item.isInProgress) setTypeface(null, Typeface.BOLD)
+                    }
+                }
+                row.addView(itemText, LinearLayout.LayoutParams(0, -2, 1f))
+                todoWidgetContainer.addView(row)
+            }
+
+            val moreBtn = Button(this).apply {
+                text = "Все задачи подробнее →"
+                textSize = 11.5f
+                setTextColor(MarsTheme.ACCENT_TEXT)
+                background = null
+                setPadding(0, dp(4), 0, 0)
+                gravity = Gravity.START
+                setOnClickListener {
+                    startActivity(Intent(this@ChatActivity, TodosActivity::class.java).apply {
+                        putExtra("EXTRA_SESSION_ID", currentSessionId)
+                    })
+                }
+            }
+            todoWidgetContainer.addView(moreBtn)
+        } else if (card.inProgressContent != null) {
+            val previewRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(2), 0, 0)
+            }
+            val pulse = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_RUNNING)
+            previewRow.addView(pulse, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(8) })
+
+            val activeLabel = TextView(this).apply {
+                text = card.inProgressContent
+                textSize = 12f
+                setTextColor(MarsTheme.TEXT_STRONG)
+                setTypeface(null, Typeface.BOLD)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            previewRow.addView(activeLabel, LinearLayout.LayoutParams(0, -2, 1f))
+            todoWidgetContainer.addView(previewRow)
         }
     }
 
@@ -1649,6 +1805,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                                 appendInlineSpans(ssb, line.spans)
                                 tv.setTypeface(null, Typeface.ITALIC)
                             }
+                            is RichLine.TaskItem -> {
+                                if (line.checked) {
+                                    ssb.append("☑  ")
+                                } else {
+                                    ssb.append("☐  ")
+                                }
+                                val start = ssb.length
+                                appendInlineSpans(ssb, line.spans)
+                                if (line.checked) {
+                                    ssb.setSpan(StrikethroughSpan(), start, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                    ssb.setSpan(ForegroundColorSpan(MarsTheme.TEXT_MUTED), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                }
+                            }
                             is RichLine.Normal -> {
                                 appendInlineSpans(ssb, line.spans)
                             }
@@ -2003,6 +2172,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 autoScroll.pinToBottom()
                 renderMessages()
                 setStatus()
+                updateTodoWidget()
                 refreshYoloState()
                 // Stream recovery: a session that is still streaming server-side must resume
                 // live instead of showing a frozen transcript.
@@ -2110,6 +2280,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 uiState.setTodoState(detail.todoState)
                 autoScroll.pinToBottom()
                 renderMessages()
+                updateTodoWidget()
                 refreshYoloState()
             }
         }
@@ -3029,7 +3200,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     companion object {
-        private const val BASE_URL = "https://marscore.ru"
+        const val BASE_URL = "https://marscore.ru"
 
         /** Lightbox guards: payload cap and max decoded dimension (memory discipline). */
         private const val MAX_VIEWER_IMAGE_BYTES = 25L * 1024 * 1024
