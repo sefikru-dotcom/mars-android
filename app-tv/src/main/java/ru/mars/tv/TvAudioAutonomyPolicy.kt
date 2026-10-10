@@ -76,6 +76,27 @@ object TvAudioAutonomyPolicy {
     fun shouldHoldWakeLock(wakeLockPermissionGranted: Boolean): Boolean = wakeLockPermissionGranted
 
     /**
+     * `AudioManager.requestAudioFocus` result codes, value-identical to the framework
+     * constants (`AUDIOFOCUS_REQUEST_GRANTED` / `AUDIOFOCUS_REQUEST_FAILED`) — duplicated
+     * as literals so this policy stays a pure JVM artifact.
+     */
+    const val FOCUS_REQUEST_GRANTED = 1
+    const val FOCUS_REQUEST_FAILED = 0
+
+    /**
+     * Whether playback may START for one focus-request outcome ([TvMusicPlayer]):
+     * - `null` — focus integration is unavailable (no attached context, no AudioManager,
+     *   framework exception): keep the legacy best-effort behaviour and play. A transport
+     *   that cannot even ASK must not go silent on TVs with odd focus stacks;
+     * - GRANTED — we own the output, play;
+     * - FAILED (or any other definitive verdict) — another app holds the audio: starting
+     *   anyway would play OVER it, so the start is refused. The caller surfaces the
+     *   refusal honestly instead of rendering audio nobody asked for.
+     */
+    fun shouldStartPlayback(focusRequestResult: Int?): Boolean =
+        focusRequestResult == null || focusRequestResult == FOCUS_REQUEST_GRANTED
+
+    /**
      * Safe playback position for UI consumption: negative raw values (a known
      * MediaPlayer quirk in transitional states) clamp to zero — a progress render must
      * never see a negative or crash-worthy position.

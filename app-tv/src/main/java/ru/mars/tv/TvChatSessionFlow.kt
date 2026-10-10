@@ -163,11 +163,29 @@ class TvChatSessionFlow(
         }
     }
 
+    /**
+     * Reattach/recovery status lines ([TvChatStreamRecoveryLoop], [TvChatActivity]):
+     * [markRecovering] publishes a recovery status WITHOUT touching the turn state — a
+     * recovering turn is not over, and its stop control (armed by a StreamStarted or a
+     * restored binding) must survive; [markReattaching] announces an opening attach.
+     */
+    fun markRecovering(status: String) {
+        statusText = status
+    }
+
+    /** The screen is opening a live server turn via attachToStream (recreate/reopen). */
+    fun markReattaching() {
+        statusText = REATTACHING
+    }
+
     companion object {
         const val CREATING_SESSION = "Создаю сессию…"
         const val TYPING = "Марс печатает…"
         const val STOPPED = "Остановлено"
         const val STOP_FAILED = "Остановлено локально — сервер не подтвердил"
+        const val REATTACHING = "Открываю активный ход…"
+        const val RECOVERY_FAILED = "Не удалось восстановить соединение"
+        const val HISTORY_REFRESHED = "Ход завершён — история обновлена"
 
         /** Status-line text for one SSE event; null when the event carries no status. */
         fun statusFor(event: ChatEvent): String? = when (event) {

@@ -144,4 +144,28 @@ class TvAudioAutonomyPolicyTest {
         assertEquals(1234, TvAudioAutonomyPolicy.sanitizePositionMs(1234))
         assertEquals(Int.MAX_VALUE, TvAudioAutonomyPolicy.sanitizePositionMs(Int.MAX_VALUE))
     }
+
+    // --- playback-start focus gate ---------------------------------------------------------
+
+    @Test
+    fun `focus request constants mirror the AudioManager contract`() {
+        // Static-final ints inline at compile time (same pattern as the focus-change codes):
+        // the player passes the framework verdict through verbatim.
+        assertEquals(AudioManager.AUDIOFOCUS_REQUEST_GRANTED, TvAudioAutonomyPolicy.FOCUS_REQUEST_GRANTED)
+        assertEquals(AudioManager.AUDIOFOCUS_REQUEST_FAILED, TvAudioAutonomyPolicy.FOCUS_REQUEST_FAILED)
+    }
+
+    @Test
+    fun `an explicit focus denial refuses to start playback over another app`() {
+        assertFalse(TvAudioAutonomyPolicy.shouldStartPlayback(TvAudioAutonomyPolicy.FOCUS_REQUEST_FAILED))
+        assertFalse(TvAudioAutonomyPolicy.shouldStartPlayback(99)) // any other definitive verdict
+    }
+
+    @Test
+    fun `granted or unverifiable focus starts playback`() {
+        assertTrue(TvAudioAutonomyPolicy.shouldStartPlayback(TvAudioAutonomyPolicy.FOCUS_REQUEST_GRANTED))
+        // null = focus integration unavailable (no attached context / odd TV stack):
+        // the legacy best-effort playback must not go silent just because it cannot ASK.
+        assertTrue(TvAudioAutonomyPolicy.shouldStartPlayback(null))
+    }
 }

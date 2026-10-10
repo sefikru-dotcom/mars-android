@@ -161,9 +161,16 @@ object TvMusicPlayer : TvMusicTransport {
         lastError = null
         pausedByFocusLoss = false
         duckedByFocus = false
-        // Best-effort audio focus: playback proceeds even when the request is denied
-        // (odd TV focus stacks) — it only forfeits the LOSS/duck callbacks in that case.
-        requestAudioFocus()
+        // Audio focus gate ([TvAudioAutonomyPolicy.shouldStartPlayback]): an explicit
+        // DENIAL means another app owns the output — starting would play over it, so the
+        // track parks with an honest error. Without any focus integration (null verdict:
+        // no context / odd TV stack) playback proceeds best-effort, as before.
+        if (!TvAudioAutonomyPolicy.shouldStartPlayback(requestAudioFocus())) {
+            isPlaying = false
+            lastError = "Аудиофокус занят другим приложением"
+            notifyChanged()
+            return
+        }
         val player = MediaPlayer()
         mediaPlayer = player
         try {
@@ -270,7 +277,10 @@ object TvMusicPlayer : TvMusicTransport {
     fun resume() {
         val player = mediaPlayer ?: return
         if (isPlaying) return
-        requestAudioFocus()
+        // A resume after ANY interruption must not play over whoever grabbed the output:
+        // an explicit focus DENIAL keeps the transport paused (the user's pause state is
+        // preserved — nothing is started, nothing is flagged as focus-paused).
+        if (!TvAudioAutonomyPolicy.shouldStartPlayback(requestAudioFocus())) return
         pausedByFocusLoss = false
         duckedByFocus = false
         try {
@@ -361,13 +371,16 @@ object TvMusicPlayer : TvMusicTransport {
     }
 
     /**
-     * Requests AUDIOFOCUS_GAIN for media usage (listener on the main looper). Best-effort:
-     * without an attached context, or on any framework oddity, playback simply continues
-     * without focus integration — the transport must never fail to play because of it.
+     * Requests AUDIOFOCUS_GAIN for media usage (listener on the main looper) and returns
+     * the framework verdict (`AUDIOFOCUS_REQUEST_GRANTED`/`FAILED`), or `null` when focus
+     * integration is unavailable (no attached context, no AudioManager, framework
+     * exception). Callers gate the START on [TvAudioAutonomyPolicy.shouldStartPlayback]:
+     * a definitive denial never plays over another app; `null` keeps the legacy
+     * best-effort playback.
      */
-    private fun requestAudioFocus() {
-        val manager = audioManager ?: return
-        try {
+    private fun requestAudioFocus(): Int? {
+        val manager = audioManager ?: return null
+        return try {
             val request = focusRequest ?: AudioFocusRequest
                 .Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
@@ -382,7 +395,7 @@ object TvMusicPlayer : TvMusicTransport {
                 .also { focusRequest = it }
             manager.requestAudioFocus(request)
         } catch (_: Exception) {
-            // Focus stays best-effort; a denial never blocks playback.
+            null
         }
     }
 

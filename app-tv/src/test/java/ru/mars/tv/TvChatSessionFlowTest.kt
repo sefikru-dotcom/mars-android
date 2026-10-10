@@ -378,4 +378,30 @@ class TvChatSessionFlowTest {
         assertFalse(flow.canStop)
         assertNull(flow.activeStreamId)
     }
+
+    // ---- recovery status lines (reattach wiring) ----------------------------------
+
+    @Test fun `markRecovering publishes a status without touching the turn state`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-9"))
+        flow.markRecovering("Восстанавливаю соединение…")
+        assertEquals("Восстанавливаю соединение…", flow.statusText)
+        // The turn is still live server-side — «Остановить» stays armed during recovery.
+        assertTrue(flow.canStop)
+        assertEquals("st-9", flow.activeStreamId)
+    }
+
+    @Test fun `markReattaching announces the opening attach`() {
+        val (flow, _) = flowWith()
+        flow.markReattaching()
+        assertEquals(TvChatSessionFlow.REATTACHING, flow.statusText)
+        // The stop control arms only when the reattached stream's StreamStarted lands.
+        assertFalse(flow.canStop)
+    }
+
+    @Test fun `recovery status constants are stable host references`() {
+        assertEquals("Не удалось восстановить соединение", TvChatSessionFlow.RECOVERY_FAILED)
+        assertEquals("Ход завершён — история обновлена", TvChatSessionFlow.HISTORY_REFRESHED)
+    }
 }

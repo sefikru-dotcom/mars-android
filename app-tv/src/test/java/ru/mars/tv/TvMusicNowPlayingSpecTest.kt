@@ -79,4 +79,25 @@ class TvMusicNowPlayingSpecTest {
     fun `no row is current while transport is idle`() {
         assertFalse(TvMusicNowPlayingSpec.isCurrent("t1", null))
     }
+
+    // --- repeat toggle label ------------------------------------------------------------------
+
+    @Test
+    fun `repeat button mirrors the transport preference`() {
+        assertEquals("Повтор: выкл", TvMusicNowPlayingSpec.repeatButtonLabel(TvRepeatMode.OFF))
+        assertEquals("Повтор: список", TvMusicNowPlayingSpec.repeatButtonLabel(TvRepeatMode.ALL))
+        assertEquals("Повтор: трек", TvMusicNowPlayingSpec.repeatButtonLabel(TvRepeatMode.ONE))
+    }
+
+    @Test
+    fun `label follows the cycle ring OFF - ALL - ONE - OFF`() {
+        var mode = TvRepeatMode.OFF
+        val labels = buildList {
+            repeat(4) {
+                add(TvMusicNowPlayingSpec.repeatButtonLabel(mode))
+                mode = TvPlaybackModePolicy.nextRepeatMode(mode)
+            }
+        }
+        assertEquals(listOf("Повтор: выкл", "Повтор: список", "Повтор: трек", "Повтор: выкл"), labels)
+    }
 }
