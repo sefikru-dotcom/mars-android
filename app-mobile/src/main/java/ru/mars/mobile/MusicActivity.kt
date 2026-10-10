@@ -30,6 +30,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.service.MarsMusicService
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
 import java.net.HttpURLConnection
@@ -124,6 +125,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         MarsMusicPlayer.setAudioFx(audioFx.state)
         setContentView(buildView())
         MarsMusicPlayer.registerListener(this)
+        requestNotificationPermission()
         seek.post(ticker)
         updateTabStyles()
         updateQueueIcons()
@@ -137,6 +139,36 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         seek.removeCallbacks(ticker)
         job?.cancel()
         super.onDestroy()
+    }
+
+    /** True once [MarsMusicService] was started for the current playback run; resets on stop. */
+    private var musicServiceStarted = false
+
+    /**
+     * Keeps the shade notification in step with playback: a track starting raises the
+     * foreground service (the activity is visible here, so the Android 12+ background-FGS
+     * ban does not apply); the service tears itself down when playback dies, so we only
+     * reset the flag and let it own its lifecycle.
+     */
+    private fun syncMusicService(track: MusicTrack?, isPlaying: Boolean) {
+        if (track != null && !musicServiceStarted) {
+            MarsMusicService.start(this)
+            musicServiceStarted = true
+        } else if (track == null && !isPlaying) {
+            musicServiceStarted = false
+        }
+    }
+
+    /** Android 13+: без POST_NOTIFICATIONS медиа-нотификация в шторке не видна. */
+    private fun requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            androidx.core.app.ActivityCompat.requestPermissions(
+                this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS
+            )
+        }
     }
 
     private fun buildView(): View {
@@ -507,6 +539,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) {
         runOnUiThread {
+            syncMusicService(track, isPlaying)
             title.text = track?.title ?: "Ничего не играет"
             artistView.text = track?.artist ?: "Mars Audio"
             playButton.setImageDrawable(
@@ -1492,6 +1525,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru/music"
+        /** Request code for the Android 13+ POST_NOTIFICATIONS runtime prompt. */
+        private const val REQUEST_NOTIFICATIONS = 0x4D54
     }
 }
 
