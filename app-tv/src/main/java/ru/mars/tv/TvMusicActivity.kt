@@ -85,6 +85,9 @@ class TvMusicActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_music)
+        // Global music transport: audio focus + network wake mode need an application
+        // context; playback started from this screen is a good audio citizen.
+        TvMusicPlayer.attachContext(this)
         stateText = findViewById(R.id.stateText)
         retryButton = findViewById(R.id.retryButton)
         stopButton = findViewById(R.id.stopButton)

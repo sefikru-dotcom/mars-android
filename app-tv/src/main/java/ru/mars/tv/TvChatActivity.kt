@@ -32,9 +32,17 @@ import ru.mars.network.repository.SessionRepository
  *
  * A running turn is STOPPABLE (mobile cancelStream parity): while the turn is live the
  * primary button becomes «Остановить» and posts /api/chat/cancel ([TvChatControlGateway])
- * before tearing the local stream down. «Новый чат» and BACK/onDestroy cancel the server
- * turn best-effort as well — the TV client has no stream re-attach, so a merely abandoned
+ * before tearing the local stream down. «Новый чат», opening another session and an
+ * EXPLICIT exit (BACK/finish, i.e. onDestroy with isFinishing) cancel the server turn
+ * best-effort as well — the TV client has no stream re-attach, so a merely abandoned
  * turn would keep executing invisibly (tokens, commands, or blocked on an approval card).
+ *
+ * A TECHNICAL destroy (configuration change / system-initiated recreation) must NOT
+ * cancel the turn: the agent keeps running server-side, and the minimal session/stream
+ * binding is persisted through onSaveInstanceState ([TvChatLifecyclePolicy]) so the
+ * recreated screen rebinds the same session and can still stop the orphaned turn
+ * ([TvChatSessionFlow.restoreBinding]). The transcript itself is not restored — the
+ * server keeps the history and «Диалоги» can reload it.
  *
  * «Диалоги» opens the session browser overlay: the list fetch
  * ([SessionRepository.getSessions]) and the detail load ([SessionRepository.getSessionDetail])
@@ -109,6 +117,9 @@ class TvChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
+        // Global music transport: audio focus + network wake mode need an application
+        // context (the mini player below resumes playback through TvMusicPlayer).
+        TvMusicPlayer.attachContext(this)
         messages = findViewById(R.id.messages)
         input = findViewById(R.id.messageInput)
         send = findViewById(R.id.sendButton)
@@ -141,6 +152,17 @@ class TvChatActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, browserBackCallback)
         controlGateway = RepositoryTvChatControlGateway.create(BASE_URL, store)
+        // Technical recreation rebinds the persisted session/stream (TvChatLifecyclePolicy):
+        // the next send continues the same dialog and «Остановить» still reaches the
+        // server turn whose local SSE stream died with the destroyed Activity.
+        savedInstanceState?.let { saved ->
+            sessionFlow.restoreBinding(
+                TvChatLifecyclePolicy.sanitizedBinding(
+                    saved.getString(KEY_SESSION_ID),
+                    saved.getString(KEY_STREAM_ID),
+                )
+            )
+        }
         // While a turn is live the same button becomes «Остановить» (mobile parity).
         send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
@@ -148,6 +170,19 @@ class TvChatActivity : AppCompatActivity() {
         buildQuickChips()
         renderSendControl()
         input.requestFocus()
+    }
+
+    /**
+     * Persists the minimal session/stream binding across a technical recreation
+     * ([TvChatLifecyclePolicy.sanitizedBinding] — blank ids never reach the bundle).
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        TvChatLifecyclePolicy.sanitizedBinding(sessionFlow.sessionId, sessionFlow.activeStreamId)
+            ?.let { binding ->
+                binding.sessionId?.let { outState.putString(KEY_SESSION_ID, it) }
+                binding.activeStreamId?.let { outState.putString(KEY_STREAM_ID, it) }
+            }
     }
 
     /**
@@ -183,9 +218,13 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // BACK/exit abandons the session for good (no stream re-attach on TV): cancel the
-        // live server turn first so the agent does not keep running invisibly.
-        cancelServerTurnBestEffort()
+        // An EXPLICIT exit (BACK/finish) abandons the session for good: cancel the live
+        // server turn first so the agent does not keep running invisibly. A TECHNICAL
+        // destroy (recreation) must not cancel — the turn keeps running server-side and
+        // the recreated screen rebinds it from the saved state (TvChatLifecyclePolicy).
+        if (TvChatLifecyclePolicy.shouldCancelServerTurnOnDestroy(isFinishing, isChangingConfigurations)) {
+            cancelServerTurnBestEffort()
+        }
         stream?.cancel()
         if (::interactive.isInitialized) interactive.destroy()
         super.onDestroy()
@@ -193,7 +232,9 @@ class TvChatActivity : AppCompatActivity() {
 
     private fun sendMessage(): Boolean {
         val text = input.text.toString().trim()
-        if (text.isEmpty() || stream?.isActive == true) return false
+        // Blocked while a turn is live: the local stream is active OR a restored binding
+        // still arms the stop control (technical recreation — no local stream exists).
+        if (text.isEmpty() || stream?.isActive == true || sessionFlow.canStop) return false
         val credential = store.read() ?: return false
         input.text.clear()
         append("Вы", text, isUser = true)
@@ -640,6 +681,8 @@ class TvChatActivity : AppCompatActivity() {
         private const val STOPPING = "Останавливаю…"
         private const val LOADING_SESSIONS = "Загружаю список…"
         private const val OPENING_SESSION = "Открываю диалог…"
+        private const val KEY_SESSION_ID = "tv_chat_session_id"
+        private const val KEY_STREAM_ID = "tv_chat_active_stream_id"
 
         /** Process-wide scope for fire-and-forget server cancels that must outlive the Activity. */
         private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

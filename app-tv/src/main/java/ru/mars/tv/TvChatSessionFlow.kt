@@ -144,6 +144,25 @@ class TvChatSessionFlow(
         endTurn()
     }
 
+    /**
+     * Re-binds a session/stream that survived a TECHNICAL Activity recreation
+     * ([TvChatLifecyclePolicy] — only an explicit user exit cancels the server turn).
+     * The session id lets the next send continue the same dialog without minting a
+     * fresh one; a live stream id re-arms the stop control ([canStop]) so the user can
+     * still stop a server turn whose local SSE stream died with the destroyed Activity,
+     * and an accidental parallel send is blocked while it stands. Blank ids are
+     * ignored; a null binding is a no-op. The status line stays untouched — the stop
+     * button state is the honest indicator of the re-armed turn.
+     */
+    fun restoreBinding(binding: TvChatBinding?) {
+        binding ?: return
+        binding.sessionId?.takeIf { it.isNotBlank() }?.let { sessionId = it }
+        binding.activeStreamId?.takeIf { it.isNotBlank() }?.let {
+            activeStreamId = it
+            turnActive = true
+        }
+    }
+
     companion object {
         const val CREATING_SESSION = "Создаю сессию…"
         const val TYPING = "Марс печатает…"
