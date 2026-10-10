@@ -20,6 +20,7 @@ sealed class RichLine {
     data class Bullet(val spans: List<InlineSpan>) : RichLine()
     data class Quote(val spans: List<InlineSpan>) : RichLine()
     data class Numbered(val number: String, val spans: List<InlineSpan>) : RichLine()
+    data class TaskItem(val checked: Boolean, val spans: List<InlineSpan>) : RichLine()
     data class Normal(val spans: List<InlineSpan>) : RichLine()
     /** Horizontal rule (---, ***, ___). Rendered as a thin divider. */
     object Divider : RichLine()
@@ -50,6 +51,7 @@ object MarkdownFormatter {
     private val HEADER_REGEX = Regex("^(#{1,6})\\s+(.*)$")
     private val DIVIDER_REGEX = Regex("^\\s*([-*_])(?:\\s*\\1){2,}\\s*$")
     private val NUMBERED_REGEX = Regex("^(\\d+)\\.\\s+(.*)$")
+    private val TASK_ITEM_REGEX = Regex("^[-*+]\\s+\\[([ xX])\\]\\s+(.*)$")
     private val BULLET_REGEX = Regex("^[-*+]\\s+(.*)$")
     private val QUOTE_REGEX = Regex("^>\\s?(.*)$")
     private val ITALIC_AFTER_TRIM = Regex("\\*(.+?)\\*")
@@ -156,6 +158,11 @@ object MarkdownFormatter {
                     RichLine.Header(m.groupValues[1].length, parseInline(m.groupValues[2]))
                 }
                 QUOTE_REGEX.matches(trimmed) -> RichLine.Quote(parseInline(QUOTE_REGEX.find(trimmed)!!.groupValues[1]))
+                TASK_ITEM_REGEX.matches(trimmed) -> {
+                    val m = TASK_ITEM_REGEX.find(trimmed)!!
+                    val isChecked = m.groupValues[1].equals("x", ignoreCase = true)
+                    RichLine.TaskItem(isChecked, parseInline(m.groupValues[2]))
+                }
                 BULLET_REGEX.matches(trimmed) -> RichLine.Bullet(parseInline(BULLET_REGEX.find(trimmed)!!.groupValues[1]))
                 NUMBERED_REGEX.matches(trimmed) -> {
                     val m = NUMBERED_REGEX.find(trimmed)!!

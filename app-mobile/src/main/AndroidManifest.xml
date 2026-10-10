@@ -12,6 +12,9 @@
         <activity android:name=".ProjectsActivity" />
         <activity android:name=".MemoryActivity" />
         <activity android:name=".SkillsActivity" />
+        <activity android:name=".TodosActivity" />
+        <activity android:name=".CronActivity" />
+        <activity android:name=".SettingsActivity" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
