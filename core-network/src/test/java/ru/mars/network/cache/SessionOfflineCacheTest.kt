@@ -34,6 +34,11 @@ class SessionOfflineCacheTest {
             map.remove(key)
         }
 
+        override fun keys(): Set<String> {
+            if (failing) throw IllegalStateException("store down")
+            return map.keys.toSet()
+        }
+
         override fun clearAll() {
             if (failing) throw IllegalStateException("store down")
             map.clear()

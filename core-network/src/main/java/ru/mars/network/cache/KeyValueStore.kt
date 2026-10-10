@@ -19,6 +19,13 @@ interface KeyValueStore {
     /** Удаляет запись по ключу (если её нет — no-op). */
     fun remove(key: String)
 
+    /**
+     * Все ключи хранилища на текущий момент. Нужно офлайн-кэшу для восстановления
+     * LRU-индекса после повреждения/отсутствия служебной записи (перечислить кэши
+     * сообщений диалогов по префиксу). Пустой набор допустим — деградация, не ошибка.
+     */
+    fun keys(): Set<String>
+
     /** Стирает всё хранилище (гигиена выхода из аккаунта: приватные данные не переживают logout). */
     fun clearAll()
 }
@@ -38,6 +45,8 @@ class SharedPreferencesKeyValueStore(private val prefs: SharedPreferences) : Key
     override fun remove(key: String) {
         prefs.edit().remove(key).apply()
     }
+
+    override fun keys(): Set<String> = prefs.all.keys.toSet()
 
     override fun clearAll() {
         prefs.edit().clear().commit()
