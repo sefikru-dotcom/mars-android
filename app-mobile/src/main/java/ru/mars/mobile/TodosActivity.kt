@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -20,6 +21,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
+import ru.mars.network.cache.TodosOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.TodoItem
 import ru.mars.network.model.TodoSnapshot
@@ -30,19 +33,53 @@ class TodosActivity : ComponentActivity() {
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
     private val sessionRepo = SessionRepository()
 
+    /**
+     * Офлайн-кэш снимков todo_state (core-network): при старте мгновенно показываем
+     * последний снимок, сеть обновляет его в фоне; сбой сети не затирает задачи —
+     * экран остаётся на кэше с бейджем возраста (политика [OfflineCacheUiPolicy]).
+     */
+    private val offlineCache by lazy {
+        TodosOfflineCache(
+            SharedPreferencesKeyValueStore(
+                getSharedPreferences(TODOS_OFFLINE_PREFS, Context.MODE_PRIVATE),
+            ),
+        )
+    }
+
     private lateinit var todoList: LinearLayout
     private lateinit var summaryText: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var emptyText: TextView
+    private lateinit var cacheBanner: TextView
 
     private var currentFilter: String = "ALL" // ALL, IN_PROGRESS, COMPLETED, PENDING
     private var allItems: List<TodoItem> = emptyList()
+    private var currentSessionId: String? = null
+
+    /** На экране сейчас данные из кэша (переживает сбой сети, не затирается). */
+    private var cacheOnScreen = false
+
+    /** Слот кэша (sessionId), из которого взят ПОКАЗАННЫЙ снимок; null — снимка нет. */
+    private var cacheSlot: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildView())
         val sessionId = intent.getStringExtra("EXTRA_SESSION_ID")
+        currentSessionId = sessionId
+        showCachedSnapshot(sessionId)
         loadTodos(sessionId)
+    }
+
+    /** Мгновенный показ последнего снимка из кэша до ответа сети (бейдж возраста, без баннера). */
+    private fun showCachedSnapshot(sessionId: String?) {
+        val snapshot = offlineCache.loadTodos(sessionId) ?: return
+        allItems = snapshot.todos
+        cacheOnScreen = true
+        cacheSlot = sessionId
+        updateSummary(snapshot)
+        renderTodos()
+        applyDecision(decisionFor(OfflineFetchState.PENDING, livePayloadEmpty = false))
     }
 
     private fun buildView(): View {
@@ -95,6 +132,16 @@ class TodosActivity : ComponentActivity() {
             setPadding(dp(4), 0, 0, dp(10))
         }
         root.addView(summaryText)
+
+        // Ненавязчивый баннер кэша: бейдж возраста + отметка о сбое обновления.
+        cacheBanner = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.STATUS_WARNING)
+            background = MarsTheme.pill(this@TodosActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            visibility = View.GONE
+        }
+        root.addView(cacheBanner, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(10) })
 
         // Filter chips
         val filterScroll = HorizontalScrollView(this).apply {
@@ -166,24 +213,84 @@ class TodosActivity : ComponentActivity() {
     }
 
     private fun loadTodos(sessionId: String?) {
-        val cred = store.read() ?: return
-        progressBar.visibility = View.VISIBLE
+        val cred = store.read()
+        if (cred == null) {
+            onFetchFailure()
+            return
+        }
+
+        // Кэш уже показан (showCachedSnapshot) — запрос идёт в фоне, не затирая его.
+        progressBar.visibility = if (cacheOnScreen) View.GONE else View.VISIBLE
         lifecycleScope.launch {
-            val snapshot = if (!sessionId.isNullOrBlank()) {
-                val detail = sessionRepo.getSessionDetail(ChatActivity.BASE_URL, cred, sessionId)
-                detail?.todoState
-            } else {
-                // If no specific session, get the most recent session's todos
-                val sessions = sessionRepo.getSessions(ChatActivity.BASE_URL, cred)
-                val active = sessions.firstOrNull { it.activeTurn != null } ?: sessions.firstOrNull()
-                if (active != null) {
-                    sessionRepo.getSessionDetail(ChatActivity.BASE_URL, cred, active.id)?.todoState
-                } else null
-            }
+            val snapshot = runCatching {
+                if (!sessionId.isNullOrBlank()) {
+                    sessionRepo.getSessionDetail(ChatActivity.BASE_URL, cred, sessionId)?.todoState
+                } else {
+                    // If no specific session, get the most recent session's todos
+                    val sessions = sessionRepo.getSessions(ChatActivity.BASE_URL, cred)
+                    val active = sessions.firstOrNull { it.activeTurn != null } ?: sessions.firstOrNull()
+                    currentSessionId = active?.id
+                    if (active != null) {
+                        sessionRepo.getSessionDetail(ChatActivity.BASE_URL, cred, active.id)?.todoState
+                    } else null
+                }
+            }.getOrNull()
             progressBar.visibility = View.GONE
-            allItems = snapshot?.todos.orEmpty()
-            updateSummary(snapshot)
+            if (snapshot != null) onFetchSuccess(currentSessionId, snapshot) else onFetchFailure()
+        }
+    }
+
+    /** Сеть отработала: сохраняем снимок в кэш и переводим экран в LIVE (бейдж/баннер скрыты). */
+    private fun onFetchSuccess(slotSessionId: String?, snapshot: TodoSnapshot) {
+        offlineCache.saveTodos(slotSessionId, snapshot)
+        allItems = snapshot.todos
+        cacheOnScreen = false
+        cacheSlot = slotSessionId
+        updateSummary(snapshot)
+        renderTodos()
+        applyDecision(decisionFor(OfflineFetchState.SUCCESS, livePayloadEmpty = snapshot.todos.isEmpty()))
+    }
+
+    /**
+     * Сбой сети: если кэш уже на экране — задачи НЕ затираем, лишь подсвечиваем
+     * ненавязчивым баннером «работаем из кэша, обновление не удалось»; кэша нет —
+     * честный экран ошибки.
+     */
+    private fun onFetchFailure() {
+        val decision = decisionFor(OfflineFetchState.FAILURE, livePayloadEmpty = false)
+        cacheOnScreen = decision.showCachedContent
+        applyDecision(decision)
+        if (!decision.showCachedContent) {
+            allItems = emptyList()
             renderTodos()
+            emptyText.visibility = View.VISIBLE
+            emptyText.text = "Не удалось загрузить задачи"
+            summaryText.text = "Нет сети, а сохранённый снимок отсутствует"
+        }
+    }
+
+    /**
+     * Решение политики по текущим фактам экрана: фаза запроса + возраст снимка в кэше
+     * (null — кэша нет или он битый; показывать ли снимок — решает политика).
+     */
+    private fun decisionFor(state: OfflineFetchState, livePayloadEmpty: Boolean): OfflineUiDecision =
+        OfflineCacheUiPolicy.evaluate(
+            surface = MobileOfflineSurface.TODOS,
+            fetchState = state,
+            livePayloadEmpty = livePayloadEmpty,
+            snapshotTakenAtMs = offlineCache.getSnapshotTimestamp(cacheSlot ?: currentSessionId),
+            nowMs = System.currentTimeMillis(),
+        )
+
+    /** Рендер решения политики: видимость и текст ненавязчивого баннера кэша. */
+    private fun applyDecision(decision: OfflineUiDecision) {
+        val badge = decision.badgeText
+        val banner = decision.bannerText
+        if (badge == null && banner == null) {
+            cacheBanner.visibility = View.GONE
+        } else {
+            cacheBanner.visibility = View.VISIBLE
+            cacheBanner.text = listOfNotNull(badge, banner).joinToString("  ·  ")
         }
     }
 
@@ -275,4 +382,9 @@ class TodosActivity : ComponentActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private companion object {
+        /** Приватный prefs-файл офлайн-кэша задач (входит в logout-cleanup). */
+        const val TODOS_OFFLINE_PREFS = "mars_todos_offline"
+    }
 }
