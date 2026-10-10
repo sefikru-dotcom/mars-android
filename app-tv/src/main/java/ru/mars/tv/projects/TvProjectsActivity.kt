@@ -9,8 +9,11 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import ru.mars.network.cache.ProjectsOfflineCache
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.tv.R
 import ru.mars.tv.TvFocusLift
+import ru.mars.tv.TvOfflineCacheStatus
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -29,6 +32,13 @@ import java.util.Locale
  * Data/repository/parser слой отделён от UI: [HttpTvProjectsGateway] (транспорт),
  * [TvProjectsMetricsParser] (чистый парсинг), [TvProjectsController] (оркестрация,
  * generation guard, destroy) — покрыты JVM-тестами.
+ *
+ * Offline-кэш: контроллер внедрён с [ProjectsOfflineCache] поверх приватного
+ * SharedPreferences-файла ([SharedPreferencesKeyValueStore]). При сетевом сбое экран
+ * рисует последний снимок метрик со статусом [TvOfflineCacheStatus.CACHED] и плашкой
+ * возраста («Снимок из кэша (N мин. назад)») вместо ошибки: карточки не пустеют, фокус
+ * пульта не переставляется на «Повторить». Явная ошибка — только когда показывать
+ * нечего (кэш пуст или просрочен).
  */
 class TvProjectsActivity : AppCompatActivity() {
 
@@ -44,6 +54,9 @@ class TvProjectsActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var hasData = false
     private lateinit var controller: TvProjectsController
+
+    /** Плашка источника данных из контроллера (LIVE/CACHED); null — данные ещё не показывались. */
+    private var currentBadge: String? = null
 
     private val refreshTick = object : Runnable {
         override fun run() {
@@ -65,8 +78,15 @@ class TvProjectsActivity : AppCompatActivity() {
             statusView.text = "Загрузка метрик…"
         }
 
-        override fun showMetrics(metrics: TvProjectsMetrics) {
+        override fun showMetrics(
+            metrics: TvProjectsMetrics,
+            status: TvOfflineCacheStatus,
+            badgeText: String?,
+        ) {
+            // CACHED рисуется как обычные метрики: видимость та же, фокус не трогаем —
+            // мягкое восстановление не должно ломать навигацию с пульта.
             hasData = true
+            currentBadge = badgeText
             loadingGroup.visibility = View.GONE
             errorGroup.visibility = View.GONE
             dataScroll.visibility = View.VISIBLE
@@ -106,7 +126,12 @@ class TvProjectsActivity : AppCompatActivity() {
         refreshButton.setOnClickListener { controller.load() }
         retryButton.setOnClickListener { controller.load() }
 
-        controller = TvProjectsController(surface, HttpTvProjectsGateway(METRICS_URL))
+        // Офлайн-кэш сырого JSON метрик: отдельный приватный файл — clear() кэша
+        // (гигиена logout) не должен задевать чужие записи.
+        val offlineCache = ProjectsOfflineCache(
+            SharedPreferencesKeyValueStore(getSharedPreferences(OFFLINE_CACHE_PREFS, MODE_PRIVATE)),
+        )
+        controller = TvProjectsController(surface, HttpTvProjectsGateway(METRICS_URL), offlineCache)
         TvFocusLift.attachAll(backButton, refreshButton, retryButton)
         backButton.requestFocus()
 
@@ -140,10 +165,17 @@ class TvProjectsActivity : AppCompatActivity() {
             cardsContainer.getChildAt(focusedIndex)?.requestFocus()
         }
 
-        statusView.text = if (metrics.timestamp.isNotBlank()) {
-            "Обновлено: ${metrics.timestamp}"
-        } else {
-            "Обновлено в ${clock()}"
+        // Live-регион: плашка источника («Обновлено только что» / «Снимок из кэша (…)»)
+        // + серверная метка времени снимка, когда она есть.
+        val badge = currentBadge
+        statusView.text = when {
+            badge == null -> if (metrics.timestamp.isNotBlank()) {
+                "Обновлено: ${metrics.timestamp}"
+            } else {
+                "Обновлено в ${clock()}"
+            }
+            metrics.timestamp.isNotBlank() -> "$badge · ${metrics.timestamp}"
+            else -> badge
         }
     }
 
@@ -226,5 +258,8 @@ class TvProjectsActivity : AppCompatActivity() {
     companion object {
         const val METRICS_URL = "https://marscore.ru/dashboard/api/metrics"
         private const val REFRESH_MS = 30_000L
+
+        /** Приватный SharedPreferences-файл офлайн-кэша метрик. */
+        private const val OFFLINE_CACHE_PREFS = "tv_projects_offline_cache"
     }
 }
