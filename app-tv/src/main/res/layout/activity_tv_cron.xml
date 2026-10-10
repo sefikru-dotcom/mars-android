@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Экран «Cron» (TV): мониторинг расписаний планировщика и системного статуса.
+     Состояния: loading / error / data. Фильтр Все/Активные/На паузе — чип-ряд под шапкой.
+     Системный статус (профиль, число задач, cron_unavailable) — в statusView (live region);
+     честные пустые состояния выбирает TvCronPolicy. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="40dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/backButton"
+            android:text="Назад"
+            android:textSize="20sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_arrow_back"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="10dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            android:focusable="true"
+            android:nextFocusRight="@id/refreshButton"
+            android:nextFocusDown="@id/filterAll"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:text="Cron"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="32sp"
+            android:textStyle="bold"
+            android:layout_marginStart="24dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/statusView"
+            android:text="Загрузка расписаний…"
+            android:textColor="@color/mars_muted"
+            android:textSize="18sp"
+            android:gravity="end"
+            android:maxWidth="460dp"
+            android:accessibilityLiveRegion="polite"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/refreshButton"
+            android:text="Обновить"
+            android:textSize="20sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_refresh"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="10dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="22dp"
+            android:paddingEnd="22dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp"
+            android:focusable="true"
+            android:nextFocusLeft="@id/backButton"
+            android:nextFocusDown="@id/filterPaused"
+            android:layout_marginStart="20dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <!-- Фильтр состояния: D-pad left/right между чипами, up — в шапку, down — в список -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="22dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/filterAll"
+            android:text="Все"
+            android:textSize="17sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_chip"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:focusable="true"
+            android:nextFocusUp="@id/backButton"
+            android:nextFocusRight="@id/filterActive"
+            android:layout_marginEnd="12dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/filterActive"
+            android:text="Активные"
+            android:textSize="17sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_chip"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:focusable="true"
+            android:nextFocusUp="@id/backButton"
+            android:nextFocusLeft="@id/filterAll"
+            android:nextFocusRight="@id/filterPaused"
+            android:layout_marginEnd="12dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/filterPaused"
+            android:text="На паузе"
+            android:textSize="17sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_chip"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:focusable="true"
+            android:nextFocusUp="@id/refreshButton"
+            android:nextFocusLeft="@id/filterActive"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="24dp"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <!-- Состояние: загрузка -->
+        <LinearLayout
+            android:id="@+id/loadingGroup"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <ProgressBar
+                android:indeterminateTint="@color/mars_accent"
+                android:layout_width="56dp"
+                android:layout_height="56dp" />
+
+            <TextView
+                android:text="Загрузка расписаний…"
+                android:textColor="@color/mars_muted"
+                android:textSize="20sp"
+                android:layout_marginTop="16dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Состояние: ошибка (явная недоступность данных) -->
+        <LinearLayout
+            android:id="@+id/errorGroup"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <ImageView
+                android:src="@drawable/ic_status_dot_error"
+                android:contentDescription="@null"
+                android:layout_width="36dp"
+                android:layout_height="36dp" />
+
+            <TextView
+                android:id="@+id/errorText"
+                android:textColor="@color/mars_status_error"
+                android:textSize="24sp"
+                android:gravity="center"
+                android:maxWidth="720dp"
+                android:layout_marginTop="14dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <Button
+                android:id="@+id/retryButton"
+                android:text="Повторить"
+                android:textSize="20sp"
+                android:textColor="@color/mars_text"
+                android:background="@drawable/bg_focus_card"
+                android:drawableStart="@drawable/ic_refresh"
+                android:drawableTint="@color/icon_focus_tint"
+                android:drawablePadding="10dp"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:paddingStart="26dp"
+                android:paddingEnd="26dp"
+                android:paddingTop="12dp"
+                android:paddingBottom="12dp"
+                android:focusable="true"
+                android:layout_marginTop="22dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Состояние: данные (карточки задач планировщика) -->
+        <ScrollView
+            android:id="@+id/dataScroll"
+            android:visibility="gone"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:scrollbars="none"
+            android:focusable="false"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <LinearLayout
+                android:orientation="vertical"
+                android:clipChildren="false"
+                android:clipToPadding="false"
+                android:paddingBottom="16dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <!-- Явная пустая выборка / недоступность планировщика -->
+                <TextView
+                    android:id="@+id/emptyText"
+                    android:visibility="gone"
+                    android:textColor="@color/mars_muted"
+                    android:textSize="20sp"
+                    android:gravity="center"
+                    android:layout_marginTop="36dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+
+                <LinearLayout
+                    android:id="@+id/jobsContainer"
+                    android:orientation="vertical"
+                    android:clipChildren="false"
+                    android:clipToPadding="false"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+        </ScrollView>
+    </FrameLayout>
+</LinearLayout>

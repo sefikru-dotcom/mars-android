@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Строка списка «Задачи»: статусная точка (тонизируется в коде по семантике),
+     текст задачи (completed — зачёркнут, in_progress — акцент), справа бейдж статуса. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/bg_focus_card"
+    android:padding="20dp"
+    android:focusable="true"
+    android:layout_marginTop="12dp"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <ImageView
+        android:id="@+id/todoDot"
+        android:src="@drawable/ic_status_dot"
+        android:contentDescription="@null"
+        android:layout_marginStart="4dp"
+        android:layout_width="12dp"
+        android:layout_height="12dp" />
+
+    <TextView
+        android:id="@+id/todoContent"
+        android:textColor="@color/mars_text"
+        android:textSize="20sp"
+        android:lineSpacingExtra="3dp"
+        android:maxLines="3"
+        android:ellipsize="end"
+        android:layout_marginStart="16dp"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/todoBadge"
+        android:textSize="15sp"
+        android:background="@drawable/bg_chip"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:layout_marginStart="14dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>

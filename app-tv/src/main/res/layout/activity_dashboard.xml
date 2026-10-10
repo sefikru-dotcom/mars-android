@@ -29,7 +29,7 @@
     </LinearLayout>
 
     <!-- Без статичного «Марс онлайн»: доступность сервера здесь не проверяется,
-         живой статус показывают экраны Чат/Проекты из реальных данных. -->
+         живой статус показывают экраны Чат/Проекты/Задачи/Cron из реальных данных. -->
     <TextView
         android:id="@+id/time"
         android:text="00:00"
@@ -39,9 +39,12 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 
+    <!-- Сетка кнопок 3x2: явные D-pad цепочки по строкам и столбцам, без wrap. -->
     <LinearLayout
         android:orientation="horizontal"
-        android:layout_marginTop="50dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="44dp"
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
@@ -59,6 +62,7 @@
             android:gravity="center"
             android:focusable="true"
             android:nextFocusRight="@id/projectsButton"
+            android:nextFocusDown="@id/musicButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -77,11 +81,41 @@
             android:paddingEnd="24dp"
             android:gravity="center"
             android:focusable="true"
-            android:nextFocusRight="@id/musicButton"
+            android:nextFocusLeft="@id/chatButton"
+            android:nextFocusRight="@id/todosButton"
+            android:nextFocusDown="@id/cronButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/todosButton"
+            android:text="Задачи"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_todos"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusLeft="@id/projectsButton"
+            android:nextFocusDown="@id/settingsButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
         <Button
             android:id="@+id/musicButton"
@@ -96,6 +130,28 @@
             android:paddingEnd="24dp"
             android:gravity="center"
             android:focusable="true"
+            android:nextFocusUp="@id/chatButton"
+            android:nextFocusRight="@id/cronButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/cronButton"
+            android:text="Cron"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_cron"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/projectsButton"
+            android:nextFocusLeft="@id/musicButton"
             android:nextFocusRight="@id/settingsButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
@@ -115,6 +171,8 @@
             android:paddingEnd="24dp"
             android:gravity="center"
             android:focusable="true"
+            android:nextFocusUp="@id/todosButton"
+            android:nextFocusLeft="@id/cronButton"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="96dp" />
