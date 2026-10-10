@@ -74,3 +74,34 @@ The server auto-compresses mid-turn on its own threshold. The client additionall
 `POST /api/reasoning` with `{"effort": "…", "model"?, "provider"?, "session_id"?}` persists the choice server-side and answers the same status payload. WebUI parity: `effort:""` means Default (clears the override) and the key must be present.
 
 `POST /api/chat/start` carries NO reasoning field. The server resolves the effort per turn from session override > per-model pin > global config, so an explicit pick must be persisted via `POST /api/reasoning` before the next chat/start; the mobile client records a pick locally only after the server confirmed it, and hides the selector on any failed/unknown status.
+
+# Chat SSE: resume and reconnect
+
+## Event ids and the resume cursor
+
+`GET /api/chat/stream?stream_id=…` (and the legacy `POST /chat` SSE response) numbers every journal-worthy frame with an SSE `id:` field of the form `<stream_id>:<seq>` — tokens, tool frames, `todo_state`, `title` and `done` alike. Frames may also arrive without an `id:` (they carry nothing resumable).
+
+The client treats ids as OPAQUE and records the last non-blank one via the `onEventId` transport callback of `ChatRepository.sendMessage` / `attachToStream` (fires for EVERY id-bearing frame BEFORE mapping/diversion, so the cursor advances even for frames that never become `ChatEvent`s). `StreamResumeTracker` implements the WHATWG "last event ID" buffer semantics: id-less frames keep the cursor, an empty `id:` clears it, a new turn starts with `reset()` so a cursor from a previous stream never leaks into a new request.
+
+## Reattaching with Last-Event-ID
+
+`attachToStream(baseUrl, credential, streamId, lastEventId = …)` sends the cursor as the spec-compliant `Last-Event-ID` request header (the server honors it after explicit query params). Server behaviour (`routes.py` `_handle_sse_stream`):
+
+- live stream + cursor → the journaled events missed since that cursor are replayed first (gap-checked), then live frames continue;
+- dead-but-journaled stream → full journal replay from the cursor, then the terminal frames;
+- no cursor → live-only subscription (the server-side snapshot backfill still applies);
+- unknown/expired stream → `HTTP 404 {"error":"stream not found"}`.
+
+A 404 means the journal is GONE — resume is impossible. The client surfaces it as `ChatEvent.Error "HTTP 404: stream not found"` and must fall back to reloading the session (`GET /api/session`) and re-rendering the transcript; a turn that is still running re-binds via `active_stream_id` and a fresh attach.
+
+## Client reconnect semantics (mid-turn recovery)
+
+`MidTurnRecoveryCoordinator` (pure JVM, no clocks/randomness of its own) turns one `StreamFailure {throwable, errorMessage, lastEventId}` into exactly one sealed decision, first match wins:
+
+1. local network unavailable → `WaitForNetwork` (park; does not burn the retry budget); on the unavailable→available transition the next retry is IMMEDIATE (0 ms, one-shot);
+2. HTTP 404 / "stream not found" markers → `ReloadSession`;
+3. non-retryable class (401/403 auth, other 4xx, deliberate cancel, code bug — classified by `StreamRecoveryBackoffPolicy.shouldRetry`) → `GiveUp(reason)`;
+4. reconnect budget exhausted (`AdaptiveSseReconnectPolicy` streak) → `GiveUp`;
+5. otherwise → `ReattachAfter(delayMs, attempt, resumeFromEventId)`: jittered exponential ladder (500 ms → cap, ×2 per consecutive failure, ±20% jitter), 1-based attempt within the streak, cursor for the `Last-Event-ID` header.
+
+The first healthy stream event after a reattach (`onStreamHealthy()`) resets the streak, the ladder and the budget. A `/api/health` probe fed through `onServerProbe(...)` (`ServerHealthPolicy.evaluateStatus`) gates the one-shot immediate retry: while the server measures OFFLINE the arm is preserved and the ladder delay is used instead — the radio came back but the backend is still down, so a 0 ms hammer helps nobody. The coordinator never sleeps or re-opens anything itself; the caller owns threading, delays and the actual `attachToStream` call, and must call `decide` exactly once per failure.
