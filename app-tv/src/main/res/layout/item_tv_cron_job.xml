@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Карточка задачи cron: имя + состояние (Активна / На паузе, точка тонизируется в коде),
+     ниже расписание/модель и сроки (След. / Посл.) — строки скрываются, когда данных нет. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:background="@drawable/bg_focus_card"
+    android:padding="24dp"
+    android:focusable="true"
+    android:layout_marginTop="14dp"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <TextView
+            android:id="@+id/cronJobTitle"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <ImageView
+            android:id="@+id/cronJobDot"
+            android:src="@drawable/ic_status_dot"
+            android:contentDescription="@null"
+            android:layout_width="12dp"
+            android:layout_height="12dp" />
+
+        <TextView
+            android:id="@+id/cronJobState"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginStart="8dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/cronJobSchedule"
+        android:textColor="@color/mars_muted"
+        android:textSize="18sp"
+        android:lineSpacingExtra="3dp"
+        android:layout_marginTop="8dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/cronJobTiming"
+        android:textColor="@color/mars_text_em"
+        android:textSize="16sp"
+        android:layout_marginTop="6dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+</LinearLayout>
