@@ -72,6 +72,8 @@ class OfflineSessionPersistencePolicyTest {
         sourceLabel = "Subagent",
         readOnly = true,
         parentSessionId = "parent-$id",
+        model = "@custom:plusvibe-api:gpt-6.1-sol",
+        modelProvider = "custom:plusvibe-api",
     )
 
     private fun fullTurn() = ActiveTurnInfo(

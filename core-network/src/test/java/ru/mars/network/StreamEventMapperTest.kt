@@ -51,6 +51,118 @@ class StreamEventMapperTest {
         assertEquals("ok", event.result)
     }
 
+    @Test fun structuredToolResultIsJsonNotKotlinMapString() {
+        val event = StreamEventMapper.map(
+            "tool_result", null,
+            """{"id":"t2","name":"search","content":{"items":[{"title":"Ставрополь"}]}}"""
+        ) as ChatEvent.ToolResult
+        assertTrue(event.result.contains("\"items\""))
+        assertTrue(event.result.contains("Ставрополь"))
+        assertFalse(event.result.contains("items="))
+    }
+
+    // ---- числовые идентификаторы: wire вправе дать tid/session_id как JSON number ----
+
+    @Test fun numericTidIsCanonicalizedAndCorrelatesWithStringTid() {
+        val started = StreamEventMapper.map(
+            "tool", "e1",
+            """{"event_type":"tool.started","name":"terminal","args":{"command":"ls"},"tid":42}"""
+        ) as ChatEvent.ToolCall
+        assertEquals("42", started.id)
+        val completed = StreamEventMapper.map(
+            "tool_complete", "e2",
+            """{"event_type":"tool.completed","name":"terminal","preview":"total 0","tid":"42"}"""
+        ) as ChatEvent.ToolResult
+        // Корреляция call↔result в ChatUiState идёт по id: числовая и строковая
+        // формы одного tid обязаны нормализоваться одинаково (без «42.0»).
+        assertEquals(started.id, completed.id)
+    }
+
+    @Test fun numericIdsNeverSurfaceAsDoubleArtifacts() {
+        // Moshi декодирует JSON-числа в Double: целый id не должен стать «…123.0».
+        val event = StreamEventMapper.map("tool", null, """{"name":"bash","tid":1759870000123}""") as ChatEvent.ToolCall
+        assertEquals("1759870000123", event.id)
+    }
+
+    @Test fun numericSessionIdSurvivesSessionAndTitleFrames() {
+        assertEquals(ChatEvent.SessionBound("123"), StreamEventMapper.map("session", null, """{"session_id":123}"""))
+        assertEquals(ChatEvent.SessionBound("456"), StreamEventMapper.map("title", null, """{"session_id":456,"title":"Отладка"}"""))
+        assertEquals(
+            SessionTitleUpdate(sessionId = "456", title = "Отладка"),
+            StreamEventMapper.sideEvent("title", """{"session_id":456,"title":"Отладка"}""")
+        )
+    }
+
+    @Test fun numericApprovalAndClarifyIdsArePreserved() {
+        val approval = StreamEventMapper.map(
+            "approval", null, """{"approval_id":77,"command":"rm x","description":""}"""
+        ) as ChatEvent.ApprovalRequired
+        assertEquals("77", approval.payload.approvalId)
+        val clarify = StreamEventMapper.map(
+            "clarify", null, """{"clarify_id":8,"question":"Профиль?","session_id":99}"""
+        ) as ChatEvent.ClarifyRequired
+        assertEquals("8", clarify.payload.clarifyId)
+        assertEquals("99", clarify.payload.sessionId)
+    }
+
+    @Test fun numericRunIdAndMirrorTokenArePreserved() {
+        // run_id/_gateway_mirror_token — идентификаторы того же класса: числовая форма
+        // с провода не должна теряться при корреляции approval-рейса.
+        val approval = StreamEventMapper.map(
+            "approval", null,
+            """{"approval_id":77,"run_id":1234,"_gateway_mirror_token":567,"command":"rm x"}"""
+        ) as ChatEvent.ApprovalRequired
+        assertEquals("1234", approval.payload.runId)
+        assertEquals("567", approval.payload.mirrorToken)
+    }
+
+    @Test fun structuredIdsAreStillNeverCoerced() {
+        // Анти-джиббериш остаётся в силе: Map/List-идентификатор отбрасывается, а не toString()-дамнится.
+        assertNull(StreamEventMapper.map("session", null, """{"session_id":{"nested":1}}"""))
+        val event = StreamEventMapper.map("tool", null, """{"name":"bash","tid":["a"]}""") as ChatEvent.ToolCall
+        assertNull(event.id)
+    }
+
+    // ---- ограничение размера: гигантский однострочный tool JSON не должен течь в UI целиком ----
+
+    @Test fun giantSingleLineToolArgsAreCappedWithReadableMarker() {
+        val huge = "x".repeat(200_000)
+        val event = StreamEventMapper.map(
+            "tool", null,
+            """{"name":"write_file","tid":"t9","args":{"path":"a.txt","content":"$huge"}}"""
+        ) as ChatEvent.ToolCall
+        assertTrue(
+            "args length ${event.arguments.length} exceeds the cap",
+            event.arguments.length < StreamEventMapper.MAX_TOOL_PAYLOAD_CHARS + 64
+        )
+        // Начало сохраняется: detail-подсказка и ключи читаются.
+        assertTrue(event.arguments.startsWith("""{"path":"a.txt","content":"xxx"""))
+        // Маркер объясняет усечение и хранит полную длину — текст остаётся понятным.
+        assertTrue(event.arguments.contains("обрезано: полная длина"))
+        assertTrue(event.arguments.contains("${huge.length + """{"path":"a.txt","content":""}""".length} симв."))
+    }
+
+    @Test fun giantSingleLineToolResultAndPreviewAreCapped() {
+        val huge = "y".repeat(50_000)
+        val structured = StreamEventMapper.map(
+            "tool_result", null, """{"name":"search","tid":"t10","content":{"blob":"$huge"}}"""
+        ) as ChatEvent.ToolResult
+        assertTrue(structured.result.length < StreamEventMapper.MAX_TOOL_PAYLOAD_CHARS + 64)
+        assertTrue(structured.result.contains("обрезано: полная длина"))
+
+        val preview = StreamEventMapper.map(
+            "tool_complete", null, """{"name":"terminal","tid":"t11","preview":"$huge"}"""
+        ) as ChatEvent.ToolResult
+        assertTrue(preview.result.length < StreamEventMapper.MAX_TOOL_PAYLOAD_CHARS + 64)
+        assertTrue(preview.result.startsWith("yyy"))
+        assertTrue(preview.result.contains("обрезано: полная длина"))
+    }
+
+    @Test fun shortToolPayloadsAreNotTouchedByTheCap() {
+        val event = StreamEventMapper.map("tool", null, """{"name":"bash","args":{"command":"ls"}}""") as ChatEvent.ToolCall
+        assertEquals("""{"command":"ls"}""", event.arguments)
+    }
+
     @Test fun mapsInterimAssistantToChunkOnce() {
         val payload = """{"text":"Проверяю файл.","already_streamed":false}"""
         assertEquals(ChatEvent.Chunk("Проверяю файл.", "e3"), StreamEventMapper.map("interim_assistant", "e3", payload))

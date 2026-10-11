@@ -260,6 +260,8 @@ class SessionOfflineCache(
         "source_label" to item.sourceLabel,
         "read_only" to item.readOnly,
         "parent_session_id" to item.parentSessionId,
+        "model" to item.model,
+        "model_provider" to item.modelProvider,
     )
 
     /** Строка без id не восстанавливается в [SessionItem] и отбрасывается. */
@@ -280,6 +282,8 @@ class SessionOfflineCache(
             sourceLabel = map.stringOrNull("source_label"),
             readOnly = map["read_only"] as? Boolean ?: false,
             parentSessionId = map.stringOrNull("parent_session_id"),
+            model = map.stringOrNull("model"),
+            modelProvider = map.stringOrNull("model_provider"),
         )
     }
 

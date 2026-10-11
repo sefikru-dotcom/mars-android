@@ -73,6 +73,14 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         private set
 
     private var lastCatalog: ModelsResponse? = null
+    private var sessionModel: ModelChoice? = null
+
+    /** The server-authoritative model used by the currently opened session. */
+    fun setSessionModel(modelId: String?, providerId: String?) {
+        sessionModel = modelId?.takeIf { it.isNotBlank() }?.let { ModelChoice(it, providerId, explicitPick = false) }
+    }
+
+    fun clearSessionModel() { sessionModel = null }
 
     /** Picker rows in server order, labeled `name · provider` from real catalog data. */
     fun pickerEntries(catalog: ModelsResponse): List<ModelPickerEntry> {
@@ -85,6 +93,7 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         if (model.id.isBlank()) return null
         val choice = ModelChoice(model.id, model.providerId, explicitPick = true)
         current = choice
+        sessionModel = choice
         storage.save(choice)
         return choice
     }
@@ -105,12 +114,24 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         return choice
     }
 
-    /** Header-button label from real catalog data; null until a choice exists. */
+    /** Header-button label from the effective server session, then the local picker choice. */
     fun buttonLabel(): String? {
-        val choice = current ?: return null
+        val choice = wireChoice() ?: return null
         val row = lastCatalog?.models?.firstOrNull { it.id == choice.modelId }
         return row?.name?.takeIf { it.isNotBlank() } ?: choice.modelId
     }
+
+    fun displayedChoice(): ModelChoice? = wireChoice()
+
+    /**
+     * THE choice for the wire (`POST /api/chat/start` model fields) and, by
+     * delegation, for display: the server-authoritative session model when one
+     * is bound ([setSessionModel]), otherwise the local [current] (persisted
+     * user pick, else adopted server default). Null means "no usable identity":
+     * send chat/start WITHOUT model fields so the server routes with its own
+     * session/configured default instead of a client-side guess.
+     */
+    fun wireChoice(): ModelChoice? = sessionModel ?: current
 
     private fun entryLabel(model: ModelInfo): String {
         val name = model.name?.takeIf { it.isNotBlank() } ?: model.id

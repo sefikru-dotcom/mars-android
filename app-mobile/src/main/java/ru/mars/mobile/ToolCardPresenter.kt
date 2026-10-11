@@ -66,6 +66,8 @@ data class ToolCardView(
 object ToolCardPresenter {
     /** Sections longer than this are collapsed by default. */
     const val COLLAPSE_THRESHOLD_LINES = 8
+    /** Maximum visible characters for a collapsed section. */
+    const val COLLAPSE_THRESHOLD_CHARS = 1200
     /** Max length of the collapsed one-line detail hint. */
     const val DETAIL_MAX_LENGTH = 60
 
@@ -105,12 +107,17 @@ object ToolCardPresenter {
 
     fun lineCount(text: String): Int = if (text.isEmpty()) 0 else text.count { it == '\n' } + 1
 
-    fun isCollapsible(text: String): Boolean = lineCount(text) > COLLAPSE_THRESHOLD_LINES
+    fun isCollapsible(text: String): Boolean =
+        lineCount(text) > COLLAPSE_THRESHOLD_LINES || text.length > COLLAPSE_THRESHOLD_CHARS
 
-    /** Rendered text: first [COLLAPSE_THRESHOLD_LINES] lines of a long dump when collapsed. */
+    /** Rendered text: line and character limits apply only in collapsed state. */
     fun visibleText(text: String, expanded: Boolean): String {
         if (expanded || !isCollapsible(text)) return text
-        return text.split('\n').take(COLLAPSE_THRESHOLD_LINES).joinToString("\n")
+        val lineLimited = if (lineCount(text) > COLLAPSE_THRESHOLD_LINES) {
+            text.split('\n').take(COLLAPSE_THRESHOLD_LINES).joinToString("\n")
+        } else text
+        if (lineLimited.length <= COLLAPSE_THRESHOLD_CHARS) return lineLimited
+        return lineLimited.take(COLLAPSE_THRESHOLD_CHARS - 1).trimEnd() + "…"
     }
 
     fun hiddenLineCount(text: String): Int =
@@ -120,6 +127,7 @@ object ToolCardPresenter {
     fun toggleLabel(text: String, expanded: Boolean): String? {
         if (!isCollapsible(text)) return null
         if (expanded) return "Свернуть"
+        if (lineCount(text) <= COLLAPSE_THRESHOLD_LINES) return "Показать полностью"
         val hidden = hiddenLineCount(text)
         return "Показать ещё $hidden ${linesWord(hidden)}"
     }
