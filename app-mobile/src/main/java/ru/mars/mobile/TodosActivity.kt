@@ -52,7 +52,10 @@ class TodosActivity : ComponentActivity() {
     private lateinit var emptyText: TextView
     private lateinit var cacheBanner: TextView
 
-    private var currentFilter: String = "ALL" // ALL, IN_PROGRESS, COMPLETED, PENDING
+    private var currentFilter: TodoFilter = TodoFilter.ALL
+
+    /** Чипы фильтров по статусу; подсветка активного перерисовывается на каждый тап. */
+    private val filterChips = LinkedHashMap<TodoFilter, Button>()
     private var allItems: List<TodoItem> = emptyList()
     private var currentSessionId: String? = null
 
@@ -150,32 +153,17 @@ class TodosActivity : ComponentActivity() {
         }
         val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
 
-        val filters = listOf(
-            "ALL" to "Все",
-            "IN_PROGRESS" to "В процессе",
-            "COMPLETED" to "Выполнены",
-            "PENDING" to "В очереди"
-        )
-
-        filters.forEach { (key, label) ->
+        filterChips.clear()
+        TodoFilterPolicy.CHIPS.forEach { filter ->
             val chip = Button(this).apply {
-                text = label
+                text = filter.label
                 textSize = 12f
                 isAllCaps = false
-                val isSelected = currentFilter == key
-                background = MarsTheme.button(
-                    this@TodosActivity,
-                    if (isSelected) MarsTheme.ACCENT else MarsTheme.SURFACE,
-                    radiusDp = 10,
-                    strokeColor = if (isSelected) 0 else MarsTheme.BORDER
-                )
-                setTextColor(if (isSelected) Color.WHITE else MarsTheme.TEXT)
                 setPadding(dp(12), dp(4), dp(12), dp(4))
-                setOnClickListener {
-                    currentFilter = key
-                    renderTodos()
-                }
+                setOnClickListener { selectFilter(filter) }
             }
+            applyChipStyle(chip, selected = filter == currentFilter)
+            filterChips[filter] = chip
             filterRow.addView(chip, LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) })
         }
         filterScroll.addView(filterRow)
@@ -300,30 +288,44 @@ class TodosActivity : ComponentActivity() {
             return
         }
         val total = snapshot.todos.size
-        val done = snapshot.todos.count { it.status == "completed" }
+        val done = snapshot.todos.count { it.status == TodoFilterPolicy.STATUS_COMPLETED }
         summaryText.text = "Выполнено $done из $total задач (${(done * 100 / total.coerceAtLeast(1))}%)"
+    }
+
+    /** Тап по чипу: фильтр переключается, подсветка ряда перерисовывается, список обновляется. */
+    private fun selectFilter(filter: TodoFilter) {
+        if (currentFilter == filter) return
+        currentFilter = filter
+        filterChips.forEach { (chipFilter, chip) -> applyChipStyle(chip, selected = chipFilter == filter) }
+        renderTodos()
+    }
+
+    /** Стиль чипа: активный — акцентный без обводки, неактивный — surface с обводкой. */
+    private fun applyChipStyle(chip: Button, selected: Boolean) {
+        chip.background = MarsTheme.button(
+            this,
+            if (selected) MarsTheme.ACCENT else MarsTheme.SURFACE,
+            radiusDp = 10,
+            strokeColor = if (selected) 0 else MarsTheme.BORDER
+        )
+        chip.setTextColor(if (selected) Color.WHITE else MarsTheme.TEXT)
     }
 
     private fun renderTodos() {
         todoList.removeAllViews()
 
-        val filtered = when (currentFilter) {
-            "IN_PROGRESS" -> allItems.filter { it.status == "in_progress" }
-            "COMPLETED" -> allItems.filter { it.status == "completed" }
-            "PENDING" -> allItems.filter { it.status == "pending" }
-            else -> allItems
-        }
+        val filtered = TodoFilterPolicy.visibleItems(allItems, currentFilter)
 
         if (filtered.isEmpty()) {
             emptyText.visibility = View.VISIBLE
-            emptyText.text = if (allItems.isEmpty()) "Задачи отсутствуют" else "Нет задач с выбранным статусом"
+            emptyText.text = TodoFilterPolicy.emptyText(allItems.isEmpty())
             return
         }
         emptyText.visibility = View.GONE
 
         filtered.forEach { item ->
-            val isDone = item.status == "completed"
-            val inProgress = item.status == "in_progress"
+            val isDone = item.status == TodoFilterPolicy.STATUS_COMPLETED
+            val inProgress = item.status == TodoFilterPolicy.STATUS_IN_PROGRESS
 
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -367,7 +369,7 @@ class TodosActivity : ComponentActivity() {
                 text = when {
                     isDone -> "Готово"
                     inProgress -> "В работе"
-                    item.status == "cancelled" -> "Отменено"
+                    item.status == TodoFilterPolicy.STATUS_CANCELLED -> "Отменено"
                     else -> "Ожидает"
                 }
                 textSize = 11f
