@@ -902,11 +902,24 @@ class TvChatActivity : AppCompatActivity() {
      * decisions come from [TvSessionBrowserPolicy]; a stale fetch (token moved on) is dropped.
      */
     private fun openSessionBrowser() {
-        val credential = store.read() ?: return
+        // Guard only — the credential the fetch needs is read again inside loadSessionList.
+        if (store.read() == null) return
         browserReturnFocus = currentFocus
         chatRoot.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         browserBackCallback.isEnabled = true
         sessionsOverlay.visibility = View.VISIBLE
+        loadSessionList()
+    }
+
+    /**
+     * One session-list fetch attempt (the first open AND every «Повторить»): resets the
+     * dialog into the loading state and renders through [TvSessionBrowserPolicy.listOutcome].
+     * core-network answers every failed fetch with an EMPTY list, so the connectivity probe
+     * snapshot decides the honest verdict: offline reads «unavailable» + retry, never
+     * «Список диалогов пуст» (a dead radio is not evidence that no dialogs exist).
+     */
+    private fun loadSessionList() {
+        val credential = store.read() ?: return
         sessionRowViews.clear()
         browserRows = emptyList()
         sessionList.removeAllViews()
@@ -933,18 +946,39 @@ class TvChatActivity : AppCompatActivity() {
         (restore ?: sessionsButton).requestFocus()
     }
 
-    /** Builds the D-pad focusable rows; the initial focus lands per policy (current session, else first). */
+    /**
+     * Renders one fetched list through [TvSessionBrowserPolicy.listOutcome]: visible rows
+     * build the D-pad cards (initial focus per policy — current session, else first), the
+     * server-confirmed empty state parks the focus on «Закрыть», and the OFFLINE state gets
+     * the honest «unavailable» line plus a focusable «Повторить» row ([buildSessionListRetry])
+     * — a flaky-TV-radio dead end must stay escapable without closing the dialog.
+     */
     private fun renderSessionBrowser(sessions: List<SessionItem>) {
-        browserRows = TvSessionBrowserPolicy.rows(sessions, sessionFlow.sessionId)
+        val outcome = TvSessionBrowserPolicy.listOutcome(
+            sessions = sessions,
+            currentSessionId = sessionFlow.sessionId,
+            networkAvailable = connectivityProbe.isNetworkAvailable(),
+        )
         sessionList.removeAllViews()
         sessionRowViews.clear()
-        if (browserRows.isEmpty()) {
-            sessionsStatus.text = TvSessionBrowserPolicy.EMPTY_LIST
+        browserRows = (outcome as? TvSessionBrowserPolicy.ListOutcome.Show)?.rows.orEmpty()
+        val statusMessage = TvSessionBrowserPolicy.listStatusMessage(outcome)
+        if (statusMessage == null) {
+            sessionsStatus.visibility = View.GONE
+        } else {
+            sessionsStatus.text = statusMessage
             sessionsStatus.visibility = View.VISIBLE
-            closeSessions.requestFocus()
+        }
+        if (browserRows.isEmpty()) {
+            if (TvSessionBrowserPolicy.shouldOfferRetry(outcome)) {
+                val retry = buildSessionListRetry()
+                sessionList.addView(retry, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+                retry.requestFocus()
+            } else {
+                closeSessions.requestFocus()
+            }
             return
         }
-        sessionsStatus.visibility = View.GONE
         browserRows.forEachIndexed { index, row ->
             val card = buildSessionCard(index, row)
             sessionRowViews += card
@@ -952,6 +986,28 @@ class TvChatActivity : AppCompatActivity() {
         }
         val selection = TvSessionBrowserPolicy.initialSelection(browserRows, sessionFlow.sessionId)
         sessionRowViews.getOrNull(selection)?.requestFocus() ?: closeSessions.requestFocus()
+    }
+
+    /**
+     * The offline state's escape hatch: a focusable «Повторить» row (closeSessionsButton
+     * styling: theme focus selector + lift) that re-runs [loadSessionList]. Rendered only
+     * for [TvSessionBrowserPolicy.ListOutcome.Unreachable] — never for a server-confirmed
+     * empty list, where there is nothing to retry.
+     */
+    private fun buildSessionListRetry(): Button = Button(this).apply {
+        text = TvSessionBrowserPolicy.RETRY_LABEL
+        textSize = 18f
+        isAllCaps = false
+        setTextColor(ContextCompat.getColor(this@TvChatActivity, R.color.mars_text))
+        setBackgroundResource(R.drawable.bg_focus_card)
+        minWidth = 0
+        minHeight = 0
+        minimumWidth = 0
+        minimumHeight = 0
+        setPadding(dp(26), dp(10), dp(26), dp(10))
+        isFocusable = true
+        setOnClickListener { loadSessionList() }
+        TvFocusLift.attach(this)
     }
 
     /**
