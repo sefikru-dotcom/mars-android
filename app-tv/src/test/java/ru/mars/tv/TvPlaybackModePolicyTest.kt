@@ -213,4 +213,35 @@ class TvPlaybackModePolicyTest {
         assertEquals(r, TvAdvanceResult(2, false, "next_track"))
         assertEquals(r, r.copy())
     }
+
+    // --- queue-semantics parity with the playlist policy ---------------------------------------------
+
+    /**
+     * [TvMusicPlayer.onTrackCompleted] routes track completion through
+     * [TvPlaybackModePolicy.advanceOnCompletion]; the DEFAULT OFF mode must reproduce the
+     * historical [TvPlaylistPolicy.nextIndex] queue semantics exactly — walk the list
+     * once, stop when exhausted, never wrap — so wiring the mode policy in changed no
+     * observable behavior for the shipped default.
+     */
+    @Test
+    fun `OFF-mode completion matches the historical playlist policy for every size and index`() {
+        for (size in 0..4) {
+            for (index in -1..size) {
+                val advance = TvPlaybackModePolicy.advanceOnCompletion(size, index, TvRepeatMode.OFF)
+                val legacy = TvPlaylistPolicy.nextIndex(size, index)
+                if (legacy == null) {
+                    assertTrue("size=$size index=$index must stop", advance.shouldStop)
+                    assertNull("size=$size index=$index", advance.targetIndex)
+                } else {
+                    assertFalse("size=$size index=$index must advance", advance.shouldStop)
+                    assertEquals("size=$size index=$index", legacy, advance.targetIndex)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the transport default mode is OFF so the queue semantics ship unchanged`() {
+        assertEquals(TvRepeatMode.OFF, TvRepeatMode.values().first())
+    }
 }

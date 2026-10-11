@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.ReasoningStatus
 import java.io.IOException
@@ -38,7 +39,7 @@ sealed interface ReasoningStatusResult {
  * Blocking HTTP calls (same convention as [ContextCompressionRepository]): callers run
  * them on a background dispatcher, never on the UI thread.
  */
-class ReasoningRepository(private val client: OkHttpClient = OkHttpClient()) {
+class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     private val mapType = Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
     private val moshi = Moshi.Builder().build()

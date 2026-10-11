@@ -5,6 +5,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import java.io.IOException
 
@@ -41,7 +42,7 @@ sealed interface YoloToggleResult {
  * only in the header, token never in URLs, logs or result messages. Blocking by design;
  * callers run it on a background dispatcher/executor.
  */
-class SessionYoloRepository(private val client: OkHttpClient = OkHttpClient()) {
+class SessionYoloRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     /** Fetches the current YOLO state of a session. */
     fun fetchState(

@@ -316,4 +316,92 @@ class TvChatSessionFlowTest {
         assertNull(flow.activeStreamId)
         assertEquals("", flow.statusText)
     }
+
+    // ---- restored binding after a technical Activity recreation --------------
+
+    @Test fun `restoreBinding rebinds the session without minting a fresh one`() = runBlocking {
+        val (flow, creator) = flowWith()
+        flow.restoreBinding(TvChatBinding("restored-1", null))
+        assertEquals("restored-1", flow.sessionId)
+        assertTrue(flow.hasSession)
+        assertFalse("a session-only binding must not arm the stop control", flow.canStop)
+        // The next send continues the SAME dialog — no fresh session is created.
+        val result = flow.ensureSession(credential)
+        assertEquals(TvSessionResult.Ready("restored-1"), result)
+        assertEquals(0, creator.calls)
+    }
+
+    @Test fun `restoreBinding with a live stream re-arms the stop control`() {
+        val (flow, _) = flowWith()
+        flow.restoreBinding(TvChatBinding("s-1", "st-7"))
+        assertEquals("st-7", flow.activeStreamId)
+        assertTrue(flow.canStop)
+        // The recreated screen can still stop the orphaned server turn, honestly.
+        flow.markTurnStopped(serverCancelled = true)
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+        assertEquals(TvChatSessionFlow.STOPPED, flow.statusText)
+    }
+
+    @Test fun `restoreBinding keeps a stream-only binding stoppable without a session`() {
+        val (flow, _) = flowWith()
+        flow.restoreBinding(TvChatBinding(null, "st-3"))
+        assertNull(flow.sessionId)
+        assertEquals("st-3", flow.activeStreamId)
+        assertTrue(flow.canStop)
+    }
+
+    @Test fun `restoreBinding ignores a null binding and blank ids`() {
+        val (flow, _) = flowWith()
+        flow.restoreBinding(null)
+        assertNull(flow.sessionId)
+        assertFalse(flow.canStop)
+        flow.restoreBinding(TvChatBinding("   ", ""))
+        assertNull(flow.sessionId)
+        assertFalse(flow.hasSession)
+        assertNull(flow.activeStreamId)
+        assertFalse(flow.canStop)
+    }
+
+    @Test fun `restoreBinding never invents a status line`() {
+        val (flow, _) = flowWith()
+        flow.restoreBinding(TvChatBinding("s-2", "st-2"))
+        // The stop-button state is the honest indicator; the status strip stays hidden.
+        assertEquals("", flow.statusText)
+    }
+
+    @Test fun `startNewChat after a restore drops the rebound binding`() {
+        val (flow, _) = flowWith()
+        flow.restoreBinding(TvChatBinding("s-4", "st-4"))
+        flow.startNewChat()
+        assertNull(flow.sessionId)
+        assertFalse(flow.canStop)
+        assertNull(flow.activeStreamId)
+    }
+
+    // ---- recovery status lines (reattach wiring) ----------------------------------
+
+    @Test fun `markRecovering publishes a status without touching the turn state`() {
+        val (flow, _) = flowWith()
+        flow.beginTurn()
+        flow.onEvent(ChatEvent.StreamStarted("st-9"))
+        flow.markRecovering("Восстанавливаю соединение…")
+        assertEquals("Восстанавливаю соединение…", flow.statusText)
+        // The turn is still live server-side — «Остановить» stays armed during recovery.
+        assertTrue(flow.canStop)
+        assertEquals("st-9", flow.activeStreamId)
+    }
+
+    @Test fun `markReattaching announces the opening attach`() {
+        val (flow, _) = flowWith()
+        flow.markReattaching()
+        assertEquals(TvChatSessionFlow.REATTACHING, flow.statusText)
+        // The stop control arms only when the reattached stream's StreamStarted lands.
+        assertFalse(flow.canStop)
+    }
+
+    @Test fun `recovery status constants are stable host references`() {
+        assertEquals("Не удалось восстановить соединение", TvChatSessionFlow.RECOVERY_FAILED)
+        assertEquals("Ход завершён — история обновлена", TvChatSessionFlow.HISTORY_REFRESHED)
+    }
 }

@@ -25,4 +25,16 @@ object TvMusicNowPlayingSpec {
     /** True when the row's track is the transport's current one. */
     fun isCurrent(trackId: String, currentTrackId: String?): Boolean =
         currentTrackId != null && currentTrackId == trackId
+
+    /**
+     * Label of the D-pad repeat toggle for one [TvRepeatMode] (the button mirrors the
+     * transport preference and cycles it via [TvMusicPlayer.cycleRepeatMode]):
+     * OFF reads «выкл», ALL «список» (the whole queue loops), ONE «трек» (the current
+     * track replays). Text only — theme colors, no emojis.
+     */
+    fun repeatButtonLabel(mode: TvRepeatMode): String = when (mode) {
+        TvRepeatMode.OFF -> "Повтор: выкл"
+        TvRepeatMode.ALL -> "Повтор: список"
+        TvRepeatMode.ONE -> "Повтор: трек"
+    }
 }

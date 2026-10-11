@@ -74,3 +74,55 @@ The server auto-compresses mid-turn on its own threshold. The client additionall
 `POST /api/reasoning` with `{"effort": "…", "model"?, "provider"?, "session_id"?}` persists the choice server-side and answers the same status payload. WebUI parity: `effort:""` means Default (clears the override) and the key must be present.
 
 `POST /api/chat/start` carries NO reasoning field. The server resolves the effort per turn from session override > per-model pin > global config, so an explicit pick must be persisted via `POST /api/reasoning` before the next chat/start; the mobile client records a pick locally only after the server confirmed it, and hides the selector on any failed/unknown status.
+
+# Chat SSE: resume and reconnect
+
+## Event ids and the resume cursor
+
+`GET /api/chat/stream?stream_id=…` (and the legacy `POST /chat` SSE response) numbers every journal-worthy frame with an SSE `id:` field of the form `<stream_id>:<seq>` — tokens, tool frames, `todo_state`, `title` and `done` alike. Frames may also arrive without an `id:` (they carry nothing resumable).
+
+The client treats ids as OPAQUE and records the last non-blank one via the `onEventId` transport callback of `ChatRepository.sendMessage` / `attachToStream`. It fires for EVERY id-bearing frame AFTER the frame was delivered — emit returned / the `todo_state` and side-event callbacks ran — never before, so a cancelled or failed delivery leaves the cursor BEFORE the undelivered frame and the server replay covers it on reconnect. Known limitation: "delivered" means entered the `flowOn` channel buffer, not processed by the terminal collector; consumers needing end-to-end acking feed `StreamResumeTracker` from their terminal collector instead (`ChatEvent.Chunk` carries `eventId` for exactly this). `StreamResumeTracker` implements the WHATWG "last event ID" buffer semantics: id-less frames keep the cursor, an empty `id:` clears it, a new turn starts with `reset()` so a cursor from a previous stream never leaks into a new request.
+
+## Reattaching with Last-Event-ID
+
+`attachToStream(baseUrl, credential, streamId, lastEventId = …)` sends the cursor as the spec-compliant `Last-Event-ID` request header (the server honors it as a FALLBACK after its explicit query params `after_event_id`/`after_seq`/`replay`). Server behaviour (verified read-only against `/opt/hermes-webui/api/routes.py` `_handle_sse_stream`):
+
+- live stream + cursor → `_sse_replay_run_journal_gap_checked` replays the journaled events missed since that cursor (gap-checked), then the live drain loop continues with `id:`-bearing frames;
+- dead-but-journaled stream → `_replay_run_journal` replays the journal from the cursor, then the terminal frames;
+- no cursor → live-only subscription (the server-side snapshot backfill still applies);
+- unusable cursor (invalid/foreign/ahead-of-stream `last_seq`) → the server NORMALIZES it to replay-from-start, never silently skipping journal events;
+- unknown/expired stream (no journal) → `HTTP 404 {"error":"stream not found"}`.
+
+A 404 means the journal is GONE — resume is impossible. The client surfaces it as `ChatEvent.Error "HTTP 404: stream not found"` (`ErrorOrigin.TRANSPORT`) and must fall back to reloading the session (`GET /api/session`) and re-rendering the transcript; a turn that is still running re-binds via `active_stream_id` and a fresh attach.
+
+## Error origins (transport vs server)
+
+`ChatEvent.Error` carries an `ErrorOrigin`:
+
+- `TRANSPORT` (default) — the request itself failed: IOException/read timeout (`describeNetworkError` text) or a non-2xx response (`"HTTP <code>: <reason>"` from `describeHttpError`). Only these may drive reconnect decisions;
+- `SERVER` — the SSE channel delivered a runtime verdict: an `error`/`apperror` frame mapped by `StreamEventMapper`. The connection was healthy; the AGENT failed. The message is arbitrary server text (tool output, tracebacks, anything containing "not found") and must NEVER be parsed as a network verdict or re-attempted as a transport retry.
+
+`MidTurnRecoveryCoordinator.StreamFailure` mirrors this with an optional `origin` seam (`null` = legacy/unknown, treated as transport; `TRANSPORT`; `SERVER_EVENT` → always terminal `GiveUp`). Callers forwarding a `ChatEvent.Error` with `origin == SERVER` MUST set `StreamFailure.Origin.SERVER_EVENT`. Both new parameters are appended with defaults — existing call sites compile unchanged.
+
+## Shared OkHttp clients (HttpClients)
+
+`ru.mars.network.http.HttpClients` provides ONE connection pool + ONE dispatcher and two timeout profiles, used as constructor DEFAULTS (every repository still accepts an injected client):
+
+- `stream` — SSE calls (`POST /api/chat/start`, `GET /api/chat/stream`, legacy `POST /chat`): 90 s read timeout (covers server stalls around the 5 s `: heartbeat` comment; no `callTimeout` — a call lasts a whole turn);
+- `rest` — bounded request/response calls (sessions, models, uploads, cancel/steer, health): 10 s connect / 20 s read / 20 s write, no `callTimeout` (per-phase bounds catch stalled sockets without killing slow-but-steady 20 MB uploads).
+
+`pingInterval` is deliberately NOT configured: OkHttp pings only exist on HTTP/2 and WebSockets, this backend serves SSE over HTTP/1.1 `Connection: close`, and an HTTP ping is NOT an SSE heartbeat — it says nothing about the event stream making progress. Liveness = the server's `: heartbeat` comment (every `_SSE_HEARTBEAT_INTERVAL_SECONDS = 5`) + the stream read timeout.
+
+## Client reconnect semantics (mid-turn recovery)
+
+`MidTurnRecoveryCoordinator` (pure JVM, no clocks/randomness of its own) turns one `StreamFailure {throwable, errorMessage, lastEventId, origin}` into exactly one sealed decision, first match wins:
+
+0. `origin == SERVER_EVENT` (server-side terminal error frame) → `GiveUp("server-side stream error: …")` — reconnecting cannot fix an agent failure and its message text is never classified;
+1. local network unavailable → `WaitForNetwork` (park; does not burn the retry budget); on the unavailable→available transition the next retry is IMMEDIATE (0 ms, one-shot);
+2. gone stream — ANCHORED markers only: `HTTP 404` status extracted from the message/cause chain, the message equalling `stream not found` / `no such stream`, or a message containing `unknown stream`, or a bare `404` in a message that also says `stream` → `ReloadSession`. Broad `not found` or bare `404` do NOT match: tool output routinely contains "file not found"/"404 page not found", and misreading it would discard a resumable live turn mid-answer;
+3. non-retryable class (401/403 auth, other 4xx, deliberate cancel, code bug — classified by `StreamRecoveryBackoffPolicy.shouldRetry`) → `GiveUp(reason)`;
+4. per-turn reattach cap reached without VERIFIED progress → `GiveUp` (safety net, default 24; see below);
+5. reconnect budget exhausted (`AdaptiveSseReconnectPolicy` streak) → `GiveUp`;
+6. otherwise → `ReattachAfter(delayMs, attempt, resumeFromEventId)`: jittered exponential ladder (500 ms → cap, ×2 per consecutive failure, ±20% jitter), 1-based attempt within the streak, cursor for the `Last-Event-ID` header.
+
+Budget resets are progress-aware to close the replay-only infinite loop. Feed every frame's id to `onStreamFrame(eventId)` (wire it from the same `onEventId` lambda as `StreamResumeTracker`): an id NEWER than the high-water cursor (`RunJournalCursor.isAfter` — same-run ids compare `<stream_id>:<seq>` numerically, different runs are always newer, opaque shapes fall back to inequality) resets the streak AND re-arms the per-turn cap; an id at/below it is a REPLAYED duplicate and resets nothing, so a reconnect loop fed only by journal replays still terminates in `GiveUp`. The legacy `onStreamHealthy()` (id-less liveness proof) resets only the streak and never re-arms the cap. A `/api/health` probe fed through `onServerProbe(...)` (`ServerHealthPolicy.evaluateStatus`) gates the one-shot immediate retry: while the server measures OFFLINE the arm is preserved and the ladder delay is used instead — the radio came back but the backend is still down, so a 0 ms hammer helps nobody. The coordinator never sleeps or re-opens anything itself; the caller owns threading, delays and the actual `attachToStream` call (a GET — never a repeated `POST /api/chat/start`, which would start a second turn), and must call `decide` exactly once per failure.

@@ -13,6 +13,7 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -45,6 +46,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.domain.util.SpeechContentFilter
@@ -132,6 +135,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var scrollToBottomFab: ImageButton? = null
     /** Stream-recovery decisions (pure policy): reattach plan + dead-stream (404) detection. */
     private val reattachPolicy = StreamReattachPolicy()
+
+    /**
+     * Авто-recovery доставленного SSE-хода: единственный recovery-job (чистый JVM-цикл
+     * [MidTurnRecoveryController] поверх core-координатора MidTurnRecoveryCoordinator),
+     * классификатор транспортных обрывов (серверный tool error ≠ обрыв сети) и защита от
+     * шторма обновлений списка сессий на восстановлении сети.
+     */
+    private val transportFailureClassifier = TransportFailureClassifier()
+    private lateinit var recovery: MidTurnRecoveryController
+    private val sessionRefreshThrottle = SessionListRefreshThrottle()
+    private var sessionRefreshJob: Job? = null
+
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentStreamId: String? = null
@@ -263,6 +278,28 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         })
         setContentView(buildView())
+        // Recovery-цикл доставленного хода: транспорт — ТОЛЬКО attachToStream (повторный
+        // POST chat/start структурно невозможен), listener — тонкий wiring в существующий
+        // конвейер событий. Инициализация до networkObserver.start(): первый же снимок
+        // сети синхронно вызовет onNetworkTransition → recovery.onNetworkChanged.
+        recovery = MidTurnRecoveryController(
+            scope = lifecycleScope,
+            transport = RecoveryStreamTransport { streamId, lastEventId, onEventId ->
+                val attachCredential = store.read()
+                if (attachCredential == null) {
+                    // Credential исчез прямо во время recovery (logout/принудительная
+                    // реавторизация): цикл завершится GiveUp(auth rejected) → reauth.
+                    flowOf(ChatEvent.Error("HTTP 401: unauthorized"))
+                } else {
+                    ChatRepository().attachToStream(
+                        BASE_URL, attachCredential, streamId, lastEventId,
+                        onTodoState = todoCallback(currentSessionId),
+                        onEventId = onEventId,
+                    )
+                }
+            },
+            listener = RecoveryListener(),
+        )
         // Мониторинг сети: детектор стартует после построения UI (start() синхронно публикует
         // снимок текущего состояния — баннер корректен с первого кадра); переходы обновляют
         // баннер и запускают автофлаш офлайн-очереди.
@@ -300,6 +337,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
         MarsMusicPlayer.unregisterListener(this)
+        // Recovery-job умирает вместе с экраном (destroy — точка прерывания цикла).
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         speech?.destroy()
         tts.shutdown()
@@ -1158,10 +1197,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         targetSessionId: String?,
         credential: ConsumedDeviceCredential,
         onTurnFailed: (() -> Unit)? = null,
-    ): Job = lifecycleScope.launch {
+    ): Job {
+        // Новый пользовательский ход: предыдущий recovery-job прерывается (generation
+        // guard), курсор Last-Event-ID и серии отказов координатора сбрасываются.
+        if (::recovery.isInitialized) recovery.onNewTurn()
+        return lifecycleScope.launch {
         var credentialRejected = false
         var turnFailed = false
         var delivered = false
+        // Итоги первичного collect для передачи хода в recovery-цикл: терминальный Done
+        // (никогда не ретраится), серверная app/tool-ошибка (терминальна для хода) и
+        // подавленная ТРАНСПОРТНАЯ ошибка обрыва (recoverable — в транскрипт не пишется).
+        var sawDone = false
+        var sawAppError = false
+        var suppressedTransportError: ChatEvent.Error? = null
         try {
             if (targetSessionId == null) {
                 explicitStatus = "Создаю сессию…"
@@ -1201,27 +1250,62 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 model = choice?.modelId,
                 modelProvider = choice?.providerId,
                 explicitModelPick = choice?.explicitPick == true,
-                onTodoState = todoCallback(currentSessionId)
+                onTodoState = todoCallback(currentSessionId),
+                // Курсор Last-Event-ID продвигается на КАЖДОМ id-кадре (до маппинга),
+                // чтобы оборвавшийся доставленный ход восстанавливался без потерь.
+                onEventId = { id -> if (::recovery.isInitialized) recovery.resumeTracker.onFrameId(id) },
             ).collect { event ->
                 // Любое не-ошибочное событие доказывает: сервер принял запрос, сообщение
                 // доставлено. Ошибка ДО доставки (HTTP-отказ вместо стрима) — turnFailed.
                 if (event !is ChatEvent.Error) delivered = true
-                uiState.onEvent(event)
-                if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
-                if (event is ChatEvent.Error && !delivered) turnFailed = true
-                if (event is ChatEvent.SessionBound) {
-                    currentSessionId = event.sessionId
-                    refreshYoloState()
+                if (event is ChatEvent.Done) sawDone = true
+                // Транспортный обрыв ПОСЛЕ доставки: не пишем «Ошибка: …» в пузырь и не
+                // роняем статус в ERROR — ход жив на сервере, его подхватит recovery-цикл
+                // через attachToStream. Ошибка всплывёт, только если восстановление
+                // окончательно провалится (Listener.onGiveUp). 401 не подавляется: это
+                // существующий путь принудительной реавторизации. Серверные tool/app-ошибки
+                // (журнал хода) классификатором НЕ подавляются и проходят в транскрипт.
+                val suppressAsTransportDrop = event is ChatEvent.Error && delivered &&
+                    currentStreamId != null &&
+                    transportFailureClassifier.isTransportShaped(event.message) &&
+                    !AuthRejectionPolicy.isCredentialRejected(event.message)
+                if (suppressAsTransportDrop) {
+                    suppressedTransportError = event as ChatEvent.Error
+                    explicitStatus = STREAM_RECONNECT_STATUS
+                } else {
+                    uiState.onEvent(event)
+                    if (event is ChatEvent.Error) {
+                        sawAppError = true
+                        if (AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
+                        if (!delivered) turnFailed = true
+                    }
+                    if (event is ChatEvent.SessionBound) {
+                        currentSessionId = event.sessionId
+                        refreshYoloState()
+                    }
+                    if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
+                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
+                    interactiveController.onEvent(event)
+                    if (::compressionController.isInitialized) compressionController.onEvent(event)
+                    renderMessages()
+                    setStatus()
                 }
-                if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
-                if (event is ChatEvent.ContextUsage) updateContextIndicator()
-                if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
-                interactiveController.onEvent(event)
-                if (::compressionController.isInitialized) compressionController.onEvent(event)
-                renderMessages()
-                setStatus()
             }
             if (credentialRejected) { requestReauthentication(); return@launch }
+            // Доставленный ход оборвался без терминального Done → ЕДИНСТВЕННЫЙ recovery-job:
+            // только attach c Last-Event-ID, никогда повторный POST chat/start и никогда
+            // повторная отправка сообщения. Серверная ошибка, закрывшая ход (app-ошибка без
+            // транспортного сбоя), — терминальна: reconnect лишь отреплеил бы её же.
+            val recoveryStreamId = currentStreamId
+            val appErrorTerminal = sawAppError && suppressedTransportError == null
+            if (delivered && !sawDone && !appErrorTerminal && recoveryStreamId != null &&
+                ::recovery.isInitialized
+            ) {
+                explicitStatus = STREAM_RECONNECT_STATUS
+                stream = recovery.beginRecoveryAfterDrop(recoveryStreamId, suppressedTransportError)
+                return@launch
+            }
             if (uiState.status == ChatStatus.TYPING) uiState.complete()
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1242,6 +1326,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 flushOfflineQueue()
             }
         }
+        }
     }
 
     // --- Сеть и офлайн-очередь -------------------------------------------------------------------
@@ -1249,7 +1334,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Обработчик перехода сети: баннер обновляется всегда, восстановление связи запускает флаш. */
     private fun onNetworkTransition(transition: NetworkTransition) {
         updateNetworkBanner()
-        if (transition.restored) flushOfflineQueue()
+        // Сеть кормится в recovery-цикл: offline → парковка (WaitForNetwork), online →
+        // пробуждение и немедленный reattach. LOSING трактуется как offline (сеть сейчас умрёт).
+        if (::recovery.isInitialized) recovery.onNetworkChanged(transition.current.sendAllowed)
+        if (transition.restored) {
+            flushOfflineQueue()
+            // Список сессий на восстановлении связи обновляется через throttle: моргающая
+            // сеть (серия restored-переходов) не должна устраивать шторм GET /api/sessions.
+            // Стартовый снимок сети (до первичного восстановления диалога) не триггерит:
+            // onCreate сам грузит список — так же, как gated автофлаш очереди выше.
+            if (initialRestoreDone) requestSessionListRefresh()
+        }
     }
 
     /** Баннер: решение (видимость/текст/тон) — чистая NetworkBannerPolicy; хост мапит тон на MarsTheme. */
@@ -1349,6 +1444,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 runCatching { ChatRepository().executeControl(ChatRepository().cancelRequest(BASE_URL, id, credential.accessToken)) }
             }
         }
+        // «Стоп» прерывает recovery-цикл: после осознанной остановки хода reattach не должен
+        // «воскрешать» стрим; generation guard отсекает поздние события убитого цикла.
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -2336,15 +2434,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun loadSessions() {
-        val c = store.read() ?: return
+    private fun loadSessions(onFinished: (() -> Unit)? = null) {
+        val c = store.read() ?: run { onFinished?.invoke(); return }
         lifecycleScope.launch {
-            val fresh = SessionRepository().getSessions(BASE_URL, c)
-            // Пустой ответ (сбой сети — репозиторий не бросает исключение, — или диалогов
-            // действительно нет) сверяется с офлайн-кэшем: на сбое drawer показывает
-            // последний сохранённый снимок вместо пустого списка.
-            uiState.setSessions(withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) })
-            renderSessionList()
+            try {
+                val fresh = SessionRepository().getSessions(BASE_URL, c)
+                // Пустой ответ (сбой сети — репозиторий не бросает исключение, — или диалогов
+                // действительно нет) сверяется с офлайн-кэшем: на сбое drawer показывает
+                // последний сохранённый снимок вместо пустого списка.
+                uiState.setSessions(withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) })
+                renderSessionList()
+            } finally {
+                // Throttle обновления списка (защита от шторма) отмечает завершение полёта.
+                onFinished?.invoke()
+            }
         }
     }
 
@@ -2362,6 +2465,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Токен навигации: устаревший callback (пользователь открыл другой диалог/новый чат
         // или закрыл сессию, пока грузились детали) не перетирает актуальное состояние.
         val token = sessionNavigation.beginNavigation()
+        // Смена диалога прерывает recovery предыдущего хода: reattach чужого стрима в
+        // новом контексте запрещён (generation guard отсекает поздние события).
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, sessionId)
             if (detail != null) {
@@ -2457,7 +2563,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun reattachActiveTurn(activeTurn: ActiveTurnInfo) {
         val plan = reattachPolicy.planFor(activeTurn) as? ReattachPlan.Attach ?: return
         if (stream?.isActive == true) return
-        val credential = store.read() ?: return
+        if (!::recovery.isInitialized || recovery.isRecovering) return
+        store.read() ?: return // транспорт recovery читает credential на каждой попытке attach
         if (!uiState.beginReattachedTurn()) return
         autoScroll.pinToBottom()
         currentStreamId = plan.streamId
@@ -2465,55 +2572,135 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         renderMessages()
         setStatus()
         updateControls()
-        val sessionId = currentSessionId
-        stream = lifecycleScope.launch {
-            var streamGone = false
-            var credentialRejected = false
-            try {
-                ChatRepository().attachToStream(BASE_URL, credential, plan.streamId,
-                    onTodoState = todoCallback(sessionId)).collect { event ->
-                    if (reattachPolicy.outcomeOf(event) == ReattachEventOutcome.StreamGone) {
-                        streamGone = true
-                        return@collect
-                    }
-                    uiState.onEvent(event)
-                    if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
-                    if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
-                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
-                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
-                    interactiveController.onEvent(event)
-                    if (::compressionController.isInitialized) compressionController.onEvent(event)
-                    renderMessages()
-                    setStatus()
-                }
-                if (credentialRejected) {
-                    requestReauthentication()
-                    return@launch
-                }
-                if (streamGone) {
-                    // The stream died server-side (404): drop the empty placeholder and show
-                    // what actually settled in the transcript.
-                    uiState.cancelReattachedTurn()
-                    explicitStatus = "Ход завершён — история обновлена"
-                    if (currentSessionId == sessionId) reloadCurrentSession()
-                } else if (uiState.status == ChatStatus.TYPING) {
-                    uiState.complete()
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                uiState.fail()
-                if (credentialRejected) { requestReauthentication(); return@launch }
-            } finally {
-                if (explicitStatus == REATTACH_STATUS) explicitStatus = null
-                renderMessages()
-                setStatus()
-                updateControls()
-                // Переоткрытый ход завершён штатно — можно доотправить буферизованные
-                // сообщения диалога. Отмена пользователем триггером не является, а
-                // streamGone уже обрабатывается reloadCurrentSession().
-                if (coroutineContext[Job]?.isCancelled != true && !streamGone) flushOfflineQueue()
+        // Recovery-цикл (MidTurnRecoveryController) владеет всем attach-жизненным циклом:
+        // единственный job, backoff/офлайн-парковка, resume по Last-Event-ID, транспортный
+        // 404 (стрим умер серверно) → ReloadSession с обновлением истории, терминальный
+        // Done не ретраится, серверные tool-ошибки идут в транскрипт и завершают цикл без
+        // reconnect'а, 401 → GiveUp(auth) → requestReauthentication (см. RecoveryListener).
+        stream = recovery.attachActiveTurn(plan.streamId)
+    }
+
+    // --- Mid-turn recovery: тонкий wiring MidTurnRecoveryController.Listener --------------------
+
+    /**
+     * Все вызовы приходят в main-диспетчере (lifecycleScope) и только из живого поколения
+     * цикла: смена сессии, новый ход, «стоп», logout и destroy убивают job через
+     * [MidTurnRecoveryController.cancelRecovery], и поздние события туда не доходят.
+     */
+    private inner class RecoveryListener : MidTurnRecoveryController.Listener {
+        /** Обычное событие reattach-стрима — тот же конвейер, что и у первичного collect. */
+        override fun onStreamEvent(event: ChatEvent) {
+            uiState.onEvent(event)
+            if (event is ChatEvent.Error && AuthRejectionPolicy.isCredentialRejected(event.message)) {
+                requestReauthentication()
+                return
             }
+            if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+            if (event is ChatEvent.ContextUsage) updateContextIndicator()
+            if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
+            interactiveController.onEvent(event)
+            if (::compressionController.isInitialized) compressionController.onEvent(event)
+            renderMessages()
+            setStatus()
+        }
+
+        override fun onAttachAttempt(attempt: Int, resumeFromEventId: String?) {
+            if (attempt > 0) {
+                explicitStatus = if (attempt == 1) {
+                    STREAM_RECONNECT_STATUS
+                } else {
+                    "$STREAM_RECONNECT_STATUS (попытка $attempt)"
+                }
+                setStatus()
+            }
+        }
+
+        /** Офлайн-парковка: ход остаётся TYPING (пузырь, «стоп», steer), цикл ждёт сеть. */
+        override fun onRecoveryParkedOffline() {
+            explicitStatus = STREAM_PARKED_OFFLINE_STATUS
+            setStatus()
+        }
+
+        override fun onTurnCompleted() {
+            finishRecoveredTurn()
+        }
+
+        /** Серверная ошибка хода уже в транскрипте (onStreamEvent → uiState.fail()). */
+        override fun onTurnEndedInError() {
+            finishRecoveredTurn()
+        }
+
+        /** Стрим исчез серверно (404/истёкший журнал): placeholder снимается, история перезагружается. */
+        override fun onReloadSession() {
+            if (uiState.reattachedTurn) uiState.cancelReattachedTurn()
+            clearRecoveryStatus()
+            explicitStatus = "Ход завершён — история обновлена"
+            renderMessages()
+            setStatus()
+            updateControls()
+            reloadCurrentSession()
+        }
+
+        override fun onGiveUp(reason: String, suppressedTransportError: ChatEvent.Error?) {
+            if (suppressedTransportError != null &&
+                AuthRejectionPolicy.isCredentialRejected(suppressedTransportError.message)
+            ) {
+                requestReauthentication()
+                return
+            }
+            // Подавленная транспортная ошибка всплывает только здесь — на окончательном провале.
+            if (suppressedTransportError != null) uiState.onEvent(suppressedTransportError) else uiState.fail()
+            clearRecoveryStatus()
+            explicitStatus = "Поток не восстановлен: $reason"
+            renderMessages()
+            setStatus()
+            updateControls()
+            updateNetworkBanner()
+            flushOfflineQueue()
+        }
+    }
+
+    /** Завершение recovery-цикла: статус/контролы/офлайн-очередь — паритет с finally прежнего attach. */
+    private fun finishRecoveredTurn() {
+        clearRecoveryStatus()
+        if (uiState.status == ChatStatus.TYPING) uiState.complete()
+        renderMessages()
+        setStatus()
+        updateControls()
+        flushOfflineQueue()
+    }
+
+    /** Снимает статусную строку, только если её поставил recovery-цикл (не пользователь/сервер). */
+    private fun clearRecoveryStatus() {
+        val status = explicitStatus ?: return
+        if (status == REATTACH_STATUS || status == STREAM_PARKED_OFFLINE_STATUS ||
+            status.startsWith(STREAM_RECONNECT_STATUS)
+        ) {
+            explicitStatus = null
+        }
+    }
+
+    // --- Обновление списка сессий на восстановлении сети (защита от шторма) -----------------------
+
+    private fun requestSessionListRefresh() {
+        when (val decision = sessionRefreshThrottle.onTrigger(SystemClock.elapsedRealtime())) {
+            SessionRefreshDecision.Now -> runThrottledSessionRefresh()
+            is SessionRefreshDecision.Later -> {
+                sessionRefreshJob?.cancel()
+                sessionRefreshJob = lifecycleScope.launch {
+                    delay(decision.delayMs)
+                    runThrottledSessionRefresh()
+                }
+            }
+            SessionRefreshDecision.Skip -> Unit
+        }
+    }
+
+    private fun runThrottledSessionRefresh() {
+        sessionRefreshThrottle.onStarted()
+        loadSessions {
+            // Триггеры, пришедшие во время полёта, схлопываются в один догоняющий refresh.
+            if (sessionRefreshThrottle.onFinished(SystemClock.elapsedRealtime())) runThrottledSessionRefresh()
         }
     }
 
@@ -2562,6 +2749,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     // композитор переключается на черновик нового чата, а pending-загрузка
                     // удалённой сессии инвалидируется (её callback уже не применится).
                     sessionNavigation.invalidatePending()
+                    // Recovery удалённого диалога не переживает удаление: reattach мёртвой
+                    // сессии бессмыслен.
+                    if (::recovery.isInitialized) recovery.cancelRecovery()
                     interactiveController.dismissAll()
                     compressionController.onSessionChanged()
                     uiState.startNewSession()
@@ -3225,6 +3415,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Pending-загрузка диалога больше не актуальна: её callback не должен переключить
         // композитор и состояние обратно на старый session_id после «нового чата».
         sessionNavigation.invalidatePending()
+        // Новый чат прерывает recovery предыдущего диалога.
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -3335,6 +3527,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         sessionNavigation.invalidatePending()
 
         // Local stream teardown first so no more events land while the close is in flight.
+        // Recovery-цикл завершаемого хода тоже умирает: reattach после finish не нужен.
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -3426,6 +3620,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun leaveChat() {
+        // Logout прерывает recovery: цикл не должен дёргать API после отзыва credentials.
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         // Локальные plaintext-данные (черновики, история поиска музыки) стираются синхронно
         // ДО finish() и независимо от асинхронного best-effort revoke; pending-навигация
@@ -3450,6 +3646,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * loops every action into the same 401 with no way back to login.
      */
     private fun requestReauthentication() {
+        // Принудительная реавторизация прерывает recovery: attach с отозванным credential бессмыслен.
+        if (::recovery.isInitialized) recovery.cancelRecovery()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -3500,5 +3698,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val MESSAGE_NOT_DELIVERED_STATUS = "Сообщение из очереди не доставлено — лимит попыток исчерпан"
         /** Status line while a reattach to the session's live stream is being established. */
         private const val REATTACH_STATUS = "Подключение к активному ходу…"
+        /** Recovery-цикл переподключается к доставленному ходу (по Last-Event-ID). */
+        private const val STREAM_RECONNECT_STATUS = "Связь прервана — восстанавливаю поток…"
+        /** Recovery-цикл припаркован до возврата сети (офлайн-парковка). */
+        private const val STREAM_PARKED_OFFLINE_STATUS = "Нет связи — поток продолжится автоматически"
     }
 }

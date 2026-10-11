@@ -1,5 +1,6 @@
 package ru.mars.tv
 
+import android.content.Intent
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.KeyEvent
@@ -14,36 +15,58 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
+import ru.mars.network.repository.MidTurnRecoveryCoordinator
 import ru.mars.network.repository.SessionRepository
+import ru.mars.network.repository.StreamResumeTracker
 
 /**
  * TV chat screen: transcript, composer and the live turn status strip.
  *
  * A running turn is STOPPABLE (mobile cancelStream parity): while the turn is live the
  * primary button becomes «Остановить» and posts /api/chat/cancel ([TvChatControlGateway])
- * before tearing the local stream down. «Новый чат» and BACK/onDestroy cancel the server
- * turn best-effort as well — the TV client has no stream re-attach, so a merely abandoned
- * turn would keep executing invisibly (tokens, commands, or blocked on an approval card).
+ * before tearing the local stream down. «Новый чат» and an EXPLICIT exit (BACK/finish,
+ * i.e. onDestroy with isFinishing) cancel the server turn best-effort as well — a merely
+ * abandoned turn would keep executing invisibly (tokens, commands, or blocked on an
+ * approval card). NAVIGATION (opening another dialog) cancels only the LOCAL jobs: the
+ * server turn survives and the opened screen reattaches to it when it is the live one.
+ *
+ * A TECHNICAL destroy (configuration change / system-initiated recreation) must NOT
+ * cancel the turn: the agent keeps running server-side, and the minimal session/stream
+ * binding is persisted through onSaveInstanceState ([TvChatLifecyclePolicy]) so the
+ * recreated screen rebinds the same session, restores the transcript via a LIVE
+ * `GET /api/session` ([SessionRepository.getSessionDetail]) and reattaches the running
+ * turn with `attachToStream` + the `Last-Event-ID` resume cursor ([StreamResumeTracker]).
+ *
+ * Mid-turn resilience (core [MidTurnRecoveryCoordinator] + [TvChatStreamRecoveryLoop]):
+ * a dropped stream never re-POSTs chat/start — a SINGLE bounded recovery job parks on
+ * the connectivity observer ([TvConnectivityProbe]) while offline, backs off between
+ * reattach attempts and reattaches with the resume cursor so the server replays only
+ * the journal gap (no transcript/approval duplication). `Done` and definitive server
+ * verdicts (business/auth 4xx) end recovery; an expired journal (404) reloads history.
  *
  * «Диалоги» opens the session browser overlay: the list fetch
  * ([SessionRepository.getSessions]) and the detail load ([SessionRepository.getSessionDetail])
  * happen here, while every DECISION — which rows are listed (subagent children hidden),
  * how each row reads, where the D-pad focus opens and how it steps, how a loaded
  * [ru.mars.network.model.SessionDetail] turns into transcript bubbles — lives in the pure
- * [TvSessionBrowserPolicy] (JVM unit-tested). Opening a session tears the current turn down
- * exactly like «Новый чат» does, then binds the loaded id into [sessionFlow] so the next
- * send continues that dialog.
+ * [TvSessionBrowserPolicy] (JVM unit-tested). Opening a session cancels the LOCAL stream
+ * work (never the server turn), binds the loaded id into [sessionFlow] so the next send
+ * continues that dialog, and reattaches the session's live turn when it has one.
  */
 class TvChatActivity : AppCompatActivity() {
     private lateinit var messages: LinearLayout
@@ -83,6 +106,48 @@ class TvChatActivity : AppCompatActivity() {
     private var stream: Job? = null
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
 
+    // --- stream autonomy wiring ---------------------------------------------------------
+
+    /** The SINGLE mid-turn recovery job ([TvChatStreamRecoveryLoop]); at most one at a time. */
+    private var recovery: Job? = null
+
+    /**
+     * Stream generation: bumped by every explicit local teardown («Новый чат», opening
+     * another dialog, «Остановить», выход). Stream/recovery callbacks carrying a stale
+     * generation are dropped — late events of a dead stream never reach the transcript,
+     * the status strip or the interactive cards. A TECHNICAL recreate does not bump it
+     * (the new instance starts at 0 with no stale locals to guard against).
+     */
+    private var streamGeneration = 0
+
+    /** Live SSE resume cursor (`Last-Event-ID`): fed by `onEventId` of EVERY stream. */
+    private val resumeTracker = StreamResumeTracker()
+
+    /** Core recovery brain: failure classification, bounded backoff, offline parking. */
+    private val recoveryCoordinator = MidTurnRecoveryCoordinator()
+
+    /** Android connectivity snapshot + observer for the recovery loop's offline parking. */
+    private val connectivityProbe: TvConnectivityProbe by lazy {
+        TvAndroidConnectivityProbe(applicationContext)
+    }
+
+    /**
+     * Per-turn answer rendering state shared by a fresh send and every reattach: a still
+     * streaming bubble is CONTINUED by a cursor-resumed attach (never duplicated); a
+     * locked (Done/Error) bubble is replaced by a fresh one ([beginReattachedTurn]).
+     */
+    private var liveAnswer: TextView? = null
+    private var liveAccumulator: TvAnswerAccumulator? = null
+
+    private val recoveryLoop: TvChatStreamRecoveryLoop by lazy {
+        TvChatStreamRecoveryLoop(
+            transport = RecoveryTransport(),
+            connectivity = connectivityProbe,
+            cursorProvider = { resumeTracker.lastEventId },
+            coordinator = recoveryCoordinator,
+        )
+    }
+
     /**
      * Pure session + stream state (WebUI parity): chat/start requires a real
      * session_id, so the flow mints one via POST /api/session/new before the
@@ -109,6 +174,9 @@ class TvChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
+        // Global music transport: audio focus + network wake mode need an application
+        // context (the mini player below resumes playback through TvMusicPlayer).
+        TvMusicPlayer.attachContext(this)
         messages = findViewById(R.id.messages)
         input = findViewById(R.id.messageInput)
         send = findViewById(R.id.sendButton)
@@ -141,13 +209,43 @@ class TvChatActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, browserBackCallback)
         controlGateway = RepositoryTvChatControlGateway.create(BASE_URL, store)
+        // Technical recreation rebinds the persisted session/stream (TvChatLifecyclePolicy):
+        // the next send continues the same dialog and «Остановить» still reaches the
+        // server turn whose local SSE stream died with the destroyed Activity.
+        savedInstanceState?.let { saved ->
+            sessionFlow.restoreBinding(
+                TvChatLifecyclePolicy.sanitizedBinding(
+                    saved.getString(KEY_SESSION_ID),
+                    saved.getString(KEY_STREAM_ID),
+                )
+            )
+        }
         // While a turn is live the same button becomes «Остановить» (mobile parity).
         send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
         input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
         wireInteractive()
         buildQuickChips()
         renderSendControl()
+        // Technical recreate: restore the transcript via a LIVE GET /api/session and
+        // reattach the turn when it is still streaming server-side (never cancel it).
+        // Runs AFTER wireInteractive so the reattached turn's cards have their surface.
+        if (savedInstanceState != null) {
+            sessionFlow.sessionId?.let { restored -> openSession(restored) }
+        }
         input.requestFocus()
+    }
+
+    /**
+     * Persists the minimal session/stream binding across a technical recreation
+     * ([TvChatLifecyclePolicy.sanitizedBinding] — blank ids never reach the bundle).
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        TvChatLifecyclePolicy.sanitizedBinding(sessionFlow.sessionId, sessionFlow.activeStreamId)
+            ?.let { binding ->
+                binding.sessionId?.let { outState.putString(KEY_SESSION_ID, it) }
+                binding.activeStreamId?.let { outState.putString(KEY_STREAM_ID, it) }
+            }
     }
 
     /**
@@ -183,17 +281,23 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // BACK/exit abandons the session for good (no stream re-attach on TV): cancel the
-        // live server turn first so the agent does not keep running invisibly.
-        cancelServerTurnBestEffort()
-        stream?.cancel()
+        // An EXPLICIT exit (BACK/finish) abandons the session for good: cancel the live
+        // server turn first so the agent does not keep running invisibly. A TECHNICAL
+        // destroy (recreation) must not cancel — the turn keeps running server-side and
+        // the recreated screen rebinds it from the saved state (TvChatLifecyclePolicy).
+        if (TvChatLifecyclePolicy.shouldCancelServerTurnOnDestroy(isFinishing, isChangingConfigurations)) {
+            cancelServerTurnBestEffort()
+        }
+        cancelLocalStreamJobs()
         if (::interactive.isInitialized) interactive.destroy()
         super.onDestroy()
     }
 
     private fun sendMessage(): Boolean {
         val text = input.text.toString().trim()
-        if (text.isEmpty() || stream?.isActive == true) return false
+        // Blocked while a turn is live: the local stream is active, recovery is reattaching,
+        // OR a restored binding still arms the stop control (technical recreation).
+        if (text.isEmpty() || stream?.isActive == true || recovery?.isActive == true || sessionFlow.canStop) return false
         val credential = store.read() ?: return false
         input.text.clear()
         append("Вы", text, isUser = true)
@@ -202,11 +306,20 @@ class TvChatActivity : AppCompatActivity() {
         // (first chunk), chunks concatenate verbatim, and the FIRST terminal event (Done/Error)
         // locks the bubble — late frames can no longer clobber the outcome. A new turn builds
         // a fresh accumulator, so the next answer streams normally.
-        val accumulator = TvAnswerAccumulator(answer.text.toString())
+        liveAnswer = answer
+        liveAccumulator = TvAnswerAccumulator(answer.text.toString())
+        // A fresh user turn invalidates any stale local stream work and starts the resume
+        // cursor + recovery budget from zero (a cursor of the previous stream must never
+        // leak into a new Last-Event-ID header).
+        cancelLocalStreamJobs()
+        resumeTracker.reset()
+        recoveryCoordinator.reset()
+        stopping = false
         sessionFlow.beginTurn()
         renderSendControl()
         renderStatus()
         stream = lifecycleScope.launch {
+            val generation = streamGeneration
             try {
                 // Preflight: the server never creates sessions — a null id must not
                 // reach chat/start; the flow reuses the bound id or mints a new one.
@@ -217,34 +330,19 @@ class TvChatActivity : AppCompatActivity() {
                     }
                     is TvSessionResult.Ready -> renderStatus()
                 }
-                ChatRepository().sendMessage(BASE_URL, credential, text, sessionFlow.sessionId)
-                    .collect { event ->
-                        sessionFlow.onEvent(event)
-                        // Interactive gates are handled explicitly — they must never fall into
-                        // a silent `else -> Unit` (P0: the turn would hang with no way to answer).
-                        interactive.onEvent(event)
-                        when (event) {
-                            // Terminal lock lives in the accumulator (first Done/Error wins):
-                            // a late chunk after Error no longer clobbers «Ошибка: …», a late
-                            // chunk after Done no longer mutates the finished answer, and a
-                            // tail Error after Done no longer overwrites it. null = ignore.
-                            is ChatEvent.Chunk -> {
-                                accumulator.onChunk(event.text)?.let { rendered ->
-                                    answer.text = rendered
-                                    scrollDown()
-                                }
-                            }
-                            is ChatEvent.Error -> accumulator.onError(event.message)?.let { answer.text = it }
-                            is ChatEvent.Done -> accumulator.onDone()
-                            is ChatEvent.ApprovalRequired -> scrollDown() // card rendered by the surface
-                            is ChatEvent.ClarifyRequired -> scrollDown()
-                            else -> Unit
-                        }
-                        renderStatus()
-                    }
+                val outcome = collectTurn(
+                    ChatRepository().sendMessage(
+                        BASE_URL, credential, text, sessionFlow.sessionId,
+                        onEventId = { resumeTracker.onFrameId(it) },
+                    ),
+                    generation,
+                )
+                finishTurn(generation, outcome)
             } finally {
                 // Stream finished/cancelled: prompts cannot outlive their stream (Done/Error
                 // already dismissed via the controller; this covers abnormal termination).
+                // Dismissed cards are re-shown by a recovery reattach when the server
+                // replays the still-pending approval/clarify from its journal.
                 if (::interactive.isInitialized) interactive.dismissAll()
                 if (!stopping) {
                     // An explicit «Остановить» teardown owns the final render (stopCurrentTurn).
@@ -258,6 +356,331 @@ class TvChatActivity : AppCompatActivity() {
         return true
     }
 
+    /** One consumed local stream's outcome (fresh send or a reattach). */
+    private class TurnOutcome(
+        val cancelled: Boolean,
+        val sawDone: Boolean,
+        val sawGone: Boolean,
+        val errorMessage: String?,
+        val streamId: String?,
+    )
+
+    /**
+     * Consumes [flow] through the shared event pipeline ([handleStreamEvent]) and reports
+     * why it ended. Never throws: a cancellation is reported as [TurnOutcome.cancelled];
+     * transport failures arrive as `ChatEvent.Error` from core-network (its resilience
+     * contract maps every IOException onto an event instead of a thrown exception).
+     */
+    private suspend fun collectTurn(flow: Flow<ChatEvent>, generation: Int): TurnOutcome {
+        var sawDone = false
+        var sawGone = false
+        var errorMessage: String? = null
+        var streamId: String? = null
+        try {
+            flow.collect { event ->
+                when (event) {
+                    is ChatEvent.StreamStarted -> streamId = event.streamId
+                    is ChatEvent.Done -> sawDone = true
+                    is ChatEvent.Error -> {
+                        errorMessage = event.message
+                        if (TvStreamReattachPolicy.outcomeOf(event) == TvReattachEventOutcome.StreamGone) {
+                            sawGone = true
+                        }
+                    }
+                    else -> Unit
+                }
+                handleStreamEvent(event, generation)
+            }
+        } catch (cancelled: CancellationException) {
+            return TurnOutcome(true, sawDone, sawGone, errorMessage, streamId)
+        }
+        return TurnOutcome(false, sawDone, sawGone, errorMessage, streamId)
+    }
+
+    /**
+     * Shared per-event pipeline of EVERY stream source (a fresh chat/start, the reattach
+     * on session open, the recovery loop's reattaches): session state, interactive gates
+     * and the answer bubble. Events of a stale generation are dropped — a late callback
+     * of a dead stream must never mutate the transcript, the status strip or re-show
+     * cards after the user navigated/stopped.
+     */
+    private fun handleStreamEvent(event: ChatEvent, generation: Int) {
+        if (generation != streamGeneration) return
+        sessionFlow.onEvent(event)
+        // Interactive gates are handled explicitly — they must never fall into
+        // a silent `else -> Unit` (P0: the turn would hang with no way to answer).
+        if (::interactive.isInitialized) interactive.onEvent(event)
+        when (event) {
+            // Terminal lock lives in the accumulator (first Done/Error wins):
+            // a late chunk after Error no longer clobbers «Ошибка: …», a late
+            // chunk after Done no longer mutates the finished answer, and a
+            // tail Error after Done no longer overwrites it. null = ignore.
+            is ChatEvent.Chunk -> liveAccumulator?.onChunk(event.text)?.let { rendered ->
+                liveAnswer?.text = rendered
+                scrollDown()
+            }
+            is ChatEvent.Error -> {
+                liveAccumulator?.onError(event.message)?.let { liveAnswer?.text = it }
+                renderSendControl() // terminal event disarms «Остановить»
+            }
+            is ChatEvent.Done -> {
+                liveAccumulator?.onDone()
+                renderSendControl()
+            }
+            is ChatEvent.ApprovalRequired -> scrollDown() // card rendered by the surface
+            is ChatEvent.ClarifyRequired -> scrollDown()
+            // A reattached/recovered turn arms «Остановить» only when its StreamStarted lands.
+            is ChatEvent.StreamStarted -> renderSendControl()
+            else -> Unit
+        }
+        renderStatus()
+    }
+
+    /**
+     * Post-stream verdict (the gate is pure — [TvStreamReattachPolicy.shouldAttemptRecovery]):
+     * - a delivered `Done` ends everything: a finished turn NEVER reconnects;
+     * - an expired journal (anchored 404) resolves to ONE live history reload;
+     * - a transport-class error or a silent end starts the single bounded recovery job
+     *   (offline parking + backoff + `Last-Event-ID` reattach — never a chat/start re-POST);
+     * - a definitive server verdict (business/auth 4xx) stays terminal: the server already
+     *   answered, so no reconnect may follow.
+     */
+    private fun finishTurn(generation: Int, outcome: TurnOutcome) {
+        if (outcome.cancelled || stopping || generation != streamGeneration) return
+        val sessionId = sessionFlow.sessionId ?: return
+        when {
+            outcome.sawDone -> Unit
+            outcome.sawGone -> reloadHistoryAfterGone(sessionId, generation)
+            TvStreamReattachPolicy.shouldAttemptRecovery(outcome.errorMessage) ->
+                scheduleStreamRecovery(sessionId, outcome.streamId, outcome.errorMessage, generation)
+        }
+    }
+
+    /**
+     * Starts the SINGLE recovery job of a broken turn. At most one recovery job runs at
+     * a time; a stale generation is never scheduled. All decisions (park/retry/reload/
+     * give-up) belong to the core coordinator inside [TvChatStreamRecoveryLoop].
+     */
+    private fun scheduleStreamRecovery(
+        sessionId: String,
+        streamId: String?,
+        errorMessage: String?,
+        generation: Int,
+    ) {
+        if (generation != streamGeneration) return
+        // finishTurn runs INSIDE the dying stream job, so the only meaningful guard is
+        // the single-recovery-job invariant itself.
+        if (recovery?.isActive == true) return
+        sessionFlow.markRecovering(TvChatStreamRecoveryLoop.STATUS_STARTING)
+        renderStatus()
+        recovery = lifecycleScope.launch {
+            recoveryLoop.run(sessionId, streamId, errorMessage, recoveryHooks(generation))
+        }
+    }
+
+    /** Host reactions of the recovery loop; every one is generation-guarded. */
+    private fun recoveryHooks(generation: Int) = object : TvChatStreamRecoveryLoop.Hooks {
+        override fun onStatus(status: String) {
+            if (generation != streamGeneration) return
+            sessionFlow.markRecovering(status)
+            renderStatus()
+        }
+
+        override fun onAttachStarting(streamId: String) {
+            if (generation != streamGeneration) return
+            beginReattachedTurn()
+        }
+
+        override fun onStreamEvent(event: ChatEvent) {
+            handleStreamEvent(event, generation)
+        }
+
+        override fun onReloadHistory(detail: SessionDetail?) {
+            if (generation != streamGeneration) return
+            if (detail == null || detail.messages.isEmpty()) {
+                // detail == null: the reload fetch itself failed (server unreachable) —
+                // report honestly instead of pretending history was refreshed.
+                // Empty history: nothing ever settled server-side — the turn (and possibly
+                // the message itself) never reached the server. Keep the local transcript
+                // honest — wiping the user's own bubble for an undelivered message would
+                // be worse.
+                sessionFlow.markRecovering(TvChatSessionFlow.RECOVERY_FAILED)
+                sessionFlow.endTurn()
+                renderStatus()
+                renderSendControl()
+                return
+            }
+            renderSessionDetailHistory(detail)
+            sessionFlow.markRecovering(TvChatSessionFlow.HISTORY_REFRESHED)
+            sessionFlow.endTurn()
+            renderStatus()
+            renderSendControl()
+        }
+
+        override fun onGiveUp(reason: String) {
+            if (generation != streamGeneration) return
+            if (reason.startsWith(GIVE_UP_AUTH_PREFIX)) {
+                forceReauth()
+                return
+            }
+            sessionFlow.markRecovering(TvChatSessionFlow.RECOVERY_FAILED)
+            sessionFlow.endTurn()
+            renderStatus()
+            renderSendControl()
+        }
+    }
+
+    /**
+     * Prepares the answer bubble of a reattached turn: a still-STREAMING bubble is reused
+     * (a cursor-resumed attach CONTINUES the same answer — the transcript is never
+     * duplicated), a locked (Done/Error) or missing bubble gets a fresh placeholder.
+     */
+    private fun beginReattachedTurn() {
+        if (liveAccumulator?.state != TvAnswerAccumulator.State.STREAMING || liveAnswer == null) {
+            val answer = append("Марс", "", isUser = false)
+            liveAnswer = answer
+            liveAccumulator = TvAnswerAccumulator(answer.text.toString())
+        }
+        sessionFlow.markReattaching()
+        renderStatus()
+    }
+
+    /**
+     * Opens the session's live server turn with `attachToStream` (+ the `Last-Event-ID`
+     * cursor when one is known) — it NEVER cancels the turn and NEVER re-POSTs
+     * chat/start. A mid-attach drop cascades into the single recovery job.
+     */
+    private fun reattachActiveTurn(sessionId: String, activeTurn: ActiveTurnInfo, generation: Int) {
+        if (generation != streamGeneration) return
+        if (stream?.isActive == true || recovery?.isActive == true) return
+        val plan = TvStreamReattachPolicy.planFor(activeTurn) as? TvReattachPlan.Attach ?: return
+        val credential = store.read() ?: return
+        beginReattachedTurn()
+        stream = lifecycleScope.launch {
+            try {
+                val outcome = collectTurn(
+                    ChatRepository().attachToStream(
+                        BASE_URL, credential, plan.streamId,
+                        lastEventId = resumeTracker.lastEventId,
+                        onEventId = { resumeTracker.onFrameId(it) },
+                    ),
+                    generation,
+                )
+                finishTurn(generation, outcome)
+            } finally {
+                if (!stopping && generation == streamGeneration) {
+                    renderStatus()
+                    renderSendControl()
+                }
+            }
+        }
+    }
+
+    /** The journal died server-side (anchored 404): one live history reload, no reconnect. */
+    private fun reloadHistoryAfterGone(sessionId: String, generation: Int) {
+        val credential = store.read() ?: return
+        lifecycleScope.launch {
+            val detail = runCatching {
+                SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            }.getOrNull()
+            if (generation != streamGeneration) return@launch
+            if (detail == null) {
+                sessionFlow.markRecovering(TvChatSessionFlow.RECOVERY_FAILED)
+            } else {
+                renderSessionDetailHistory(detail)
+                sessionFlow.markRecovering(TvChatSessionFlow.HISTORY_REFRESHED)
+            }
+            sessionFlow.endTurn()
+            renderStatus()
+            renderSendControl()
+        }
+    }
+
+    /** Replaces the transcript with the server's settled history (live `GET /api/session`). */
+    private fun renderSessionDetailHistory(detail: SessionDetail?) {
+        detail ?: return
+        if (::interactive.isInitialized) interactive.dismissAll()
+        messages.removeAllViews()
+        liveAnswer = null
+        liveAccumulator = null
+        TvSessionBrowserPolicy.transcript(detail).forEach { row ->
+            append(row.author, row.text, row.isUser)
+        }
+        scrollDown()
+    }
+
+    /**
+     * Explicit local teardown of the stream work («Новый чат», opening another dialog,
+     * выход/BACK, logout): invalidates the generation (late callbacks are dropped) and
+     * cancels the single stream job AND the single recovery job. The SERVER turn is never
+     * touched here — an explicit exit/new-chat cancels it separately via
+     * [cancelServerTurnBestEffort]; navigation and a technical recreate leave it running.
+     */
+    private fun cancelLocalStreamJobs() {
+        streamGeneration++
+        stream?.cancel()
+        stream = null
+        recovery?.cancel()
+        recovery = null
+    }
+
+    /** Recovery verdict "auth rejected": the credential is dead — re-pair (dashboard logout parity). */
+    private fun forceReauth() {
+        cancelLocalStreamJobs()
+        store.clear()
+        startActivity(Intent(this, PairingActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        finish()
+    }
+
+    /** Production [TvRecoveryTransport]: core repositories + the shared resume cursor. */
+    private inner class RecoveryTransport : TvRecoveryTransport {
+        override suspend fun fetchSessionDetail(sessionId: String): SessionDetail? {
+            val credential = store.read() ?: return null
+            return runCatching {
+                SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            }.getOrNull()
+        }
+
+        override suspend fun attachStream(
+            streamId: String,
+            lastEventId: String?,
+            onEvent: (ChatEvent) -> Unit,
+        ): TvAttachOutcome {
+            // No credential mid-recovery = the auth verdict is already known: report it
+            // as a 401-class failure so the coordinator gives up and the host re-pairs.
+            val credential = store.read() ?: return TvAttachOutcome.Lost("HTTP 401: unauthorized")
+            var sawDone = false
+            var sawGone = false
+            var errorMessage: String? = null
+            ChatRepository().attachToStream(
+                BASE_URL, credential, streamId,
+                lastEventId = lastEventId,
+                onEventId = { resumeTracker.onFrameId(it) },
+            ).collect { event ->
+                when (event) {
+                    is ChatEvent.Done -> sawDone = true
+                    is ChatEvent.Error -> {
+                        errorMessage = event.message
+                        if (TvStreamReattachPolicy.outcomeOf(event) == TvReattachEventOutcome.StreamGone) {
+                            sawGone = true
+                        }
+                    }
+                    else -> Unit
+                }
+                onEvent(event)
+            }
+            // Snapshot: `errorMessage` is captured by the collect closure, so the compiler
+            // cannot smart-cast the var inside the `when` arm.
+            val finalError = errorMessage
+            return when {
+                sawDone -> TvAttachOutcome.Settled
+                sawGone -> TvAttachOutcome.Gone
+                finalError != null -> TvAttachOutcome.Lost(finalError)
+                else -> TvAttachOutcome.Lost(TvChatStreamRecoveryLoop.UNEXPECTED_END_MESSAGE)
+            }
+        }
+    }
+
     /** «Новый чат» from the header: cancels the live server turn, aborts the stream, resets session + transcript. */
     private fun startNewChat() {
         // Any in-flight browser fetch or session load is stale from this point on.
@@ -266,13 +689,18 @@ class TvChatActivity : AppCompatActivity() {
         // The session is dropped for good — cancel the server turn first (best-effort) so the
         // agent does not keep running for a transcript nobody will ever see again.
         cancelServerTurnBestEffort()
-        stream?.cancel()
-        stream = null
+        // Explicit local teardown: kills the stream AND the recovery job, and invalidates
+        // the generation so late callbacks of both are dropped.
+        cancelLocalStreamJobs()
+        resumeTracker.reset()
+        recoveryCoordinator.reset()
         stopping = false
         // Cards of the dead stream go first (invalidates in-flight responds), then the transcript.
         if (::interactive.isInitialized) interactive.dismissAll()
         sessionFlow.startNewChat()
         messages.removeAllViews()
+        liveAnswer = null
+        liveAccumulator = null
         renderSendControl()
         renderStatus()
         input.text.clear()
@@ -294,6 +722,10 @@ class TvChatActivity : AppCompatActivity() {
         send.isEnabled = false
         statusView.text = STOPPING
         statusView.visibility = View.VISIBLE
+        // An explicit stop must also kill the recovery job — otherwise it would reattach
+        // the very turn the user just asked to cancel.
+        recovery?.cancel()
+        recovery = null
         lifecycleScope.launch {
             val serverCancelled = streamId?.let { id ->
                 withContext(Dispatchers.IO) { controlGateway.cancelStream(id) }
@@ -589,24 +1021,30 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /**
-     * Loads one session and continues the chat inside it (mobile `loadSessionById` parity,
-     * minus drafts/reattach which the TV client does not have): the current turn is torn
-     * down exactly like «Новый чат» (server cancel first — the TV has no stream re-attach),
-     * the fetched detail binds into [sessionFlow] via [ChatEvent.SessionBound] so the next
-     * send reuses that session_id, and the persisted transcript renders as bubbles.
+     * Loads one session and continues the chat inside it (mobile `loadSessionById` parity):
+     * navigation cancels only the LOCAL stream work — NEVER the server turn — the fetched
+     * detail binds into [sessionFlow] via [ChatEvent.SessionBound] so the next send reuses
+     * that session_id, the persisted transcript renders as bubbles, and when the session's
+     * turn is still streaming server-side it is REATTACHED (attachToStream + Last-Event-ID
+     * cursor), never cancelled: a technical recreate or reopening an active dialog must
+     * continue the same live answer.
      */
     private fun openSession(sessionId: String) {
         val credential = store.read() ?: return
-        cancelServerTurnBestEffort()
-        stream?.cancel()
-        stream = null
+        // Navigation: cancel local jobs (stream + recovery), bump the generation so their
+        // late callbacks are dropped. The server turn survives and is reattached below.
+        cancelLocalStreamJobs()
+        resumeTracker.reset()
+        recoveryCoordinator.reset()
         stopping = false
         if (::interactive.isInitialized) interactive.dismissAll()
         val token = ++sessionLoadToken
         statusView.text = OPENING_SESSION
         statusView.visibility = View.VISIBLE
         lifecycleScope.launch {
-            val detail = SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            val detail = runCatching {
+                SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            }.getOrNull()
             // The user opened something newer mid-fetch («Новый чат», another dialog):
             // that navigation owns the screen now — never clobber it with a stale load.
             if (token != sessionLoadToken) return@launch
@@ -620,12 +1058,19 @@ class TvChatActivity : AppCompatActivity() {
                     sessionFlow.startNewChat()
                     sessionFlow.onEvent(ChatEvent.SessionBound(outcome.detail.id))
                     messages.removeAllViews()
+                    liveAnswer = null
+                    liveAccumulator = null
                     TvSessionBrowserPolicy.transcript(outcome.detail).forEach { row ->
                         append(row.author, row.text, row.isUser)
                     }
+                    input.text.clear()
+                    // A live server turn is reattached (never cancelled): the recreated
+                    // or reopened screen continues the same dialog.
+                    if (outcome.detail.activeTurn.canReattach) {
+                        reattachActiveTurn(outcome.detail.id, outcome.detail.activeTurn, streamGeneration)
+                    }
                     renderSendControl()
                     renderStatus()
-                    input.text.clear()
                     input.requestFocus()
                     scrollDown()
                 }
@@ -640,6 +1085,11 @@ class TvChatActivity : AppCompatActivity() {
         private const val STOPPING = "Останавливаю…"
         private const val LOADING_SESSIONS = "Загружаю список…"
         private const val OPENING_SESSION = "Открываю диалог…"
+        private const val KEY_SESSION_ID = "tv_chat_session_id"
+        private const val KEY_STREAM_ID = "tv_chat_active_stream_id"
+
+        /** Recovery give-up label of a dead credential ([MidTurnRecoveryCoordinator.giveUpReason]). */
+        private const val GIVE_UP_AUTH_PREFIX = "auth rejected"
 
         /** Process-wide scope for fire-and-forget server cancels that must outlive the Activity. */
         private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
