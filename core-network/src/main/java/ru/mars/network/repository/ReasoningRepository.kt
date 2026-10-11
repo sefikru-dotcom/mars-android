@@ -28,13 +28,23 @@ sealed interface ReasoningStatusResult {
  * Reasoning-effort contract of the WebUI backend (verified live and against
  * `api/routes.py` `_handle_api_reasoning` / `api/config.get_reasoning_status`):
  * - GET  /api/reasoning?model=&provider=&session_id= — effective status for the context.
- * - POST /api/reasoning `{effort, model?, provider?, session_id?}` — persists the effort
- *   (WebUI-parity: the composer chip posts `effort:''` for Default to clear the override)
- *   and answers the same status payload.
+ * - POST /api/reasoning `{effort, model?, provider?, session_id?, scope?}` — persists the
+ *   effort (WebUI-parity: the composer chip posts `effort:''` for Default to clear the
+ *   override) and answers the same status payload.
  *
  * `POST /api/chat/start` carries NO reasoning field: the server resolves the effort per
  * turn from session override > per-model pin > global config, so the selection must be
  * persisted through this endpoint before the next chat/start — exactly what the WebUI does.
+ *
+ * Per-model pin parity (static/ui.js composer chip): when the target model carries a pin in
+ * `agent.reasoning_overrides` (surfaced as `model_overrides` of the GET status), the chip must
+ * edit THAT pin — `{"scope":"model","model":<pinned key>}` — because a global write is silently
+ * overridden by the pin at runtime (`set_model_reasoning_override`: session > model > global).
+ * [setEffort] therefore preflights `GET /api/reasoning` with the same context and, when a pin
+ * matches (spelling-tolerant, `@custom:<provider>:<model>` full-form keys included), posts
+ * `scope=model` with the EXISTING key verbatim so the server updates (or, for Default `effort:''`,
+ * removes) exactly that entry instead of accumulating a near-duplicate. A failed/absent preflight
+ * falls back to the legacy global body — the user action is never blocked by the extra probe.
  *
  * Blocking HTTP calls (same convention as [ContextCompressionRepository]): callers run
  * them on a background dispatcher, never on the UI thread.
@@ -54,26 +64,41 @@ class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
         sessionId: String? = null,
     ): ReasoningStatusResult =
         execute(
-            request = Request.Builder()
-                .url(
-                    baseUrl.toHttpUrl().newBuilder()
-                        .addPathSegments("api/reasoning")
-                        .apply {
-                            model?.takeIf(String::isNotBlank)?.let { addQueryParameter("model", it) }
-                            provider?.takeIf(String::isNotBlank)?.let { addQueryParameter("provider", it) }
-                            sessionId?.takeIf(String::isNotBlank)?.let { addQueryParameter("session_id", it) }
-                        }
-                        .build()
-                )
-                .header("Authorization", "Bearer ${credential.accessToken}")
-                .get()
-                .build(),
+            request = statusRequest(baseUrl, credential, model, provider, sessionId),
             onIoError = { ReasoningStatusResult.Failed(networkMessage(it)) },
         )
+
+    /** Builds the context-carrying `GET /api/reasoning` request shared by [fetchStatus] and the pin preflight. */
+    private fun statusRequest(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        model: String?,
+        provider: String?,
+        sessionId: String?,
+    ): Request =
+        Request.Builder()
+            .url(
+                baseUrl.toHttpUrl().newBuilder()
+                    .addPathSegments("api/reasoning")
+                    .apply {
+                        model?.takeIf(String::isNotBlank)?.let { addQueryParameter("model", it) }
+                        provider?.takeIf(String::isNotBlank)?.let { addQueryParameter("provider", it) }
+                        sessionId?.takeIf(String::isNotBlank)?.let { addQueryParameter("session_id", it) }
+                    }
+                    .build()
+            )
+            .header("Authorization", "Bearer ${credential.accessToken}")
+            .get()
+            .build()
 
     /**
      * POST /api/reasoning. [effort] null/blank means "Default" and reaches the wire as
      * `""` (WebUI parity — the key must be present to clear the override).
+     *
+     * When [model] carries a per-model pin (preflighted `model_overrides` of the GET status),
+     * the POST edits that pin (`scope:"model"` + the pinned key verbatim) instead of the global
+     * default — matching the WebUI composer chip, which would otherwise have its global write
+     * silently overridden by the pin at runtime. Any preflight failure keeps the legacy body.
      */
     fun setEffort(
         baseUrl: String,
@@ -84,9 +109,16 @@ class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
         sessionId: String? = null,
     ): ReasoningStatusResult {
         val args = mutableMapOf<String, Any?>("effort" to (effort?.trim().orEmpty()))
-        model?.takeIf(String::isNotBlank)?.let { args["model"] = it }
+        val wireModel = model?.takeIf(String::isNotBlank)
+        wireModel?.let { args["model"] = it }
         provider?.takeIf(String::isNotBlank)?.let { args["provider"] = it }
         sessionId?.takeIf(String::isNotBlank)?.let { args["session_id"] = it }
+        if (wireModel != null) {
+            findPinnedKey(baseUrl, credential, wireModel, provider, sessionId)?.let { pinnedKey ->
+                args["model"] = pinnedKey
+                args["scope"] = "model"
+            }
+        }
         return execute(
             request = Request.Builder()
                 .url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/reasoning").build())
@@ -95,6 +127,34 @@ class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
                 .build(),
             onIoError = { ReasoningStatusResult.Failed(networkMessage(it)) },
         )
+    }
+
+    /**
+     * Preflights the GET status and returns the RAW `model_overrides` key pinning [model],
+     * or null when the model is unpinned or the probe failed (HTTP error, unparseable body,
+     * transport failure) — the caller then posts the legacy global body.
+     */
+    private fun findPinnedKey(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        model: String,
+        provider: String?,
+        sessionId: String?,
+    ): String? = try {
+        client.newCall(statusRequest(baseUrl, credential, model, provider, sessionId)).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val root = parseMap(response.body?.string().orEmpty()) ?: return null
+            val overrides = (root["model_overrides"] as? Map<*, *>)?.mapNotNull { (key, value) ->
+                val k = key?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val v = value?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                k to v
+            }.orEmpty()
+            matchPinnedOverrideKey(overrides, model)
+        }
+    } catch (_: Exception) {
+        // IOException (network) or any parse/runtime surprise: degrade to the legacy body,
+        // never block the user action. IOException messages contain no request headers.
+        null
     }
 
     private inline fun execute(
@@ -141,5 +201,33 @@ class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
     private companion object {
         private fun stringField(obj: Map<String, Any?>?, key: String): String? =
             obj?.get(key)?.toString()?.takeIf(String::isNotBlank)
+
+        /**
+         * Finds the RAW `model_overrides` key pinning [model] (first match wins), mirroring the
+         * server's spelling tolerance (`api/config._match_reasoning_override_key`: lowercase,
+         * `[-_.\s]+` → `-`) plus the full-form `@custom:<provider>:<model>` keys the live config
+         * uses. The bare tail after the last `/` is matched too (`qwen/qwen3.8-max` pins as
+         * `…:qwen/qwen3.8-max` or `…/qwen3.8-max`). Returns null when nothing matches — the
+         * caller then keeps the legacy global write.
+         */
+        private fun matchPinnedOverrideKey(overrides: List<Pair<String, String>>, model: String): String? {
+            val target = normalizeModelKey(model)
+            if (target.isEmpty()) return null
+            val tail = normalizeModelKey(model.trim().substringAfterLast('/', ""))
+            for ((key, _) in overrides) {
+                val candidate = normalizeModelKey(key)
+                if (candidate.isEmpty()) continue
+                if (candidate == target || candidate.endsWith(":$target") || candidate.endsWith("/$target")) return key
+                if (tail.isNotEmpty() &&
+                    (candidate == tail || candidate.endsWith(":$tail") || candidate.endsWith("/$tail"))
+                ) {
+                    return key
+                }
+            }
+            return null
+        }
+
+        private fun normalizeModelKey(value: String): String =
+            value.trim().lowercase().replace(Regex("[\\s._-]+"), "-")
     }
 }
