@@ -28,6 +28,7 @@ class SettingsActivity : ComponentActivity() {
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
     private lateinit var cacheSizeText: TextView
     private lateinit var pingStatusText: TextView
+    private lateinit var pingStatusDot: View
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,9 +97,16 @@ class SettingsActivity : ComponentActivity() {
                 text = "Проверка соединения…"
                 textSize = 12f
                 setTextColor(MarsTheme.TEXT_MUTED)
-                setPadding(dp(12), dp(8), dp(12), dp(10))
+                setPadding(dp(8), dp(8), dp(12), dp(10))
             }
-            addView(pingStatusText)
+            pingStatusDot = MarsTheme.statusDot(this@SettingsActivity, MarsTheme.TEXT_MUTED)
+            val pingRow = LinearLayout(this@SettingsActivity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), 0, 0, 0)
+                addView(pingStatusDot, LinearLayout.LayoutParams(dp(8), dp(8)))
+                addView(pingStatusText, LinearLayout.LayoutParams(0, -2, 1f))
+            }
+            addView(pingRow)
         }
         content.addView(serverCard)
 
@@ -237,10 +245,12 @@ class SettingsActivity : ComponentActivity() {
             val elapsed = System.currentTimeMillis() - startTime
             withContext(Dispatchers.Main) {
                 if (ok) {
-                    pingStatusText.text = "● Онлайн · Пинг $elapsed мс"
+                    pingStatusText.text = "Онлайн · Пинг $elapsed мс"
+                    pingStatusDot.background = MarsTheme.statusDot(this@SettingsActivity, MarsTheme.STATUS_ONLINE).background
                     pingStatusText.setTextColor(MarsTheme.STATUS_ONLINE)
                 } else {
-                    pingStatusText.text = "○ Связь нестабильна или локальный шлюз"
+                    pingStatusText.text = "Связь нестабильна или локальный шлюз"
+                    pingStatusDot.background = MarsTheme.statusDot(this@SettingsActivity, MarsTheme.TEXT_MUTED).background
                     pingStatusText.setTextColor(MarsTheme.TEXT_MUTED)
                 }
             }
