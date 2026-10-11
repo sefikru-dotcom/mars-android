@@ -52,6 +52,14 @@ object TvSessionBrowserPolicy {
     /** [initialSelection]/[move] result when there is nothing to focus. */
     const val NO_SELECTION = -1
 
+    /**
+     * Meta-line marker of the dialog the user is CURRENTLY inside. Focus alone is not
+     * enough on a 10-foot screen: the browser opens focused on the current row
+     * ([initialSelection]), but once the user steps away nothing tells them which
+     * dialog is live. The row gets this marker plus a ruby-tinted title.
+     */
+    const val CURRENT_MARKER = "текущий диалог"
+
     /** One focusable row of the dialog: everything the TV renders, nothing it computes. */
     data class SessionRow(
         val id: String,
@@ -140,6 +148,21 @@ object TvSessionBrowserPolicy {
 
     /** The row under [index], or `null` when the index fell out of the list. */
     fun selected(rows: List<SessionRow>, index: Int): SessionRow? = rows.getOrNull(index)
+
+    /** True when [row] is the dialog the user is currently inside (blank ids never match). */
+    fun isCurrent(row: SessionRow, currentSessionId: String?): Boolean =
+        !currentSessionId.isNullOrBlank() && row.id == currentSessionId
+
+    /**
+     * Meta line of a rendered row: for the CURRENT dialog the «текущий диалог» marker
+     * leads (it is the most important fact about the row), the server meta follows;
+     * every other row keeps its meta unchanged. `null` only when nothing applies.
+     */
+    fun metaWithCurrent(meta: String?, current: Boolean): String? = when {
+        !current -> meta
+        meta.isNullOrBlank() -> CURRENT_MARKER
+        else -> "$CURRENT_MARKER · $meta"
+    }
 
     /**
      * Transcript of a loaded session, oldest first (server order): every persisted

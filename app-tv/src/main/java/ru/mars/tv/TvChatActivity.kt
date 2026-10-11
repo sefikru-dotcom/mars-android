@@ -70,6 +70,7 @@ import ru.mars.network.repository.StreamResumeTracker
  */
 class TvChatActivity : AppCompatActivity() {
     private lateinit var messages: LinearLayout
+    private lateinit var messageScroll: ScrollView
     private lateinit var input: EditText
     private lateinit var send: Button
     private lateinit var newChat: Button
@@ -81,6 +82,18 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var sessionsStatus: TextView
     private lateinit var sessionList: LinearLayout
     private lateinit var closeSessions: Button
+
+    /** «К последнему» jump control: visible only while the reader is away from the live edge. */
+    private lateinit var jumpToBottom: Button
+
+    /**
+     * Pin-aware auto-scroll (pure decisions: [TvAutoScrollPolicy]). A streaming answer
+     * follows to the bottom ONLY while the user is pinned there; scrolling up releases
+     * the pin, shows [jumpToBottom] and stops the per-token yank. Programmatic scrolls
+     * use `scrollTo` (never `fullScroll(FOCUS_DOWN)`), so the D-pad focus stays put.
+     */
+    private val autoScroll = TvAutoScrollPolicy()
+    private var jumpThresholdPx = 0
 
     // Mini player in the header: mirrors the global TvMusicPlayer transport
     // (rules: TvMiniPlayerSpec). Hidden while no track is bound.
@@ -178,6 +191,7 @@ class TvChatActivity : AppCompatActivity() {
         // context (the mini player below resumes playback through TvMusicPlayer).
         TvMusicPlayer.attachContext(this)
         messages = findViewById(R.id.messages)
+        messageScroll = findViewById(R.id.messageScroll)
         input = findViewById(R.id.messageInput)
         send = findViewById(R.id.sendButton)
         newChat = findViewById(R.id.newChatButton)
@@ -190,6 +204,21 @@ class TvChatActivity : AppCompatActivity() {
         sessionsStatus = findViewById(R.id.sessionsStatus)
         sessionList = findViewById(R.id.sessionList)
         closeSessions = findViewById(R.id.closeSessionsButton)
+        jumpToBottom = findViewById(R.id.jumpToBottomButton)
+        jumpThresholdPx = dp(64)
+        jumpToBottom.setOnClickListener {
+            renderJumpButton(autoScroll.pinToBottom())
+            scrollToBottom()
+        }
+        // The pin follows the reader: any scroll observation re-evaluates it and drives
+        // the jump-control visibility (pure decision — TvAutoScrollPolicy.onScroll).
+        messageScroll.setOnScrollChangeListener { _, _, _, _, _ ->
+            val child = messageScroll.getChildAt(0) ?: return@setOnScrollChangeListener
+            val distance = TvAutoScrollPolicy.distanceFromBottom(
+                child.bottom, messageScroll.scrollY, messageScroll.height, messageScroll.paddingBottom,
+            )
+            renderJumpButton(autoScroll.onScroll(distance, jumpThresholdPx))
+        }
         miniPlayerRow = findViewById(R.id.miniPlayerRow)
         miniPlayerText = findViewById(R.id.miniPlayerText)
         miniPlayerToggle = findViewById(R.id.miniPlayerToggle)
@@ -198,7 +227,7 @@ class TvChatActivity : AppCompatActivity() {
         newChat.setOnClickListener { startNewChat() }
         sessionsButton.setOnClickListener { openSessionBrowser() }
         closeSessions.setOnClickListener { closeSessionBrowser() }
-        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, miniPlayerToggle)
+        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, miniPlayerToggle, jumpToBottom)
         miniPlayerToggle.setOnClickListener {
             TvMusicPlayer.togglePlayPause()
             renderMiniPlayer()
@@ -302,6 +331,9 @@ class TvChatActivity : AppCompatActivity() {
         input.text.clear()
         append("Вы", text, isUser = true)
         val answer = append("Марс", "", isUser = false)
+        // An outgoing message re-pins: the user always sees their own turn and the
+        // answer that streams after it, whatever they read before.
+        pinAndScrollToBottom()
         // Per-turn answer state machine: the «Марс: » placeholder is dropped exactly once
         // (first chunk), chunks concatenate verbatim, and the FIRST terminal event (Done/Error)
         // locks the bubble — late frames can no longer clobber the outcome. A new turn builds
@@ -606,7 +638,7 @@ class TvChatActivity : AppCompatActivity() {
         TvSessionBrowserPolicy.transcript(detail).forEach { row ->
             append(row.author, row.text, row.isUser)
         }
-        scrollDown()
+        pinAndScrollToBottom()
     }
 
     /**
@@ -701,6 +733,7 @@ class TvChatActivity : AppCompatActivity() {
         messages.removeAllViews()
         liveAnswer = null
         liveAccumulator = null
+        pinAndScrollToBottom()
         renderSendControl()
         renderStatus()
         input.text.clear()
@@ -891,7 +924,50 @@ class TvChatActivity : AppCompatActivity() {
         messages.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
     }
 
-    private fun scrollDown() { findViewById<ScrollView>(R.id.messageScroll).post { findViewById<ScrollView>(R.id.messageScroll).fullScroll(View.FOCUS_DOWN) } }
+    /**
+     * Auto-scroll of a live transcript: runs ONLY while the reader is pinned to the
+     * bottom ([TvAutoScrollPolicy.shouldAutoScroll]) — a user rereading a scrolled-up
+     * line is never yanked back by an incoming chunk or card.
+     */
+    private fun scrollDown() {
+        if (autoScroll.shouldAutoScroll()) scrollToBottom()
+    }
+
+    /**
+     * Unconditional re-pin + scroll (outgoing message, opened/reloaded session, jump
+     * control): hides «К последнему» and puts the transcript at the live edge.
+     */
+    private fun pinAndScrollToBottom() {
+        renderJumpButton(autoScroll.pinToBottom())
+        scrollToBottom()
+    }
+
+    /**
+     * Focus-stable bottom scroll: `scrollTo` (clamped by the pure
+     * [TvAutoScrollPolicy.scrollTargetForBottom]) instead of `fullScroll(FOCUS_DOWN)` —
+     * the old call also moved the D-pad focus into the transcript on EVERY token.
+     */
+    private fun scrollToBottom() {
+        messageScroll.post {
+            val child = messageScroll.getChildAt(0) ?: return@post
+            messageScroll.scrollTo(
+                0,
+                TvAutoScrollPolicy.scrollTargetForBottom(
+                    child.bottom, messageScroll.height, messageScroll.paddingBottom,
+                ),
+            )
+        }
+    }
+
+    /**
+     * «К последнему» visibility. Hiding a FOCUSED control would drop the D-pad focus
+     * into nowhere (unstable focus on disappearance), so the focus moves to the
+     * composer first — the natural continuation after jumping to the live edge.
+     */
+    private fun renderJumpButton(visible: Boolean) {
+        if (!visible && jumpToBottom.hasFocus()) input.requestFocus()
+        jumpToBottom.visibility = if (visible) View.VISIBLE else View.GONE
+    }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     // --- Session browser («Диалоги») ---------------------------------------------------------------
@@ -980,7 +1056,10 @@ class TvChatActivity : AppCompatActivity() {
             return
         }
         browserRows.forEachIndexed { index, row ->
-            val card = buildSessionCard(index, row)
+            val card = buildSessionCard(
+                index, row,
+                current = TvSessionBrowserPolicy.isCurrent(row, sessionFlow.sessionId),
+            )
             sessionRowViews += card
             sessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         }
@@ -1011,12 +1090,15 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /**
-     * One dialog row: title + preview + meta card. UP/DOWN stepping is explicit through
-     * [TvSessionBrowserPolicy.move] (deterministic, clamped at the edges — focus never
-     * escapes the list into the chat behind); at an edge the key falls through to the
-     * platform focus search (towards «Закрыть»).
+     * One dialog row: title + preview + meta card. The CURRENT dialog is marked
+     * visually (ruby-tinted title + «текущий диалог» meta lead — decisions in
+     * [TvSessionBrowserPolicy.isCurrent]/[TvSessionBrowserPolicy.metaWithCurrent]):
+     * after the initial focus steps away, the user must still see which dialog is live.
+     * UP/DOWN stepping is explicit through [TvSessionBrowserPolicy.move] (deterministic,
+     * clamped at the edges — focus never escapes the list into the chat behind); at an
+     * edge the key falls through to the platform focus search (towards «Закрыть»).
      */
-    private fun buildSessionCard(index: Int, row: TvSessionBrowserPolicy.SessionRow): View {
+    private fun buildSessionCard(index: Int, row: TvSessionBrowserPolicy.SessionRow, current: Boolean): View {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundResource(R.drawable.bg_focus_sidebar_item)
@@ -1043,7 +1125,8 @@ class TvChatActivity : AppCompatActivity() {
         card.addView(TextView(this).apply {
             text = row.title
             textSize = 20f
-            setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
+            setTextColor(ContextCompat.getColor(
+                context, if (current) R.color.mars_accent_text else R.color.mars_text_strong))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
         })
@@ -1057,7 +1140,7 @@ class TvChatActivity : AppCompatActivity() {
                 setPadding(0, dp(4), 0, 0)
             })
         }
-        row.meta?.let { meta ->
+        TvSessionBrowserPolicy.metaWithCurrent(row.meta, current)?.let { meta ->
             card.addView(TextView(this).apply {
                 text = meta
                 textSize = 14f
@@ -1128,7 +1211,7 @@ class TvChatActivity : AppCompatActivity() {
                     renderSendControl()
                     renderStatus()
                     input.requestFocus()
-                    scrollDown()
+                    pinAndScrollToBottom()
                 }
             }
         }
