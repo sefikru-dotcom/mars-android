@@ -162,7 +162,17 @@ class ChatRepository(
                     // The server answers start failures with `{"error": "<reason>"}`
                     // (400 message required, 401 unauthorized, 502 gateway…): surface
                     // the reason, not just the code (parity with uploadAttachment).
-                    emit(ChatEvent.Error(describeHttpError(response.code, body)))
+                    // A Retry-After directive (429/503) rides along as an anchored
+                    // marker for the recovery coordinator (RetryAfterPolicy).
+                    emit(
+                        ChatEvent.Error(
+                            describeHttpError(
+                                response.code,
+                                body,
+                                RetryAfterPolicy.parseSeconds(response.header("Retry-After")),
+                            )
+                        )
+                    )
                     return@flow
                 }
                 extractStartResponse(body)
@@ -424,8 +434,20 @@ class ChatRepository(
             if (!response.isSuccessful) {
                 // Same contract as the start POST: non-2xx bodies carry `{"error": ...}`
                 // ("stream not found", gateway failures); keep the reason for the user.
+                // A Retry-After directive (429/503 from a throttling proxy or a
+                // restarting backend) becomes an anchored marker in the message so
+                // MidTurnRecoveryCoordinator waits the server-directed pause instead
+                // of burning its reconnect ladder (RetryAfterPolicy).
                 val errorBody = response.body?.string().orEmpty()
-                emit(ChatEvent.Error(describeHttpError(response.code, errorBody)))
+                emit(
+                    ChatEvent.Error(
+                        describeHttpError(
+                            response.code,
+                            errorBody,
+                            RetryAfterPolicy.parseSeconds(response.header("Retry-After")),
+                        )
+                    )
+                )
                 return
             }
             val byteStream = response.body?.byteStream()

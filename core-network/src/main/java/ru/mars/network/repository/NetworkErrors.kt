@@ -82,9 +82,18 @@ internal fun describeNetworkError(error: Throwable): String {
  * non-blank `error`, else the plain `"HTTP <code>"`. Both shapes stay compatible with
  * the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
  * StreamReattachPolicy `\b404\b` / "not found").
+ *
+ * [retryAfterSeconds] — the parsed `Retry-After` response header (RFC 9110 §10.2.3,
+ * typically on 429/503 from a throttling proxy or a restarting backend), see
+ * [RetryAfterPolicy]. When present, the ANCHORED marker `"(retry-after <N>s)"` is
+ * appended so [MidTurnRecoveryCoordinator] can honor the server-directed wait instead
+ * of burning its reconnect ladder against a server that asked to wait. It is a pure
+ * suffix: every app-level policy keys on the message prefix or on substrings that the
+ * marker never touches.
  */
-internal fun describeHttpError(code: Int, body: String?): String {
+internal fun describeHttpError(code: Int, body: String?, retryAfterSeconds: Long? = null): String {
     val serverMessage = StreamEventMapper.parseObject(body.orEmpty())
         ?.get("error")?.toString()?.trim()?.takeIf { it.isNotBlank() }
-    return if (serverMessage != null) "HTTP $code: $serverMessage" else "HTTP $code"
+    val base = if (serverMessage != null) "HTTP $code: $serverMessage" else "HTTP $code"
+    return retryAfterSeconds?.let { "$base ${RetryAfterPolicy.marker(it)}" } ?: base
 }

@@ -366,4 +366,89 @@ class MidTurnRecoveryCoordinatorTest {
         // old-turn ids no longer count as duplicates after the reset
         assertTrue(c.onStreamFrame("st-1:1"))
     }
+
+    // ---- Retry-After: server-directed waits floor the reattach delay -------------------
+
+    @Test
+    fun `a retry-after marker floors the reattach delay above the ladder`() {
+        val c = coordinator()
+        val decision = c.decide(
+            StreamFailure(errorMessage = "HTTP 429: rate limited (retry-after 30s)", lastEventId = "st-1:4")
+        )
+        // ladder for attempt 1 is 500 ms; the directive's 30 s wins
+        assertEquals(RecoveryDecision.ReattachAfter(30_000L, 1, "st-1:4"), decision)
+    }
+
+    @Test
+    fun `the ladder delay wins when it already exceeds retry-after`() {
+        val c = coordinator()
+        val decision = c.decide(
+            StreamFailure(errorMessage = "HTTP 503: unavailable (retry-after 0s)", lastEventId = "st-1:4")
+        )
+        assertEquals(RecoveryDecision.ReattachAfter(500L, 1, "st-1:4"), decision)
+    }
+
+    @Test
+    fun `an armed immediate retry does not override retry-after and survives`() {
+        val c = coordinator()
+        c.onNetworkChanged(false)
+        c.onNetworkChanged(true) // arms the one-shot 0 ms reattach
+        val throttled = StreamFailure(errorMessage = "HTTP 429: rate limited (retry-after 10s)")
+        // the server directive wins over the arm…
+        assertEquals(RecoveryDecision.ReattachAfter(10_000L, 1, null), c.decide(throttled))
+        // …and the arm was NOT consumed: the next ordinary failure still retries at 0 ms
+        assertEquals(RecoveryDecision.ReattachAfter(0L, 2, "st-1:4"), c.decide(io))
+    }
+
+    @Test
+    fun `retry-after carried in a throwable message is honored`() {
+        val c = coordinator()
+        val decision = c.decide(
+            StreamFailure(throwable = IOException("wrapped: HTTP 429: slow down (retry-after 5s)"))
+        )
+        assertEquals(RecoveryDecision.ReattachAfter(5_000L, 1, null), decision)
+    }
+
+    @Test
+    fun `an absurd retry-after directive is clamped to the policy cap`() {
+        val c = coordinator()
+        val decision = c.decide(
+            StreamFailure(
+                errorMessage =
+                    "HTTP 503 (retry-after ${RetryAfterPolicy.MAX_RETRY_AFTER_SECONDS * 100}s)"
+            )
+        )
+        assertEquals(
+            RecoveryDecision.ReattachAfter(RetryAfterPolicy.MAX_RETRY_AFTER_SECONDS * 1_000L, 1, null),
+            decision,
+        )
+    }
+
+    @Test
+    fun `retry-after never rescues a non-retryable status`() {
+        // 401/404 stay terminal even with a directive on the response: GiveUp/ReloadSession
+        // are decided before any delay math.
+        val c = coordinator()
+        assertTrue(
+            c.decide(StreamFailure(errorMessage = "HTTP 401: unauthorized (retry-after 60s)"))
+                is RecoveryDecision.GiveUp
+        )
+        assertTrue(
+            c.decide(StreamFailure(errorMessage = "HTTP 404: stream not found (retry-after 60s)"))
+                is RecoveryDecision.ReloadSession
+        )
+    }
+
+    @Test
+    fun `a server-origin error with a retry-after-looking text stays terminal`() {
+        // Arbitrary agent text is never parsed for transport directives.
+        val c = coordinator()
+        val giveUp = c.decide(
+            StreamFailure(
+                errorMessage = "curl said: HTTP 429 (retry-after 30s) — tool output",
+                origin = StreamFailure.Origin.SERVER_EVENT,
+            )
+        )
+        assertTrue(giveUp is RecoveryDecision.GiveUp)
+    }
 }
