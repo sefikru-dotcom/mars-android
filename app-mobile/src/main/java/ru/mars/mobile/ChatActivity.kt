@@ -26,6 +26,7 @@ import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.ImageSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
@@ -2333,11 +2334,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                                 tv.setTypeface(null, Typeface.ITALIC)
                             }
                             is RichLine.TaskItem -> {
-                                if (line.checked) {
-                                    ssb.append("☑  ")
-                                } else {
-                                    ssb.append("☐  ")
-                                }
+                                val iconStart = ssb.length
+                                ssb.append("  ")
+                                val iconRes = if (line.checked) R.drawable.ic_check else R.drawable.ic_checkbox_empty
+                                ssb.setSpan(
+                                    ImageSpan(this@ChatActivity, iconRes, ImageSpan.ALIGN_BASELINE),
+                                    iconStart,
+                                    ssb.length,
+                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                                )
                                 val start = ssb.length
                                 appendInlineSpans(ssb, line.spans)
                                 if (line.checked) {
