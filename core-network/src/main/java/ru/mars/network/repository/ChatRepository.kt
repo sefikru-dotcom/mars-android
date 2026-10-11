@@ -169,7 +169,6 @@ class ChatRepository(
                             describeHttpError(
                                 response.code,
                                 body,
-                                RetryAfterPolicy.parseSeconds(response.header("Retry-After")),
                             )
                         )
                     )
