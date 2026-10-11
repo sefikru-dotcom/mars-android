@@ -23,7 +23,7 @@ class SessionCreateSessionTest {
         MockWebServer().use { server ->
             server.enqueue(
                 MockResponse().setResponseCode(200)
-                    .setBody("{\"session\":{\"session_id\":\"abc123\",\"workspace\":\"/root/workspace\",\"model\":null}}")
+                    .setBody("{\"session\":{\"session_id\":\"abc123\",\"workspace\":\"/root/workspace\",\"model\":\"@custom:plusvibe-api:gpt-6.1-sol\",\"model_provider\":\"custom:plusvibe-api\"}}")
             )
             val outcome = SessionRepository().createSession(server.url("/").toString(), credential)
             assertTrue(outcome is CreateSessionOutcome.Success)
@@ -31,6 +31,8 @@ class SessionCreateSessionTest {
             // The creation response carries the server-resolved workspace — surfaced
             // so the caller can echo it on the first chat/start.
             assertEquals("/root/workspace", outcome.session.workspace)
+            assertEquals("@custom:plusvibe-api:gpt-6.1-sol", outcome.session.model)
+            assertEquals("custom:plusvibe-api", outcome.session.modelProvider)
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/api/session/new", request.path)

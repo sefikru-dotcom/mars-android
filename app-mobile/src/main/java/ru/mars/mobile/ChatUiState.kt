@@ -289,8 +289,38 @@ class ChatUiState(
      * badge); the currently-open session always stays visible so the active
      * row never disappears mid-delegation.
      */
-    fun drawerSessions(showSubagents: Boolean = false, currentSessionId: String? = null): List<SessionItem> =
-        sessions.filter { showSubagents || !it.isSubagent || it.id == currentSessionId }
+    /** Rows for the drawer, with subagents attached immediately after their parent. */
+    fun drawerSessions(showSubagents: Boolean = false, currentSessionId: String? = null): List<SessionItem> {
+        val visible = sessions.filter { showSubagents || !it.isSubagent || it.id == currentSessionId }
+        if (!showSubagents) return visible
+        val byId = visible.associateBy { it.id }
+        val byParent = visible.filter { it.parentSessionId != null }
+            .groupBy { it.parentSessionId }
+        val emitted = mutableSetOf<String>()
+        val result = mutableListOf<SessionItem>()
+
+        fun append(node: SessionItem) {
+            if (!emitted.add(node.id)) return
+            result += node
+            byParent[node.id].orEmpty()
+                .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+                .forEach(::append)
+        }
+
+        val roots = visible.filter { it.parentSessionId == null }
+            .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+        roots.filterNot { it.isSubagent }.forEach(::append)
+        roots.filter { it.isSubagent }.forEach(::append)
+        // Orphans (parent out of scope) never compete with rooted rows: tail, newest first.
+        visible.filter { it.parentSessionId != null && it.parentSessionId !in byId }
+            .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+            .forEach(::append)
+        // Cycles have no natural root; keep every remaining row visible exactly once.
+        visible.filter { it.id !in emitted }
+            .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+            .forEach(::append)
+        return result
+    }
 
     fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }

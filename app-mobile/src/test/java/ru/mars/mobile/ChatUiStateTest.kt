@@ -129,12 +129,58 @@ class ChatUiStateTest {
         assertEquals(listOf("w1", "sub1"), state.drawerSessions(showSubagents = true).map { it.id })
     }
 
+    @Test fun drawerNestsSubagentAfterItsParentRegardlessOfServerOrder() {
+        val state = ChatUiState()
+        val parent = SessionItem("p", "Parent", sourceTag = "webui")
+        val child = SessionItem("c", "Worker", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "p", readOnly = true)
+        state.setSessions(listOf(child, parent))
+        assertEquals(listOf("p", "c"), state.drawerSessions(showSubagents = true).map { it.id })
+    }
     @Test fun drawerKeepsCurrentSessionVisibleEvenWhenSubagent() {
         val state = ChatUiState()
         val sub = SessionItem("sub1", "Subagent Session", sourceTag = "subagent", readOnly = true, parentSessionId = "w1")
         val other = SessionItem("sub2", "Subagent Session", sourceTag = "subagent", readOnly = true, parentSessionId = "w1")
         state.setSessions(listOf(sub, other))
-        // The open session's row must not disappear mid-delegation.
         assertEquals(listOf("sub1"), state.drawerSessions(currentSessionId = "sub1").map { it.id })
+    }
+
+    @Test fun drawerNestsGrandchildAfterItsWholeParentChain() {
+        val state = ChatUiState()
+        val parent = SessionItem("p", "Parent", sourceTag = "webui")
+        val child = SessionItem("c", "Worker", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "p", readOnly = true)
+        val grand = SessionItem("g", "Nested worker", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "c", readOnly = true)
+        // Server order is shuffled: the grandchild must still land right after its chain.
+        state.setSessions(listOf(grand, child, parent))
+        val shown = state.drawerSessions(showSubagents = true)
+        assertEquals(listOf("p", "c", "g"), shown.map { it.id })
+        assertEquals(shown.size, shown.map { it.id }.distinct().size) // each row exactly once
+    }
+
+    @Test fun drawerKeepsOrphanSubagentAtTheTailInsteadOfDropping() {
+        val state = ChatUiState()
+        val top = SessionItem("n1", "Работа", sourceTag = "webui", updatedAt = "2026-01-02")
+        val orphan = SessionItem("o1", "Orphan worker", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "missing", readOnly = true, updatedAt = "2026-01-05")
+        state.setSessions(listOf(orphan, top))
+        // The orphan is newer but its parent is out of scope: tail placement, never dropped.
+        assertEquals(listOf("n1", "o1"), state.drawerSessions(showSubagents = true).map { it.id })
+    }
+
+    @Test fun drawerKeepsOrphanChainTogetherAtTheTail() {
+        val state = ChatUiState()
+        val top = SessionItem("n1", "Работа", sourceTag = "webui")
+        val orphan = SessionItem("o1", "Orphan", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "gone", readOnly = true)
+        val orphanChild = SessionItem("o2", "Orphan child", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "o1", readOnly = true)
+        state.setSessions(listOf(orphanChild, orphan, top))
+        assertEquals(listOf("n1", "o1", "o2"), state.drawerSessions(showSubagents = true).map { it.id })
+    }
+
+    @Test fun drawerShowsCyclicSubagentsExactlyOnce() {
+        val state = ChatUiState()
+        val a = SessionItem("a", "Cycle A", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "b", readOnly = true)
+        val b = SessionItem("b", "Cycle B", sourceTag = "subagent", rawSource = "subagent", parentSessionId = "a", readOnly = true)
+        state.setSessions(listOf(a, b))
+        val shown = state.drawerSessions(showSubagents = true)
+        assertEquals(2, shown.size)
+        assertEquals(setOf("a", "b"), shown.map { it.id }.toSet())
     }
 }

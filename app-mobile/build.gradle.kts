@@ -11,7 +11,7 @@ android {
         applicationId = "ru.mars.mobile"
         minSdk = 28
         targetSdk = 34
-        versionCode = 21
+        versionCode = 22
         versionName = "1.3.8"
     }
     testOptions { unitTests.isReturnDefaultValues = true }

@@ -88,6 +88,15 @@ class ModelSelectionTest {
     }
 
     @Test
+    fun serverSessionModelOverridesStaleLocalChoiceForDisplay() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex"))
+        selection.pickerEntries(realCatalog())
+        selection.setSessionModel("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api")
+        assertEquals("GPT 6.1 SOL", selection.buttonLabel())
+        assertEquals("@custom:plusvibe-api:gpt-6.1-sol", selection.displayedChoice()?.modelId)
+    }
+    @Test
     fun selectRejectsBlankModelId() {
         val storage = FakeStorage()
         val selection = ModelSelection(storage)
@@ -129,5 +138,49 @@ class ModelSelectionTest {
         val selection = ModelSelection(storage)
         assertEquals("some-model", selection.buttonLabel())
         assertFalse(selection.buttonLabel()!!.isEmpty())
+    }
+
+    @Test
+    fun wireChoiceUsesServerSessionModelWhenPresent() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
+        selection.setSessionModel("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api")
+        assertEquals(
+            ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = false),
+            selection.wireChoice()
+        )
+        // Display and wire resolve through the SAME rule — no diverging copies.
+        assertEquals(selection.wireChoice(), selection.displayedChoice())
+    }
+
+    @Test
+    fun wireChoiceFallsBackToCurrentWithoutSessionModel() {
+        val selection = ModelSelection(FakeStorage())
+        val picked = selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
+        assertEquals(picked, selection.wireChoice())
+    }
+
+    @Test
+    fun wireChoiceNullWithoutAnyChoice() {
+        // No catalog, no persisted pick, no session model → null: chat/start is
+        // sent WITHOUT model fields so the server routes with its own default.
+        assertNull(ModelSelection(FakeStorage()).wireChoice())
+    }
+
+    @Test
+    fun clearSessionModelRestoresCurrentForWire() {
+        val selection = ModelSelection(FakeStorage())
+        val picked = selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
+        selection.setSessionModel("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api")
+        selection.clearSessionModel()
+        assertEquals(picked, selection.wireChoice())
+    }
+
+    @Test
+    fun blankSessionModelIsIgnoredForWire() {
+        val selection = ModelSelection(FakeStorage())
+        val picked = selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
+        selection.setSessionModel("   ", "custom:vertex-gemini")
+        assertEquals(picked, selection.wireChoice())
     }
 }

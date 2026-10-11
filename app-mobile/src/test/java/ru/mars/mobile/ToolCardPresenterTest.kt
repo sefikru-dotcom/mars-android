@@ -167,6 +167,53 @@ class ToolCardPresenterTest {
         assertNull(ToolCardPresenter.toggleLabel(listing(8), expanded = false))
     }
 
+    // --- символьный коллапс: гигантский однострочный JSON (строчный порог его не ловит) ---
+
+    @Test
+    fun `oversized single-line section is collapsible and char-capped when collapsed`() {
+        val blob = "{\"content\":\"" + "x".repeat(3000) + "\"}"
+        assertTrue(ToolCardPresenter.isCollapsible(blob))
+        val view = ToolCardPresenter.present(tool("write_file", blob))
+        val section = view.argsSection!!
+        // Полный текст сохраняется для копирования, видимый — ограничен порогом.
+        assertEquals(blob, section.fullText)
+        assertTrue(section.visibleText.length <= ToolCardPresenter.COLLAPSE_THRESHOLD_CHARS)
+        assertTrue(section.visibleText.endsWith("…"))
+        // Одна строка: скрытых строк нет, но секция сворачиваемая по символам.
+        assertEquals(0, section.hiddenLines)
+        assertEquals("Показать полностью", section.toggleLabel)
+    }
+
+    @Test
+    fun `expanded oversized single-line section keeps full text and offers collapse`() {
+        val blob = "z".repeat(5000)
+        val view = ToolCardPresenter.present(tool("bash", blob, expanded = true))
+        val section = view.argsSection!!
+        assertEquals(blob, section.visibleText)
+        assertEquals("Свернуть", section.toggleLabel)
+    }
+
+    @Test
+    fun `line-collapsed text also respects the char cap`() {
+        // 20 строк по ~190 символов: после строчного фолда (8 строк) текст всё ещё
+        // длиннее порога символов — включается символьное усечение.
+        val text = (1..20).joinToString("\n") { "строка $it ".repeat(20) }
+        val collapsed = ToolCardPresenter.visibleText(text, expanded = false)
+        assertTrue(collapsed.length <= ToolCardPresenter.COLLAPSE_THRESHOLD_CHARS)
+        assertTrue(collapsed.endsWith("…"))
+        // Строчный счётчик скрытых линий не меняется.
+        assertEquals(12, ToolCardPresenter.hiddenLineCount(text))
+        assertEquals("Показать ещё 12 строк", ToolCardPresenter.toggleLabel(text, expanded = false))
+    }
+
+    @Test
+    fun `char cap leaves ordinary payloads untouched`() {
+        // До 8 строк и до порога символов — без усечения.
+        assertEquals(listing(8), ToolCardPresenter.visibleText(listing(8), expanded = false))
+        // Строчный коллапс из 60 коротких строк символьный порог не трогает.
+        assertEquals(listing(8), ToolCardPresenter.visibleText(listing(60), expanded = false))
+    }
+
     // --- detail hint ---
 
     @Test

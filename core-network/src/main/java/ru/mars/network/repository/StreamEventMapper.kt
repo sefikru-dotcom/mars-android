@@ -57,6 +57,9 @@ import ru.mars.network.model.TodoSnapshot
  */
 object StreamEventMapper {
 
+    /** Максимальная длина строкового поля одного tool-кадра (args/result/preview), симв. */
+    const val MAX_TOOL_PAYLOAD_CHARS = 4_000
+
     /** @return mapped event or `null` when the frame carries nothing representable (metadata/duplicate). */
     fun map(eventName: String?, eventId: String?, payload: String): ChatEvent? {
         val obj = parseObject(payload)
@@ -239,21 +242,27 @@ object StreamEventMapper {
     }
 
     private fun toolCall(obj: Map<String, Any?>?): ChatEvent.ToolCall? = obj?.let { m ->
-        val id = (m["tid"] ?: m["id"])?.toString()?.takeIf { it.isNotBlank() }
-        val name = (m["name"] ?: m["tool"])?.toString().orEmpty()
+        val id = idField(m, "tid") ?: idField(m, "id")
+        val name = stringField(m, "name") ?: stringField(m, "tool").orEmpty()
         val args = jsonValue(m["arguments"] ?: m["args"])
-        val preview = m["preview"]?.toString().orEmpty()
+        val preview = stringOnly(m, "preview").orEmpty()
         val usableArgs = args.takeIf { it.isNotBlank() && it != "{}" && it != "[]" }.orEmpty()
-        ChatEvent.ToolCall(id, name, usableArgs.ifBlank { preview })
+        ChatEvent.ToolCall(id, name, capToolPayload(usableArgs.ifBlank { preview }))
     }
 
     private fun toolResult(obj: Map<String, Any?>?): ChatEvent.ToolResult? = obj?.let { m ->
-        val id = (m["tid"] ?: m["id"])?.toString()?.takeIf { it.isNotBlank() }
-        val name = (m["name"] ?: m["tool"])?.toString().orEmpty()
-        // Server sends the result snippet as `preview`; legacy clients used `result`/`content`.
-        val preview = m["preview"]?.toString()?.takeIf { it.isNotBlank() }
+        val id = idField(m, "tid") ?: idField(m, "id")
+        val name = stringField(m, "name") ?: stringField(m, "tool").orEmpty()
+        // Structured result/content is serialized as JSON, never Kotlin Map.toString().
+        val preview = stringOnly(m, "preview")
         val legacy = jsonValue(m["result"] ?: m["content"]).ifBlank { null }
-        ChatEvent.ToolResult(id, name, preview ?: legacy.orEmpty())
+        ChatEvent.ToolResult(id, name, capToolPayload(preview ?: legacy.orEmpty()))
+    }
+
+    private fun capToolPayload(value: String): String {
+        if (value.length <= MAX_TOOL_PAYLOAD_CHARS) return value
+        val marker = "\n… обрезано: полная длина ${value.length} симв."
+        return value.take((MAX_TOOL_PAYLOAD_CHARS - marker.length).coerceAtLeast(0)) + marker
     }
 
     private fun chunk(obj: Map<String, Any?>?, payload: String, eventId: String?): ChatEvent? {
@@ -278,10 +287,10 @@ object StreamEventMapper {
         val choices = stringList(obj["choices_offered"] ?: obj["choices"])
         if (question.isBlank() && choices.isEmpty()) return null
         return ClarifyPayload(
-            clarifyId = stringField(obj, "clarify_id"),
+            clarifyId = idField(obj, "clarify_id"),
             question = question,
             choices = choices,
-            sessionId = stringField(obj, "session_id"),
+            sessionId = idField(obj, "session_id"),
             requestedAtEpochSeconds = (obj["requested_at"] as? Number)?.toDouble(),
             timeoutSeconds = (obj["timeout_seconds"] as? Number)?.toInt(),
             expiresAtEpochSeconds = (obj["expires_at"] as? Number)?.toDouble(),
@@ -303,7 +312,7 @@ object StreamEventMapper {
         if (command.isBlank() && description.isBlank() && tool.isNullOrBlank()) return null
         val patternKeys = stringList(obj["pattern_keys"]).ifEmpty { listOfNotNull(stringField(obj, "pattern_key")) }
         return ApprovalPayload(
-            approvalId = stringField(obj, "approval_id"),
+            approvalId = idField(obj, "approval_id"),
             command = command,
             description = description,
             patternKeys = patternKeys,
@@ -312,8 +321,8 @@ object StreamEventMapper {
             allowPermanent = obj["allow_permanent"] as? Boolean ?: false,
             allowSession = obj["allow_session"] as? Boolean ?: true,
             smartDenied = obj["smart_denied"] == true,
-            runId = stringField(obj, "run_id"),
-            mirrorToken = stringField(obj, "_gateway_mirror_token"),
+            runId = idField(obj, "run_id"),
+            mirrorToken = idField(obj, "_gateway_mirror_token"),
             pendingCount = positiveInt(obj["pending_count"]) ?: 1,
             tool = tool,
             riskLevel = stringField(obj, "risk_level"),
@@ -395,10 +404,31 @@ object StreamEventMapper {
     private val SUBAGENT_FAILED_STATUSES = setOf("failed", "error", "timeout")
 
     private fun sessionId(obj: Map<String, Any?>?, payload: String): String? =
-        stringField(obj, "session_id") ?: stringField(obj, "id")
+        idField(obj, "session_id") ?: idField(obj, "id")
+
+    /**
+     * IDENTIFIER field extraction: unlike [stringOnly] this accepts a JSON number —
+     * the wire may deliver `tid`/`session_id`/`approval_id` as a numeric literal, and
+     * dropping it would break call↔result correlation (ChatUiState matches tools by id).
+     * Structured values (Map/List) are still never toString()-coerced, and integral
+     * numbers never surface with Moshi's Double artifact ("42.0").
+     */
+    private fun idField(obj: Map<String, Any?>?, key: String): String? = when (val value = obj?.get(key)) {
+        is String -> value.takeIf { it.isNotBlank() }
+        is Number -> numberToString(value)
+        else -> null
+    }
+
+    /** Canonical string for a JSON number: integral values without a fractional tail. */
+    private fun numberToString(value: Number): String? {
+        val d = value.toDouble()
+        if (d.isNaN() || d.isInfinite()) return null
+        val l = d.toLong()
+        return if (d == l.toDouble()) l.toString() else value.toString()
+    }
 
     private fun stringField(obj: Map<String, Any?>?, key: String): String? =
-        obj?.get(key)?.toString()?.takeIf { it.isNotBlank() }
+        stringOnly(obj, key)
 
     /**
      * STRING-TYPED field extraction: unlike [stringField] this never coerces a

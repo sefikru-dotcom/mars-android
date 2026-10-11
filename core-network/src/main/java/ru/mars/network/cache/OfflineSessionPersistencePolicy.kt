@@ -190,6 +190,8 @@ class OfflineSessionPersistencePolicy(
         "source_label" to item.sourceLabel,
         "read_only" to item.readOnly,
         "parent_session_id" to item.parentSessionId,
+        "model" to item.model,
+        "model_provider" to item.modelProvider,
         "active_turn" to turnToRow(item.activeTurn),
     )
 
@@ -210,6 +212,8 @@ class OfflineSessionPersistencePolicy(
             sourceLabel = row["source_label"] as? String,
             readOnly = (row["read_only"] as? Boolean) ?: false,
             parentSessionId = row["parent_session_id"] as? String,
+            model = row["model"] as? String,
+            modelProvider = row["model_provider"] as? String,
         )
     }
 

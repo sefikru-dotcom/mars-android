@@ -64,4 +64,37 @@ class FirstSessionFlowTest {
         assertTrue(result is EnsureSessionResult.Failed)
         assertEquals("HTTP 500", (result as EnsureSessionResult.Failed).message)
     }
+
+    @Test fun createdSessionCarriesServerModelIdentity() = runBlocking {
+        val creator = FakeCreator(
+            CreateSessionOutcome.Success(
+                SessionDetail("minted-9", model = "gemini-3.8-flash", modelProvider = "custom:vertex-gemini")
+            )
+        )
+        val result = FirstSessionFlow(creator, "https://base").ensureSession(null, credential)
+        assertEquals(
+            EnsureSessionResult.Ready("minted-9", "gemini-3.8-flash", "custom:vertex-gemini"),
+            result
+        )
+    }
+
+    @Test fun createdSessionWithoutModelKeepsLegacyShape() = runBlocking {
+        // Backward compatibility: a payload without model identity equals the
+        // legacy single-arg Ready, so existing call sites/tests keep compiling.
+        val creator = FakeCreator(CreateSessionOutcome.Success(SessionDetail("minted-2")))
+        val result = FirstSessionFlow(creator, "https://base").ensureSession(null, credential)
+        assertEquals(EnsureSessionResult.Ready("minted-2"), result)
+        assertEquals(EnsureSessionResult.Ready("minted-2", null, null), result)
+    }
+
+    @Test fun reusedSessionIdHasNoModelIdentity() = runBlocking {
+        // The already-bound path does not consult the server, so it must not
+        // invent a model — null means "unknown here", not "no model".
+        val creator = FakeCreator(
+            CreateSessionOutcome.Success(SessionDetail("new", model = "m", modelProvider = "p"))
+        )
+        val result = FirstSessionFlow(creator, "https://base").ensureSession("bound-1", credential)
+        assertEquals(EnsureSessionResult.Ready("bound-1", null, null), result)
+        assertEquals(0, creator.calls)
+    }
 }
