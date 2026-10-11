@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:orientation="vertical"
     android:padding="52dp"
     android:background="@drawable/bg_tv_root"
@@ -39,6 +40,73 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 
+    <!-- Secondary clock line: full weekday + date (format decisions in TvDashboardClockSpec).
+         Muted and smaller than HH:mm — the hierarchy is time first, date second. -->
+    <TextView
+        android:id="@+id/dateLine"
+        android:textColor="@color/mars_muted"
+        android:textSize="20sp"
+        android:layout_marginTop="2dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <!-- Now playing plate: mirrors the global TvMusicPlayer transport while a track is
+         bound (rules: TvMiniPlayerSpec — same spec the chat header mini player uses).
+         D-pad reachable: UP from «Чат» lands on the toggle, DOWN returns to the grid.
+         Gone when the transport is idle, so the grid keeps its usual focus chains. -->
+    <LinearLayout
+        android:id="@+id/nowPlayingRow"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_chip"
+        android:layout_marginTop="14dp"
+        android:paddingStart="18dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:src="@drawable/ic_music"
+            android:contentDescription="@null"
+            app:tint="@color/mars_muted"
+            android:layout_marginEnd="12dp"
+            android:layout_width="26dp"
+            android:layout_height="26dp" />
+
+        <TextView
+            android:id="@+id/nowPlayingText"
+            android:textColor="@color/mars_text"
+            android:textSize="18sp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/nowPlayingToggle"
+            android:focusable="true"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:layout_marginStart="16dp"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_pause"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="8dp"
+            android:text="Пауза"
+            android:textColor="@color/mars_text"
+            android:textSize="16sp"
+            android:nextFocusDown="@id/chatButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
     <!-- Сетка кнопок 3x2: явные D-pad цепочки по строкам и столбцам, без wrap. -->
     <LinearLayout
         android:orientation="horizontal"
@@ -61,6 +129,7 @@
             android:paddingEnd="24dp"
             android:gravity="center"
             android:focusable="true"
+            android:nextFocusUp="@id/nowPlayingToggle"
             android:nextFocusRight="@id/projectsButton"
             android:nextFocusDown="@id/musicButton"
             android:layout_marginEnd="16dp"

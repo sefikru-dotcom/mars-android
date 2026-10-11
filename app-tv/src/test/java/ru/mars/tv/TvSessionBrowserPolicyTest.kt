@@ -371,4 +371,42 @@ class TvSessionBrowserPolicyTest {
     fun `the retry label is a non-blank D-pad action caption`() {
         assertTrue(TvSessionBrowserPolicy.RETRY_LABEL.isNotBlank())
     }
+
+    @Test
+    fun `the current dialog row is recognised by id, blank ids never match`() {
+        val row = SessionRow("s-1", "Dialog", null, null)
+        assertTrue(TvSessionBrowserPolicy.isCurrent(row, "s-1"))
+        assertFalse(TvSessionBrowserPolicy.isCurrent(row, "s-2"))
+        assertFalse(TvSessionBrowserPolicy.isCurrent(row, null))
+        assertFalse(TvSessionBrowserPolicy.isCurrent(row, "  "))
+        assertFalse(TvSessionBrowserPolicy.isCurrent(SessionRow("", "Dialog", null, null), ""))
+    }
+
+    @Test
+    fun `the current marker leads the meta line and other rows keep theirs unchanged`() {
+        assertEquals(
+            "текущий диалог · 4 сообщения",
+            TvSessionBrowserPolicy.metaWithCurrent("4 сообщения", current = true),
+        )
+        assertEquals(
+            "a current row without server meta still reads as current",
+            TvSessionBrowserPolicy.CURRENT_MARKER,
+            TvSessionBrowserPolicy.metaWithCurrent(null, current = true),
+        )
+        assertEquals(
+            TvSessionBrowserPolicy.CURRENT_MARKER,
+            TvSessionBrowserPolicy.metaWithCurrent("  ", current = true),
+        )
+        assertEquals("4 сообщения", TvSessionBrowserPolicy.metaWithCurrent("4 сообщения", current = false))
+        assertNull(TvSessionBrowserPolicy.metaWithCurrent(null, current = false))
+    }
+
+    @Test
+    fun `the current marker is plain russian text without glyph decoration`() {
+        val marker = TvSessionBrowserPolicy.CURRENT_MARKER
+        assertTrue(marker.isNotBlank())
+        marker.codePoints().forEach { cp ->
+            assertTrue("marker must stay in the Cyrillic/ASCII letter range", cp < 0x0500)
+        }
+    }
 }

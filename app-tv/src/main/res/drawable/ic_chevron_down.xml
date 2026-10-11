@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chevron down: «jump to the latest message» control of the TV chat transcript.
+     Monochrome white fill; the actual color comes from android:drawableTint
+     (@color/icon_focus_tint — muted at rest, ruby under D-pad focus). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.41,8.59L12,13.17l4.59,-4.58L18,10l-6,6l-6,-6z" />
+</vector>

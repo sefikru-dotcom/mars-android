@@ -180,20 +180,52 @@
                 android:layout_height="wrap_content" />
         </LinearLayout>
 
-        <ScrollView
-            android:id="@+id/messageScroll"
+        <!-- Transcript + floating «К последнему» jump control. Auto-scroll is pin-aware
+             (TvAutoScrollPolicy): the control appears only while the reader is away from
+             the live edge and hides again on the jump/back-to-bottom (focus moves to the
+             composer — a disappearing control must never drop the D-pad focus). -->
+        <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1"
-            android:scrollbars="none"
-            android:fillViewport="true">
+            android:layout_weight="1">
 
-            <LinearLayout
-                android:id="@+id/messages"
-                android:orientation="vertical"
+            <ScrollView
+                android:id="@+id/messageScroll"
                 android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scrollbars="none"
+                android:fillViewport="true">
+
+                <LinearLayout
+                    android:id="@+id/messages"
+                    android:orientation="vertical"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+            </ScrollView>
+
+            <Button
+                android:id="@+id/jumpToBottomButton"
+                android:text="К последнему"
+                android:textSize="16sp"
+                android:textColor="@color/mars_text"
+                android:background="@drawable/bg_focus_chip"
+                android:drawableStart="@drawable/ic_chevron_down"
+                android:drawableTint="@color/icon_focus_tint"
+                android:drawablePadding="8dp"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:paddingStart="18dp"
+                android:paddingEnd="18dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
+                android:focusable="true"
+                android:visibility="gone"
+                android:layout_gravity="bottom|end"
+                android:layout_marginEnd="20dp"
+                android:layout_marginBottom="16dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
-        </ScrollView>
+        </FrameLayout>
 
         <!-- Quick chips: canned one-tap turns above the composer (TvQuickChipsPolicy);
              buttons are built programmatically into quickChipsRow. -->

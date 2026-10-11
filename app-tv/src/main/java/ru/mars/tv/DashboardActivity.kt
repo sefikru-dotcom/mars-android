@@ -4,31 +4,59 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.tv.cron.TvCronActivity
 import ru.mars.tv.projects.TvProjectsActivity
 import ru.mars.tv.todos.TvTodosActivity
-import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 
+/**
+ * TV dashboard: the entry screen. Two live layers over the navigation grid:
+ *
+ * - CLOCK HEADER — big HH:mm plus a muted weekday+date line ([TvDashboardClockSpec]
+ *   owns the formats); refreshed every 30 s, callbacks removed in onDestroy.
+ * - NOW PLAYING PLATE — the global transport ([TvMusicPlayer]) keeps playing across
+ *   screens, so the dashboard mirrors it exactly like the chat header mini player
+ *   (shared pure rules: [TvMiniPlayerSpec]): visible only while a track is bound,
+ *   caption «title — artist», and a D-pad-focusable Play/Pause toggle. The plate joins
+ *   the focus grid (UP from «Чат», DOWN back), and hiding it never drops the focus —
+ *   the grid below keeps its own stable chains.
+ */
 class DashboardActivity : AppCompatActivity() {
     private lateinit var store: AndroidKeyStoreCredentialStore
     private val handler = Handler(Looper.getMainLooper())
     private val clock = object : Runnable {
         override fun run() {
-            findViewById<TextView>(R.id.time)?.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+            val now = Date()
+            findViewById<TextView>(R.id.time)?.text = TvDashboardClockSpec.timeText(now)
+            findViewById<TextView>(R.id.dateLine)?.text = TvDashboardClockSpec.dateText(now)
             handler.postDelayed(this, 30_000L)
         }
     }
+
+    private lateinit var nowPlayingRow: View
+    private lateinit var nowPlayingText: TextView
+    private lateinit var nowPlayingToggle: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
         setContentView(R.layout.activity_dashboard)
+        // Resuming the transport from the dashboard toggle needs the application context
+        // (audio focus + wake mode live there — same entry the chat/music screens use).
+        TvMusicPlayer.attachContext(this)
+        nowPlayingRow = findViewById(R.id.nowPlayingRow)
+        nowPlayingText = findViewById(R.id.nowPlayingText)
+        nowPlayingToggle = findViewById(R.id.nowPlayingToggle)
+        nowPlayingToggle.setOnClickListener {
+            TvMusicPlayer.togglePlayPause()
+            renderNowPlaying()
+        }
         findViewById<Button>(R.id.chatButton).setOnClickListener {
             startActivity(Intent(this, TvChatActivity::class.java))
         }
@@ -52,9 +80,44 @@ class DashboardActivity : AppCompatActivity() {
             findViewById(R.id.musicButton),
             findViewById(R.id.cronButton),
             findViewById(R.id.settingsButton),
+            nowPlayingToggle,
         )
         findViewById<Button>(R.id.chatButton).requestFocus()
         clock.run()
+    }
+
+    /**
+     * Mirrors the global transport into the plate (same onResume/onPause slot contract
+     * as the chat header — screens are exclusive, the last resumed one owns the mirror).
+     */
+    override fun onResume() {
+        super.onResume()
+        TvMusicPlayer.onTransportChanged = { runOnUiThread { renderNowPlaying() } }
+        renderNowPlaying()
+    }
+
+    override fun onPause() {
+        TvMusicPlayer.onTransportChanged = null
+        super.onPause()
+    }
+
+    /** Plate rendering — every decision (visibility/caption/toggle) is [TvMiniPlayerSpec]'s. */
+    private fun renderNowPlaying() {
+        val track = TvMusicPlayer.currentTrack
+        val visible = TvMiniPlayerSpec.visible(track)
+        // Hiding a plate that holds the focus would drop it; the grid recovers it instead.
+        if (!visible && nowPlayingToggle.hasFocus()) {
+            findViewById<View>(R.id.chatButton)?.requestFocus()
+        }
+        nowPlayingRow.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) return
+        nowPlayingText.text = TvMiniPlayerSpec.line(track)
+        val playing = TvMusicPlayer.isPlaying
+        nowPlayingToggle.text = TvMiniPlayerSpec.toggleLabel(playing)
+        nowPlayingToggle.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (playing) R.drawable.ic_pause else R.drawable.ic_play, 0, 0, 0)
+        nowPlayingToggle.compoundDrawableTintList =
+            ContextCompat.getColorStateList(this, R.color.icon_focus_tint)
     }
 
     private fun logout() {
