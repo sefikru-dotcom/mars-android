@@ -206,6 +206,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var drawerShowSubagents: Boolean = false
     private var drawerSubagentToggle: Button? = null
 
+    // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
+    // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
+    // хост лишь рисует панель, подсвечивает карточку найденного сообщения и скроллит к ней.
+    private lateinit var searchPlate: LinearLayout
+    private lateinit var searchInput: EditText
+    private lateinit var searchCounter: TextView
+    private var searchMatches: List<TranscriptMatch> = emptyList()
+    private var searchPosition: Int = -1
+    private var searchHighlightedCard: View? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
@@ -314,7 +324,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (drawer.isDrawerOpen(GravityCompat.START)) {
+                if (::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE) {
+                    // «Назад» сначала закрывает панель поиска по диалогу, потом шторку/экран.
+                    closeTranscriptSearch()
+                } else if (drawer.isDrawerOpen(GravityCompat.START)) {
                     drawer.closeDrawer(GravityCompat.START)
                 } else {
                     isEnabled = false
@@ -743,6 +756,78 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         root.addView(statusView)
 
+        // Панель поиска по диалогу: поле, счётчик «N из M», кольцевая навигация и закрытие.
+        // Решение о совпадениях/подписи — чистая TranscriptSearchPolicy (JVM-тесты).
+        searchPlate = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(10), dp(4), dp(6), dp(4))
+            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.BORDER)
+        }
+        val searchPlateIcon = ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_search))
+            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+        }
+        searchPlate.addView(searchPlateIcon, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
+        searchInput = EditText(this).apply {
+            hint = "Искать в диалоге…"
+            setTextColor(MarsTheme.TEXT_STRONG)
+            setHintTextColor(MarsTheme.TEXT_MUTED)
+            textSize = 14f
+            isSingleLine = true
+            background = null
+            contentDescription = "Поиск по диалогу"
+            imeOptions = 3 // IME_ACTION_SEARCH: кнопка «Найти» листает совпадения вперёд.
+            setOnEditorActionListener { _, _, _ -> navigateTranscriptSearch(forward = true); true }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    refreshTranscriptSearch(resetPosition = true, scrollToMatch = true)
+                }
+                override fun afterTextChanged(s: android.text.Editable?) {}
+            })
+        }
+        searchPlate.addView(searchInput, LinearLayout.LayoutParams(0, -2, 1f))
+        searchCounter = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            setPadding(dp(6), 0, dp(6), 0)
+        }
+        searchPlate.addView(searchCounter, LinearLayout.LayoutParams(-2, -2))
+        val searchPrevBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_chevron_up,
+            "Предыдущее совпадение",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34,
+            strokeColor = 0
+        ).apply { setOnClickListener { navigateTranscriptSearch(forward = false) } }
+        searchPlate.addView(searchPrevBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        val searchNextBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_chevron_down,
+            "Следующее совпадение",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34,
+            strokeColor = 0
+        ).apply { setOnClickListener { navigateTranscriptSearch(forward = true) } }
+        searchPlate.addView(searchNextBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        val searchCloseBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_close,
+            "Закрыть поиск",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34,
+            strokeColor = 0
+        ).apply { setOnClickListener { closeTranscriptSearch() } }
+        searchPlate.addView(searchCloseBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        root.addView(searchPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+
         // Attachment chips
         attachmentChips = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1072,11 +1157,25 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         chipsScroll.addView(chipsRow)
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
 
-        // Right: Action buttons (Attach, Voice, Volume, Send/Stop)
+        // Right: Action buttons (Search, Attach, Voice, Volume, Send/Stop)
         val actionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+
+        // Вход в поиск по диалогу: панель раскрывается над транскриптом (под статус-строкой).
+        val searchEntryBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_search,
+            "Поиск по диалогу",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34,
+            strokeColor = 0
+        ).apply {
+            setOnClickListener { openTranscriptSearch() }
+        }
+        actionsRow.addView(searchEntryBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         val attachBtn = MarsTheme.circleIconButton(
             this,
@@ -1758,7 +1857,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
         scrollToBottomPolicy.onViewportDistanceFromBottom(distanceFromBottomPx())
         messages.removeAllViews()
+        // Разделители суток: первая известная метка и каждая смена локального дня
+        // получают день-чип («Сегодня»/«Вчера»/«9 октября») — чистая MessageTimePolicy.
+        var previousTimestamp = MessageTimePolicy.UNKNOWN_TIMESTAMP
         uiState.messages.forEachIndexed { index, message ->
+            if (MessageTimePolicy.showDaySeparator(previousTimestamp, message.timestamp)) {
+                messages.addView(
+                    buildDaySeparator(message.timestamp),
+                    LinearLayout.LayoutParams(-2, -2).apply {
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        topMargin = dp(10)
+                    }
+                )
+            }
+            if (message.timestamp > MessageTimePolicy.UNKNOWN_TIMESTAMP) previousTimestamp = message.timestamp
             val isUser = message.role == "user"
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1795,6 +1907,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                     labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
                 }
+            }
+
+            // Час сообщения справа в шапке карточки; при неизвестной метке не показываем.
+            MessageTimePolicy.clockLabel(message.timestamp)?.let { clock ->
+                labelRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                labelRow.addView(TextView(this).apply {
+                    text = clock
+                    textSize = 10.5f
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                    isSingleLine = true
+                })
             }
             card.addView(labelRow)
 
@@ -2081,10 +2204,95 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     true
                 }
             }
+            // Тег = индекс сообщения: по нему поиск находит карточку для подсветки/скролла.
+            card.tag = index
             messages.addView(card, params)
+        }
+        // Открытый поиск переживает перерисовку (стрим/новый ход): совпадения пересчитываются,
+        // позиция сохраняется, скролл не дёргается — пользователь остаётся там, где читал.
+        if (::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE) {
+            refreshTranscriptSearch(resetPosition = false, scrollToMatch = false)
         }
         renderSmartChips()
         if (autoScroll.shouldScrollOnContentChanged()) scrollToBottom() else syncScrollToBottomFab()
+    }
+
+    // --- Поиск по диалогу: хост чистой TranscriptSearchPolicy ------------------------------------
+
+    /** День-чип разделителя суток («Сегодня»/«Вчера»/«9 октября») — подпись из MessageTimePolicy. */
+    private fun buildDaySeparator(timestampMillis: Long): TextView = TextView(this).apply {
+        text = MessageTimePolicy.dayLabel(timestampMillis, System.currentTimeMillis())
+        textSize = 10.5f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+        setPadding(dp(10), dp(3), dp(10), dp(3))
+        gravity = Gravity.CENTER
+    }
+
+    private fun openTranscriptSearch() {
+        searchPlate.visibility = View.VISIBLE
+        searchInput.setText("")
+        searchInput.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showSoftInput(searchInput, InputMethodManager.SHOW_IMPLICIT)
+        refreshTranscriptSearch(resetPosition = true, scrollToMatch = false)
+    }
+
+    private fun closeTranscriptSearch() {
+        searchPlate.visibility = View.GONE
+        searchInput.setText("")
+        searchMatches = emptyList()
+        searchPosition = -1
+        clearSearchHighlight()
+        hideKeyboard()
+    }
+
+    /**
+     * Пересчитывает совпадения по текущему транскрипту и обновляет счётчик.
+     * [resetPosition] — сброс на первое совпадение (новый запрос); без него позиция
+     * сохраняется и лишь зажимается в границы (перерисовка во время стрима).
+     * [scrollToMatch] — скроллить к совпадению (только явная навигация/новый запрос).
+     */
+    private fun refreshTranscriptSearch(resetPosition: Boolean, scrollToMatch: Boolean) {
+        val query = searchInput.text?.toString().orEmpty()
+        searchMatches = TranscriptSearchPolicy.findMatches(uiState.messages.map { it.text }, query)
+        searchPosition = when {
+            searchMatches.isEmpty() -> -1
+            resetPosition || searchPosition < 0 -> 0
+            else -> searchPosition.coerceAtMost(searchMatches.size - 1)
+        }
+        searchCounter.text = TranscriptSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
+        applySearchHighlight(scrollTo = scrollToMatch && searchPosition >= 0)
+    }
+
+    /** Кольцевой шаг «следующее/предыдущее совпадение» + обновление счётчика и подсветки. */
+    private fun navigateTranscriptSearch(forward: Boolean) {
+        val next = TranscriptSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
+        if (next < 0) return
+        searchPosition = next
+        searchCounter.text = TranscriptSearchPolicy.counterLabel(
+            searchInput.text?.toString().orEmpty(), searchPosition, searchMatches.size
+        )
+        applySearchHighlight(scrollTo = true)
+    }
+
+    /** Рубиновая рамка вокруг карточки текущего совпадения и плавный скролл к ней. */
+    private fun applySearchHighlight(scrollTo: Boolean) {
+        clearSearchHighlight()
+        val match = searchMatches.getOrNull(searchPosition) ?: return
+        val card = messages.findViewWithTag<View>(match.messageIndex) ?: return
+        // foreground, а не background: градиент пузыря/карточки остаётся нетронутым.
+        card.foreground = GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setStroke(dp(2), MarsTheme.ACCENT)
+        }
+        searchHighlightedCard = card
+        if (scrollTo) scroll.smoothScrollTo(0, (card.top - dp(64)).coerceAtLeast(0))
+    }
+
+    private fun clearSearchHighlight() {
+        searchHighlightedCard?.foreground = null
+        searchHighlightedCard = null
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
@@ -2402,6 +2610,24 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
             }
             card.addView(row)
+
+            // Мета активности: когда диалог обновлялся и сколько в нём сообщений
+            // («5 мин назад · 12 сообщений») — чистая SessionMetaPolicy + MessageTimePolicy.
+            val metaLine = SessionMetaPolicy.metaLine(
+                updatedAtMillis = MessageTimePolicy.parseServerTimestamp(session.updatedAt ?: session.createdAt),
+                messageCount = session.messageCount,
+                nowMillis = System.currentTimeMillis(),
+            )
+            if (metaLine != null) {
+                card.addView(TextView(this).apply {
+                    text = metaLine
+                    textSize = 11f
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(40), dp(2))
+                })
+            }
 
             if (!session.preview.isNullOrBlank()) {
                 card.addView(TextView(this).apply {
@@ -2729,7 +2955,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Maps a persisted session transcript to bubbles (shared by loadSession and post-compression reload). */
     private fun historyMessages(detail: SessionDetail): List<ChatMessage> = detail.messages.map {
-        ChatMessage(if (it.role == "user") "user" else "assistant", it.content, timestamp = System.currentTimeMillis())
+        // Реальное серверное время сообщения (createdAt): метки питают час на карточке и
+        // разделители суток; нераспознанная/отсутствующая метка -> UNKNOWN (время не показываем).
+        ChatMessage(
+            if (it.role == "user") "user" else "assistant",
+            it.content,
+            timestamp = MessageTimePolicy.parseServerTimestamp(it.createdAt),
+        )
     }
 
     /**
