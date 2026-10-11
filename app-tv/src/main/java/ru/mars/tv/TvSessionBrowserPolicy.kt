@@ -18,6 +18,10 @@ import ru.mars.network.model.SessionItem
  * - [loadOutcome]/[transcript]: a fetched [SessionDetail] turns into transcript bubbles
  *   (mobile `historyMessages` parity: `role == "user"` -> «Вы», anything else -> «Марс»;
  *   blank persisted messages are dropped — an empty bubble is noise on a 10-foot screen).
+ * - [listOutcome]/[listStatusMessage]/[shouldOfferRetry]: offline honesty of the LIST
+ *   fetch — core-network answers every failed fetch with an empty list, so the dialog
+ *   separates the server-confirmed «empty» from the offline «unavailable + retry» using
+ *   the connectivity probe snapshot instead of lying with [EMPTY_LIST].
  */
 object TvSessionBrowserPolicy {
 
@@ -26,6 +30,17 @@ object TvSessionBrowserPolicy {
 
     /** Dialog status line when the server returned no listable sessions. */
     const val EMPTY_LIST = "Список диалогов пуст"
+
+    /**
+     * Dialog status line when no list arrived AND the connectivity probe says the network
+     * is down. core-network answers EVERY list-fetch failure (offline, server down,
+     * timeout) with an empty list, so emptiness alone is not evidence of «no dialogs» —
+     * an offline TV must read «unavailable» (+ retry), never «empty» ([listOutcome]).
+     */
+    const val LIST_UNREACHABLE = "Список диалогов недоступен — проверьте сеть"
+
+    /** Label of the D-pad retry action rendered in the [ListOutcome.Unreachable] state. */
+    const val RETRY_LABEL = "Повторить"
 
     /** Status line when opening a session failed (detail == null / no id). */
     const val LOAD_FAILED = "Не удалось открыть диалог"
@@ -151,4 +166,60 @@ object TvSessionBrowserPolicy {
     fun loadOutcome(detail: SessionDetail?): LoadOutcome =
         if (detail != null && detail.id.isNotBlank()) LoadOutcome.Open(detail)
         else LoadOutcome.Failed(LOAD_FAILED)
+
+    /**
+     * What the dialog makes of a fetched session LIST. core-network maps every list-fetch
+     * failure (radio down, server down, timeout) onto an EMPTY list, so emptiness alone
+     * cannot distinguish «no dialogs» from «unreachable»: [Unreachable] keeps the offline
+     * dead end honest and retryable, [Empty] is reserved for a server-confirmed nothing.
+     */
+    sealed interface ListOutcome {
+        /** The fetch produced listable rows — render them (connectivity is irrelevant). */
+        data class Show(val rows: List<SessionRow>) : ListOutcome
+
+        /** Nothing is listable and the network was up: the honest empty state. */
+        object Empty : ListOutcome
+
+        /** Nothing arrived and the network is down: honest failure + a retry action. */
+        object Unreachable : ListOutcome
+    }
+
+    /**
+     * The dialog verdict for one `getSessions` result: any VISIBLE row wins regardless of
+     * connectivity (data beats the probe — a stale-but-real list is still navigable),
+     * otherwise [networkAvailable] (the [TvConnectivityProbe] snapshot taken at render
+     * time) decides between the server-confirmed [ListOutcome.Empty] and the offline
+     * [ListOutcome.Unreachable]. A list whose only entries are suppressed subagent
+     * children counts as empty — the user cannot pick any of them anyway.
+     */
+    fun listOutcome(
+        sessions: List<SessionItem>,
+        currentSessionId: String?,
+        networkAvailable: Boolean,
+    ): ListOutcome {
+        val visible = rows(sessions, currentSessionId)
+        return when {
+            visible.isNotEmpty() -> ListOutcome.Show(visible)
+            networkAvailable -> ListOutcome.Empty
+            else -> ListOutcome.Unreachable
+        }
+    }
+
+    /**
+     * Status line for [outcome]: `null` for [ListOutcome.Show] (the rows speak, the status
+     * line hides), [EMPTY_LIST] for the server-confirmed empty state, [LIST_UNREACHABLE]
+     * for the offline dead end. The two failure-free states must never read alike.
+     */
+    fun listStatusMessage(outcome: ListOutcome): String? = when (outcome) {
+        is ListOutcome.Show -> null
+        ListOutcome.Empty -> EMPTY_LIST
+        ListOutcome.Unreachable -> LIST_UNREACHABLE
+    }
+
+    /**
+     * True only for [ListOutcome.Unreachable]: a dead network is retryable, so the dialog
+     * renders a «Повторить» action; a server-confirmed empty list is a settled verdict —
+     * offering a retry there would be noise.
+     */
+    fun shouldOfferRetry(outcome: ListOutcome): Boolean = outcome is ListOutcome.Unreachable
 }

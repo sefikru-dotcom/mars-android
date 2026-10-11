@@ -2,6 +2,7 @@ package ru.mars.tv
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -9,16 +10,20 @@ import org.junit.Test
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
+import ru.mars.tv.TvSessionBrowserPolicy.ListOutcome
 import ru.mars.tv.TvSessionBrowserPolicy.LoadOutcome
 import ru.mars.tv.TvSessionBrowserPolicy.NO_SELECTION
+import ru.mars.tv.TvSessionBrowserPolicy.SessionRow
 
 /**
  * Unit tests for [TvSessionBrowserPolicy] — pure JVM, no Android framework, no HTTP.
  * Covers the «Диалоги» dialog decisions: subagent suppression (mobile drawerSessions
  * parity), row rendering (title fallback / preview / meta line with Russian plurals),
  * D-pad navigation (initial focus on the current session, clamped stepping without
- * wrap, out-of-range recovery) and the loaded-detail mapping (transcript bubbles,
- * honest failure outcome).
+ * wrap, out-of-range recovery), the loaded-detail mapping (transcript bubbles,
+ * honest failure outcome) and the list-fetch verdict (offline «unavailable + retry»
+ * vs the server-confirmed «empty» — an empty list from a dead radio is not evidence
+ * that no dialogs exist).
  */
 class TvSessionBrowserPolicyTest {
 
@@ -271,5 +276,99 @@ class TvSessionBrowserPolicyTest {
     @Test
     fun `failed outcome never carries a session`() {
         assertFalse(TvSessionBrowserPolicy.loadOutcome(null) is LoadOutcome.Open)
+    }
+
+    // --- list outcome: offline honesty of the list fetch ------------------------------------------------
+
+    @Test
+    fun `a fetched list with visible rows shows them regardless of connectivity`() {
+        // Data beats the probe: a real (even if momentarily stale) list is navigable offline.
+        val outcome = TvSessionBrowserPolicy.listOutcome(
+            sessions = listOf(session("a"), session("b")),
+            currentSessionId = null,
+            networkAvailable = false,
+        )
+        assertTrue("rows must win over the offline probe", outcome is ListOutcome.Show)
+        assertEquals(listOf("a", "b"), (outcome as ListOutcome.Show).rows.map { it.id })
+    }
+
+    @Test
+    fun `shown rows keep the subagent suppression of rows`() {
+        val outcome = TvSessionBrowserPolicy.listOutcome(
+            sessions = listOf(session("parent"), session("child", sourceTag = "subagent")),
+            currentSessionId = null,
+            networkAvailable = true,
+        )
+        assertEquals(listOf("parent"), (outcome as ListOutcome.Show).rows.map { it.id })
+    }
+
+    @Test
+    fun `an empty list with connectivity is the server-confirmed empty state`() {
+        assertSame(
+            ListOutcome.Empty,
+            TvSessionBrowserPolicy.listOutcome(emptyList(), currentSessionId = null, networkAvailable = true),
+        )
+    }
+
+    @Test
+    fun `an empty list without connectivity is unreachable - never the empty claim`() {
+        // The core regression: core-network maps every failed fetch onto emptyList(), so an
+        // offline TV must not read «Список диалогов пуст» — the dialogs exist, the radio is down.
+        assertSame(
+            ListOutcome.Unreachable,
+            TvSessionBrowserPolicy.listOutcome(emptyList(), currentSessionId = "cur", networkAvailable = false),
+        )
+    }
+
+    @Test
+    fun `a list of only suppressed subagent children counts as empty for the honesty verdict`() {
+        val hiddenOnly = listOf(session("child", sourceTag = "subagent"))
+        assertSame(
+            ListOutcome.Unreachable,
+            TvSessionBrowserPolicy.listOutcome(hiddenOnly, currentSessionId = null, networkAvailable = false),
+        )
+        assertSame(
+            ListOutcome.Empty,
+            TvSessionBrowserPolicy.listOutcome(hiddenOnly, currentSessionId = null, networkAvailable = true),
+        )
+    }
+
+    @Test
+    fun `status message hides for shown rows and reads honestly for both empty-ish states`() {
+        val shown = ListOutcome.Show(listOf(SessionRow("a", "Dialog", null, null)))
+        assertNull(TvSessionBrowserPolicy.listStatusMessage(shown))
+        assertEquals(
+            TvSessionBrowserPolicy.EMPTY_LIST,
+            TvSessionBrowserPolicy.listStatusMessage(ListOutcome.Empty),
+        )
+        assertEquals(
+            TvSessionBrowserPolicy.LIST_UNREACHABLE,
+            TvSessionBrowserPolicy.listStatusMessage(ListOutcome.Unreachable),
+        )
+        assertNotEquals(
+            "offline must never reuse the empty claim",
+            TvSessionBrowserPolicy.EMPTY_LIST,
+            TvSessionBrowserPolicy.LIST_UNREACHABLE,
+        )
+        assertTrue(TvSessionBrowserPolicy.LIST_UNREACHABLE.isNotBlank())
+    }
+
+    @Test
+    fun `retry is offered only for the unreachable dead end`() {
+        assertFalse(
+            TvSessionBrowserPolicy.shouldOfferRetry(
+                ListOutcome.Show(listOf(SessionRow("a", "Dialog", null, null)))
+            )
+        )
+        assertFalse(
+            "a server-confirmed empty list is settled - a retry would be noise",
+            TvSessionBrowserPolicy.shouldOfferRetry(ListOutcome.Empty),
+        )
+        assertTrue(TvSessionBrowserPolicy.shouldOfferRetry(ListOutcome.Unreachable))
+    }
+
+    @Test
+    fun `the retry label is a non-blank D-pad action caption`() {
+        assertTrue(TvSessionBrowserPolicy.RETRY_LABEL.isNotBlank())
     }
 }
