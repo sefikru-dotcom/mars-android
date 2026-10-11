@@ -154,6 +154,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drafts: SessionDraftController
     /** Guard асинхронной навигации по диалогам (pure): побеждает последняя загрузка. */
     private val sessionNavigation = SessionNavigationPolicy()
+    /** Guard живого хода send-пути (pure): поздние SSE-события старого хода не попадают в новый экран. */
+    private val liveTurnGuard = LiveTurnGuard()
     /** Сохранение открытого диалога при пересоздании экрана (pure policy). */
     private val recreationPolicy = SessionRecreationPolicy()
     /** Одноразовая очистка локальных plaintext-данных при выходе из авторизации. */
@@ -337,9 +339,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
         MarsMusicPlayer.unregisterListener(this)
-        // Recovery-job умирает вместе с экраном (destroy — точка прерывания цикла).
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
+        // Живой ход умирает вместе с экраном (destroy — точка прерывания collect send-пути
+        // и recovery-цикла).
+        teardownLiveTurn()
         speech?.destroy()
         tts.shutdown()
         super.onDestroy()
@@ -1201,6 +1203,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Новый пользовательский ход: предыдущий recovery-job прерывается (generation
         // guard), курсор Last-Event-ID и серии отказов координатора сбрасываются.
         if (::recovery.isInitialized) recovery.onNewTurn()
+        // Токен выдаётся синхронно с регистрацией хода: любой последующий уход с контекста
+        // (teardownLiveTurn) гасит его — поздние SSE-кадры этого collect не перекрасят новый экран.
+        val turnToken = liveTurnGuard.beginTurn()
         return lifecycleScope.launch {
         var credentialRejected = false
         var turnFailed = false
@@ -1255,6 +1260,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // чтобы оборвавшийся доставленный ход восстанавливался без потерь.
                 onEventId = { id -> if (::recovery.isInitialized) recovery.resumeTracker.onFrameId(id) },
             ).collect { event ->
+                // Смена контекста убила ход (переключение диалога/«новый чат»/«стоп»/logout):
+                // поздние кадры структурно не допускаются в новый экран — collect сразу
+                // завершается, а finally видит отменённый job и не запускает автофлаш очереди.
+                if (!liveTurnGuard.isCurrent(turnToken)) throw CancellationException("live turn superseded")
                 // Любое не-ошибочное событие доказывает: сервер принял запрос, сообщение
                 // доставлено. Ошибка ДО доставки (HTTP-отказ вместо стрима) — turnFailed.
                 if (event !is ChatEvent.Error) delivered = true
@@ -1436,6 +1445,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             ?.hideSoftInputFromWindow(input.windowToken, 0)
     }
 
+    /**
+     * Единый локальный разрыв живого хода при любом уходе из контекста диалога: гасит
+     * токен send-пути ([LiveTurnGuard] — поздние SSE-кадры убитого хода не попадут в новый
+     * экран), прерывает recovery-цикл и отменяет collect отправочного стрима. Серверный ход
+     * при этом не трогается: при возвращении в диалог его подхватит reattachActiveTurn.
+     */
+    private fun teardownLiveTurn() {
+        liveTurnGuard.invalidate()
+        if (::recovery.isInitialized) recovery.cancelRecovery()
+        stream?.cancel()
+        stream = null
+        currentStreamId = null
+    }
+
     private fun cancelStream() {
         val credential = store.read()
         val id = currentStreamId
@@ -1444,12 +1467,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 runCatching { ChatRepository().executeControl(ChatRepository().cancelRequest(BASE_URL, id, credential.accessToken)) }
             }
         }
-        // «Стоп» прерывает recovery-цикл: после осознанной остановки хода reattach не должен
-        // «воскрешать» стрим; generation guard отсекает поздние события убитого цикла.
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
-        stream = null
-        currentStreamId = null
+        // «Стоп» убивает ход локально целиком: токен send-пути гаснет, recovery-цикл
+        // прерывается — после осознанной остановки reattach не должен «воскрешать» стрим.
+        teardownLiveTurn()
         interactiveController.dismissAll()
         uiState.cancel()
         explicitStatus = null
@@ -2465,9 +2485,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Токен навигации: устаревший callback (пользователь открыл другой диалог/новый чат
         // или закрыл сессию, пока грузились детали) не перетирает актуальное состояние.
         val token = sessionNavigation.beginNavigation()
-        // Смена диалога прерывает recovery предыдущего хода: reattach чужого стрима в
-        // новом контексте запрещён (generation guard отсекает поздние события).
-        if (::recovery.isInitialized) recovery.cancelRecovery()
+        // Смена диалога локально убивает живой ход предыдущего ЦЕЛИКОМ: и collect send-пути,
+        // и recovery-цикл. Иначе поздние SSE-кадры старого хода перекрасят только что открытый
+        // диалог (чанки/SessionBound/диалоги подтверждения), а живый старый стрим заблокирует
+        // reattachActiveTurn новой сессии. Серверный ход не прерывается: при возвращении в
+        // диалог его подхватит reattach.
+        teardownLiveTurn()
         lifecycleScope.launch {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, sessionId)
             if (detail != null) {
@@ -2749,9 +2772,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     // композитор переключается на черновик нового чата, а pending-загрузка
                     // удалённой сессии инвалидируется (её callback уже не применится).
                     sessionNavigation.invalidatePending()
-                    // Recovery удалённого диалога не переживает удаление: reattach мёртвой
-                    // сессии бессмыслен.
-                    if (::recovery.isInitialized) recovery.cancelRecovery()
+                    // Живой ход удалённого диалога не переживает удаление: collect send-пути
+                    // и recovery-цикл убиваются — reattach мёртвой сессии бессмыслен, а поздние
+                    // кадры старого хода не должны попасть в сброшенный транскрипт.
+                    teardownLiveTurn()
                     interactiveController.dismissAll()
                     compressionController.onSessionChanged()
                     uiState.startNewSession()
@@ -3415,11 +3439,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Pending-загрузка диалога больше не актуальна: её callback не должен переключить
         // композитор и состояние обратно на старый session_id после «нового чата».
         sessionNavigation.invalidatePending()
-        // Новый чат прерывает recovery предыдущего диалога.
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
-        stream = null
-        currentStreamId = null
+        // Новый чат убивает живой ход предыдущего диалога: токен send-пути, collect и recovery-цикл.
+        teardownLiveTurn()
         interactiveController.dismissAll()
         compressionController.onSessionChanged()
         uiState.startNewSession()
@@ -3527,11 +3548,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         sessionNavigation.invalidatePending()
 
         // Local stream teardown first so no more events land while the close is in flight.
-        // Recovery-цикл завершаемого хода тоже умирает: reattach после finish не нужен.
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
-        stream = null
-        currentStreamId = null
+        // Recovery-цикл и токен send-пути завершаемого хода тоже умирают: reattach после
+        // finish не нужен, поздние кадры на закрывающийся экран не пускаются.
+        teardownLiveTurn()
 
         if (credential == null || sid == null) {
             closeSessionLocally(null)
@@ -3620,9 +3639,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun leaveChat() {
-        // Logout прерывает recovery: цикл не должен дёргать API после отзыва credentials.
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
+        // Logout убивает живой ход локально: цикл не должен дёргать API после отзыва
+        // credentials, а поздние SSE-кадры убитого хода не должны трогать экран.
+        teardownLiveTurn()
         // Локальные plaintext-данные (черновики, история поиска музыки) стираются синхронно
         // ДО finish() и независимо от асинхронного best-effort revoke; pending-навигация
         // инвалидируется, а повторное сохранение черновика в onPause блокируется.
@@ -3646,11 +3665,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * loops every action into the same 401 with no way back to login.
      */
     private fun requestReauthentication() {
-        // Принудительная реавторизация прерывает recovery: attach с отозванным credential бессмыслен.
-        if (::recovery.isInitialized) recovery.cancelRecovery()
-        stream?.cancel()
-        stream = null
-        currentStreamId = null
+        // Принудительная реавторизация убивает живой ход: attach с отозванным credential
+        // бессмыслен, поздние кадры убитого хода не должны трогать экран.
+        teardownLiveTurn()
         // Черновики и история поиска стираются до finish(): новая авторизация на этом
         // устройстве не должна видеть plaintext-данные предыдущей; onPause после этого
         // черновик уже не сохраняет.
