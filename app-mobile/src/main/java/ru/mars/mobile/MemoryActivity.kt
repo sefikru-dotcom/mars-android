@@ -245,7 +245,14 @@ class MemoryActivity : ComponentActivity() {
                             appendInlineSpans(ssb, line.spans)
                         }
                         is RichLine.Quote -> {
-                            ssb.append("▎ ")
+                            val quoteStart = ssb.length
+                            ssb.append("  ")
+                            ssb.setSpan(
+                                android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
+                                quoteStart,
+                                quoteStart + 1,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
                             appendInlineSpans(ssb, line.spans)
                             tv.setTypeface(null, Typeface.ITALIC)
                             tv.setTextColor(MarsTheme.TEXT_EM)
@@ -269,8 +276,15 @@ class MemoryActivity : ComponentActivity() {
                         }
                         is RichLine.Normal -> appendInlineSpans(ssb, line.spans)
                         is RichLine.Divider -> {
-                            ssb.append("─".repeat(24))
-                            tv.setTextColor(MarsTheme.BORDER_MUTED)
+                            tv.text = ""
+                            tv.setBackgroundColor(MarsTheme.BORDER_MUTED)
+                            tv.layoutParams = LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                dp(1)
+                            ).apply {
+                                topMargin = dp(6)
+                                bottomMargin = dp(6)
+                            }
                         }
                     }
                     tv.text = ssb

@@ -150,6 +150,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private var stream: Job? = null
     private var currentSessionId: String? = null
+    private var currentSessionReadOnly = false
     private var currentStreamId: String? = null
     /** Черновики несент-сообщений по диалогам: чистая политика [SessionDraftController]. */
     private lateinit var drafts: SessionDraftController
@@ -1141,7 +1142,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             minHeight = 0
             typeface = Typeface.DEFAULT_BOLD
             isAllCaps = false
-            setOnClickListener { interactiveController.setYoloEnabled(!uiState.yoloEnabled) }
+            setOnClickListener {
+                if (currentSessionReadOnly) {
+                    statusView.text = "Сессия доступна только для чтения"
+                } else {
+                    interactiveController.setYoloEnabled(!uiState.yoloEnabled)
+                }
+            }
         }
         chipsRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
         updateYoloPill()
@@ -1250,6 +1257,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun sendMessage() {
+        if (currentSessionReadOnly) {
+            statusView.text = "Сессия доступна только для чтения"
+            return
+        }
         if (uiState.status == ChatStatus.TYPING) { steerMessage(); return }
         val rawInput = input.text.toString().trim()
         val text = composerLayoutPresenter.outgoingText(rawInput)
@@ -1324,6 +1335,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             when (val ensured = firstSessionFlow.ensureSession(targetSessionId, credential)) {
                 is EnsureSessionResult.Ready -> {
                     currentSessionId = ensured.sessionId
+                    if (targetSessionId == null) {
+                        modelSelection.setSessionModel(ensured.model, ensured.modelProvider)
+                        modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
+                    }
                     explicitStatus = null
                     // Первая отправка нового чата создала сессию: остальные сообщения
                     // офлайн-всплеска (ключ null) перепривязываются к ней — продолжают
@@ -1346,7 +1361,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     return@launch
                 }
             }
-            val choice = modelSelection.current
+            val choice = modelSelection.displayedChoice()
             // WebUI parity: the wire message carries the `[Workspace::v1: <path>]`
             // sentinel; the transcript above keeps showing the raw text.
             val wireText = workspaceSelection.outgoingMessage(text)
@@ -1579,6 +1594,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun steerMessage() {
+        if (currentSessionReadOnly) {
+            statusView.text = "Сессия доступна только для чтения"
+            return
+        }
         val text = input.text.toString().trim()
         val credential = store.read()
         val id = currentSessionId
@@ -2329,7 +2348,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                                 appendInlineSpans(ssb, line.spans)
                             }
                             is RichLine.Quote -> {
-                                ssb.append("▎ ")
+                                val quoteStart = ssb.length
+                                ssb.append("  ")
+                                ssb.setSpan(
+                                    android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
+                                    quoteStart,
+                                    quoteStart + 1,
+                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                                )
                                 appendInlineSpans(ssb, line.spans)
                                 tv.setTypeface(null, Typeface.ITALIC)
                             }
@@ -2354,8 +2380,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                                 appendInlineSpans(ssb, line.spans)
                             }
                             is RichLine.Divider -> {
-                                ssb.append("─".repeat(24))
-                                tv.setTextColor(MarsTheme.BORDER)
+                                tv.text = ""
+                                tv.setBackgroundColor(MarsTheme.BORDER)
+                                tv.layoutParams = LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    dp(1)
+                                ).apply {
+                                    topMargin = dp(6)
+                                    bottomMargin = dp(6)
+                                }
                             }
                         }
                         tv.text = ssb
@@ -2548,9 +2581,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             )
             visibility = if (subagentCount > 0 || drawerShowSubagents) View.VISIBLE else View.GONE
         }
-        val filtered = uiState.drawerSessions(drawerShowSubagents, currentSessionId)
-            .filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
-            .sortedByDescending { it.updatedAt ?: it.createdAt ?: "" }
+        val rows = uiState.drawerSessions(drawerShowSubagents, currentSessionId)
+        val filtered = if (drawerFilterQuery.isBlank()) rows else {
+            val byId = rows.associateBy { it.id }
+            val matches = rows.filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
+            val included = mutableSetOf<String>()
+            matches.forEach { match ->
+                var row: SessionItem? = match
+                while (row != null && included.add(row.id)) {
+                    row = byId[row.parentSessionId]
+                }
+            }
+            rows.filter { it.id in included }
+        }
         if (filtered.isEmpty()) {
             drawerSessionList.addView(TextView(this).apply {
                 text = "Нет подходящих сессий"
@@ -2568,7 +2611,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 } else {
                     MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 12, strokeColor = MarsTheme.BORDER_SUBTLE)
                 }
-                setPadding(dp(12), dp(8), dp(8), dp(8))
+                setPadding(dp(if (session.isSubagent && session.parentSessionId != null) 28 else 12), dp(8), dp(8), dp(8))
             }
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             row.addView(Button(this).apply {
@@ -2733,6 +2776,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // непосредственно перед присвоением нового session_id.
                 drafts.onSessionSwitch(currentSessionId, detail.id, input.text.toString())
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                modelSelection.setSessionModel(detail.model, detail.modelProvider)
+                currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == detail.id }?.readOnly == true
+                modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 // Active-turn/attention banner state from the freshly loaded detail.
                 uiState.setActiveTurn(detail.activeTurn)
                 uiState.setTodoState(detail.todoState)
@@ -2767,6 +2813,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         initialRestoreDone = true
         val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
         drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
+        currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
+        modelSelection.setSessionModel(
+            uiState.sessions.firstOrNull { it.id == sessionId }?.model,
+            uiState.sessions.firstOrNull { it.id == sessionId }?.modelProvider,
+        )
         uiState.bindSession(
             sessionId,
             uiState.sessions.firstOrNull { it.id == sessionId }?.title,
@@ -2981,6 +3032,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, id)
             if (detail != null && currentSessionId == id) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                modelSelection.setSessionModel(detail.model, detail.modelProvider)
+                currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == detail.id }?.readOnly == true
+                modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 uiState.setActiveTurn(detail.activeTurn)
                 uiState.setTodoState(detail.todoState)
                 autoScroll.pinToBottom()
@@ -3017,6 +3071,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     compressionController.onSessionChanged()
                     uiState.startNewSession()
                     currentSessionId = null
+                    currentSessionReadOnly = false
+                    modelSelection.clearSessionModel()
                     restoreComposerDraft()
                     echoPendingOfflineMessages()
                 }
@@ -3325,11 +3381,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 return@launch
             }
             val labels = entries.map { it.label }.toTypedArray()
-            val checked = entries.indexOfFirst { it.model.id == modelSelection.current?.modelId }
+            val checked = entries.indexOfFirst { it.model.id == modelSelection.displayedChoice()?.modelId }
             android.app.AlertDialog.Builder(this@ChatActivity)
                 .setTitle("Модель Марса")
                 .setSingleChoiceItems(labels, checked) { d, which ->
                     val picked = modelSelection.select(entries[which].model)
+                    modelSelection.setSessionModel(picked?.modelId, picked?.providerId)
                     d.dismiss()
                     if (picked != null) {
                         updateModelButton()
@@ -3369,7 +3426,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (c == null) { statusView.text = "Уровень размышлений недоступен: нет авторизации"; return }
         lifecycleScope.launch {
             statusView.text = "Загружаю уровни размышлений…"
-            val model = modelSelection.current
+            val model = modelSelection.displayedChoice()
             val fetched = withContext(Dispatchers.IO) {
                 ReasoningRepository().fetchStatus(BASE_URL, c, model?.modelId, model?.providerId, currentSessionId)
             }
@@ -3407,7 +3464,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (c == null) { statusView.text = "Уровень размышлений недоступен: нет авторизации"; return }
         lifecycleScope.launch {
             statusView.text = "Сохраняю уровень размышлений…"
-            val model = modelSelection.current
+            val model = modelSelection.displayedChoice()
             val result = withContext(Dispatchers.IO) {
                 ReasoningRepository().setEffort(BASE_URL, c, effort, model?.modelId, model?.providerId, currentSessionId)
             }
@@ -3431,7 +3488,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun refreshReasoningStatus() {
         val c = store.read() ?: return
         lifecycleScope.launch {
-            val model = modelSelection.current
+            val model = modelSelection.displayedChoice()
             val fetched = withContext(Dispatchers.IO) {
                 ReasoningRepository().fetchStatus(BASE_URL, c, model?.modelId, model?.providerId, currentSessionId)
             }
@@ -3681,6 +3738,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         interactiveController.dismissAll()
         compressionController.onSessionChanged()
         uiState.startNewSession()
+        modelSelection.clearSessionModel()
+        modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
         currentSessionId = null
         explicitStatus = null
         restoreComposerDraft()
@@ -3851,6 +3910,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         uiState.cancel()
         uiState.startNewSession()
         currentSessionId = null
+        currentSessionReadOnly = false
+        modelSelection.clearSessionModel()
         explicitStatus = when {
             report == null -> "Сессия завершена"
             report.succeeded -> buildString {

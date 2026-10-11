@@ -84,6 +84,8 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
                 // Live workspace path (Session.compact() `workspace`); absent on
                 // older payloads → null ("server default"), backward compatible.
                 workspace = string(s, "workspace"),
+                model = string(s, "model"),
+                modelProvider = string(s, "model_provider", "provider"),
             )
         }
 
@@ -127,6 +129,8 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
                             // returns it in the session payload — surface it so
                             // the caller can echo it on the first chat/start.
                             workspace = string(session, "workspace"),
+                            model = string(session, "model"),
+                            modelProvider = string(session, "model_provider", "provider"),
                         )
                     )
                 }
@@ -198,6 +202,8 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             sourceLabel = string(o, "source_label"),
             readOnly = o["read_only"] as? Boolean ?: false,
             parentSessionId = string(o, "parent_session_id"),
+            model = string(o, "model"),
+            modelProvider = string(o, "model_provider", "provider"),
         )
     }
 

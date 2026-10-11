@@ -127,6 +127,9 @@ data class SessionItem(
     val readOnly: Boolean = false,
     /** Delegating/branch parent (`parent_session_id`), null for top-level sessions. */
     val parentSessionId: String? = null,
+    /** Effective model identity returned by the server for this session. */
+    val model: String? = null,
+    val modelProvider: String? = null,
 ) {
     /**
      * True for delegated subagent children (WebUI parity #5244/#5305): the
@@ -181,4 +184,7 @@ data class SessionDetail(
      * mid-session switches.
      */
     val workspace: String? = null,
+    /** Effective model identity returned by the server for this session. */
+    val model: String? = null,
+    val modelProvider: String? = null,
 )
