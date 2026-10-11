@@ -16,10 +16,12 @@ import ru.mars.network.repository.ReasoningStatusResult
  * (`GET /api/reasoning`, `POST /api/reasoning`), replayed with MockWebServer against
  * payloads captured live from the production WebUI (api/routes.py `_reasoning_status_payload`).
  *
- * Live capture (2026-10-08):
+ * Live capture (2026-10-08, pin set extended with the production `agent.reasoning_overrides`
+ * entry for the active model, read 2026-10-11):
  * `{"show_reasoning":true,"reasoning_effort":"high","source":"default",
  *   "supported_efforts":["high"],"supports_reasoning_effort":true,
- *   "supports_thinking_toggle":true,"model_overrides":{"@custom:plusvibe-api:gpt-6-luna":"high"}}`
+ *   "supports_thinking_toggle":true,
+ *   "model_overrides":{"@custom:plusvibe-api:gpt-6-luna":"high","@custom:plusvibe-api:qwen/qwen3.8-max":"high"}}`
  */
 class ReasoningRepositoryTest {
 
@@ -33,7 +35,7 @@ class ReasoningRepositoryTest {
           "supported_efforts": ["high"],
           "supports_reasoning_effort": true,
           "supports_thinking_toggle": true,
-          "model_overrides": {"@custom:plusvibe-api:gpt-6-luna": "high"}
+          "model_overrides": {"@custom:plusvibe-api:gpt-6-luna": "high", "@custom:plusvibe-api:qwen/qwen3.8-max": "high"}
         }
     """.trimIndent()
 
@@ -144,9 +146,80 @@ class ReasoningRepositoryTest {
 
     // --- POST /api/reasoning ----------------------------------------------------------------------
 
+    /**
+     * Per-model pin parity (static/ui.js composer chip): the live config pins
+     * `@custom:plusvibe-api:qwen/qwen3.8-max`, so setEffort must preflight the GET status,
+     * detect the pin and POST `{scope:"model", model:<pinned key verbatim>}` — a global write
+     * would be silently overridden by the pin at runtime (session > model > global).
+     */
     @Test
-    fun setEffortPostsExplicitEffortWithContextAndBearer() {
+    fun setEffortTargetsExistingPinWithScopeModelWhenModelIsPinned() {
         MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(livePayload)) // preflight GET status
+            server.enqueue(MockResponse().setBody(livePayload)) // POST answer
+            val result = repository.setEffort(
+                server.url("/").toString(), credential(), effort = "low",
+                model = "qwen/qwen3.8-max", provider = "custom:plusvibe-api", sessionId = "sess-1",
+            )
+
+            assertTrue(result is ReasoningStatusResult.Status)
+            val preflight = server.takeRequest()
+            assertEquals("GET", preflight.method)
+            assertTrue(preflight.path!!.startsWith("/api/reasoning?"))
+            assertEquals("Bearer native-token", preflight.getHeader("Authorization"))
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/reasoning", request.path)
+            assertEquals("Bearer native-token", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"effort\":\"low\""))
+            // The EXISTING override key verbatim — no near-duplicate spelling is created.
+            assertTrue(body.contains("\"model\":\"@custom:plusvibe-api:qwen/qwen3.8-max\""))
+            assertTrue(body.contains("\"scope\":\"model\""))
+            assertTrue(body.contains("\"provider\":\"custom:plusvibe-api\""))
+            assertTrue(body.contains("\"session_id\":\"sess-1\""))
+        }
+    }
+
+    /** Default (effort:null → `""`) on a pinned model clears THAT pin (scope=model), web parity. */
+    @Test
+    fun setEffortDefaultClearsPinViaScopeModel() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(livePayload))
+            server.enqueue(MockResponse().setBody(livePayload))
+            repository.setEffort(
+                server.url("/").toString(), credential(), effort = null,
+                model = "qwen/qwen3.8-max", provider = "custom:plusvibe-api",
+            )
+
+            server.takeRequest() // preflight
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue("body=$body", body.contains("\"effort\":\"\""))
+            assertTrue("body=$body", body.contains("\"scope\":\"model\""))
+            assertTrue(body.contains("\"model\":\"@custom:plusvibe-api:qwen/qwen3.8-max\""))
+        }
+    }
+
+    /** Spelling tolerance: a bare-tail model id matches the full-form `@custom:` pin key. */
+    @Test
+    fun setEffortMatchesPinByBareModelTail() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(livePayload))
+            server.enqueue(MockResponse().setBody(livePayload))
+            repository.setEffort(server.url("/").toString(), credential(), effort = "high", model = "qwen3.8-max")
+
+            server.takeRequest()
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"scope\":\"model\""))
+            assertTrue(body.contains("\"model\":\"@custom:plusvibe-api:qwen/qwen3.8-max\""))
+        }
+    }
+
+    /** Unpinned model: legacy global body, no `scope` key (wire shape unchanged). */
+    @Test
+    fun setEffortWithoutPinPostsLegacyGlobalBody() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"show_reasoning":true,"reasoning_effort":"high","source":"default","supported_efforts":["high"],"supports_reasoning_effort":true,"supports_thinking_toggle":true,"model_overrides":{}}"""))
             server.enqueue(MockResponse().setBody(livePayload))
             val result = repository.setEffort(
                 server.url("/").toString(), credential(), effort = "low",
@@ -154,15 +227,77 @@ class ReasoningRepositoryTest {
             )
 
             assertTrue(result is ReasoningStatusResult.Status)
+            assertEquals("GET", server.takeRequest().method)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"effort\":\"low\""))
+            assertTrue(body.contains("\"model\":\"qwen/qwen3.8-max\""))
+            assertTrue(body.contains("\"provider\":\"custom:plusvibe-api\""))
+            assertTrue(body.contains("\"session_id\":\"sess-1\""))
+            assertTrue("unpinned model must not carry scope: $body", !body.contains("scope"))
+        }
+    }
+
+    /** A failed preflight (HTTP 500) never blocks the user action: legacy POST still fires. */
+    @Test
+    fun setEffortPreflightHttpErrorFallsBackToLegacyPost() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"boom"}"""))
+            server.enqueue(MockResponse().setBody(livePayload))
+            val result = repository.setEffort(
+                server.url("/").toString(), credential(), effort = "low", model = "qwen/qwen3.8-max",
+            )
+
+            assertTrue(result is ReasoningStatusResult.Status)
+            assertEquals("GET", server.takeRequest().method)
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"effort\":\"low\""))
+            assertTrue(body.contains("\"model\":\"qwen/qwen3.8-max\""))
+            assertTrue(!body.contains("scope"))
+        }
+    }
+
+    /** A transport-dead preflight socket degrades to the legacy POST on the retry connection. */
+    @Test
+    fun setEffortPreflightNetworkErrorFallsBackToLegacyPost() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            server.enqueue(MockResponse().setBody(livePayload))
+            val result = repository.setEffort(
+                server.url("/").toString(), credential(), effort = "high", model = "gpt-6-luna",
+            )
+
+            assertTrue(result is ReasoningStatusResult.Status)
+            assertEquals("GET", server.takeRequest().method)
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"effort\":\"high\""))
+            assertTrue(!body.contains("scope"))
+        }
+    }
+
+    @Test
+    fun setEffortWithoutModelSkipsPreflightAndPostsLegacyBody() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(livePayload))
+            val result = repository.setEffort(
+                server.url("/").toString(), credential(), effort = "low",
+                provider = "custom:plusvibe-api", sessionId = "sess-1",
+            )
+
+            assertTrue(result is ReasoningStatusResult.Status)
+            // Exactly ONE request: without a model there is nothing to pin-check.
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/api/reasoning", request.path)
             assertEquals("Bearer native-token", request.getHeader("Authorization"))
             val body = request.body.readUtf8()
             assertTrue(body.contains("\"effort\":\"low\""))
-            assertTrue(body.contains("\"model\":\"qwen/qwen3.8-max\""))
             assertTrue(body.contains("\"provider\":\"custom:plusvibe-api\""))
             assertTrue(body.contains("\"session_id\":\"sess-1\""))
+            assertTrue(!body.contains("\"model\""))
+            assertTrue(!body.contains("scope"))
+            assertEquals(0, server.requestCount - 1)
         }
     }
 

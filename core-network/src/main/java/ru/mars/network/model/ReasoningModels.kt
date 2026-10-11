@@ -13,7 +13,9 @@ package ru.mars.network.model
  * client never invents levels. [supportsThinkingToggle] is true for ZAI GLM
  * toggle-only models whose [supportedEfforts] is empty (no ladder → no selector).
  * `model_overrides` (per-model pins edited from the WebUI model picker) is out of
- * the mobile P1 slice and intentionally not modeled.
+ * the mobile P1 slice and not modeled here; `ReasoningRepository.setEffort` parses it
+ * internally (GET-status preflight) to route edits of a pinned model through
+ * `scope:"model"` instead of the silently-overridden global write.
  */
 data class ReasoningStatus(
     val showReasoning: Boolean = true,
