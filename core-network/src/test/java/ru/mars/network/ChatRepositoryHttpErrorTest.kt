@@ -59,6 +59,16 @@ class ChatRepositoryHttpErrorTest {
         }
     }
 
+    @Test fun chatStartFailureDoesNotLeakRetryAfterMarkerToUser() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(429)
+                .setHeader("Retry-After", "30")
+                .setBody("""{"error":"rate limited"}"""))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            assertEquals("HTTP 429: rate limited", (events.single() as ChatEvent.Error).message)
+        }
+    }
+
     /** 401 from start must keep BOTH AuthRejectionPolicy markers ("http 401" and "unauthorized"). */
     @Test fun chatStartUnauthorizedKeepsAuthRejectionMarkers() = runBlocking {
         MockWebServer().use { server ->
@@ -181,14 +191,14 @@ class ChatRepositoryHttpErrorTest {
         }
     }
 
-    /** The start POST failure carries the directive too (offline queue pacing reads it). */
-    @Test fun chatStartThrottledCarriesRetryAfterMarker() = runBlocking {
+    /** The start POST failure keeps the directive out of the user-visible error. */
+    @Test fun chatStartThrottledDoesNotLeakRetryAfterMarker() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(503)
                 .setHeader("Retry-After", "2")
                 .setBody("""{"error":"restarting"}"""))
             val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
-            assertEquals("HTTP 503: restarting (retry-after 2s)", (events.single() as ChatEvent.Error).message)
+            assertEquals("HTTP 503: restarting", (events.single() as ChatEvent.Error).message)
             assertEquals(1, server.requestCount) // terminal: no stream GET attempted
         }
     }

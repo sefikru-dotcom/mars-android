@@ -88,6 +88,7 @@ class RetryAfterPolicyTest {
         // Near-misses of the anchored shape must not match:
         assertNull(RetryAfterPolicy.parseMarkerSeconds("(retry-after 30)"))
         assertNull(RetryAfterPolicy.parseMarkerSeconds("(retry-after xs)"))
+        assertNull(RetryAfterPolicy.parseMarkerSeconds("prefix (retry-after 30s) suffix"))
     }
 
     @Test fun `the longest directive wins when messages stack`() {

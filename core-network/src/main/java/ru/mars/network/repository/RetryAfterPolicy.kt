@@ -44,7 +44,7 @@ internal object RetryAfterPolicy {
     const val MAX_RETRY_AFTER_SECONDS: Long = 600L
 
     /** Anchored marker format, e.g. `"(retry-after 30s)"`. */
-    private val MARKER_REGEX = Regex("""\(retry-after (\d+)s\)""")
+    private val MARKER_REGEX = Regex("""\(retry-after (\d+)s\)$""")
 
     private val HTTP_DATE: DateTimeFormatter = DateTimeFormatter.RFC_1123_DATE_TIME
 
