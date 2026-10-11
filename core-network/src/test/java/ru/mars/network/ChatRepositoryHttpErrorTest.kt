@@ -122,4 +122,89 @@ class ChatRepositoryHttpErrorTest {
             ), events)
         }
     }
+
+    // ---- Retry-After (RFC 9110) ----
+
+    /** describeHttpError appends the anchored coordinator marker only when a directive was parsed. */
+    @Test fun describeHttpErrorCarriesRetryAfterMarker() {
+        assertEquals(
+            "HTTP 429: slow down (retry-after 7s)",
+            describeHttpError(429, """{"error":"slow down"}""", 7),
+        )
+        assertEquals("HTTP 503 (retry-after 1s)", describeHttpError(503, null, 1))
+        // no directive -> the legacy shapes are untouched
+        assertEquals("HTTP 429: slow down", describeHttpError(429, """{"error":"slow down"}"""))
+    }
+
+    /** A throttled SSE GET after a successful start surfaces the directive in the error message. */
+    @Test fun streamGetThrottledCarriesRetryAfterMarker() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"stream_id":"st-1"}"""))
+            server.enqueue(MockResponse().setResponseCode(429)
+                .setHeader("Retry-After", "30")
+                .setBody("""{"error":"rate limited"}"""))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            assertEquals(2, events.size)
+            val message = (events[1] as ChatEvent.Error).message
+            assertEquals("HTTP 429: rate limited (retry-after 30s)", message)
+            // App-level anchors survive the suffix (transport classifier ^http\d{3}, status code).
+            assertTrue(message.lowercase().startsWith("http 429"))
+        }
+    }
+
+    /** HTTP-date directives are converted to delta seconds against the current clock. */
+    @Test fun streamGetRetryAfterHttpDateBecomesDeltaSeconds() = runBlocking {
+        MockWebServer().use { server ->
+            val date = java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME.format(
+                java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(45)
+            )
+            server.enqueue(MockResponse().setBody("""{"stream_id":"st-1"}"""))
+            server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", date))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            val message = (events[1] as ChatEvent.Error).message
+            val seconds = Regex("""\(retry-after (\d+)s\)""").find(message)
+                ?.groupValues?.get(1)?.toLong()
+            // ~45 s minus test latency; generous window, the point is "delta, not date".
+            assertTrue("expected ~45s in: $message", seconds != null && seconds in 40..45)
+        }
+    }
+
+    /** An unparseable Retry-After is ignored: the plain error message stays intact. */
+    @Test fun streamGetGarbageRetryAfterIsIgnored() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"stream_id":"st-1"}"""))
+            server.enqueue(MockResponse().setResponseCode(429)
+                .setHeader("Retry-After", "soon-ish")
+                .setBody("""{"error":"rate limited"}"""))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            assertEquals("HTTP 429: rate limited", (events[1] as ChatEvent.Error).message)
+        }
+    }
+
+    /** The start POST failure carries the directive too (offline queue pacing reads it). */
+    @Test fun chatStartThrottledCarriesRetryAfterMarker() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503)
+                .setHeader("Retry-After", "2")
+                .setBody("""{"error":"restarting"}"""))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            assertEquals("HTTP 503: restarting (retry-after 2s)", (events.single() as ChatEvent.Error).message)
+            assertEquals(1, server.requestCount) // terminal: no stream GET attempted
+        }
+    }
+
+    /** A 404 with a directive keeps its ReloadSession anchors — the marker never shadows them. */
+    @Test fun streamGetNotFoundKeepsReattachMarkersWithRetryAfter() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"stream_id":"st-1"}"""))
+            server.enqueue(MockResponse().setResponseCode(404)
+                .setHeader("Retry-After", "60")
+                .setBody("""{"error":"stream not found"}"""))
+            val events = ChatRepository().sendMessage(server.url("/").toString(), credential(), "Hi").toList()
+            val message = (events[1] as ChatEvent.Error).message
+            assertEquals("HTTP 404: stream not found (retry-after 60s)", message)
+            assertTrue(Regex("""\b404\b""").containsMatchIn(message.lowercase()))
+            assertTrue("not found" in message.lowercase())
+        }
+    }
 }

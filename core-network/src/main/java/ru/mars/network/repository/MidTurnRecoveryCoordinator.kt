@@ -42,6 +42,9 @@ import java.io.IOException
  * 6. otherwise                                 → [RecoveryDecision.ReattachAfter] with the
  *    policy delay, the 1-based attempt number and the resume cursor to put into
  *    `Last-Event-ID` (from [StreamResumeTracker.lastEventId], fed via [StreamFailure.lastEventId]).
+ *    A server-directed wait (`Retry-After` on 429/503, carried as the anchored
+ *    `"(retry-after <N>s)"` marker in the error message — [RetryAfterPolicy]) FLOORS the
+ *    delay and overrides the network-transition immediate retry for that decision.
  *
  * [RecoveryDecision.ReattachAfter] ALWAYS means re-subscribing to the existing stream
  * with `attachToStream(…, lastEventId)` — a GET. It must NEVER be implemented as
@@ -227,19 +230,46 @@ class MidTurnRecoveryCoordinator(
                 "reconnect budget exhausted after ${reconnect.consecutiveFailures()} attempts"
             )
 
+        // A server-directed wait (`Retry-After` on 429/503, carried by describeHttpError
+        // as the anchored "(retry-after <N>s)" message marker — see RetryAfterPolicy)
+        // FLOORS the delay: hammering a throttling gateway burns the reconnect budget in
+        // minutes and loses a turn whose journal is still resumable. The one-shot
+        // immediate-retry arm does NOT override the directive and is left unconsumed for
+        // the next failure.
+        val retryAfterMs = retryAfterMillis(failure)
+
         // Network just came back → one-shot 0 ms retry, UNLESS the latest probe says the
         // SERVER is still down: then keep the arm (unconsumed) and use the ladder delay.
-        val delayMs =
-            if (lastHealth != HealthLevel.OFFLINE && backoff.isImmediateRetryArmed()) {
+        val delayMs = when {
+            retryAfterMs != null -> maxOf(plan.delayMs, retryAfterMs)
+            lastHealth != HealthLevel.OFFLINE && backoff.isImmediateRetryArmed() ->
                 backoff.nextDelayMs(plan.attempt - 1) // consumes the arm, returns 0
-            } else {
-                plan.delayMs
-            }
+            else -> plan.delayMs
+        }
         return RecoveryDecision.ReattachAfter(
             delayMs = delayMs,
             attempt = plan.attempt,
             resumeFromEventId = failure.lastEventId,
         ).also { reattachesThisTurn += 1 }
+    }
+
+    /**
+     * The server-directed wait of [failure] in ms, from the anchored
+     * `"(retry-after <N>s)"` marker (RetryAfterPolicy) in the mapped error message or any
+     * throwable message of the cause chain; `null` when no directive is present. Values
+     * are already clamped to [RetryAfterPolicy.MAX_RETRY_AFTER_SECONDS] by the parser.
+     */
+    private fun retryAfterMillis(failure: StreamFailure): Long? {
+        val texts = buildList {
+            failure.errorMessage?.let { add(it) }
+            generateSequence(failure.throwable) { it.cause }
+                .take(MAX_CAUSE_DEPTH)
+                .mapNotNull { it.message }
+                .forEach { add(it) }
+        }
+        // Longest directive wins when wrappers stacked several messages.
+        val seconds = texts.mapNotNull { RetryAfterPolicy.parseMarkerSeconds(it) }.maxOrNull()
+        return seconds?.times(1_000L)
     }
 
     /**
