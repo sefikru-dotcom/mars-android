@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ErrorOrigin
 import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
 import ru.mars.network.model.SessionTitleUpdate
@@ -151,8 +152,8 @@ class StreamEventMapperTest {
     }
 
     @Test fun mapsErrorsBothShapes() {
-        assertEquals(ChatEvent.Error("boom"), StreamEventMapper.map("error", null, """{"message":"boom"}"""))
-        assertEquals(ChatEvent.Error("kaboom"), StreamEventMapper.map("apperror", null, """{"error":"kaboom"}"""))
+        assertEquals(ChatEvent.Error("boom", ErrorOrigin.SERVER), StreamEventMapper.map("error", null, """{"message":"boom"}"""))
+        assertEquals(ChatEvent.Error("kaboom", ErrorOrigin.SERVER), StreamEventMapper.map("apperror", null, """{"error":"kaboom"}"""))
     }
 
     @Test fun unknownMetadataEventsMapToNullAndAreNotErrors() {
@@ -279,12 +280,12 @@ class StreamEventMapperTest {
     }
 
     @Test fun errorWithoutMessageFieldsNeverDumpsRawJson() {
-        assertEquals(ChatEvent.Error("Ошибка потока"), StreamEventMapper.map("apperror", null, """{"code":500}"""))
-        assertEquals(ChatEvent.Error("Gateway rejected"), StreamEventMapper.map("error", null, """{"label":"Gateway rejected","type":"gateway_auth_error"}"""))
+        assertEquals(ChatEvent.Error("Ошибка потока", ErrorOrigin.SERVER), StreamEventMapper.map("apperror", null, """{"code":500}"""))
+        assertEquals(ChatEvent.Error("Gateway rejected", ErrorOrigin.SERVER), StreamEventMapper.map("error", null, """{"label":"Gateway rejected","type":"gateway_auth_error"}"""))
         // Non-JSON body preserved verbatim (nothing structured to leak).
-        assertEquals(ChatEvent.Error("raw failure"), StreamEventMapper.map("error", null, "raw failure"))
+        assertEquals(ChatEvent.Error("raw failure", ErrorOrigin.SERVER), StreamEventMapper.map("error", null, "raw failure"))
         // message/error keep priority.
-        assertEquals(ChatEvent.Error("boom"), StreamEventMapper.map("error", null, """{"message":"boom","label":"L"}"""))
+        assertEquals(ChatEvent.Error("boom", ErrorOrigin.SERVER), StreamEventMapper.map("error", null, """{"message":"boom","label":"L"}"""))
     }
 
     // ---- side-channel metadata frames: title text / goal / goal_continue -----
@@ -389,7 +390,7 @@ class StreamEventMapperTest {
         assertNull(StreamEventMapper.map("warning", null, ""))
         assertNull(StreamEventMapper.map("reasoning", null, ""))
         assertNull(StreamEventMapper.map("interim_assistant", null, ""))
-        assertEquals(ChatEvent.Error("Ошибка потока"), StreamEventMapper.map("error", null, ""))
+        assertEquals(ChatEvent.Error("Ошибка потока", ErrorOrigin.SERVER), StreamEventMapper.map("error", null, ""))
         assertEquals(ChatEvent.Done, StreamEventMapper.map("done", null, ""))
     }
 }

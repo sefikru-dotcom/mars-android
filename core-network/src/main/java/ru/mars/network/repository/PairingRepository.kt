@@ -8,6 +8,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.PairingExchangeResponseParser
 import ru.mars.network.model.PairingResponse
@@ -17,7 +18,7 @@ import ru.mars.network.model.PairingStatusResponseParser
 
 class PairingRepository(
     baseUrl: String,
-    client: OkHttpClient = OkHttpClient()
+    client: OkHttpClient = HttpClients.rest
 ) {
     private val baseHttpUrl = baseUrl.toHttpUrl().also(::validateBaseUrl)
     // Auth calls must not follow redirects: a redirect can otherwise disclose credentials

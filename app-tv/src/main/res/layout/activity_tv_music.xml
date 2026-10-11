@@ -57,6 +57,20 @@
             android:layout_height="wrap_content" />
 
         <Button
+            android:id="@+id/repeatButton"
+            android:text="Повтор: выкл"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="64dp" />
+
+        <Button
             android:id="@+id/stopButton"
             android:text="Остановить"
             android:textSize="18sp"

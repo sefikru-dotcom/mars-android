@@ -10,6 +10,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SessionAttention
@@ -53,7 +54,7 @@ interface SessionCreator {
  * All network executes are wrapped in [Dispatchers.IO], so every public
  * function is safe to call from a coroutine on the main/UI dispatcher.
  */
-class SessionRepository(private val client: OkHttpClient = OkHttpClient()) : SessionCreator {
+class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : SessionCreator {
     private val mapType = Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
     private val moshi = Moshi.Builder().build()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

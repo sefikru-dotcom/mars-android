@@ -7,6 +7,7 @@ import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.TodoSnapshot
+import ru.mars.network.repository.StreamBufferGuard
 
 /** UI model for the rich chat transcript. Kept platform independent for unit tests. */
 enum class ChatStatus { IDLE, TYPING, RECEIVED, ERROR }
@@ -31,7 +32,13 @@ data class ChatMessage(
     val status: MessageStatus = MessageStatus.COMPLETE,
 )
 
-class ChatUiState {
+class ChatUiState(
+    /**
+     * Hard memory limits for streamed text accumulation (frame clamp + sliding window with
+     * a single truncation marker). Injectable for tests; production uses the defaults.
+     */
+    private val bufferGuard: StreamBufferGuard = StreamBufferGuard(),
+) {
     var status: ChatStatus = ChatStatus.IDLE
         private set
     val messages: MutableList<ChatMessage> = mutableListOf()
@@ -88,6 +95,13 @@ class ChatUiState {
     var reattachedTurn: Boolean = false
         private set
 
+    /**
+     * Telemetry for the current turn: how many streamed characters were dropped by
+     * [bufferGuard] (frame clamp + window slide). Reset on every turn/session boundary.
+     */
+    var streamDroppedChars: Long = 0
+        private set
+
     /** Projects the loaded session's [ActiveTurnInfo] into the banner state. */
     fun setActiveTurn(turn: ActiveTurnInfo) {
         attention = turn.attention
@@ -103,6 +117,7 @@ class ChatUiState {
         if (status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
         reattachedTurn = true
+        streamDroppedChars = 0
         messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
         return true
     }
@@ -157,6 +172,7 @@ class ChatUiState {
     fun begin(message: String, attachmentNames: List<String> = emptyList()): Boolean {
         if (message.isBlank() && attachmentNames.isEmpty() || status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
+        streamDroppedChars = 0
         messages += ChatMessage("user", message, attachments = attachmentNames, status = MessageStatus.COMPLETE)
         messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
         return true
@@ -184,6 +200,7 @@ class ChatUiState {
     fun beginQueuedSend(text: String): Boolean {
         if (text.isBlank() || status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
+        streamDroppedChars = 0
         val echoIndex = messages.indexOfLast {
             it.role == "user" && it.status == MessageStatus.PENDING && it.text == text
         }
@@ -212,7 +229,14 @@ class ChatUiState {
         messages[index] = when (event) {
             is ChatEvent.SessionBound -> { activeSessionId = event.sessionId; current }
             is ChatEvent.StreamStarted -> current
-            is ChatEvent.Chunk -> current.copy(text = current.text + event.text)
+            // OOM/ANR guard: streamed text is accumulated through StreamBufferGuard, so a
+            // runaway frame is clamped and the transcript keeps only the freshest tail
+            // (prefixed with exactly one truncation marker) instead of growing unbounded.
+            is ChatEvent.Chunk -> {
+                val guarded = bufferGuard.append(current.text, event.text)
+                if (guarded.droppedChars > 0) streamDroppedChars += guarded.droppedChars
+                current.copy(text = guarded.text)
+            }
             is ChatEvent.Thought -> current.copy(
                 thoughts = current.thoughts + event.text,
                 thoughtsExpanded = current.thoughtsExpanded || activityMode == ActivityDisplayMode.STREAM_FULL,
@@ -252,7 +276,7 @@ class ChatUiState {
     fun complete() { status = ChatStatus.RECEIVED; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
     fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
 
     /**
@@ -268,7 +292,7 @@ class ChatUiState {
     fun drawerSessions(showSubagents: Boolean = false, currentSessionId: String? = null): List<SessionItem> =
         sessions.filter { showSubagents || !it.isSubagent || it.id == currentSessionId }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 

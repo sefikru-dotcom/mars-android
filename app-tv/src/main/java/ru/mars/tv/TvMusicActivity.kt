@@ -52,7 +52,10 @@ internal object TvMusicFocusPolicy {
  * Selecting a track row binds the shown list as the process-global [TvMusicPlayer]
  * transport's playlist and starts it on that row; the transport keeps playing after this
  * screen closes, auto-advances to the next track when one completes ([TvPlaylistPolicy])
- * and goes idle at the end of the list; «Остановить» ends it explicitly.
+ * and goes idle at the end of the list; «Остановить» ends it explicitly. The header
+ * «Повтор» toggle cycles the repeat preference OFF -> ALL -> ONE
+ * ([TvMusicPlayer.cycleRepeatMode], label per [TvMusicNowPlayingSpec.repeatButtonLabel]) —
+ * ALL loops the queue, ONE replays the current track.
  * The screen observes the transport ([TvMusicPlayer.onTransportChanged]) so the header
  * line and the current track's row highlight follow asynchronous state transitions
  * (prepared / completion / auto-advance / stream error) without user interaction; row
@@ -72,6 +75,7 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var stateText: TextView
     private lateinit var retryButton: Button
     private lateinit var stopButton: Button
+    private lateinit var repeatButton: Button
     private lateinit var backButton: Button
     private lateinit var nowText: TextView
     private lateinit var trackList: LinearLayout
@@ -85,9 +89,13 @@ class TvMusicActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_music)
+        // Global music transport: audio focus + network wake mode need an application
+        // context; playback started from this screen is a good audio citizen.
+        TvMusicPlayer.attachContext(this)
         stateText = findViewById(R.id.stateText)
         retryButton = findViewById(R.id.retryButton)
         stopButton = findViewById(R.id.stopButton)
+        repeatButton = findViewById(R.id.repeatButton)
         backButton = findViewById(R.id.backButton)
         nowText = findViewById(R.id.nowText)
         trackList = findViewById(R.id.trackList)
@@ -98,6 +106,12 @@ class TvMusicActivity : AppCompatActivity() {
         // Retry repeats the LAST operation (charts or the failed search query).
         retryButton.setOnClickListener { controller.retry() }
         stopButton.setOnClickListener { controller.stopPlayback() }
+        // D-pad repeat toggle: cycles the transport preference OFF -> ALL -> ONE
+        // ([TvMusicPlayer.cycleRepeatMode]); the label mirrors the new mode immediately.
+        repeatButton.setOnClickListener {
+            TvMusicPlayer.cycleRepeatMode()
+            renderRepeatMode()
+        }
         // The IME «search» action and the explicit «Найти» button are the same submit;
         // «Чарт» empties the field and returns to the charts WITHOUT touching the
         // transport — music that is playing keeps playing across the list swap.
@@ -117,6 +131,7 @@ class TvMusicActivity : AppCompatActivity() {
         TvFocusLift.attach(backButton)
         TvFocusLift.attach(retryButton)
         TvFocusLift.attach(stopButton)
+        TvFocusLift.attach(repeatButton)
         TvFocusLift.attach(searchInput)
         TvFocusLift.attach(searchButton)
         TvFocusLift.attach(chartsButton)
@@ -221,8 +236,14 @@ class TvMusicActivity : AppCompatActivity() {
             backButton.requestFocus()
         }
         stopButton.visibility = if (stopVisible) View.VISIBLE else View.GONE
+        renderRepeatMode()
         renderNowPlaying()
         trackRows.forEach { (trackId, row) -> applyRowState(row, trackId) }
+    }
+
+    /** Repeat-toggle label mirrors the transport preference (pure: [TvMusicNowPlayingSpec]). */
+    private fun renderRepeatMode() {
+        repeatButton.text = TvMusicNowPlayingSpec.repeatButtonLabel(TvMusicPlayer.repeatMode)
     }
 
     private fun renderNowPlaying() {

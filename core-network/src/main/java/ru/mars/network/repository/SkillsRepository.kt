@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SkillDetail
 import ru.mars.network.model.SkillItem
@@ -22,7 +23,7 @@ import ru.mars.network.model.SkillItem
  * instead of throwing into UI coroutines — same convention as
  * [WorkspaceRepository].
  */
-class SkillsRepository(private val client: OkHttpClient = OkHttpClient()) {
+class SkillsRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     private val mapType = Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
     private val moshi = Moshi.Builder().build()

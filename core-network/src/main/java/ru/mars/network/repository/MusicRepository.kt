@@ -18,6 +18,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
@@ -30,7 +31,7 @@ import kotlin.coroutines.resumeWithException
 /** Mars Music's HTTP search/charts and Mars Connect WebSocket client. */
 class MusicRepository(
     private val baseUrl: String = "https://marscore.ru/music",
-    private val client: OkHttpClient = OkHttpClient(),
+    private val client: OkHttpClient = HttpClients.rest,
     private val deviceId: String = "android-client",
     private val restoreTimeoutMs: Long = DEFAULT_RESTORE_TIMEOUT_MS,
 ) {

@@ -5,6 +5,7 @@ import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.ErrorOrigin
 import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
 import ru.mars.network.model.SessionTitleUpdate
@@ -65,7 +66,12 @@ object StreamEventMapper {
             // carrier and is delivered via [sideEvent] → [SessionTitleUpdate].
             "title" -> sessionId(obj, payload)?.let { ChatEvent.SessionBound(it) }
             "done", "stream_end", "cancel" -> ChatEvent.Done
-            "error", "apperror" -> ChatEvent.Error(errorMessage(obj, payload))
+            // Server-origin seam: `error`/`apperror` frames are the agent runtime's
+            // TERMINAL verdict delivered over a healthy stream — tagged ErrorOrigin.SERVER
+            // so recovery layers never re-classify arbitrary server text as a retryable
+            // network failure (transport-level errors are built by ChatRepository itself
+            // and keep the default ErrorOrigin.TRANSPORT).
+            "error", "apperror" -> ChatEvent.Error(errorMessage(obj, payload), ErrorOrigin.SERVER)
             "reasoning", "thought", "thinking" -> textOf(obj, payload)?.let { ChatEvent.Thought(it) }
             "interim_assistant" -> interimAssistant(obj, eventId)
             "tool_call", "tool" -> toolCall(obj)

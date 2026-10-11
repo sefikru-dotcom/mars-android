@@ -15,6 +15,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatStartResponse
@@ -72,7 +73,25 @@ fun readBoundedUploadPayload(input: InputStream, maxBytes: Long = MAX_UPLOAD_BYT
     return out.toByteArray()
 }
 
-class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
+class ChatRepository(
+    /**
+     * Client for turn-carrying calls: `POST /api/chat/start`, the SSE `GET
+     * /api/chat/stream` and the legacy streaming `POST /chat`. Defaults to
+     * [HttpClients.stream] (long read timeout — a healthy stream may idle during long
+     * tool calls; the server's app-level SSE heartbeat keeps gaps bounded, but HTTP
+     * pingInterval is NOT a substitute for it and is deliberately not configured).
+     * Injectable for tests: any OkHttpClient overrides it wholesale.
+     */
+    private val client: OkHttpClient = HttpClients.stream,
+    /**
+     * Client for bounded non-streaming calls of this repository: `POST /api/upload`
+     * and the cancel/steer control requests ([executeControl]). Defaults to
+     * [HttpClients.rest] (short per-phase timeouts — a hung cancel must not inherit
+     * the 90 s SSE read timeout). Injectable for tests; shares the pool/dispatcher
+     * with [client] unless overridden.
+     */
+    private val restClient: OkHttpClient = HttpClients.rest,
+) {
     /**
      * Sends a message and streams the answer.
      *
@@ -105,6 +124,17 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * still emits [ChatEvent.SessionBound]). Delivery only: receivers must not
      * auto-send a goal continuation — that is an explicit UI decision. Default
      * `null` keeps the previous behaviour (frames are dropped).
+     *
+     * [onEventId] — optional transport callback receiving the `id:` of EVERY SSE
+     * frame that carries one — tokens, tool frames, `todo_state`, `title`, `done`
+     * alike, NOT only frames mapped to [ChatEvent.Chunk] — invoked on this flow's
+     * IO context AFTER the frame was delivered into the flow / side callbacks
+     * (never before: an interrupted delivery must not advance the resume cursor
+     * past an undelivered frame). Feed it into
+     * [StreamResumeTracker.onFrameId] so a mid-turn reconnect can send
+     * `Last-Event-ID` and the server replays its journal gap (docs/API-CONTRACT.md,
+     * "Chat SSE: resume and reconnect"). Frames without an `id:` never invoke it.
+     * Default `null` disables the callback — existing callers are unaffected.
      */
     fun sendMessage(
         endpoint: String,
@@ -118,11 +148,12 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         workspace: String? = null,
         onTodoState: ((TodoSnapshot) -> Unit)? = null,
         onSideEvent: ((StreamSideEvent) -> Unit)? = null,
+        onEventId: ((String) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace), credential, onTodoState, onSideEvent) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace), credential, onTodoState, onSideEvent, onEventId) { event -> emit(event) }
                 return@flow
             }
             val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace)).execute().use { response ->
@@ -143,7 +174,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             val streamUrl = base.newBuilder().addPathSegments("api/chat/stream")
                 .addQueryParameter("stream_id", startResp.streamId).build()
             stream(Request.Builder().url(streamUrl).header("Authorization", bearer(credential))
-                .header("Accept", "text/event-stream").get().build(), credential, onTodoState, onSideEvent) { event -> emit(event) }
+                .header("Accept", "text/event-stream").get().build(), credential, onTodoState, onSideEvent, onEventId) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -170,7 +201,8 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * - dead-but-journaled stream → full journal replay, then terminal frames;
      * - unknown/expired stream → HTTP 404 `{"error":"stream not found"}`, surfaced here as
      *   [ChatEvent.Error] `"HTTP 404: stream not found"` (status code + server reason;
-     *   both StreamReattachPolicy markers — `\b404\b` and "not found" — still match) —
+     *   matches the coordinator's ANCHORED gone-stream markers — `HTTP 404` /
+     *   "stream not found" — without relying on broad substrings) —
      *   the caller should fall back to reloading history.
      *
      * [lastEventId] is the optional resume cursor: the `id:` value (`stream_id:seq`) of the
@@ -184,6 +216,10 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      *
      * [onSideEvent] — same `title`/`goal`/`goal_continue` side-channel callback as in
      * [sendMessage] (a reattached stream replays these frames from the journal too).
+     *
+     * [onEventId] — same per-frame resume-cursor callback as in [sendMessage]: receives
+     * the `id:` of EVERY frame (replayed journal frames included), so a
+     * [StreamResumeTracker] keeps advancing across reattach cycles.
      */
     fun attachToStream(
         baseUrl: String,
@@ -192,6 +228,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         lastEventId: String? = null,
         onTodoState: ((TodoSnapshot) -> Unit)? = null,
         onSideEvent: ((StreamSideEvent) -> Unit)? = null,
+        onEventId: ((String) -> Unit)? = null,
     ): Flow<ChatEvent> = flow {
         val streamUrl = baseUrl.toHttpUrl().newBuilder()
             .addPathSegments("api/chat/stream")
@@ -204,7 +241,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             .get().build()
         try {
             emit(ChatEvent.StreamStarted(streamId))
-            stream(request, credential, onTodoState, onSideEvent) { event -> emit(event) }
+            stream(request, credential, onTodoState, onSideEvent, onEventId) { event -> emit(event) }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -241,7 +278,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
         val request = Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/upload").build())
             .header("Authorization", bearer(credential)).post(multipart).build()
         try {
-            client.newCall(request).execute().use { response ->
+            restClient.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     val serverMessage = StreamEventMapper.parseObject(body)
@@ -279,7 +316,7 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * which must be reported as failure. Responses without an `accepted` field (e.g. cancel's
      * `{"ok": true, "cancelled": ...}`) keep the legacy "HTTP status is the result" behaviour.
      */
-    fun executeControl(request: Request): Boolean = client.newCall(request).execute().use { response ->
+    fun executeControl(request: Request): Boolean = restClient.newCall(request).execute().use { response ->
         if (!response.isSuccessful) return@use false
         val body = response.body?.string().orEmpty()
         StreamEventMapper.parseObject(body)?.get("accepted")?.let { it != false } ?: true
@@ -366,12 +403,21 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
      * [StreamSideEvent] side channel). Unlike `todo_state` this does NOT divert
      * the frame from [StreamEventMapper.map] — a `title` frame still emits
      * [ChatEvent.SessionBound] into the flow. When null, behaviour is unchanged.
+     *
+     * [onEventId]: when non-null, invoked with the frame's `id:` for EVERY frame that
+     * carries one — AFTER the frame was delivered (emit returned / the todo_state and
+     * side-event callbacks ran), so a cancelled or failed delivery leaves the cursor
+     * BEFORE the undelivered frame and the server replay covers it on reconnect.
+     * Frames that map to nothing are acked right after their callbacks. Blank ids are
+     * skipped (nothing resumable). See the emitFrames comment for the flowOn-buffer
+     * caveat.
      */
     private suspend fun stream(
         request: Request,
         credential: ConsumedDeviceCredential,
         onTodoState: ((TodoSnapshot) -> Unit)?,
         onSideEvent: ((StreamSideEvent) -> Unit)? = null,
+        onEventId: ((String) -> Unit)? = null,
         emit: suspend (ChatEvent) -> Unit,
     ) {
         client.newCall(request).execute().use { response ->
@@ -391,15 +437,36 @@ class ChatRepository(private val client: OkHttpClient = OkHttpClient()) {
             val parser = SseChunkParser()
             suspend fun emitFrames(frames: List<SseChunkParser.Frame>) {
                 for (frame in frames) {
+                    val ackId = frame.id?.takeIf { it.isNotBlank() }
                     val snapshot = onTodoState?.let { StreamEventMapper.todoState(frame.event, frame.data) }
                     if (snapshot != null) {
                         onTodoState.invoke(snapshot)
+                        // Cursor ack AFTER the snapshot was handed to the callback: if
+                        // the callback throws, the frame counts as NOT delivered and a
+                        // reconnect replays it (a duplicate todo snapshot is idempotent).
+                        if (onEventId != null && ackId != null) onEventId(ackId)
                         continue
                     }
                     onSideEvent?.let { callback ->
                         StreamEventMapper.sideEvent(frame.event, frame.data)?.let(callback)
                     }
-                    StreamEventMapper.map(frame.event, frame.id, frame.data)?.let { emit(it) }
+                    val mapped = StreamEventMapper.map(frame.event, frame.id, frame.data)
+                    if (mapped != null) {
+                        emit(mapped)
+                    }
+                    // Resume cursor LAST: ack only after the frame was actually handed to
+                    // the flow (emit returned) / the side channels ran. emit() suspends and
+                    // rethrows cancellation — if the collector dies before this frame is
+                    // delivered, the cursor must NOT advance past it, otherwise the server
+                    // replay on reconnect would skip exactly this undelivered frame.
+                    // Frames that map to nothing are acked immediately (no delivery to wait
+                    // for). KNOWN LIMITATION: emit() returns when the event enters the
+                    // flowOn channel buffer, not when the terminal collector processed it;
+                    // events cancelled while still buffered are acked but not rendered —
+                    // consumers needing end-to-end acking should feed StreamResumeTracker
+                    // from their terminal collector instead (ChatEvent.Chunk carries
+                    // eventId for exactly this).
+                    if (onEventId != null && ackId != null) onEventId(ackId)
                 }
             }
             val reader = InputStreamReader(byteStream, Charsets.UTF_8)
