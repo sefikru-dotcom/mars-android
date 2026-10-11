@@ -235,6 +235,42 @@ class MusicRepositoryTest {
         }
     }
 
+    /**
+     * Regression (locked invariant "URLs never get a double slash"): a trailing-slash
+     * base URL must not leak `//` onto the wire. The GET/WS calls build their URLs with
+     * `addPathSegments` (which replaces the trailing empty segment), while the
+     * `toggleFavorite` POST (`postJson`) and `getStreamUrl` used to concatenate
+     * `"$baseUrl/$path"` — with `https://…/music/` that sent
+     * `/music//api/favorite/toggle`, which strict routers answer with 404.
+     */
+    @Test
+    fun trailingSlashBaseUrlNeverProducesDoubleSlashes() = runBlocking {
+        MockWebServer().use { server ->
+            val withSlash = server.url("/music/").toString() // trailing slash kept on purpose
+            val withoutSlash = withSlash.removeSuffix("/")
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
+            server.enqueue(MockResponse().setBody("{\"success\":true,\"results\":[]}"))
+            val repo = MusicRepository(withSlash)
+
+            assertEquals(true, repo.toggleFavorite("v1"))
+            val post = server.takeRequest()
+            assertEquals("POST", post.method)
+            assertEquals("/music/api/favorite/toggle", post.path)
+
+            repo.getCharts() // GET seam keeps normalizing (guard against regressions)
+            assertEquals("/music/api/charts", server.takeRequest().path)
+
+            assertEquals("$withoutSlash/api/stream/v1", repo.getStreamUrl("v1"))
+        }
+    }
+
+    /** The stream URL percent-encodes the track id: a malformed id cannot bend the path. */
+    @Test
+    fun streamUrlEncodesTrackId() {
+        val repo = MusicRepository("https://marscore.ru/music")
+        assertEquals("https://marscore.ru/music/api/stream/a%20b", repo.getStreamUrl("a b"))
+    }
+
     @Test
     fun webSocketUrlMapsBothSchemes() {
         // Kotlin's String.replaceFirst(String, String) is literal, so the previous

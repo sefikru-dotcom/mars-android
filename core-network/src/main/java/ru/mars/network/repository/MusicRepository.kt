@@ -50,7 +50,20 @@ class MusicRepository(
     }
     suspend fun getQueue(): List<MusicTrack> = getStatus().queue
 
-    fun getStreamUrl(trackId: String): String = "$baseUrl/api/stream/$trackId"
+    /**
+     * Stream URL for the media player: `{base}/api/stream/{trackId}`.
+     *
+     * Built through the OkHttp URL builder like every other call in this class —
+     * a raw `"$baseUrl/..."` concatenation leaks a DOUBLE SLASH onto the wire for a
+     * trailing-slash base (`https://…/music/` → `music//api/stream/…`), which
+     * strict routers answer with 404. `addPathSegment` also percent-encodes the
+     * id, so a malformed id can never bend the path.
+     */
+    fun getStreamUrl(trackId: String): String = baseUrl.toHttpUrl().newBuilder()
+        .addPathSegments("api/stream")
+        .addPathSegment(trackId)
+        .build()
+        .toString()
 
     /** Real `/api/charts` payload is the same `{success,results}` envelope as `/api/search`. */
     suspend fun getCharts(): List<MusicTrack> = fetchTracks("api/charts")
@@ -118,7 +131,9 @@ class MusicRepository(
     private suspend fun <T> postJson(path: String, json: String, parse: (ResponseBody) -> T): T =
         suspendCancellableCoroutine { continuation ->
             val request = Request.Builder()
-                .url("$baseUrl/$path")
+                // HttpUrl builder (parity with getJson/fetchTracks): a string
+                // concatenation double-slashes the path for a trailing-slash base.
+                .url(baseUrl.toHttpUrl().newBuilder().addPathSegments(path).build())
                 .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
             val call = client.newCall(request)
