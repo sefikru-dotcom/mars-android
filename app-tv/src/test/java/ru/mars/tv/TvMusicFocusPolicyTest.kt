@@ -70,6 +70,28 @@ class TvMusicFocusPolicyTest {
     }
 
     @Test
+    fun `focused play-pause toggle stranded by playlist end must hand off too`() {
+        // The header pair (stop + play/pause) shares one visibility rule: the playlist
+        // exhausting (repeat OFF) goes idle asynchronously and hides BOTH buttons — the
+        // focused toggle must hand off to the stable header exactly like stop does.
+        assertTrue(
+            TvMusicFocusPolicy.handoffBeforeHide(
+                viewVisible = true,
+                viewHasFocus = true,
+                staysVisible = false,
+            ),
+        )
+        // Restyle while paused/playing keeps the toggle visible: focus stays put.
+        assertFalse(
+            TvMusicFocusPolicy.handoffBeforeHide(
+                viewVisible = true,
+                viewHasFocus = true,
+                staysVisible = true,
+            ),
+        )
+    }
+
+    @Test
     fun `fully idle button is a no-op`() {
         assertFalse(
             TvMusicFocusPolicy.handoffBeforeHide(

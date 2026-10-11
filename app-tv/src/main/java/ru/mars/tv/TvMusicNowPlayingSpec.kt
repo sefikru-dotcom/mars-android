@@ -11,6 +11,11 @@ import ru.mars.network.model.MusicTrack
  *   an explicit «Не играет» with the transport error, otherwise «Загружаю».
  * - [isCurrent]: whether a list row belongs to the transport's current track
  *   (the row-highlight rule; independent of playing/loading sub-state).
+ * - [transportControls]: the header transport-control state (visibility of the
+ *   «Пауза/Играть» + «Остановить» pair and the toggle caption/icon) — pause/resume
+ *   on the music screen itself, so the user is never forced to destroy the playlist
+ *   binding («Остановить») just to quiet the audio. Values are delegated to
+ *   [TvMiniPlayerSpec] — the chat mini player and this screen speak with one voice.
  */
 object TvMusicNowPlayingSpec {
 
@@ -37,4 +42,31 @@ object TvMusicNowPlayingSpec {
         TvRepeatMode.ALL -> "Повтор: список"
         TvRepeatMode.ONE -> "Повтор: трек"
     }
+
+    /**
+     * Header transport controls of the music screen for one transport snapshot.
+     * [visible] governs the «Пауза/Играть» + «Остановить» pair (shown only while a
+     * track is bound — an idle transport has nothing to pause or stop);
+     * [playPauseLabel]/[showPauseIcon] describe the toggle: while audio renders the
+     * button offers «Пауза» with the pause icon, otherwise «Играть» with the play
+     * icon (paused, preparing or failed track alike — the click resumes/retries via
+     * [TvMusicPlayer.togglePlayPause]).
+     */
+    data class TransportControls(
+        val visible: Boolean,
+        val playPauseLabel: String,
+        val showPauseIcon: Boolean,
+    )
+
+    /**
+     * Pure decision for the music-screen header transport pair. Delegates the values
+     * to [TvMiniPlayerSpec] (single source of truth shared with the chat mini player —
+     * the captions must never diverge between the two surfaces).
+     */
+    fun transportControls(track: MusicTrack?, isPlaying: Boolean): TransportControls =
+        TransportControls(
+            visible = TvMiniPlayerSpec.visible(track),
+            playPauseLabel = TvMiniPlayerSpec.toggleLabel(isPlaying),
+            showPauseIcon = isPlaying,
+        )
 }

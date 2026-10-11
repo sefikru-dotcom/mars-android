@@ -71,6 +71,22 @@
             android:layout_height="64dp" />
 
         <Button
+            android:id="@+id/playPauseButton"
+            android:text="Играть"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="10dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:visibility="gone"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="64dp" />
+        <Button
             android:id="@+id/stopButton"
             android:text="Остановить"
             android:textSize="18sp"

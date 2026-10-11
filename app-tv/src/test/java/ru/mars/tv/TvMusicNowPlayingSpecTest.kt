@@ -100,4 +100,54 @@ class TvMusicNowPlayingSpecTest {
         }
         assertEquals(listOf("Повтор: выкл", "Повтор: список", "Повтор: трек", "Повтор: выкл"), labels)
     }
+
+    // --- header transport pair (play/pause + stop) -----------------------------------------------
+
+    @Test
+    fun `transport pair is hidden while the transport is idle`() {
+        // No track bound — nothing to pause and nothing to stop: both buttons stay GONE
+        // and stale playing/error flags cannot summon them.
+        val controls = TvMusicNowPlayingSpec.transportControls(track = null, isPlaying = true)
+        assertFalse(controls.visible)
+    }
+
+    @Test
+    fun `bound track shows the transport pair`() {
+        assertTrue(TvMusicNowPlayingSpec.transportControls(track, isPlaying = false).visible)
+        assertTrue(TvMusicNowPlayingSpec.transportControls(track, isPlaying = true).visible)
+    }
+
+    @Test
+    fun `playing transport offers pause with the pause icon`() {
+        val controls = TvMusicNowPlayingSpec.transportControls(track, isPlaying = true)
+        assertEquals("Пауза", controls.playPauseLabel)
+        assertTrue(controls.showPauseIcon)
+    }
+
+    @Test
+    fun `paused or failed transport offers play with the play icon`() {
+        // Paused, preparing and error states alike: the toggle resumes via the same
+        // transport action and must never claim «Пауза» while nothing renders.
+        val controls = TvMusicNowPlayingSpec.transportControls(track, isPlaying = false)
+        assertEquals("Играть", controls.playPauseLabel)
+        assertFalse(controls.showPauseIcon)
+    }
+
+    @Test
+    fun `music screen toggle speaks with one voice as the chat mini player`() {
+        // Single source of truth: the captions are delegated to TvMiniPlayerSpec, so the
+        // two surfaces can never drift apart state by state.
+        for (playing in listOf(true, false)) {
+            assertEquals(
+                TvMiniPlayerSpec.toggleLabel(playing),
+                TvMusicNowPlayingSpec.transportControls(track, isPlaying = playing).playPauseLabel,
+            )
+        }
+        for (bound in listOf(track, null)) {
+            assertEquals(
+                TvMiniPlayerSpec.visible(bound),
+                TvMusicNowPlayingSpec.transportControls(bound, isPlaying = false).visible,
+            )
+        }
+    }
 }

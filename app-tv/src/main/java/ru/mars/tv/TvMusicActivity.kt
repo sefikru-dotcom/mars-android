@@ -52,7 +52,12 @@ internal object TvMusicFocusPolicy {
  * Selecting a track row binds the shown list as the process-global [TvMusicPlayer]
  * transport's playlist and starts it on that row; the transport keeps playing after this
  * screen closes, auto-advances to the next track when one completes ([TvPlaylistPolicy])
- * and goes idle at the end of the list; «Остановить» ends it explicitly. The header
+ * and goes idle at the end of the list. The header transport pair keeps non-destructive
+ * and destructive control apart: «Пауза/Играть» ([TvMusicPlayer.togglePlayPause],
+ * captions/icons delegated to [TvMiniPlayerSpec] — one voice with the chat mini player)
+ * quiets the audio while KEEPING the playlist binding, «Остановить» ends playback
+ * explicitly; both are shown only while a track is bound
+ * ([TvMusicNowPlayingSpec.transportControls]). The header
  * «Повтор» toggle cycles the repeat preference OFF -> ALL -> ONE
  * ([TvMusicPlayer.cycleRepeatMode], label per [TvMusicNowPlayingSpec.repeatButtonLabel]) —
  * ALL loops the queue, ONE replays the current track.
@@ -75,6 +80,7 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var stateText: TextView
     private lateinit var retryButton: Button
     private lateinit var stopButton: Button
+    private lateinit var playPauseButton: Button
     private lateinit var repeatButton: Button
     private lateinit var backButton: Button
     private lateinit var nowText: TextView
@@ -95,6 +101,7 @@ class TvMusicActivity : AppCompatActivity() {
         stateText = findViewById(R.id.stateText)
         retryButton = findViewById(R.id.retryButton)
         stopButton = findViewById(R.id.stopButton)
+        playPauseButton = findViewById(R.id.playPauseButton)
         repeatButton = findViewById(R.id.repeatButton)
         backButton = findViewById(R.id.backButton)
         nowText = findViewById(R.id.nowText)
@@ -106,6 +113,13 @@ class TvMusicActivity : AppCompatActivity() {
         // Retry repeats the LAST operation (charts or the failed search query).
         retryButton.setOnClickListener { controller.retry() }
         stopButton.setOnClickListener { controller.stopPlayback() }
+        // D-pad play/pause toggle: the non-destructive way to quiet the audio — the
+        // playlist binding survives, «Играть» resumes the same queue. Same transport
+        // action as the chat mini player's toggle ([TvMusicPlayer.togglePlayPause]).
+        playPauseButton.setOnClickListener {
+            TvMusicPlayer.togglePlayPause()
+            renderTransportState()
+        }
         // D-pad repeat toggle: cycles the transport preference OFF -> ALL -> ONE
         // ([TvMusicPlayer.cycleRepeatMode]); the label mirrors the new mode immediately.
         repeatButton.setOnClickListener {
@@ -131,6 +145,7 @@ class TvMusicActivity : AppCompatActivity() {
         TvFocusLift.attach(backButton)
         TvFocusLift.attach(retryButton)
         TvFocusLift.attach(stopButton)
+        TvFocusLift.attach(playPauseButton)
         TvFocusLift.attach(repeatButton)
         TvFocusLift.attach(searchInput)
         TvFocusLift.attach(searchButton)
@@ -219,23 +234,40 @@ class TvMusicActivity : AppCompatActivity() {
         }
     }
 
-    /** Transport snapshot to the UI: stop affordance, header line, row highlight. */
+    /** Transport snapshot to the UI: transport pair, header line, row highlight. */
     private fun renderTransportState() {
-        val stopVisible = TvMusicPlayer.currentTrack != null
-        // «Остановить» disappears the moment the transport goes idle — in production this
-        // fires synchronously from the D-pad press on the button itself (stop() notifies
-        // observers), so hiding it under focus would leave the window unfocused and stall
-        // D-pad navigation. Hand focus to the stable header BEFORE hiding ([TvMusicFocusPolicy]).
+        val controls = TvMusicNowPlayingSpec.transportControls(
+            track = TvMusicPlayer.currentTrack,
+            isPlaying = TvMusicPlayer.isPlaying,
+        )
+        // The transport pair disappears the moment the transport goes idle — in production
+        // this fires synchronously from the D-pad press on the button itself (stop()/pause
+        // notify observers), so hiding it under focus would leave the window unfocused and
+        // stall D-pad navigation. Hand focus to the stable header BEFORE hiding
+        // ([TvMusicFocusPolicy]).
         if (
             TvMusicFocusPolicy.handoffBeforeHide(
                 viewVisible = stopButton.visibility == View.VISIBLE,
                 viewHasFocus = stopButton.hasFocus(),
-                staysVisible = stopVisible,
+                staysVisible = controls.visible,
+            ) ||
+            TvMusicFocusPolicy.handoffBeforeHide(
+                viewVisible = playPauseButton.visibility == View.VISIBLE,
+                viewHasFocus = playPauseButton.hasFocus(),
+                staysVisible = controls.visible,
             )
         ) {
             backButton.requestFocus()
         }
-        stopButton.visibility = if (stopVisible) View.VISIBLE else View.GONE
+        val pairVisibility = if (controls.visible) View.VISIBLE else View.GONE
+        stopButton.visibility = pairVisibility
+        playPauseButton.visibility = pairVisibility
+        playPauseButton.text = controls.playPauseLabel
+        playPauseButton.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (controls.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play, 0, 0, 0,
+        )
+        playPauseButton.compoundDrawableTintList =
+            ContextCompat.getColorStateList(this, R.color.icon_focus_tint)
         renderRepeatMode()
         renderNowPlaying()
         trackRows.forEach { (trackId, row) -> applyRowState(row, trackId) }

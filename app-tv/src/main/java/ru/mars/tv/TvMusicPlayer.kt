@@ -297,7 +297,7 @@ object TvMusicPlayer : TvMusicTransport {
         }
     }
 
-    /** Play/Pause transport toggle for the chat mini player. */
+    /** Play/Pause transport toggle — the chat mini player and the music screen header share it. */
     @Synchronized
     fun togglePlayPause() {
         if (isPlaying) pause() else resume()
