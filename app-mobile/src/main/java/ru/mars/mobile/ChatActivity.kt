@@ -18,7 +18,6 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import android.text.ClipboardManager
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -53,7 +52,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import ru.mars.mobile.domain.util.SpeechContentFilter
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
@@ -183,9 +181,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var attachmentChips: LinearLayout
     private val attachments = mutableListOf<ChatAttachment>()
     private var speech: SpeechRecognizer? = null
-    private lateinit var tts: TextToSpeech
-    private val speechFilter = SpeechContentFilter()
+    // Voice output: policy lives in VoiceOutputController (pure JVM), the platform
+    // TextToSpeech is isolated behind AndroidSpeechEngine — ChatActivity only wires both.
+    private lateinit var speechEngine: AndroidSpeechEngine
+    private lateinit var voiceOutput: VoiceOutputController
+    /** TTS init callback may fire before the controller exists (sync construction failure). */
+    private var speechEngineInitResult: Boolean? = null
     private lateinit var voiceSession: VoiceSessionController
+    private var volumeBtn: ImageButton? = null
     private var voiceBtn: ImageButton? = null
     private val pickAttachment = 4101
     private val recognizeVoice = 4102
@@ -282,7 +285,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         uiState.setActivityMode(activityModeSelection.current)
         autoScroll = AutoScrollPolicy(bottomThresholdPx = dp(56))
         scrollToBottomPolicy = ScrollToBottomPolicy(showThresholdPx = dp(120), hideThresholdPx = dp(56))
-        tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = java.util.Locale.getDefault() }
+        // Voice-output wiring: the engine reports its async init here; the controller owns
+        // every speak/stop decision. The sticky auto-speak toggle is persisted across launches.
+        val voiceOutputPrefs = getSharedPreferences(VOICE_OUTPUT_PREFS, MODE_PRIVATE)
+        speechEngine = AndroidSpeechEngine(this) { available ->
+            if (::voiceOutput.isInitialized) voiceOutput.onEngineReady(available)
+            else speechEngineInitResult = available
+        }
+        voiceOutput = VoiceOutputController(
+            engine = speechEngine,
+            autoSpeakInitially = voiceOutputPrefs.getBoolean(KEY_AUTO_SPEAK, false),
+            onAutoSpeakChanged = { enabled -> voiceOutputPrefs.edit().putBoolean(KEY_AUTO_SPEAK, enabled).apply() },
+        )
+        speechEngineInitResult?.let { available ->
+            speechEngineInitResult = null
+            voiceOutput.onEngineReady(available)
+        }
         // Voice-input state machine: guards the recognizer session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
@@ -293,7 +311,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
             override fun onResult(text: String) {
                 input.setText(text)
-                input.setSelection(input.length())
+                input.setSelection(text.length)
+                // The user explicitly spoke — arm reading of this turn's completed answer.
+                voiceOutput.armSpeakNextAnswer()
             }
 
             override fun onError(message: String) {
@@ -368,18 +388,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // и recovery-цикла).
         teardownLiveTurn()
         speech?.destroy()
-        tts.shutdown()
+        if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
         super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
+        if (::voiceOutput.isInitialized) voiceOutput.onResume()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
     }
 
     override fun onPause() {
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
+        // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
+        if (::voiceOutput.isInitialized) voiceOutput.onPause()
         super.onPause()
     }
 
@@ -1308,18 +1331,33 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         voiceBtn = voiceButton
         actionsRow.addView(voiceButton, LinearLayout.LayoutParams(dp(34), dp(34)))
 
-        val volumeBtn = MarsTheme.circleIconButton(
+        val volumeButton = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_volume,
-            "Озвучить ответ",
+            "Озвучить ответ, удержание — автоозвучивание",
             bg = Color.TRANSPARENT,
             iconTint = MarsTheme.TEXT_MUTED,
             sizeDp = 34,
             strokeColor = 0
         ).apply {
             setOnClickListener { speakLastMessage() }
+            // Явное действие пользователя: долгое нажатие переключает режим «читать ответы
+            // вслух» (persisted). Автоматически режим никогда не включается.
+            setOnLongClickListener {
+                voiceOutput.setAutoSpeak(!voiceOutput.autoSpeakEnabled)
+                updateVolumeBtn()
+                Toast.makeText(
+                    this@ChatActivity,
+                    if (voiceOutput.autoSpeakEnabled) "Озвучивание ответов включено"
+                    else "Озвучивание ответов выключено",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                true
+            }
         }
-        actionsRow.addView(volumeBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        volumeBtn = volumeButton
+        actionsRow.addView(volumeButton, LinearLayout.LayoutParams(dp(34), dp(34)))
+        updateVolumeBtn()
 
         sendButton = MarsTheme.circleIconButton(
             this,
@@ -1410,6 +1448,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Новый пользовательский ход: предыдущий recovery-job прерывается (generation
         // guard), курсор Last-Event-ID и серии отказов координатора сбрасываются.
         if (::recovery.isInitialized) recovery.onNewTurn()
+        // Новый ход: озвучка предыдущего финального ответа обрывается, не перетекая в новый.
+        if (::voiceOutput.isInitialized) voiceOutput.onNewTurn()
         // Токен выдаётся синхронно с регистрацией хода: любой последующий уход с контекста
         // (teardownLiveTurn) гасит его — поздние SSE-кадры этого collect не перекрасят новый экран.
         val turnToken = liveTurnGuard.beginTurn()
@@ -1494,6 +1534,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     explicitStatus = STREAM_RECONNECT_STATUS
                 } else {
                     uiState.onEvent(event)
+                    // Терминальный Done: ход завершён — голосовой режим озвучивает ФИНАЛЬНЫЙ
+                    // ответ (промежуточные Chunk/Thought/ToolCall сюда не попадают никогда).
+                    if (event is ChatEvent.Done && ::voiceOutput.isInitialized) {
+                        voiceOutput.onTurnComplete(latestAssistantAnswer())
+                    }
                     if (event is ChatEvent.Error) {
                         sawAppError = true
                         if (AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
@@ -1526,7 +1571,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 stream = recovery.beginRecoveryAfterDrop(recoveryStreamId, suppressedTransportError)
                 return@launch
             }
-            if (uiState.status == ChatStatus.TYPING) uiState.complete()
+            if (uiState.status == ChatStatus.TYPING) {
+                uiState.complete()
+                // Стрим закрылся без терминального Done и без ухода в recovery: ход завершён
+                // здесь — голосовой режим озвучивает финальный ответ (Done-путь уже озвучил).
+                if (::voiceOutput.isInitialized) voiceOutput.onTurnComplete(latestAssistantAnswer())
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
@@ -1665,6 +1715,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun teardownLiveTurn() {
         liveTurnGuard.invalidate()
         if (::recovery.isInitialized) recovery.cancelRecovery()
+        // Смена диалога / «Стоп» / новый чат: озвучка предыдущего ответа не должна перетекать
+        // в следующий контекст (one-shot «ответ на голос» тоже сбрасывается).
+        if (::voiceOutput.isInitialized) voiceOutput.onSessionSwitch()
         stream?.cancel()
         stream = null
         currentStreamId = null
@@ -3023,12 +3076,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
 
         override fun onTurnCompleted() {
-            finishRecoveredTurn()
+            finishRecoveredTurn(speakFinalAnswer = true)
         }
 
         /** Серверная ошибка хода уже в транскрипте (onStreamEvent → uiState.fail()). */
         override fun onTurnEndedInError() {
-            finishRecoveredTurn()
+            finishRecoveredTurn(speakFinalAnswer = false)
         }
 
         /** Стрим исчез серверно (404/истёкший журнал): placeholder снимается, история перезагружается. */
@@ -3062,9 +3115,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Завершение recovery-цикла: статус/контролы/офлайн-очередь — паритет с finally прежнего attach. */
-    private fun finishRecoveredTurn() {
+    private fun finishRecoveredTurn(speakFinalAnswer: Boolean) {
         clearRecoveryStatus()
         if (uiState.status == ChatStatus.TYPING) uiState.complete()
+        // Восстановленный ход завершился успешно — голосовой режим озвучивает финальный
+        // ответ; ход, умерший серверной ошибкой, не озвучивается.
+        if (speakFinalAnswer && ::voiceOutput.isInitialized) {
+            voiceOutput.onTurnComplete(latestAssistantAnswer())
+        }
         renderMessages()
         setStatus()
         updateControls()
@@ -3262,14 +3320,27 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    /** Speak a message through TTS after cleaning markdown with [SpeechContentFilter]. */
+    /** Speak a message through [VoiceOutputController] (markdown is filtered inside). */
     private fun speakMessage(text: String) {
-        val speakable = speechFilter.filterForSpeech(text)
-        if (speakable.isBlank()) {
-            statusView.text = "В сообщении нет текста для озвучивания"
-            return
+        when (voiceOutput.speakNow(text)) {
+            VoiceOutputController.SpeakOutcome.NOTHING_TO_SPEAK ->
+                statusView.text = "В сообщении нет текста для озвучивания"
+            VoiceOutputController.SpeakOutcome.ENGINE_UNAVAILABLE ->
+                statusView.text = VOICE_OUTPUT_UNAVAILABLE
+            VoiceOutputController.SpeakOutcome.SPOKEN -> Unit
         }
-        tts.speak(speakable, TextToSpeech.QUEUE_FLUSH, null, "mars-message")
+    }
+
+    /** Финальный текст последнего ассистент-сообщения — голос озвучивает только его. */
+    private fun latestAssistantAnswer(): String? =
+        uiState.messages.lastOrNull { it.role == "assistant" }?.text
+
+    /** Режим автоозвучивания виден на композере: акцентная тонировка кнопки, пока включён. */
+    private fun updateVolumeBtn() {
+        val enabled = ::voiceOutput.isInitialized && voiceOutput.autoSpeakEnabled
+        volumeBtn?.imageTintList = ColorStateList.valueOf(
+            if (enabled) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED
+        )
     }
 
     private fun speakLastMessage() {
@@ -4113,5 +4184,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val STREAM_RECONNECT_STATUS = "Связь прервана — восстанавливаю поток…"
         /** Recovery-цикл припаркован до возврата сети (офлайн-парковка). */
         private const val STREAM_PARKED_OFFLINE_STATUS = "Нет связи — поток продолжится автоматически"
+        /** Приватное хранилище режима автоозвучивания ответов (голосовой вывод). */
+        private const val VOICE_OUTPUT_PREFS = "mars-voice-output"
+        private const val KEY_AUTO_SPEAK = "auto_speak"
+        /** TTS-движок отсутствует/сломался — статус вместо краша и ретраев. */
+        private const val VOICE_OUTPUT_UNAVAILABLE = "Озвучивание недоступно на этом устройстве"
     }
 }
