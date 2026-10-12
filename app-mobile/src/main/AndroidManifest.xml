@@ -26,6 +26,8 @@
         <activity android:name=".CronActivity" />
         <activity android:name=".SettingsActivity" />
         <activity android:name=".SpacesActivity" />
+        <!-- Read-only доска канбана (GET /api/kanban/*); навигационная интеграция — отдельной волной. -->
+        <activity android:name=".KanbanActivity" />
         <activity android:name=".InsightsActivity" />
         <activity
             android:name=".MainActivity"
