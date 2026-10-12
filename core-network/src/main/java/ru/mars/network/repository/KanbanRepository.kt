@@ -1,0 +1,435 @@
+package ru.mars.network.repository
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.http.HttpClients
+import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.KanbanAssigneeStats
+import ru.mars.network.model.KanbanBoard
+import ru.mars.network.model.KanbanBoardFilters
+import ru.mars.network.model.KanbanColumn
+import ru.mars.network.model.KanbanComment
+import ru.mars.network.model.KanbanDispatchOutcomePayload
+import ru.mars.network.model.KanbanDispatchSpawn
+import ru.mars.network.model.KanbanRun
+import ru.mars.network.model.KanbanStats
+import ru.mars.network.model.KanbanTask
+import ru.mars.network.model.KanbanTaskDetail
+import ru.mars.network.model.KanbanTaskEvent
+import ru.mars.network.model.KanbanTaskLinks
+import java.io.IOException
+
+/** Outcome of `GET /api/kanban/board`. */
+sealed interface KanbanBoardResult {
+    /** 2xx with a parseable board envelope (INCLUDING the short `changed:false` form). */
+    data class Board(val board: KanbanBoard) : KanbanBoardResult
+
+    /** 404 — board slug does not exist (`LookupError` on the bridge). */
+    data class NotFound(val message: String) : KanbanBoardResult
+
+    /** HTTP error (mapped `error` message when present) or transport failure. */
+    data class Failed(val message: String) : KanbanBoardResult
+}
+
+/** Outcome of `GET /api/kanban/tasks/{id}`. */
+sealed interface KanbanTaskDetailResult {
+    data class Detail(val detail: KanbanTaskDetail) : KanbanTaskDetailResult
+
+    /** 404 — `task not found` is a VALID settled state, distinct from a transport failure. */
+    data class NotFound(val message: String) : KanbanTaskDetailResult
+
+    data class Failed(val message: String) : KanbanTaskDetailResult
+}
+
+/** Outcome of `GET /api/kanban/stats`. */
+sealed interface KanbanStatsResult {
+    data class Stats(val stats: KanbanStats) : KanbanStatsResult
+    data class Failed(val message: String) : KanbanStatsResult
+}
+
+/** Outcome of `POST /api/kanban/dispatch`. */
+sealed interface KanbanDispatchResult {
+    data class Dispatched(val outcome: KanbanDispatchOutcomePayload) : KanbanDispatchResult
+    data class Failed(val message: String) : KanbanDispatchResult
+}
+
+/**
+ * Kanban bridge of the WebUI backend (contract verified read-only against
+ * `/opt/hermes-webui/api/kanban_bridge.py`; errors are `{"error": "<msg>"}` with
+ * 400 ValueError / 404 LookupError / 409 RuntimeError / 503 ImportError per the
+ * bridge's `handle_kanban_get`/`handle_kanban_post` except-ladder):
+ *
+ * - `GET  /api/kanban/board?board=&tenant=&assignee=&include_archived=&only_mine=&since=`
+ * - `GET  /api/kanban/tasks/{id}?board=`
+ * - `GET  /api/kanban/stats?board=`
+ * - `POST /api/kanban/dispatch?board=&dry_run=&max=`
+ *
+ * SAFETY of the mutating surface: [dispatch] is the ONLY write here and it never
+ * mutates task content — it asks the server's dispatcher for one tick. All gating
+ * (claim locks, failure breaker, per-profile caps, single-writer tick lock) lives
+ * server-side; `dryRun = true` performs a no-op scan and is the safe probe. Board
+ * creation/patch, task create/patch, comments and links are deliberately NOT
+ * exposed: a phone client mutating cards needs product decisions this layer must
+ * not pre-empt.
+ */
+class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
+
+    private val jsonMediaType = "application/json".toMediaType()
+
+    /**
+     * `GET /api/kanban/board`. [since] is the client's `latest_event_id` cursor: when
+     * the server answers `changed:false` the cached board is still current and
+     * [KanbanBoard.columns] is legitimately empty. Boolean filters travel as `1`
+     * (the bridge's `_bool_query` also accepts true/yes/on).
+     */
+    suspend fun getBoard(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        board: String? = null,
+        tenant: String? = null,
+        assignee: String? = null,
+        includeArchived: Boolean = false,
+        onlyMine: Boolean = false,
+        since: Long? = null,
+    ): KanbanBoardResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/board")
+            .boardParam(board)
+            .queryParam("tenant", tenant)
+            .queryParam("assignee", assignee)
+            .apply { if (includeArchived) addQueryParameter("include_archived", "1") }
+            .apply { if (onlyMine) addQueryParameter("only_mine", "1") }
+            .apply { since?.let { addQueryParameter("since", it.toString()) } }
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanBoardResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanBoardResult.Failed(unparseable(code))
+                code == 404 -> KanbanBoardResult.NotFound(errorMessage(root, code))
+                code in 200..299 -> KanbanBoardResult.Board(parseBoard(root))
+                else -> KanbanBoardResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /** `GET /api/kanban/tasks/{id}` — full card detail with comments/events/runs/links. */
+    suspend fun getTaskDetail(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        taskId: String,
+        board: String? = null,
+    ): KanbanTaskDetailResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks")
+            // addPathSegment percent-encodes; task ids are URL-safe slugs but stay literal.
+            .addPathSegment(taskId)
+            .boardParam(board)
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanTaskDetailResult.Failed(it) },
+        ) { code, root ->
+            val taskMap = TolerantJson.mapField(root, "task")
+            when {
+                root == null -> KanbanTaskDetailResult.Failed(unparseable(code))
+                code == 404 -> KanbanTaskDetailResult.NotFound(errorMessage(root, code))
+                code in 200..299 && taskMap != null ->
+                    KanbanTaskDetailResult.Detail(parseTaskDetail(root, taskMap))
+                code in 200..299 -> KanbanTaskDetailResult.Failed(unparseable(code))
+                else -> KanbanTaskDetailResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /** `GET /api/kanban/stats` — per-status/per-assignee counters of one board. */
+    suspend fun getStats(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        board: String? = null,
+    ): KanbanStatsResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/stats")
+            .boardParam(board)
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanStatsResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanStatsResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanStatsResult.Stats(parseStats(root))
+                else -> KanbanStatsResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * `POST /api/kanban/dispatch` — one dispatcher tick. The bridge reads `board`,
+     * `dry_run` and `max` from the QUERY string (`_resolve_board(parsed)`,
+     * `_bool_query`, `_int_query` on `parsed`), so all params travel as query
+     * params and the body is an empty JSON object (the global POST handler parses
+     * the body before dispatch and rejects non-JSON).
+     *
+     * [dryRun]` = true` asks for a no-op scan (nothing is spawned) — the safe probe.
+     */
+    suspend fun dispatch(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        board: String? = null,
+        dryRun: Boolean = false,
+        maxSpawn: Int? = null,
+    ): KanbanDispatchResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/dispatch")
+            .boardParam(board)
+            .apply { if (dryRun) addQueryParameter("dry_run", "1") }
+            .apply { maxSpawn?.let { addQueryParameter("max", it.toString()) } }
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .authHeader(credential)
+            .post("{}".toRequestBody(jsonMediaType))
+            .build()
+        execute(
+            request = request,
+            networkFailure = { KanbanDispatchResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanDispatchResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanDispatchResult.Dispatched(parseDispatch(root))
+                else -> KanbanDispatchResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    // ── request plumbing ──
+
+    private fun get(url: HttpUrl, credential: ConsumedDeviceCredential): Request =
+        Request.Builder().url(url).authHeader(credential).get().build()
+
+    private fun Request.Builder.authHeader(credential: ConsumedDeviceCredential): Request.Builder =
+        header("Authorization", "Bearer ${credential.accessToken}")
+
+    private fun HttpUrl.Builder.queryParam(name: String, value: String?): HttpUrl.Builder =
+        apply { value?.takeIf(String::isNotBlank)?.let { addQueryParameter(name, it) } }
+
+    private fun HttpUrl.Builder.boardParam(board: String?): HttpUrl.Builder =
+        queryParam("board", board)
+
+    private inline fun <T> execute(
+        request: Request,
+        crossinline networkFailure: (message: String) -> T,
+        crossinline map: (code: Int, root: Map<String, Any?>?) -> T,
+    ): T = try {
+        client.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            map(response.code, TolerantJson.parseMap(body))
+        }
+    } catch (error: IOException) {
+        // IOException messages carry host/path at worst — never request headers, no token leak.
+        networkFailure(error.message ?: "Network error")
+    }
+
+    private fun errorMessage(root: Map<String, Any?>?, code: Int): String =
+        TolerantJson.string(root, "error") ?: "HTTP $code"
+
+    private fun unparseable(code: Int): String = "HTTP $code: unparseable body"
+
+    // ── parsing (all tolerant: absent/null/mis-typed fields degrade to defaults) ──
+
+    internal fun parseBoard(root: Map<String, Any?>): KanbanBoard {
+        val columns = TolerantJson.listField(root, "columns").mapNotNull { entry ->
+            val map = entry as? Map<*, *> ?: return@mapNotNull null
+            KanbanColumn(
+                name = TolerantJson.string(map, "name").orEmpty(),
+                statuses = TolerantJson.stringListOrEmpty(map, "statuses"),
+                tasks = TolerantJson.listField(map, "tasks").mapNotNull { parseTaskOrNull(it) },
+            )
+        }
+        val filtersMap = TolerantJson.mapField(root, "filters")
+        return KanbanBoard(
+            // Default true: a payload WITHOUT the flag is a full board, not a stale no-op.
+            changed = TolerantJson.bool(root, "changed", default = true),
+            latestEventId = TolerantJson.longOrNull(root, "latest_event_id") ?: 0L,
+            readOnly = TolerantJson.bool(root, "read_only"),
+            columns = columns,
+            tenants = TolerantJson.stringListOrEmpty(root, "tenants"),
+            assignees = TolerantJson.stringListOrEmpty(root, "assignees"),
+            filters = filtersMap?.let {
+                KanbanBoardFilters(
+                    tenant = TolerantJson.string(it, "tenant"),
+                    assignee = TolerantJson.string(it, "assignee"),
+                    includeArchived = TolerantJson.bool(it, "include_archived"),
+                    onlyMine = TolerantJson.bool(it, "only_mine"),
+                    profile = TolerantJson.string(it, "profile"),
+                )
+            },
+        )
+    }
+
+    internal fun parseTaskOrNull(raw: Any?): KanbanTask? {
+        val map = raw as? Map<*, *> ?: return null
+        @Suppress("UNCHECKED_CAST")
+        val task = map as Map<String, Any?>
+        val id = TolerantJson.string(task, "id") ?: return null
+        val linkCounts = TolerantJson.mapField(task, "link_counts")
+        return KanbanTask(
+            id = id,
+            title = TolerantJson.string(task, "title").orEmpty(),
+            body = TolerantJson.string(task, "body"),
+            status = TolerantJson.string(task, "status").orEmpty(),
+            assignee = TolerantJson.string(task, "assignee"),
+            priority = TolerantJson.int(task, "priority"),
+            createdBy = TolerantJson.string(task, "created_by"),
+            createdAt = TolerantJson.longOrNull(task, "created_at"),
+            startedAt = TolerantJson.longOrNull(task, "started_at"),
+            completedAt = TolerantJson.longOrNull(task, "completed_at"),
+            workspaceKind = TolerantJson.string(task, "workspace_kind"),
+            workspacePath = TolerantJson.string(task, "workspace_path"),
+            claimLock = TolerantJson.string(task, "claim_lock"),
+            claimExpires = TolerantJson.longOrNull(task, "claim_expires"),
+            tenant = TolerantJson.string(task, "tenant"),
+            branchName = TolerantJson.string(task, "branch_name"),
+            projectId = TolerantJson.string(task, "project_id"),
+            result = TolerantJson.string(task, "result"),
+            consecutiveFailures = TolerantJson.int(task, "consecutive_failures"),
+            workerPid = TolerantJson.longOrNull(task, "worker_pid"),
+            lastFailureError = TolerantJson.string(task, "last_failure_error"),
+            maxRuntimeSeconds = TolerantJson.longOrNull(task, "max_runtime_seconds"),
+            lastHeartbeatAt = TolerantJson.longOrNull(task, "last_heartbeat_at"),
+            currentRunId = TolerantJson.longOrNull(task, "current_run_id"),
+            workflowTemplateId = TolerantJson.string(task, "workflow_template_id"),
+            currentStepKey = TolerantJson.string(task, "current_step_key"),
+            // null (defaults only) vs [] (explicitly none) is MEANINGFUL on the wire.
+            skills = TolerantJson.stringListOrNull(task, "skills"),
+            modelOverride = TolerantJson.string(task, "model_override"),
+            providerOverride = TolerantJson.string(task, "provider_override"),
+            reasoningEffort = TolerantJson.string(task, "reasoning_effort"),
+            maxRetries = TolerantJson.intOrNull(task, "max_retries"),
+            goalMode = TolerantJson.bool(task, "goal_mode"),
+            goalMaxTurns = TolerantJson.longOrNull(task, "goal_max_turns"),
+            sessionId = TolerantJson.string(task, "session_id"),
+            blockKind = TolerantJson.string(task, "block_kind"),
+            blockRecurrences = TolerantJson.int(task, "block_recurrences"),
+            ageSeconds = TolerantJson.longOrNull(task, "age_seconds"),
+            commentCount = TolerantJson.int(task, "comment_count"),
+            parentCount = TolerantJson.int(linkCounts, "parents"),
+            childCount = TolerantJson.int(linkCounts, "children"),
+        )
+    }
+
+    internal fun parseTaskDetail(root: Map<String, Any?>, taskMap: Map<String, Any?>): KanbanTaskDetail {
+        val links = TolerantJson.mapField(root, "links")
+        return KanbanTaskDetail(
+            task = parseTaskOrNull(taskMap) ?: KanbanTask(id = "", title = ""),
+            comments = TolerantJson.listField(root, "comments").mapNotNull { entry ->
+                val map = entry as? Map<*, *> ?: return@mapNotNull null
+                KanbanComment(
+                    id = TolerantJson.longOrNull(map, "id") ?: 0L,
+                    taskId = TolerantJson.string(map, "task_id").orEmpty(),
+                    author = TolerantJson.string(map, "author").orEmpty(),
+                    body = TolerantJson.string(map, "body").orEmpty(),
+                    createdAt = TolerantJson.longOrNull(map, "created_at"),
+                )
+            },
+            events = TolerantJson.listField(root, "events").mapNotNull { entry ->
+                val map = entry as? Map<*, *> ?: return@mapNotNull null
+                KanbanTaskEvent(
+                    id = TolerantJson.longOrNull(map, "id") ?: 0L,
+                    taskId = TolerantJson.string(map, "task_id").orEmpty(),
+                    runId = TolerantJson.longOrNull(map, "run_id"),
+                    kind = TolerantJson.string(map, "kind").orEmpty(),
+                    payload = TolerantJson.mapField(map, "payload"),
+                    createdAt = TolerantJson.longOrNull(map, "created_at"),
+                )
+            },
+            links = KanbanTaskLinks(
+                parents = TolerantJson.stringListOrEmpty(links, "parents"),
+                children = TolerantJson.stringListOrEmpty(links, "children"),
+            ),
+            runs = TolerantJson.listField(root, "runs").mapNotNull { entry ->
+                val map = entry as? Map<*, *> ?: return@mapNotNull null
+                KanbanRun(
+                    id = TolerantJson.longOrNull(map, "id") ?: 0L,
+                    taskId = TolerantJson.string(map, "task_id").orEmpty(),
+                    profile = TolerantJson.string(map, "profile"),
+                    stepKey = TolerantJson.string(map, "step_key"),
+                    status = TolerantJson.string(map, "status").orEmpty(),
+                    startedAt = TolerantJson.longOrNull(map, "started_at"),
+                    endedAt = TolerantJson.longOrNull(map, "ended_at"),
+                    outcome = TolerantJson.string(map, "outcome"),
+                    summary = TolerantJson.string(map, "summary"),
+                    error = TolerantJson.string(map, "error"),
+                )
+            },
+            readOnly = TolerantJson.bool(root, "read_only"),
+        )
+    }
+
+    internal fun parseStats(root: Map<String, Any?>): KanbanStats {
+        val byStatus = TolerantJson.intCounts(root, "by_status")
+        val byAssignee = TolerantJson.mapField(root, "by_assignee").orEmpty().entries
+            .mapNotNull { (assignee, value) ->
+                val name = assignee.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                parseAssigneeStats(value)?.let { name to it }
+            }
+            .toMap()
+        return KanbanStats(
+            byStatus = byStatus,
+            byAssignee = byAssignee,
+            oldestReadyAgeSeconds = TolerantJson.longOrNull(root, "oldest_ready_age_seconds"),
+            now = TolerantJson.longOrNull(root, "now"),
+        )
+    }
+
+    /**
+     * One `by_assignee` value: the kanban_db.board_stats shape is `{status: n}` (nested),
+     * while the bridge's SQL-fallback shape is a bare count `n`. Both are valid wire
+     * contracts; anything else is dropped.
+     */
+    private fun parseAssigneeStats(value: Any?): KanbanAssigneeStats? = when (value) {
+        is Map<*, *> -> {
+            val perStatus = value.entries.mapNotNull { (k, v) ->
+                val status = k?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val count = (v as? Number)?.toInt() ?: v?.toString()?.toIntOrNull() ?: return@mapNotNull null
+                status to count
+            }.toMap()
+            KanbanAssigneeStats(total = perStatus.values.sum(), byStatus = perStatus)
+        }
+        is Number -> KanbanAssigneeStats(total = value.toInt())
+        else -> null
+    }
+
+    internal fun parseDispatch(root: Map<String, Any?>): KanbanDispatchOutcomePayload =
+        KanbanDispatchOutcomePayload(
+            spawned = TolerantJson.listField(root, "spawned").mapNotNull { entry ->
+                // asdict turns (task_id, assignee, workspace_path) tuples into JSON arrays.
+                val triple = entry as? List<*> ?: return@mapNotNull null
+                KanbanDispatchSpawn(
+                    taskId = triple.getOrNull(0)?.toString().orEmpty(),
+                    assignee = triple.getOrNull(1)?.toString().orEmpty(),
+                    workspacePath = triple.getOrNull(2)?.toString().orEmpty(),
+                )
+            },
+            reclaimed = TolerantJson.int(root, "reclaimed"),
+            promoted = TolerantJson.int(root, "promoted"),
+            reconciledOrphans = TolerantJson.stringListOrEmpty(root, "reconciled_orphans"),
+            skippedUnassigned = TolerantJson.stringListOrEmpty(root, "skipped_unassigned"),
+            autoAssignedDefault = TolerantJson.stringListOrEmpty(root, "auto_assigned_default"),
+            crashed = TolerantJson.stringListOrEmpty(root, "crashed"),
+            autoBlocked = TolerantJson.stringListOrEmpty(root, "auto_blocked"),
+            timedOut = TolerantJson.stringListOrEmpty(root, "timed_out"),
+            stale = TolerantJson.stringListOrEmpty(root, "stale"),
+            rateLimited = TolerantJson.stringListOrEmpty(root, "rate_limited"),
+            skippedLocked = TolerantJson.bool(root, "skipped_locked"),
+            memoryPressure = TolerantJson.string(root, "memory_pressure"),
+        )
+}
