@@ -1,7 +1,59 @@
+import java.io.File
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+
+// Release signing contract — идентичен app-mobile: секреты только из env CI или
+// локального ~/.gradle/gradle.properties (не из git). Без полного контракта
+// release остаётся UNSIGNED; debug-ключ release не подписывает никогда.
+fun releaseSecret(name: String): String? =
+    providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
+        ?: providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
+
+val releaseKeystoreFile: File? = releaseSecret("MARS_RELEASE_KEYSTORE")
+    ?.let { File(it) }
+    ?.takeIf { it.isFile }
+val releaseKeystorePassword: String? = releaseSecret("MARS_RELEASE_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = releaseSecret("MARS_RELEASE_KEY_ALIAS")
+val releaseKeyPassword: String? = releaseSecret("MARS_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = releaseKeystoreFile != null &&
+    releaseKeystorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null
+
+if (!hasReleaseSigning) {
+    logger.warn(
+        "[app-tv] Release signing не настроен (MARS_RELEASE_KEYSTORE/_PASSWORD/_KEY_ALIAS/_KEY_PASSWORD): " +
+            "assembleRelease даст unsigned APK. Dev-сборка — только variant debug."
+    )
+}
 
 android { namespace = "ru.mars.tv"; compileSdk = 34
     defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 19; versionName = "1.2.7" }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8 + shrinkResources: keep-правила в proguard-rules.pro
+            // (data-слой ru.mars.network парсится Moshi/org.json рефлексивно).
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
 }
 
 dependencies {
