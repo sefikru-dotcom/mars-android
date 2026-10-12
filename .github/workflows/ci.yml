@@ -38,6 +38,11 @@ jobs:
         run: chmod +x ./gradlew
       - name: Run core-network and TV/mobile tests
         run: ./gradlew --no-daemon --stacktrace :core-network:test :app-tv:testDebugUnitTest :app-mobile:testDebugUnitTest
+      - name: Design-system parity gate (no hardcoded colors, no banned glyphs)
+        run: |
+          set -eu
+          python3 scripts/theme-parity-audit.py app-mobile/src/main
+          python3 scripts/theme-parity-audit.py app-tv/src/main
       - name: Assemble TV debug APK
         run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
       - name: Assemble mobile debug APK

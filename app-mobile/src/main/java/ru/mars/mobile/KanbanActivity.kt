@@ -361,7 +361,7 @@ class KanbanActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             background = MarsTheme.card(
                 this@KanbanActivity,
-                if (card.isBlocked) BLOCKED_CARD_BG else MarsTheme.SURFACE_CARD,
+                if (card.isBlocked) MarsTheme.BLOCKED_CARD_BG else MarsTheme.SURFACE_CARD,
                 radiusDp = 12,
                 strokeColor = if (card.isBlocked) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_SUBTLE,
             )
@@ -563,9 +563,6 @@ class KanbanActivity : ComponentActivity() {
 
         /** Ширина колонки: мобильный канбан — горизонтальный свайп между колонками. */
         const val COLUMN_WIDTH_DP = 272
-
-        /** Подложка заблокированной карточки: тёплый warn-тон 10% поверх поверхности. */
-        val BLOCKED_CARD_BG = 0x1af59e0b.toInt()
 
         /**
          * Публичная точка входа для интегратора (например, пункт меню

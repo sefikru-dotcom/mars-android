@@ -170,7 +170,7 @@ class SettingsActivity : ComponentActivity() {
         content.addView(aboutCard)
 
         // SECTION: Выход
-        val logoutRed = 0xFFEF4444.toInt()
+        val logoutRed = MarsTheme.ACCENT
         val logoutBtn = Button(this).apply {
             text = "Выйти из профиля"
             textSize = 14f

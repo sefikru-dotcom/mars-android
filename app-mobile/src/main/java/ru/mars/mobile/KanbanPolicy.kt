@@ -277,7 +277,7 @@ object KanbanPolicy {
         task.workspacePath?.takeIf { it.isNotBlank() }?.let { add(KanbanDetailRowUi("Рабочее пространство", it)) }
         ageLabel(task.ageSeconds)?.let { add(KanbanDetailRowUi("Возраст", it)) }
         task.blockKind?.takeIf { it.isNotBlank() }?.let {
-            val suffix = if (task.blockRecurrences > 0) " (×${task.blockRecurrences})" else ""
+            val suffix = if (task.blockRecurrences > 0) " (x${task.blockRecurrences})" else ""
             add(KanbanDetailRowUi("Блокировка", "$it$suffix"))
         }
         task.lastFailureError?.takeIf { it.isNotBlank() }?.let { add(KanbanDetailRowUi("Последняя ошибка", it)) }

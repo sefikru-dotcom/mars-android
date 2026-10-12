@@ -3428,7 +3428,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         val dialog = Dialog(this)
         val root = FrameLayout(this).apply {
-            setBackgroundColor(0xE6000000.toInt())
+            setBackgroundColor(MarsTheme.LIGHTBOX_SCRIM)
             fitsSystemWindows = true
             setOnClickListener { dialog.dismiss() }
         }

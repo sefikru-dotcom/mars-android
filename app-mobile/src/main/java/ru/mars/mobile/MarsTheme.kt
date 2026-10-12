@@ -174,6 +174,16 @@ object MarsTheme {
     const val STATUS_RUNNING = MarsGradients.STATUS_RUNNING
     const val STATUS_DONE = MarsGradients.STATUS_DONE
 
+    /**
+     * Подложка заблокированной карточки канбана: warn-тон 10% поверх поверхности.
+     * Токен заведён здесь, а не литералом в экране, — иначе у канбана появляется
+     * своя палитра и он расходится с остальными экранами при следующей правке темы.
+     */
+    val BLOCKED_CARD_BG = MarsGradients.withAlpha(STATUS_WARNING, MarsGradients.BADGE_BG_ALPHA)
+
+    /** Затемнение под полноэкранным просмотром изображения (lightbox). 90% чёрного. */
+    const val LIGHTBOX_SCRIM = 0xE6000000.toInt()
+
     /** Maps a pure [MarsGradients.Angle] onto the Android gradient orientation. */
     private fun orientationOf(angle: MarsGradients.Angle): GradientDrawable.Orientation = when (angle) {
         MarsGradients.Angle.TOP_BOTTOM -> GradientDrawable.Orientation.TOP_BOTTOM

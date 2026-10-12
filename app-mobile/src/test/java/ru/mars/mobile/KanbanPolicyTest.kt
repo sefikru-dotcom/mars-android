@@ -190,7 +190,7 @@ class KanbanPolicyTest {
         val rows = KanbanPolicy.detailRows(
             task(status = "blocked", blockKind = "needs_input").copy(blockRecurrences = 3)
         )
-        assertEquals("needs_input (×3)", rows.first { it.label == "Блокировка" }.value)
+        assertEquals("needs_input (x3)", rows.first { it.label == "Блокировка" }.value)
     }
 
     @Test
