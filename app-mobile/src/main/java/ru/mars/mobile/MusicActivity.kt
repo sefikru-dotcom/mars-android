@@ -38,13 +38,22 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.service.MarsMusicService
+import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
+import java.io.Closeable
 import java.net.HttpURLConnection
 import java.net.URL
 
 class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var repository: MusicRepository
+    /**
+     * Domain glue for the real remote music event stream: validates each Mars Connect
+     * frame and routes it through [RemoteQueueSyncPolicy] (see [RemoteQueueSyncController]).
+     */
+    private val remoteSync = RemoteQueueSyncController()
+    /** Live Mars Connect subscription; opened in [onCreate], closed in [onDestroy]. */
+    private var remoteSubscription: Closeable? = null
     private lateinit var results: LinearLayout
     private lateinit var title: TextView
     private lateinit var artistView: TextView
@@ -124,6 +133,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         repository = MusicRepository(BASE_URL)
+        // Real remote music event stream (Mars Connect): SESSION_RESTORE snapshot plus
+        // every later DEVICES_UPDATE broadcast, resolved against the local player state
+        // by the pure RemoteQueueSyncPolicy inside remoteSync.
+        remoteSubscription = repository.subscribeRemoteState(::onRemoteMusicState)
         searchHistory = MusicSearchHistory(
             PrefsMusicSearchHistoryStorage(getSharedPreferences("mars-music-search-history", MODE_PRIVATE))
         )
@@ -168,10 +181,37 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onDestroy() {
         finishIconCrossfades()
+        remoteSubscription?.close()
+        remoteSubscription = null
         MarsMusicPlayer.unregisterListener(this)
         seek.removeCallbacks(ticker)
         job?.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * One frame of the remote music event stream. The repository delivers on its WebSocket
+     * reader thread, so the (pure) decision and its application are marshalled to the main
+     * thread; the outcome goes through the process-scoped [MarsMusicPlayer], whose
+     * listeners refresh this screen, the notification service and the chat mini player
+     * exactly as for a local change. Adopting a remote queue never auto-starts audio, and
+     * stale frames (own-device echo, out-of-order timestamp) are dropped by [remoteSync].
+     */
+    private fun onRemoteMusicState(state: MusicPlayerState) {
+        runOnUiThread {
+            if (isDestroyed) return@runOnUiThread
+            val local = LocalPlaybackSnapshot(
+                queue = MarsMusicPlayer.tracks,
+                isPlaying = MarsMusicPlayer.isPlaying,
+                currentTrackId = MarsMusicPlayer.currentTrack?.id,
+                deviceId = repository.deviceId,
+            )
+            when (val outcome = remoteSync.onRemoteState(state, local)) {
+                is RemoteSyncOutcome.Adopted -> MarsMusicPlayer.adoptQueue(outcome.queue, outcome.startIndex)
+                is RemoteSyncOutcome.Merged -> outcome.appendedTracks.forEach { MarsMusicPlayer.enqueue(it) }
+                is RemoteSyncOutcome.Kept, is RemoteSyncOutcome.IgnoredStale -> Unit
+            }
+        }
     }
 
     /** System «reduce motion» accessibility setting routed through the pure [MotionPolicy]. */
