@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -35,6 +36,7 @@ import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -353,6 +355,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (::interactiveController.isInitialized) interactiveController.destroy()
         if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
+        if (::miniPlayerBox.isInitialized) miniPlayerBox.animate().cancel()
         MarsMusicPlayer.unregisterListener(this)
         // Живой ход умирает вместе с экраном (destroy — точка прерывания collect send-пути
         // и recovery-цикла).
@@ -390,13 +393,51 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun updateMiniPlayer(track: MusicTrack?, isPlaying: Boolean) {
         // Presentation logic (visibility, header formatting, play/pause status) is pure — MiniPlayerPresenter.
         val state = MiniPlayerPresenter.resolve(track, isPlaying)
-        miniPlayerBox.visibility = if (state.visible) View.VISIBLE else View.GONE
-        if (!state.visible) return
+        if (!state.visible) {
+            if (miniPlayerBox.visibility != View.GONE) {
+                applyMiniPlayerMotion(MiniPlayerPresenter.hideMotion(isReducedMotion()), appearing = false)
+            }
+            return
+        }
         miniPlayerTitle.text = state.titleText
         miniPlayerPlayBtn.contentDescription = state.statusLabel
         miniPlayerPlayBtn.setImageDrawable(
             ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
         )
+        if (miniPlayerBox.visibility != View.VISIBLE) {
+            applyMiniPlayerMotion(MiniPlayerPresenter.showMotion(isReducedMotion()), appearing = true)
+        }
+    }
+
+    /** Reads Settings.Global.ANIMATOR_DURATION_SCALE — the same source MusicActivity uses. */
+    private fun isReducedMotion(): Boolean = MotionPolicy.isReducedMotion(
+        Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+    )
+
+    /**
+     * Calm fade+slide of the mini-player strip (alpha + translationY only, no scale).
+     * Under reduced motion [MiniPlayerMotion.instant] applies the final state without
+     * starting any animator.
+     */
+    private fun applyMiniPlayerMotion(motion: MiniPlayerMotion, appearing: Boolean) {
+        miniPlayerBox.animate().cancel()
+        val density = resources.displayMetrics.density
+        if (motion.instant) {
+            miniPlayerBox.alpha = motion.alphaTo
+            miniPlayerBox.translationY = motion.translationToDp * density
+            miniPlayerBox.visibility = if (appearing) View.VISIBLE else View.GONE
+            return
+        }
+        miniPlayerBox.visibility = View.VISIBLE
+        miniPlayerBox.alpha = motion.alphaFrom
+        miniPlayerBox.translationY = motion.translationFromDp * density
+        miniPlayerBox.animate()
+            .alpha(motion.alphaTo)
+            .translationY(motion.translationToDp * density)
+            .setDuration(motion.durationMs.toLong())
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction { if (!appearing) miniPlayerBox.visibility = View.GONE }
+            .start()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
