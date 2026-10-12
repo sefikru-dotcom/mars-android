@@ -9,8 +9,8 @@ import org.junit.Test
 class SidebarNavPolicyTest {
 
     @Test
-    fun `exactly seven sections`() {
-        assertEquals(7, SidebarNavPolicy.sections.size)
+    fun `exactly eight sections`() {
+        assertEquals(8, SidebarNavPolicy.sections.size)
     }
 
     @Test
@@ -21,7 +21,7 @@ class SidebarNavPolicyTest {
 
     @Test
     fun `order is stable and matches WebUI parity`() {
-        val expected = listOf("todos", "cron", "projects", "music", "memory", "skills", "settings")
+        val expected = listOf("todos", "cron", "projects", "music", "memory", "skills", "spaces", "settings")
         assertEquals(expected, SidebarNavPolicy.sections.map { it.id })
         // Повторный доступ к тому же списку даёт тот же порядок (стабильность).
         assertEquals(expected, SidebarNavPolicy.sections.map { it.id })
@@ -72,6 +72,7 @@ class SidebarNavPolicyTest {
             "music" to NavTarget.MUSIC,
             "memory" to NavTarget.MEMORY,
             "skills" to NavTarget.SKILLS,
+            "spaces" to NavTarget.SPACES,
             "settings" to NavTarget.SETTINGS,
         )
         expected.forEach { (id, target) ->
@@ -85,7 +86,7 @@ class SidebarNavPolicyTest {
     @Test
     fun `labels match WebUI parity`() {
         val expected = listOf(
-            "Задачи", "Планировщик", "Проекты", "Музыка", "Память", "Скиллы", "Настройки"
+            "Задачи", "Планировщик", "Проекты", "Музыка", "Память", "Скиллы", "Пространства", "Настройки"
         )
         assertEquals(expected, SidebarNavPolicy.sections.map { it.label })
     }

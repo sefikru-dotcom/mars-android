@@ -115,6 +115,42 @@ class WorkspaceSelectionTest {
     }
 
     @Test
+    fun reloadFromStorageAdoptsPickMadeOnAnotherScreen() {
+        val storage = FakeStorage()
+        val selection = WorkspaceSelection(storage)
+        assertNull(selection.current)
+        // SpacesActivity (shared `mars-workspace-choice` storage) persists a pick
+        // while ChatActivity's instance is already constructed.
+        storage.saved = WorkspaceItem("hermes-webui", "/opt/hermes-webui")
+        assertEquals(WorkspaceItem("hermes-webui", "/opt/hermes-webui"), selection.reloadFromStorage())
+        assertEquals("hermes-webui", selection.buttonLabel())
+        assertEquals(
+            "[Workspace::v1: /opt/hermes-webui]\nhi",
+            selection.outgoingMessage("hi"),
+        )
+    }
+
+    @Test
+    fun reloadFromStorageFallsBackToServerDefaultOfLastCatalog() {
+        val storage = FakeStorage()
+        val selection = WorkspaceSelection(storage)
+        selection.resolveEffective(realCatalog()) // adopts server default ephemerally
+        storage.saved = null // "Авто" on the Spaces screen cleared the explicit pick
+        assertEquals("/opt/kvartal-git", selection.reloadFromStorage()?.path)
+        assertEquals("Квартал", selection.buttonLabel())
+    }
+
+    @Test
+    fun reloadFromStorageWithoutPickOrCatalogStaysNull() {
+        val selection = WorkspaceSelection(FakeStorage())
+        selection.resolveEffective(realCatalog())
+        // No persisted pick and no catalog known — nothing to invent.
+        val empty = WorkspaceSelection(FakeStorage())
+        assertNull(empty.reloadFromStorage())
+        assertEquals("привет", empty.outgoingMessage("привет"))
+    }
+
+    @Test
     fun tokenCountsFormatLikeWebUi() {
         assertEquals("0", formatTokenCount(0))
         assertEquals("0", formatTokenCount(-5))

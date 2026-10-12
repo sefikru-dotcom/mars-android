@@ -396,6 +396,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         super.onResume()
         if (::voiceOutput.isInitialized) voiceOutput.onResume()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
+        // Выбор пространства мог измениться на экране SpacesActivity (общее
+        // хранилище mars-workspace-choice): перечитываем chip из storage.
+        if (::workspaceSelection.isInitialized) {
+            workspaceSelection.reloadFromStorage()
+            updateWorkspaceButton()
+        }
     }
 
     override fun onPause() {
@@ -649,6 +655,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             NavTarget.MUSIC -> Intent(this, MusicActivity::class.java)
             NavTarget.MEMORY -> Intent(this, MemoryActivity::class.java)
             NavTarget.SKILLS -> Intent(this, SkillsActivity::class.java)
+            NavTarget.SPACES -> SpacesActivity.newIntent(this)
             NavTarget.SETTINGS -> Intent(this, SettingsActivity::class.java)
         }
 
