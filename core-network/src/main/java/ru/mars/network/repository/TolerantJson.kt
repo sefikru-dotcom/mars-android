@@ -76,6 +76,9 @@ internal object TolerantJson {
 
     fun intOrNull(map: Map<*, *>?, key: String): Int? = longOrNull(map?.get(key))?.toInt()
 
+    /** Long field tolerant to JSON numbers and numeric strings; absent/null/garbage → [default]. */
+    fun long(map: Map<*, *>?, key: String, default: Long = 0L): Long = longOrNull(map?.get(key)) ?: default
+
     fun longOrNull(map: Map<*, *>?, key: String): Long? = longOrNull(map?.get(key))
 
     fun doubleOrNull(map: Map<*, *>?, key: String): Double? =
@@ -109,7 +112,7 @@ internal object TolerantJson {
         (map?.get(key) as? List<*>).orEmpty()
 
     /**
-     * `{key: int}` counter map (board `by_status`, insights `kinds`, logs stats).
+     * `{key: int}` counter map (board `by_status`-style payloads).
      * Values tolerant to numbers and numeric strings; unparsable entries are dropped.
      */
     fun intCounts(map: Map<*, *>?, key: String): Map<String, Int> =
@@ -121,7 +124,7 @@ internal object TolerantJson {
             }
             .toMap()
 
-    /** Raw `{key: value}` string map (insights `aliases`-style payloads). */
+    /** Raw `{key: value}` string map for flat alias/label objects. */
     fun stringMap(map: Map<*, *>?, key: String): Map<String, String> =
         (mapField(map, key)).orEmpty().entries
             .mapNotNull { (k, v) ->

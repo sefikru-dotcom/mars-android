@@ -1,114 +1,94 @@
 package ru.mars.network.model
 
 /**
- * Wire models for `GET /api/insights` (contract verified read-only against
- * `/opt/hermes-webui/api/route_insights.py`).
+ * Wire models for `GET /api/insights` (contract verified read-only against the
+ * deployed `/opt/hermes-webui/api/route_insights.py` — `build_insights_response`).
  *
- * Query filters (all validated server-side, 400 `{"error": …}` on bad input):
- * - `days`  — int 1..365, default 7;
- * - `limit` — int 1..1000, default 50;
- * - `status`— `active` | `stuck` | `error` | `all` (default `all`);
- * - `scope` — reserved, echoed back.
+ * The endpoint has exactly ONE query param:
+ * - `days` — window length in days. The server clamps it into 1..365
+ *   (`min(max(int(days), 1), 365)`) and falls back to 30 when the param is
+ *   absent or unparsable. There is NO 400 validation branch and NO 503
+ *   "unavailable" branch in this route: it aggregates local WebUI session data
+ *   (plus CLI sessions from state.db) and answers 200.
  *
- * Failure modes: 400 invalid filter, 503 `insights unavailable` (ImportError),
- * 500 internal error — all as `{"error": "<msg>"}`.
+ * 200 payload: `{period_days, total_sessions, total_messages, total_input_tokens,
+ * total_output_tokens, total_cache_read_tokens, total_cache_hit_percent,
+ * total_tokens, total_cost, models[], daily_tokens[], activity_by_day[],
+ * activity_by_hour[]}`. Cache-hit percents are whole ints 0..100 or null when
+ * there is nothing meaningful to show; costs are floats rounded to 6 decimals;
+ * `daily_tokens` is zero-filled to exactly `period_days` rows (oldest first);
+ * `activity_by_day` is 7 weekday buckets (`Mon`..`Sun`) and `activity_by_hour`
+ * is 24 hour buckets — both always present, possibly all-zero.
+ *
+ * Non-2xx answers come from the API auth guard (401/403 `{"error": …}`) or an
+ * unexpected upstream failure (500) — never from filter validation.
  */
 
-/** One `errors[]` bucket: a normalised error sample with its occurrence window. */
-data class InsightsErrorGroup(
-    val sample: String = "",
-    val kind: String = "",
-    val count: Int = 0,
-    val firstSeen: String? = null,
-    val lastSeen: String? = null,
+/** One `models[]` row; the server sorts rows by (-cost, -sessions, model). */
+data class InsightsModelUsage(
+    val model: String = "",
+    val sessions: Int = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    /** Whole percent 0..100; null when the server had no meaningful denominator. */
+    val cacheHitPercent: Int? = null,
+    /** `input_tokens + output_tokens` (cache reads excluded), as computed server-side. */
+    val totalTokens: Long = 0,
+    val cost: Double = 0.0,
+    /** Whole-percent shares (0..100) of the window totals. */
+    val sessionShare: Int = 0,
+    val tokenShare: Int = 0,
+    val costShare: Int = 0,
 )
 
-/** One `timeline[]` point: sessions per day inside the requested window. */
-data class InsightsTimelinePoint(
+/**
+ * One `daily_tokens[]` row — one calendar day of the window. The server
+ * zero-fills days without activity, so a row with all-zero counters is normal.
+ */
+data class InsightsDailyTokens(
+    val date: String = "",
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    val sessions: Int = 0,
+    val cost: Double = 0.0,
+) {
+    /** `input + output`, mirroring the server's `total_tokens` definition. */
+    val totalTokens: Long get() = inputTokens + outputTokens
+}
+
+/** One `activity_by_day[]` row — day-of-week bucket; `day` is `Mon`..`Sun` (always 7 rows). */
+data class InsightsWeekdayActivity(
     val day: String = "",
-    val count: Int = 0,
+    val sessions: Int = 0,
 )
 
-/** One `sessions[]` row. Every field is optional on the wire (partial imports). */
-data class InsightsSession(
-    val sessionId: String = "",
-    val source: String = "",
-    val whenEpoch: Long? = null,
-    val isoTime: String? = null,
-    val title: String? = null,
-    val model: String? = null,
-    val messageCount: Int = 0,
-    val hasErrors: Boolean = false,
-    val errorCount: Int = 0,
-    val firstError: String? = null,
-    val errorSample: String? = null,
-    val errorKinds: List<String> = emptyList(),
+/** One `activity_by_hour[]` row — hour-of-day bucket 0..23 (always 24 rows). */
+data class InsightsHourActivity(
+    val hour: Int = 0,
+    val sessions: Int = 0,
 )
 
-/** One `knowledge.chunk_errors[]` row. */
-data class InsightsChunkError(
-    val sessionId: String = "",
-    val errorCount: Int = 0,
-    val firstError: String? = null,
-    val lastError: String? = null,
-)
-
-/** One `knowledge.recent[]` row. */
-data class InsightsKnowledgeRecent(
-    val sessionId: String = "",
-    val chunks: Int = 0,
-    val documents: Int = 0,
-    val project: String? = null,
-    val status: String? = null,
-    val error: String? = null,
-    val indexedAt: String? = null,
-    val indexedAtRelative: String? = null,
-)
-
-/** `knowledge` block — RAG index status; entirely optional (older servers omit it). */
-data class InsightsKnowledge(
-    val indexed: Int = 0,
-    val queued: Int = 0,
-    val failed: Int = 0,
-    val queueSize: Int = 0,
-    val pendingChunks: Int = 0,
-    val chunkErrorCount: Int = 0,
-    val totalChunks: Int = 0,
-    val totalDocuments: Int = 0,
-    val totalProjects: Int = 0,
-    val sessionCount: Int = 0,
-    val status: String? = null,
-    val statusMessage: String? = null,
-    val lastIndexedAt: String? = null,
-    val lastIndexedRelative: String? = null,
-    val lastIndexError: String? = null,
-    val chunkErrors: List<InsightsChunkError> = emptyList(),
-    val recent: List<InsightsKnowledgeRecent> = emptyList(),
-)
-
-/** Full `GET /api/insights` payload with all counters echoed by the server. */
+/**
+ * Full `GET /api/insights` usage snapshot. Every field degrades to a safe
+ * default when absent/null/garbage (tolerant parsing in `InsightsRepository`).
+ */
 data class InsightsSnapshot(
-    val ok: Boolean = false,
-    val generatedAt: String? = null,
-    val days: Int = 0,
-    val scope: String = "",
-    val limit: Int = 0,
-    val requestedLimit: Int? = null,
-    val effectiveLimit: Int? = null,
-    val maxLimit: Int? = null,
+    /** Server-echoed window length after clamping (1..365); 0 when absent. */
+    val periodDays: Int = 0,
     val totalSessions: Int = 0,
-    val filteredSessions: Int = 0,
-    val returnedSessions: Int = 0,
-    val sessionsScanned: Int = 0,
-    val sessionsImported: Int = 0,
-    val sessionsImportFailed: Int = 0,
-    val active: Int = 0,
-    val stuck: Int = 0,
-    val longRunning: Int = 0,
-    val errorStates: Int = 0,
-    val errors: List<InsightsErrorGroup> = emptyList(),
-    val kinds: Map<String, Int> = emptyMap(),
-    val timeline: List<InsightsTimelinePoint> = emptyList(),
-    val sessions: List<InsightsSession> = emptyList(),
-    val knowledge: InsightsKnowledge? = null,
+    val totalMessages: Int = 0,
+    val totalInputTokens: Long = 0,
+    val totalOutputTokens: Long = 0,
+    val totalCacheReadTokens: Long = 0,
+    /** Whole percent 0..100; null when there were no cache reads / prompt tokens. */
+    val totalCacheHitPercent: Int? = null,
+    /** `total_input_tokens + total_output_tokens` (cache reads excluded). */
+    val totalTokens: Long = 0,
+    val totalCost: Double = 0.0,
+    val models: List<InsightsModelUsage> = emptyList(),
+    val dailyTokens: List<InsightsDailyTokens> = emptyList(),
+    val activityByDay: List<InsightsWeekdayActivity> = emptyList(),
+    val activityByHour: List<InsightsHourActivity> = emptyList(),
 )
