@@ -13,7 +13,9 @@ import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.tv.cron.TvCronActivity
 import ru.mars.tv.insights.TvInsightsActivity
 import ru.mars.tv.kanban.TvKanbanActivity
+import ru.mars.tv.memory.TvMemoryActivity
 import ru.mars.tv.projects.TvProjectsActivity
+import ru.mars.tv.skills.TvSkillsActivity
 import ru.mars.tv.spaces.TvSpacesActivity
 import ru.mars.tv.todos.TvTodosActivity
 import java.util.Date
@@ -84,6 +86,12 @@ class DashboardActivity : AppCompatActivity() {
         findViewById<Button>(R.id.spacesButton).setOnClickListener {
             startActivity(Intent(this, TvSpacesActivity::class.java))
         }
+        findViewById<Button>(R.id.memoryButton).setOnClickListener {
+            startActivity(Intent(this, TvMemoryActivity::class.java))
+        }
+        findViewById<Button>(R.id.skillsButton).setOnClickListener {
+            startActivity(Intent(this, TvSkillsActivity::class.java))
+        }
         findViewById<Button>(R.id.settingsButton).setOnClickListener { logout() }
         TvFocusLift.attachAll(
             findViewById(R.id.chatButton),
@@ -94,6 +102,8 @@ class DashboardActivity : AppCompatActivity() {
             findViewById(R.id.kanbanButton),
             findViewById(R.id.insightsButton),
             findViewById(R.id.spacesButton),
+            findViewById(R.id.memoryButton),
+            findViewById(R.id.skillsButton),
             findViewById(R.id.settingsButton),
             nowPlayingToggle,
         )

@@ -274,6 +274,7 @@
             android:focusable="true"
             android:nextFocusUp="@id/musicButton"
             android:nextFocusRight="@id/insightsButton"
+            android:nextFocusDown="@id/memoryButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -295,6 +296,7 @@
             android:nextFocusUp="@id/cronButton"
             android:nextFocusLeft="@id/kanbanButton"
             android:nextFocusRight="@id/spacesButton"
+            android:nextFocusDown="@id/skillsButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -315,6 +317,65 @@
             android:focusable="true"
             android:nextFocusUp="@id/settingsButton"
             android:nextFocusLeft="@id/insightsButton"
+            android:nextFocusDown="@id/skillsButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+    </LinearLayout>
+
+    <!-- Четвёртый ряд: «Память» и «Скиллы» — read-only паритет с мобильным
+         клиентом (GET /api/memory, GET /api/skills). Невидимый спейсер третьей
+         колонки сохраняет геометрию рядов; фокус он не принимает. -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/memoryButton"
+            android:text="Память"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_memory"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/kanbanButton"
+            android:nextFocusRight="@id/skillsButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/skillsButton"
+            android:text="Скиллы"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_skills"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/insightsButton"
+            android:nextFocusLeft="@id/memoryButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <!-- Спейсер третьей колонки: геометрия рядов совпадает, фокус не принимает. -->
+        <View
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="96dp" />
