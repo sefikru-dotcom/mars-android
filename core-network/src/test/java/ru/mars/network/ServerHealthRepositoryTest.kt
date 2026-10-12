@@ -29,11 +29,11 @@ class ServerHealthRepositoryTest {
 
             val request = server.takeRequest()
             assertEquals("GET", request.method)
-            assertEquals("/api/status", request.path)
+            assertEquals("/health", request.path)
 
             assertEquals(HealthLevel.HEALTHY, report.status)
             assertTrue("latency must be non-negative, was ${report.latencyMs}", report.latencyMs >= 0L)
-            assertEquals(server.url("/api/status").toString(), report.checkedUrl)
+            assertEquals(server.url("/health").toString(), report.checkedUrl)
             assertEquals("HTTP 200", report.message)
             assertTrue("timestamp must be recent", report.timestampMs <= System.currentTimeMillis())
             assertTrue("timestamp must be set", report.timestampMs > 0L)
@@ -109,7 +109,7 @@ class ServerHealthRepositoryTest {
             assertEquals(HealthLevel.OFFLINE, report.status)
             assertNotNull(report.message)
             assertTrue(report.latencyMs >= 0L)
-            assertEquals(server.url("/api/status").toString(), report.checkedUrl)
+            assertEquals(server.url("/health").toString(), report.checkedUrl)
         }
     }
 
@@ -125,7 +125,7 @@ class ServerHealthRepositoryTest {
 
         assertEquals(HealthLevel.OFFLINE, report.status)
         assertNotNull("failure report must carry a message", report.message)
-        assertTrue(report.checkedUrl.endsWith("/api/status"))
+        assertTrue(report.checkedUrl.endsWith("/health"))
     }
 
     @Test

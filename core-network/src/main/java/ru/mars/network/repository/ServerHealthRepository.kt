@@ -23,7 +23,7 @@ class ServerHealthRepository(
 ) {
 
     /**
-     * Probes [endpointPath] (relative to [baseUrl], e.g. `api/status`).
+     * Probes [endpointPath] (relative to [baseUrl], e.g. `health`).
      *
      * @param timeoutMs hard cap for the whole call (connect + read + write).
      * @return a report with the measured latency, resolved URL and verdict.
@@ -69,7 +69,12 @@ class ServerHealthRepository(
     }
 
     companion object {
-        const val DEFAULT_ENDPOINT_PATH: String = "api/status"
+        /**
+         * Публичный liveness-эндпоинт сервера (`https://marscore.ru/health`, HTTP 200 без токена).
+         * Прежний дефолт `api/status` на сервере не существует и не входит в белый список
+         * device-токена, поэтому без явного пути проба всегда возвращала OFFLINE/401.
+         */
+        const val DEFAULT_ENDPOINT_PATH: String = "health"
         const val DEFAULT_TIMEOUT_MS: Long = 5_000L
     }
 }
