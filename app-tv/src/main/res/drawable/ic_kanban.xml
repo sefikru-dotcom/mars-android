@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Kanban board icon: three columns with cards -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,4h4v16H4z M10,4h4v10h-4z M16,4h4v13h-4z" />
+</vector>

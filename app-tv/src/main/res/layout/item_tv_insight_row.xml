@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Строка вкладки «Аналитика» (TV): один layout на все типы рядов
+     (Section/Stat/ModelRow/BarRow/Note) — Activity показывает только нужные
+     child-views по типу [TvInsightRow]. Карточка фокусируема (D-pad скролл). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:background="@drawable/bg_focus_card"
+    android:padding="20dp"
+    android:focusable="true"
+    android:layout_marginTop="12dp"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <!-- Section -->
+    <TextView
+        android:id="@+id/rowSectionTitle"
+        android:textColor="@color/mars_text_strong"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/rowSectionSubtitle"
+        android:textColor="@color/mars_muted"
+        android:textSize="17sp"
+        android:layout_marginTop="2dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- Stat / ModelRow: общая горизонталь (label/title — value/cost) -->
+    <LinearLayout
+        android:id="@+id/rowMainLine"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <TextView
+            android:id="@+id/rowLabel"
+            android:textColor="@color/mars_text"
+            android:textSize="20sp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/rowValue"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <!-- ModelRow meta / Note -->
+    <TextView
+        android:id="@+id/rowMeta"
+        android:textColor="@color/mars_muted"
+        android:textSize="16sp"
+        android:layout_marginTop="4dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- BarRow: трек с заполнением (weight ставится в коде) -->
+    <LinearLayout
+        android:id="@+id/rowBarTrack"
+        android:orientation="horizontal"
+        android:background="@color/mars_surface_subtle"
+        android:layout_marginTop="8dp"
+        android:layout_width="match_parent"
+        android:layout_height="10dp">
+
+        <View
+            android:id="@+id/rowBarFill"
+            android:background="@color/mars_accent"
+            android:layout_width="0dp"
+            android:layout_height="match_parent" />
+    </LinearLayout>
+</LinearLayout>

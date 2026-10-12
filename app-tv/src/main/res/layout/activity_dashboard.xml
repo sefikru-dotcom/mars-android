@@ -201,6 +201,7 @@
             android:focusable="true"
             android:nextFocusUp="@id/chatButton"
             android:nextFocusRight="@id/cronButton"
+            android:nextFocusDown="@id/kanbanButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -222,6 +223,7 @@
             android:nextFocusUp="@id/projectsButton"
             android:nextFocusLeft="@id/musicButton"
             android:nextFocusRight="@id/settingsButton"
+            android:nextFocusDown="@id/insightsButton"
             android:layout_marginEnd="16dp"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -242,6 +244,77 @@
             android:focusable="true"
             android:nextFocusUp="@id/todosButton"
             android:nextFocusLeft="@id/cronButton"
+            android:nextFocusDown="@id/spacesButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+    </LinearLayout>
+
+    <!-- Третий ряд: read-only разделы паритета с мобильным клиентом. -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_marginTop="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/kanbanButton"
+            android:text="Канбан"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_kanban"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/musicButton"
+            android:nextFocusRight="@id/insightsButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/insightsButton"
+            android:text="Аналитика"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_insights"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/cronButton"
+            android:nextFocusLeft="@id/kanbanButton"
+            android:nextFocusRight="@id/spacesButton"
+            android:layout_marginEnd="16dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="96dp" />
+
+        <Button
+            android:id="@+id/spacesButton"
+            android:text="Пространства"
+            android:textSize="22sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_spaces"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="14dp"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusUp="@id/settingsButton"
+            android:nextFocusLeft="@id/insightsButton"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="96dp" />

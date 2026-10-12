@@ -11,7 +11,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.tv.cron.TvCronActivity
+import ru.mars.tv.insights.TvInsightsActivity
+import ru.mars.tv.kanban.TvKanbanActivity
 import ru.mars.tv.projects.TvProjectsActivity
+import ru.mars.tv.spaces.TvSpacesActivity
 import ru.mars.tv.todos.TvTodosActivity
 import java.util.Date
 
@@ -72,6 +75,15 @@ class DashboardActivity : AppCompatActivity() {
         findViewById<Button>(R.id.cronButton).setOnClickListener {
             startActivity(Intent(this, TvCronActivity::class.java))
         }
+        findViewById<Button>(R.id.kanbanButton).setOnClickListener {
+            startActivity(Intent(this, TvKanbanActivity::class.java))
+        }
+        findViewById<Button>(R.id.insightsButton).setOnClickListener {
+            startActivity(Intent(this, TvInsightsActivity::class.java))
+        }
+        findViewById<Button>(R.id.spacesButton).setOnClickListener {
+            startActivity(Intent(this, TvSpacesActivity::class.java))
+        }
         findViewById<Button>(R.id.settingsButton).setOnClickListener { logout() }
         TvFocusLift.attachAll(
             findViewById(R.id.chatButton),
@@ -79,6 +91,9 @@ class DashboardActivity : AppCompatActivity() {
             findViewById(R.id.todosButton),
             findViewById(R.id.musicButton),
             findViewById(R.id.cronButton),
+            findViewById(R.id.kanbanButton),
+            findViewById(R.id.insightsButton),
+            findViewById(R.id.spacesButton),
             findViewById(R.id.settingsButton),
             nowPlayingToggle,
         )
