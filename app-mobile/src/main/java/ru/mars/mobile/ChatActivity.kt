@@ -538,38 +538,72 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
 
-        // Быстрые разделы: сетка 2-в-ряд (Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Настройки).
-        listOf(
-            "Задачи" to { startActivity(Intent(this@ChatActivity, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }) },
-            "Планировщик" to { startActivity(Intent(this@ChatActivity, CronActivity::class.java)) },
-            "Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
-            "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
-            "Память" to { startActivity(Intent(this@ChatActivity, MemoryActivity::class.java)) },
-            "Скиллы" to { startActivity(Intent(this@ChatActivity, SkillsActivity::class.java)) },
-            "Настройки" to { startActivity(Intent(this@ChatActivity, SettingsActivity::class.java)) }
-        ).chunked(2).forEach { rowActions ->
-            val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            rowActions.forEach { (title, action) ->
-                quickRow.addView(Button(this).apply {
-                    text = title
-                    textSize = 12f
-                    setTextColor(MarsTheme.TEXT)
-                    background = MarsTheme.button(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
-                    setPadding(dp(10), dp(4), dp(10), dp(4))
-                    setOnClickListener {
-                        drawer.closeDrawer(GravityCompat.START)
-                        action()
-                    }
-                }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(6) })
-            }
-            panel.addView(quickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-        }
+        // Быстрые разделы: вертикальный WebUI-подобный список с иконками.
+        // Состав и порядок — только из SidebarNavPolicy.sections.
+        panel.addView(buildSidebarNav(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         drawerSessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val listScroll = ScrollView(this).apply { addView(drawerSessionList, ViewGroup.LayoutParams(-1, -2)) }
         panel.addView(listScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(10) })
         renderSessionList()
         return panel
+    }
+
+    /**
+     * Быстрые разделы бокового меню: вертикальный WebUI-подобный список
+     * «иконка + подпись». Состав, порядок, подписи и иконки берутся только
+     * из [SidebarNavPolicy.sections]; здесь живёт лишь сопоставление
+     * [NavTarget] -> Activity и резолвинг iconKey -> drawable.
+     */
+    private fun buildSidebarNav(): View {
+        fun navIntent(target: NavTarget): Intent = when (target) {
+            NavTarget.TODOS ->
+                Intent(this, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }
+            NavTarget.CRON -> Intent(this, CronActivity::class.java)
+            NavTarget.PROJECTS -> Intent(this, ProjectsActivity::class.java)
+            NavTarget.MUSIC -> Intent(this, MusicActivity::class.java)
+            NavTarget.MEMORY -> Intent(this, MemoryActivity::class.java)
+            NavTarget.SKILLS -> Intent(this, SkillsActivity::class.java)
+            NavTarget.SETTINGS -> Intent(this, SettingsActivity::class.java)
+        }
+
+        val nav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        SidebarNavPolicy.sections.forEachIndexed { index, section ->
+            val iconRes = resources.getIdentifier(section.iconKey, "drawable", packageName)
+                .takeIf { it != 0 } ?: R.drawable.ic_mars
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), 0, dp(10), 0)
+                background = MarsTheme.button(
+                    this@ChatActivity,
+                    MarsTheme.SURFACE,
+                    radiusDp = 8,
+                    strokeColor = MarsTheme.BORDER_SUBTLE
+                )
+                isClickable = true
+                contentDescription = section.label
+                setOnClickListener {
+                    drawer.closeDrawer(GravityCompat.START)
+                    startActivity(navIntent(section.target))
+                }
+            }
+            row.addView(ImageView(this).apply {
+                setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
+                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            }, LinearLayout.LayoutParams(dp(18), dp(18)))
+            row.addView(TextView(this).apply {
+                text = section.label
+                textSize = 12.5f
+                setTextColor(MarsTheme.TEXT)
+                isSingleLine = true
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
+            nav.addView(
+                row,
+                LinearLayout.LayoutParams(-1, dp(38)).apply { if (index > 0) topMargin = dp(4) }
+            )
+        }
+        return nav
     }
 
     private fun buildChatContent(): View {
