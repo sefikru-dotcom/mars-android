@@ -2,6 +2,24 @@ package ru.mars.mobile
 
 import ru.mars.network.model.MusicTrack
 
+/**
+ * Pure motion parameters for the mini-player reveal/hide: a calm fade+slide
+ * (alpha + translationY only — no scale, no bounce, no overshoot). The (thin) view
+ * layer maps these numbers onto its animator; when [instant] is true it must apply
+ * the final state directly and never start an animator at all.
+ */
+data class MiniPlayerMotion(
+    /** Animator duration in ms; 0 when [instant]. */
+    val durationMs: Int,
+    val alphaFrom: Float,
+    val alphaTo: Float,
+    /** Vertical offset in dp (the view layer converts to px); the reveal settles at 0. */
+    val translationFromDp: Float,
+    val translationToDp: Float,
+    /** True when motion is suppressed: from == to == the final state. */
+    val instant: Boolean,
+)
+
 /** Presentation data for the ChatActivity mini-player strip, consumed by the (thin) Android layer. */
 data class MiniPlayerUiState(
     /** False when there is no current track — the whole strip must be hidden. */
@@ -38,6 +56,43 @@ object MiniPlayerPresenter {
 
     const val STATUS_PLAYING = "Воспроизведение"
     const val STATUS_PAUSED = "Пауза"
+
+    /** Slide distance of the reveal/hide fade+slide: small, so the strip never «jumps». */
+    const val REVEAL_SLIDE_DP = 6f
+
+    /** Hard cap for the strip motion — never heavier than base motion (200 ms). */
+    const val MAX_REVEAL_MS = MarsMotion.baseMs
+
+    /** CARD_EXPAND duration, capped at [MAX_REVEAL_MS]; 0 under reduced motion. */
+    private fun revealDurationMs(reducedMotion: Boolean): Int =
+        MotionPolicy.durationFor(MotionCue.CARD_EXPAND, reducedMotion).coerceIn(0, MAX_REVEAL_MS)
+
+    /**
+     * Motion for the strip appearing: fade+slide in (alpha 0→1, translationY 6dp→0) over
+     * [revealDurationMs]. Under reduced motion the result is [MiniPlayerMotion.instant]:
+     * from == to == the final (fully visible) state, duration 0 — no animator at all.
+     */
+    fun showMotion(reducedMotion: Boolean): MiniPlayerMotion {
+        val duration = revealDurationMs(reducedMotion)
+        return if (duration <= 0) {
+            MiniPlayerMotion(0, 1f, 1f, 0f, 0f, instant = true)
+        } else {
+            MiniPlayerMotion(duration, 0f, 1f, REVEAL_SLIDE_DP, 0f, instant = false)
+        }
+    }
+
+    /**
+     * Motion for the strip disappearing: the mirror of [showMotion] (alpha 1→0,
+     * translationY 0→6dp). Under reduced motion: instantly the final hidden state.
+     */
+    fun hideMotion(reducedMotion: Boolean): MiniPlayerMotion {
+        val duration = revealDurationMs(reducedMotion)
+        return if (duration <= 0) {
+            MiniPlayerMotion(0, 0f, 0f, REVEAL_SLIDE_DP, REVEAL_SLIDE_DP, instant = true)
+        } else {
+            MiniPlayerMotion(duration, 1f, 0f, 0f, REVEAL_SLIDE_DP, instant = false)
+        }
+    }
 
     /**
      * Resolves the strip state for the current player snapshot. A null [track] hides the

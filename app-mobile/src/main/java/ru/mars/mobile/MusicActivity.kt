@@ -1,15 +1,22 @@
 package ru.mars.mobile
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
 import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.LayerDrawable
 import android.os.Bundle
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -98,6 +105,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
     private var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
+    /** Running play/pause glyph crossfades; ended at their final frame in onPause/onStop. */
+    private val iconCrossfades = ArrayList<AnimatorSet>()
     private val ticker = object : Runnable {
         override fun run() {
             if (::seek.isInitialized) {
@@ -107,7 +116,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     seek.progress = MarsMusicPlayer.currentPosition
                     time.text = "${fmt(MarsMusicPlayer.currentPosition)} / ${fmt(MarsMusicPlayer.duration)}"
                 }
-                seek.postDelayed(this, 500)
+                seek.postDelayed(this, TICKER_INTERVAL_MS)
             }
         }
     }
@@ -134,11 +143,94 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         loadHome()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Single ticker chain: drop stale posts (the initial onCreate one included),
+        // then restart the 500 ms progress ticker with an immediate first update.
+        if (::seek.isInitialized) {
+            seek.removeCallbacks(ticker)
+            seek.post(ticker)
+        }
+    }
+
+    override fun onPause() {
+        finishIconCrossfades()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        // No animator or ticker may outlive the visible session (no Activity leak):
+        // crossfades snap to their final frame, the progress ticker is detached.
+        finishIconCrossfades()
+        if (::seek.isInitialized) seek.removeCallbacks(ticker)
+        super.onStop()
+    }
+
     override fun onDestroy() {
         MarsMusicPlayer.unregisterListener(this)
         seek.removeCallbacks(ticker)
         job?.cancel()
         super.onDestroy()
+    }
+
+    /** System «reduce motion» accessibility setting routed through the pure [MotionPolicy]. */
+    private fun isReducedMotion(): Boolean = MotionPolicy.isReducedMotion(
+        Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+    )
+
+    /**
+     * Sets the play/pause glyph of [button] with an alpha-only crossfade (120 ms,
+     * [MarsMotion.fastMs] cap, no scale/bounce — pure [PlayPauseIconPolicy] decides).
+     * The glyph res id currently shown is remembered in the button's tag: the first
+     * render swaps instantly (nothing to fade from) and unchanged glyphs are no-ops,
+     * so list refreshes never restart the effect. Reduced motion → instant swap.
+     */
+    private fun setPlayPauseGlyph(button: ImageButton, showPause: Boolean) {
+        val targetRes = if (showPause) R.drawable.ic_pause else R.drawable.ic_play
+        val currentRes = button.tag as? Int
+        if (currentRes == targetRes) return // already showing (or crossfading toward) the target
+        button.tag = targetRes
+        val duration = PlayPauseIconPolicy.durationMs(isReducedMotion())
+        val old = currentRes?.let { ContextCompat.getDrawable(this, it)?.mutate() }
+        val new = ContextCompat.getDrawable(this, targetRes)?.mutate()
+        if (old == null || new == null || !PlayPauseIconPolicy.shouldCrossfade(currentRes, targetRes, duration)) {
+            button.setImageResource(targetRes)
+            return
+        }
+        // True crossfade: both glyphs are layered, the new one fades in while the old
+        // fades out (alpha only, decelerate curve); the ImageView applies its tint to
+        // the layer stack, so both children render in the button's icon color.
+        new.alpha = 0
+        button.setImageDrawable(LayerDrawable(arrayOf(old, new)))
+        val crossfade = AnimatorSet().apply {
+            playTogether(
+                ObjectAnimator.ofInt(new, "alpha", 0, 255),
+                ObjectAnimator.ofInt(old, "alpha", 255, 0),
+            )
+            this.duration = duration.toLong()
+            interpolator = DecelerateInterpolator()
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Land the final frame: the plain target glyph replaces the two-layer
+                    // stack. Skipped when a newer toggle already moved the button on.
+                    if (button.tag == targetRes) {
+                        new.alpha = 255
+                        button.setImageDrawable(new)
+                    }
+                }
+            })
+        }
+        iconCrossfades.add(crossfade)
+        crossfade.start()
+    }
+
+    /**
+     * Ends every tracked glyph crossfade at its final frame (the end listener lands the
+     * target glyph) and drops the references — nothing animated outlives onPause/onStop.
+     */
+    private fun finishIconCrossfades() {
+        iconCrossfades.forEach { runCatching { it.end() } }
+        iconCrossfades.clear()
     }
 
     /** True once [MarsMusicService] was started for the current playback run; resets on stop. */
@@ -191,7 +283,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         val backBtn = MarsTheme.circleIconButton(
             this,
-            R.drawable.ic_arrow_back,
+            R.drawable.ic_ui_arrow_back,
             "Назад",
             bg = MarsTheme.SURFACE,
             iconTint = MarsTheme.TEXT
@@ -287,7 +379,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Clear-search (visible only while the field has text); reloads the active tab
         clearSearchBtn = MarsTheme.circleIconButton(
             this,
-            R.drawable.ic_close,
+            R.drawable.ic_ui_close,
             "Очистить поиск",
             bg = MarsTheme.SURFACE_SUBTLE,
             iconTint = MarsTheme.TEXT_MUTED,
@@ -316,7 +408,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         val searchBtn = MarsTheme.circleIconButton(
             this,
-            R.drawable.ic_search,
+            R.drawable.ic_ui_search,
             "Найти",
             bg = MarsTheme.ACCENT,
             iconTint = Color.WHITE,
@@ -542,9 +634,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             syncMusicService(track, isPlaying)
             title.text = track?.title ?: "Ничего не играет"
             artistView.text = track?.artist ?: "Mars Audio"
-            playButton.setImageDrawable(
-                ContextCompat.getDrawable(this, if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
-            )
+            setPlayPauseGlyph(playButton, isPlaying)
             seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
             updateQueueIcons()
             updatePlayerActionStates()
@@ -1343,7 +1433,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         } else {
             "${holder.artist} · ${holder.duration}"
         }
-        holder.playButton.setImageResource(if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
+        setPlayPauseGlyph(holder.playButton, state.showPauseIcon)
         holder.playButton.contentDescription = if (state.showPauseIcon) "Пауза" else "Воспроизвести"
     }
 
@@ -1527,6 +1617,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val BASE_URL = "https://marscore.ru/music"
         /** Request code for the Android 13+ POST_NOTIFICATIONS runtime prompt. */
         private const val REQUEST_NOTIFICATIONS = 0x4D54
+        /** Progress ticker period while the screen is visible (thumb + time label). */
+        private const val TICKER_INTERVAL_MS = 500L
     }
 }
 
@@ -1549,4 +1641,27 @@ object SeekDragPolicy {
      */
     fun pendingSeekTarget(pendingMs: Int, durationMs: Int): Int? =
         if (pendingMs < 0) null else pendingMs.coerceIn(0, durationMs.coerceAtLeast(0))
+}
+
+/**
+ * Pure policy for the play/pause glyph crossfade in the music flow: alpha only — never
+ * scale, never bounce/overshoot, capped at [MarsMotion.fastMs] (120 ms) so the effect
+ * stays a discreet micro-feedback, and collapsed to an instant swap under reduced motion.
+ * Android-free for JVM tests.
+ */
+object PlayPauseIconPolicy {
+    /**
+     * Crossfade duration in ms: [MarsMotion.fastMs] normally, 0 (instant swap) when
+     * [reducedMotion] — routed through [MotionPolicy] like every other effect.
+     */
+    fun durationMs(reducedMotion: Boolean): Int =
+        MotionPolicy.durationFor(MotionCue.MICRO_TAP, reducedMotion).coerceIn(0, MarsMotion.fastMs)
+
+    /**
+     * Crossfade only a real glyph change on a button that already rendered its first
+     * glyph ([currentResId] != null — the first render is instant, there is nothing to
+     * fade from) and only while animation is allowed (duration > 0).
+     */
+    fun shouldCrossfade(currentResId: Int?, targetResId: Int, durationMs: Int): Boolean =
+        currentResId != null && currentResId != targetResId && durationMs > 0
 }
