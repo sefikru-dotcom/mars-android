@@ -5,27 +5,26 @@
 активного пространства. Выбор переживает перезапуск и сразу влияет на
 исходящие сообщения чата (`[Workspace::v1: <path>]`-сентинел).
 
-## Запуск из меню (для писателя ChatActivity/SidebarNavPolicy)
+## Запуск из меню
 
-Экран намеренно не подключён к боковому меню: `ChatActivity` и
-`SidebarNavPolicy` в этой волне заморожены. Публичная точка входа:
-
-```kotlin
-startActivity(SpacesActivity.newIntent(this))   // ru.mars.mobile.SpacesActivity
-```
+Экран подключён к боковому меню (волна `wave/android-spaces-nav`): секция
+`SidebarSection(id = "spaces", label = "Пространства", iconKey = "ic_nav_spaces",
+target = NavTarget.SPACES)` — между «Скиллы» и «Настройки» (settings всегда
+последний; контрактный порядок остальных разделов не менялся). Сопоставление
+`NavTarget.SPACES -> SpacesActivity.newIntent(this)` живёт в
+`ChatActivity.buildSidebarNav()`.
 
 - Activity объявлена в `app-mobile/src/main/AndroidManifest.xml`
   (`.SpacesActivity`, не exported — запуск только изнутри приложения).
 - Кнопка «Назад» и системный back — `finish()`, возврат в вызвавший
   `ChatActivity`. Пересоздавать сессию/стрим не нужно.
-- Рекомендуемое место в меню: секция `SidebarSection(id = "spaces",
-  label = "Пространства", iconKey = "ic_nav_spaces", target = NavTarget.SPACES)`
-  (иконка-слои `res/drawable/ic_nav_spaces.xml`, stroke 1.7 — стиль
-  остальных `ic_nav_*`). Порядок в `SidebarNavPolicy.sections` контрактный,
-  поэтому добавление — за волной, владеющей policy.
-- После выбора в ChatActivity достаточно перечитать chip:
-  `workspaceSelection.resolveEffective(...)`/`buttonLabel()` — storage общий
-  (`mars-workspace-choice`, `PrefsWorkspaceChoiceStorage`).
+- Иконка-слои `res/drawable/ic_nav_spaces.xml`, stroke 1.7 — стиль
+  остальных `ic_nav_*`.
+- После выбора ChatActivity перечитывает chip в `onResume`:
+  `workspaceSelection.reloadFromStorage()` + `updateWorkspaceButton()` —
+  storage общий (`mars-workspace-choice`, `PrefsWorkspaceChoiceStorage`),
+  а `WorkspaceSelection.current` кэшируется при создании экземпляра, поэтому
+  без перечитывания chip остался бы устаревшим.
 
 ## Слои
 

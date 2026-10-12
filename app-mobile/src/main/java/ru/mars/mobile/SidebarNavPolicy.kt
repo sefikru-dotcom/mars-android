@@ -12,6 +12,7 @@ enum class NavTarget {
     MUSIC,
     MEMORY,
     SKILLS,
+    SPACES,
     SETTINGS,
 }
 
@@ -33,9 +34,10 @@ data class SidebarSection(
 
 /**
  * Декларативный состав бокового меню (заменяет ручную сетку кнопок в
- * ChatActivity): ровно 7 разделов в порядке WebUI-паритета —
- * Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Настройки.
- * Порядок [sections] стабилен и является контрактным.
+ * ChatActivity): ровно 8 разделов в порядке WebUI-паритета —
+ * Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Пространства,
+ * Настройки. Порядок [sections] стабилен и является контрактным:
+ * новые разделы добавляются перед «Настройками» (settings всегда последний).
  */
 object SidebarNavPolicy {
 
@@ -46,6 +48,7 @@ object SidebarNavPolicy {
         SidebarSection(id = "music", label = "Музыка", iconKey = "ic_nav_music", target = NavTarget.MUSIC),
         SidebarSection(id = "memory", label = "Память", iconKey = "ic_nav_memory", target = NavTarget.MEMORY),
         SidebarSection(id = "skills", label = "Скиллы", iconKey = "ic_nav_skills", target = NavTarget.SKILLS),
+        SidebarSection(id = "spaces", label = "Пространства", iconKey = "ic_nav_spaces", target = NavTarget.SPACES),
         SidebarSection(id = "settings", label = "Настройки", iconKey = "ic_nav_settings", target = NavTarget.SETTINGS),
     )
 
