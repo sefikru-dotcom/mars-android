@@ -13,6 +13,9 @@ enum class NavTarget {
     MEMORY,
     SKILLS,
     SPACES,
+    KANBAN,
+    INSIGHTS,
+    LOGS,
     SETTINGS,
 }
 
@@ -34,10 +37,11 @@ data class SidebarSection(
 
 /**
  * Декларативный состав бокового меню (заменяет ручную сетку кнопок в
- * ChatActivity): ровно 8 разделов в порядке WebUI-паритета —
+ * ChatActivity): 11 разделов в порядке WebUI-паритета —
  * Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Пространства,
- * Настройки. Порядок [sections] стабилен и является контрактным:
- * новые разделы добавляются перед «Настройками» (settings всегда последний).
+ * Канбан, Аналитика, Логи, Настройки. Порядок [sections] стабилен и является
+ * контрактным: новые разделы добавляются перед «Настройками»
+ * (settings всегда последний).
  */
 object SidebarNavPolicy {
 
@@ -49,6 +53,9 @@ object SidebarNavPolicy {
         SidebarSection(id = "memory", label = "Память", iconKey = "ic_nav_memory", target = NavTarget.MEMORY),
         SidebarSection(id = "skills", label = "Скиллы", iconKey = "ic_nav_skills", target = NavTarget.SKILLS),
         SidebarSection(id = "spaces", label = "Пространства", iconKey = "ic_nav_spaces", target = NavTarget.SPACES),
+        SidebarSection(id = "kanban", label = "Канбан", iconKey = "ic_nav_kanban", target = NavTarget.KANBAN),
+        SidebarSection(id = "insights", label = "Аналитика", iconKey = "ic_nav_insights", target = NavTarget.INSIGHTS),
+        SidebarSection(id = "logs", label = "Логи", iconKey = "ic_nav_logs", target = NavTarget.LOGS),
         SidebarSection(id = "settings", label = "Настройки", iconKey = "ic_nav_settings", target = NavTarget.SETTINGS),
     )
 

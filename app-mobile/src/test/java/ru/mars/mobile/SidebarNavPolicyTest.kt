@@ -9,8 +9,8 @@ import org.junit.Test
 class SidebarNavPolicyTest {
 
     @Test
-    fun `exactly eight sections`() {
-        assertEquals(8, SidebarNavPolicy.sections.size)
+    fun `exactly eleven sections`() {
+        assertEquals(11, SidebarNavPolicy.sections.size)
     }
 
     @Test
@@ -21,7 +21,10 @@ class SidebarNavPolicyTest {
 
     @Test
     fun `order is stable and matches WebUI parity`() {
-        val expected = listOf("todos", "cron", "projects", "music", "memory", "skills", "spaces", "settings")
+        val expected = listOf(
+            "todos", "cron", "projects", "music", "memory", "skills", "spaces",
+            "kanban", "insights", "logs", "settings"
+        )
         assertEquals(expected, SidebarNavPolicy.sections.map { it.id })
         // Повторный доступ к тому же списку даёт тот же порядок (стабильность).
         assertEquals(expected, SidebarNavPolicy.sections.map { it.id })
@@ -73,6 +76,9 @@ class SidebarNavPolicyTest {
             "memory" to NavTarget.MEMORY,
             "skills" to NavTarget.SKILLS,
             "spaces" to NavTarget.SPACES,
+            "kanban" to NavTarget.KANBAN,
+            "insights" to NavTarget.INSIGHTS,
+            "logs" to NavTarget.LOGS,
             "settings" to NavTarget.SETTINGS,
         )
         expected.forEach { (id, target) ->
@@ -86,9 +92,28 @@ class SidebarNavPolicyTest {
     @Test
     fun `labels match WebUI parity`() {
         val expected = listOf(
-            "Задачи", "Планировщик", "Проекты", "Музыка", "Память", "Скиллы", "Пространства", "Настройки"
+            "Задачи", "Планировщик", "Проекты", "Музыка", "Память", "Скиллы", "Пространства",
+            "Канбан", "Аналитика", "Логи", "Настройки"
         )
         assertEquals(expected, SidebarNavPolicy.sections.map { it.label })
+    }
+
+    @Test
+    fun `settings is always the last section`() {
+        val last = SidebarNavPolicy.sections.last()
+        assertEquals("settings", last.id)
+        assertEquals(NavTarget.SETTINGS, last.target)
+    }
+
+    @Test
+    fun `monitoring sections placed before settings`() {
+        val ids = SidebarNavPolicy.sections.map { it.id }
+        val settingsIndex = ids.indexOf("settings")
+        listOf("kanban", "insights", "logs").forEach { id ->
+            val index = ids.indexOf(id)
+            assertTrue("$id отсутствует в меню", index >= 0)
+            assertTrue("$id должен стоять перед settings", index < settingsIndex)
+        }
     }
 
     @Test

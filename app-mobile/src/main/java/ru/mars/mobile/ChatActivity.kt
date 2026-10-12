@@ -656,6 +656,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             NavTarget.MEMORY -> Intent(this, MemoryActivity::class.java)
             NavTarget.SKILLS -> Intent(this, SkillsActivity::class.java)
             NavTarget.SPACES -> SpacesActivity.newIntent(this)
+            NavTarget.KANBAN -> KanbanActivity.newIntent(this)
+            NavTarget.INSIGHTS -> InsightsActivity.newIntent(this)
+            NavTarget.LOGS -> InsightsActivity.newIntent(this, MonitorTab.LOGS)
             NavTarget.SETTINGS -> Intent(this, SettingsActivity::class.java)
         }
 
