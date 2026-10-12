@@ -21,11 +21,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.http.HttpClients
+import ru.mars.network.repository.ServerHealthRepository
 import java.io.File
 
 class SettingsActivity : ComponentActivity() {
 
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
+
+    /**
+     * Проба лёгкости/задержки боевого хоста Марса. Путь `health` публичный
+     * (см. `ConnectionStatusPolicy.PROBE_PATH`), поэтому токен для проверки
+     * связи не нужен.
+     */
+    private val healthRepository by lazy {
+        ServerHealthRepository(client = HttpClients.rest)
+    }
     private lateinit var cacheSizeText: TextView
     private lateinit var pingStatusText: TextView
     private lateinit var pingStatusDot: View
@@ -151,7 +162,7 @@ class SettingsActivity : ComponentActivity() {
         // SECTION: О приложении
         content.addView(buildSectionHeader("О ПРИЛОЖЕНИИ"))
         val aboutCard = buildCard().apply {
-            addView(buildInfoRow("Версия", "Марс v1.2.0 (12)"))
+            addView(buildInfoRow("Версия", appVersionLabel()))
             addView(buildInfoRow("Дизайн-система", "Obsidian Depth"))
             addView(buildInfoRow("Клиент", "Android / HyperOS (POCO F5)"))
             addView(buildInfoRow("Профиль", "Stef (Ставрополь)"))
@@ -232,30 +243,30 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun checkConnection() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val startTime = System.currentTimeMillis()
-            val ok = runCatching {
-                val url = java.net.URL("http://127.0.0.1:8787/api/health")
-                val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
-                val code = conn.responseCode
-                code in 200..299
-            }.getOrDefault(false)
-            val elapsed = System.currentTimeMillis() - startTime
-            withContext(Dispatchers.Main) {
-                if (ok) {
-                    pingStatusText.text = "Онлайн · Пинг $elapsed мс"
-                    pingStatusDot.background = MarsTheme.statusDot(this@SettingsActivity, MarsTheme.STATUS_ONLINE).background
-                    pingStatusText.setTextColor(MarsTheme.STATUS_ONLINE)
-                } else {
-                    pingStatusText.text = "Связь нестабильна или локальный шлюз"
-                    pingStatusDot.background = MarsTheme.statusDot(this@SettingsActivity, MarsTheme.TEXT_MUTED).background
-                    pingStatusText.setTextColor(MarsTheme.TEXT_MUTED)
-                }
+        lifecycleScope.launch {
+            val report = healthRepository.checkHealth(
+                endpointPath = ConnectionStatusPolicy.PROBE_PATH,
+            )
+            pingStatusText.text = ConnectionStatusPolicy.statusText(report.status, report.latencyMs)
+            val dotColor = if (ConnectionStatusPolicy.isOnline(report.status)) {
+                MarsTheme.STATUS_ONLINE
+            } else {
+                MarsTheme.TEXT_MUTED
             }
+            pingStatusDot.background = MarsTheme.statusDot(this@SettingsActivity, dotColor).background
+            pingStatusText.setTextColor(dotColor)
         }
     }
+
+    /**
+     * Версия берётся из манифеста, а не из литерала: раньше строка «О приложении»
+     * была захардкожена и отставала от реальной сборки (показывала v1.2.0 (12)
+     * при работающей 1.4.0 (24)).
+     */
+    private fun appVersionLabel(): String = runCatching {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        "Марс v${info.versionName} (${info.longVersionCode})"
+    }.getOrDefault("Марс")
 
     private fun confirmLogout() {
         AlertDialog.Builder(this)
