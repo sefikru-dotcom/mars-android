@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Kanban: доска с тремя колонками карточек, stroke-only (паритет с ic_nav_*: 1.7, round caps). -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M3.5 4.5H20.5V19.5H3.5V4.5Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.7" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M9.2 4.5V19.5M14.8 4.5V19.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.7" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M5.4 7.6H7.3M5.4 10.6H7.3M11.1 7.6H13M11.1 10.6H13M11.1 13.6H13M16.7 7.6H18.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.7" />
+</vector>
