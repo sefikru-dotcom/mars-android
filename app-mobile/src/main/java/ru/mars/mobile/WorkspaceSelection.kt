@@ -124,6 +124,18 @@ class WorkspaceSelection(private val storage: WorkspaceChoiceStorage) {
     /** Chip label: workspace name (or path tail) until a choice exists, then "Авто". */
     fun buttonLabel(): String? = current?.let { it.name.ifBlank { it.path } }
 
+    /**
+     * Re-reads the persisted pick from [storage]: the choice is shared with
+     * SpacesActivity (`mars-workspace-choice` prefs), so a selection made on
+     * that screen must be adopted when the host Activity resumes. With no
+     * persisted pick falls back to the server default of the last catalog
+     * (same semantics as [resolveEffective], without a network reload).
+     */
+    fun reloadFromStorage(): WorkspaceItem? {
+        current = storage.load() ?: lastCatalog?.let { serverDefault(it) }
+        return current
+    }
+
     private fun serverDefault(response: WorkspacesResponse): WorkspaceItem? =
         response.workspaces.firstOrNull { it.path == response.last && it.path.isNotBlank() }
             ?: response.workspaces.firstOrNull { it.isDefault }
