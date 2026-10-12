@@ -23,6 +23,7 @@ import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
+import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -32,7 +33,8 @@ import kotlin.coroutines.resumeWithException
 class MusicRepository(
     private val baseUrl: String = "https://marscore.ru/music",
     private val client: OkHttpClient = HttpClients.rest,
-    private val deviceId: String = "android-client",
+    /** Mars Connect device id sent in REGISTER frames; also the echo-suppression key. */
+    val deviceId: String = "android-client",
     private val restoreTimeoutMs: Long = DEFAULT_RESTORE_TIMEOUT_MS,
 ) {
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
@@ -238,6 +240,56 @@ class MusicRepository(
         connect(WsAction.Command(action, payload))
     }
 
+    /**
+     * Opens a PERSISTENT Mars Connect socket and reports the real remote music event
+     * stream: the initial `SESSION_RESTORE` snapshot plus every later `DEVICES_UPDATE`
+     * broadcast carrying a session (`globalSession`). Frames are parsed by the same
+     * envelope/session mapping as [connect] — this subscription adds no second parser.
+     *
+     * Robustness (parity with [ConnectListener]): malformed JSON, session-less
+     * `DEVICES_UPDATE`, and any other frame type (`EXEC_CMD`, …) are ignored without
+     * killing the socket, and a throwing [onUpdate] receiver cannot tear the reader down.
+     *
+     * [onUpdate] fires on OkHttp's WebSocket reader thread — receivers that touch UI or
+     * player state must marshal to their own thread. The returned [Closeable] cancels the
+     * socket; afterwards no further updates are delivered. There is deliberately no
+     * auto-reconnect: a dropped socket goes silent, and the next subscription (e.g. the
+     * next MusicActivity session) restores the stream.
+     */
+    fun subscribeRemoteState(onUpdate: (MusicPlayerState) -> Unit): Closeable {
+        val wsUrl = webSocketUrl(
+            baseUrl.toHttpUrl().newBuilder().addPathSegments("api/connect/ws").build().toString(),
+        )
+        val socket = client.newWebSocket(Request.Builder().url(wsUrl).build(), RemoteStateListener(onUpdate))
+        return Closeable { socket.cancel() }
+    }
+
+    /** Persistent counterpart of [ConnectListener]: every session-bearing frame, no continuation, no close. */
+    internal inner class RemoteStateListener(
+        private val onUpdate: (MusicPlayerState) -> Unit,
+    ) : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+            webSocket.send(registerFrame())
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            val envelope = try { envelopeAdapter.fromJson(text) } catch (e: Throwable) { null } ?: return
+            val session = when (envelope.type) {
+                // This client's initial snapshot, sent once by the server on register.
+                SESSION_RESTORE -> envelope.session ?: envelope.globalSession
+                // Every later global change is broadcast as DEVICES_UPDATE(globalSession).
+                DEVICES_UPDATE -> envelope.globalSession ?: envelope.session
+                else -> null
+            } ?: return
+            val state = try { session.toModel() } catch (e: Throwable) { null } ?: return
+            try { onUpdate(state) } catch (e: Throwable) { /* a bad receiver must not kill the socket reader */ }
+        }
+    }
+
+    /** The one REGISTER frame shape this client sends (shared by both WS listeners). */
+    private fun registerFrame(): String =
+        "{\"type\":\"REGISTER\",\"id\":\"$deviceId\",\"name\":\"Android\",\"deviceType\":\"mobile\",\"isActive\":false,\"state\":{}}"
+
     internal sealed interface WsAction {
         object Status : WsAction
         data class Command(val action: String, val payload: String) : WsAction
@@ -279,7 +331,7 @@ class MusicRepository(
         private val restoreHandled = AtomicBoolean(false)
 
         override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
-            val sent = webSocket.send("{\"type\":\"REGISTER\",\"id\":\"$deviceId\",\"name\":\"Android\",\"deviceType\":\"mobile\",\"isActive\":false,\"state\":{}}")
+            val sent = webSocket.send(registerFrame())
             if (!sent) fail(webSocket, IOException("music socket rejected REGISTER"))
         }
 
@@ -376,12 +428,13 @@ class MusicRepository(
     @JsonClass(generateAdapter = false)
     private data class FavoriteToggleResponse(val status: String? = null, val favorited: Boolean? = null)
     @JsonClass(generateAdapter = false)
-    private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null) {
-        fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId)
+    private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null, val timestamp: Long? = null) {
+        fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId, timestamp)
     }
     companion object {
         private const val NORMAL_CLOSURE = 1000
         private const val SESSION_RESTORE = "SESSION_RESTORE"
+        private const val DEVICES_UPDATE = "DEVICES_UPDATE"
         internal const val DEFAULT_RESTORE_TIMEOUT_MS = 10_000L
 
         /**

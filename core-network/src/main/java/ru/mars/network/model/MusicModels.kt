@@ -11,6 +11,13 @@ data class MusicTrack(
 
 enum class PlaybackStatus { PLAYING, PAUSED, STOPPED }
 
+/**
+ * Snapshot of the Mars Connect global music session.
+ *
+ * [timestampMs] is the server's session timestamp (`session.timestamp`, epoch millis) when
+ * the frame carried one; consumers use it to drop out-of-order/stale broadcasts. It is the
+ * last field with a default so every existing positional/named construction stays valid.
+ */
 data class MusicPlayerState(
     val track: MusicTrack? = null,
     val positionSeconds: Double = 0.0,
@@ -20,6 +27,7 @@ data class MusicPlayerState(
     val queue: List<MusicTrack> = emptyList(),
     val currentIndex: Int = 0,
     val activeDeviceId: String? = null,
+    val timestampMs: Long? = null,
 )
 
 data class MusicSearchResult(

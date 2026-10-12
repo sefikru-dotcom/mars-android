@@ -232,7 +232,17 @@ object MarsMusicPlayer {
     @Synchronized fun togglePlay() { if (isPlaying) pause() else play() }
 
     @Synchronized fun play() {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer
+        if (player == null) {
+            // Adopted-but-not-started queue (remote sync): prepare and start the selected
+            // track. Unreachable for every pre-existing state — a finished session has no
+            // current track and clearQueue() empties it — so local behavior is unchanged.
+            if (!queueManager.isFinished && queueManager.currentTrack != null) {
+                retryPolicy.onPlaybackReady()
+                startCurrentTrack()
+            }
+            return
+        }
         runCatching { player.start(); isPlaying = true; notifyState() }
     }
 
@@ -304,6 +314,32 @@ object MarsMusicPlayer {
         retryResumeMs = 0
         retryPolicy.onPlaybackReady()
         queueManager.clear()
+        syncQueueState()
+        notifyState()
+        notifyProgress()
+    }
+
+    /**
+     * Adopts an externally resolved queue (remote sync — see [RemoteQueueSyncController])
+     * WITHOUT starting audio: any live player is released, [startIndex] becomes the current
+     * track and playback stays stopped — the user presses play to join the session, so the
+     * phone never starts sounding on its own because a remote device did. The subsequent
+     * [play] prepares the adopted track from scratch. Empty queue or out-of-range index is
+     * a no-op (same guard as [playTrack]); local queue ownership is decided by the caller.
+     */
+    @Synchronized
+    fun adoptQueue(queue: List<MusicTrack>, startIndex: Int) {
+        if (queue.isEmpty() || startIndex !in queue.indices) return
+        cancelPendingRetry()
+        mediaPlayer?.release()
+        mediaPlayer = null
+        releaseAudioFx()
+        setPlaying(false)
+        currentPosition = 0
+        duration = 0
+        retryResumeMs = 0
+        retryPolicy.onPlaybackReady()
+        queueManager.setQueue(queue, startIndex)
         syncQueueState()
         notifyState()
         notifyProgress()
