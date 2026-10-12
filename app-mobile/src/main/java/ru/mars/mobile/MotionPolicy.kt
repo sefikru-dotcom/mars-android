@@ -15,7 +15,7 @@ package ru.mars.mobile
  */
 
 /** UI events that carry motion in the Mars mobile client. */
-enum class MotionEvent {
+enum class MotionCue {
     /** A new assistant/user message appears in the transcript. */
     MESSAGE_REVEAL,
 
@@ -48,15 +48,15 @@ object MotionPolicy {
      * Duration in milliseconds for [event]. Returns 0 when [reducedMotion] is true so
      * callers can always animate unconditionally — the collapse happens here.
      */
-    fun durationFor(event: MotionEvent, reducedMotion: Boolean): Int {
+    fun durationFor(event: MotionCue, reducedMotion: Boolean): Int {
         if (reducedMotion) return 0
         return when (event) {
-            MotionEvent.MESSAGE_REVEAL -> MarsMotion.baseMs
-            MotionEvent.CARD_EXPAND -> MarsMotion.baseMs
-            MotionEvent.NETWORK_BANNER -> MarsMotion.baseMs
-            MotionEvent.SCROLL_TO_BOTTOM_SHOW -> MarsMotion.fastMs
-            MotionEvent.MICRO_TAP -> MarsMotion.fastMs
-            MotionEvent.DRAWER -> MarsMotion.slowMs
+            MotionCue.MESSAGE_REVEAL -> MarsMotion.baseMs
+            MotionCue.CARD_EXPAND -> MarsMotion.baseMs
+            MotionCue.NETWORK_BANNER -> MarsMotion.baseMs
+            MotionCue.SCROLL_TO_BOTTOM_SHOW -> MarsMotion.fastMs
+            MotionCue.MICRO_TAP -> MarsMotion.fastMs
+            MotionCue.DRAWER -> MarsMotion.slowMs
         }
     }
 }

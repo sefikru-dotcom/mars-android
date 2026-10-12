@@ -40,7 +40,7 @@ class MotionPolicyTest {
 
     @Test
     fun `reduced motion collapses every event to zero`() {
-        MotionEvent.values().forEach { event ->
+        MotionCue.values().forEach { event ->
             assertEquals(
                 "event $event must be instant under reduced motion",
                 0,
@@ -51,25 +51,25 @@ class MotionPolicyTest {
 
     @Test
     fun `full motion maps base events to baseMs`() {
-        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionEvent.MESSAGE_REVEAL, false))
-        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionEvent.CARD_EXPAND, false))
-        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionEvent.NETWORK_BANNER, false))
+        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionCue.MESSAGE_REVEAL, false))
+        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionCue.CARD_EXPAND, false))
+        assertEquals(MarsMotion.baseMs, MotionPolicy.durationFor(MotionCue.NETWORK_BANNER, false))
     }
 
     @Test
     fun `full motion maps fast events to fastMs`() {
-        assertEquals(MarsMotion.fastMs, MotionPolicy.durationFor(MotionEvent.SCROLL_TO_BOTTOM_SHOW, false))
-        assertEquals(MarsMotion.fastMs, MotionPolicy.durationFor(MotionEvent.MICRO_TAP, false))
+        assertEquals(MarsMotion.fastMs, MotionPolicy.durationFor(MotionCue.SCROLL_TO_BOTTOM_SHOW, false))
+        assertEquals(MarsMotion.fastMs, MotionPolicy.durationFor(MotionCue.MICRO_TAP, false))
     }
 
     @Test
     fun `full motion maps drawer to slowMs`() {
-        assertEquals(MarsMotion.slowMs, MotionPolicy.durationFor(MotionEvent.DRAWER, false))
+        assertEquals(MarsMotion.slowMs, MotionPolicy.durationFor(MotionCue.DRAWER, false))
     }
 
     @Test
     fun `every duration is non-negative for both motion modes`() {
-        MotionEvent.values().forEach { event ->
+        MotionCue.values().forEach { event ->
             val full = MotionPolicy.durationFor(event, reducedMotion = false)
             val reduced = MotionPolicy.durationFor(event, reducedMotion = true)
             assertTrue("event $event full duration must be positive, was $full", full > 0)
@@ -79,7 +79,7 @@ class MotionPolicyTest {
 
     @Test
     fun `no event exceeds the slowest token`() {
-        MotionEvent.values().forEach { event ->
+        MotionCue.values().forEach { event ->
             val duration = MotionPolicy.durationFor(event, reducedMotion = false)
             assertTrue("event $event duration $duration exceeds slowMs", duration <= MarsMotion.slowMs)
         }
