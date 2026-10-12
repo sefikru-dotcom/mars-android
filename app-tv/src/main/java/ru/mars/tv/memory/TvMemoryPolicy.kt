@@ -22,7 +22,7 @@ data class TvMemorySnapshot(
 )
 
 /**
- * Табы экрана «Память»: секция ответа `GET /api/memory` ↔ подпись таба ↔
+ * Табы экрана «Память»: секция ответа `GET /api/memory` - подпись таба -
  * имя файла на сервере (mobile `MemoryTab` parity; подпись «Контекст» —
  * проектный контекст AGENTS.md активного workspace).
  */

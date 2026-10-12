@@ -141,7 +141,7 @@ class TvMemoryActivity : AppCompatActivity() {
 
         controller = TvMemoryController(
             surface,
-            HttpTvMemoryGateway(MarsApi.BASE_URL) { store.read() },
+            HttpTvMemoryGateway(MarsApi.BASE_URL, credentialProvider = { store.read() }),
         )
         TvFocusLift.attachAll(backButton, refreshButton, retryButton, *tabButtons.values.toTypedArray())
         backButton.requestFocus()

@@ -81,47 +81,51 @@ object TvSkillsPolicy {
      * не-JSON — `null` (транспортный слой озвучит это ошибкой, а не «пустым
      * каталогом» — честность «сбой != пусто»).
      */
-    fun parseCatalog(payload: String): List<SkillItem>? = try {
-        val json = JSONObject(payload)
-        val array = json.optJSONArray("skills") ?: return null
-        (0 until array.length()).mapNotNull { index ->
-            val entry = array.optJSONObject(index) ?: return@mapNotNull null
-            val name = entry.text("name").trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            SkillItem(
-                name = name,
-                description = entry.text("description").trim(),
-                category = entry.text("category").trim(),
-            )
+    fun parseCatalog(payload: String): List<SkillItem>? {
+        return try {
+            val json = JSONObject(payload)
+            val array = json.optJSONArray("skills") ?: return null
+            (0 until array.length()).mapNotNull { index ->
+                val entry = array.optJSONObject(index) ?: return@mapNotNull null
+                val name = entry.text("name").trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                SkillItem(
+                    name = name,
+                    description = entry.text("description").trim(),
+                    category = entry.text("category").trim(),
+                )
+            }
+        } catch (_: Exception) {
+            null
         }
-    } catch (_: Exception) {
-        null
     }
 
     /**
      * Парсер статистики `GET /api/skills/usage`; `null` когда payload не-JSON
      * или объекта `usage` нет (статистика недоступна — экран работает без неё).
      */
-    fun parseUsage(payload: String): TvSkillsUsage? = try {
-        val json = JSONObject(payload)
-        val usageObject = json.optJSONObject("usage") ?: return null
-        val bySkill = mutableMapOf<String, TvSkillUsage>()
-        val keys = usageObject.keys()
-        while (keys.hasNext()) {
-            val name = keys.next()
-            val entry = usageObject.optJSONObject(name) ?: continue
-            bySkill[name] = TvSkillUsage(
-                useCount = entry.optInt("use_count", 0).coerceAtLeast(0),
-                viewCount = entry.optInt("view_count", 0).coerceAtLeast(0),
-                patchCount = entry.optInt("patch_count", 0).coerceAtLeast(0),
+    fun parseUsage(payload: String): TvSkillsUsage? {
+        return try {
+            val json = JSONObject(payload)
+            val usageObject = json.optJSONObject("usage") ?: return null
+            val bySkill = mutableMapOf<String, TvSkillUsage>()
+            val keys = usageObject.keys()
+            while (keys.hasNext()) {
+                val name = keys.next()
+                val entry = usageObject.optJSONObject(name) ?: continue
+                bySkill[name] = TvSkillUsage(
+                    useCount = entry.optInt("use_count", 0).coerceAtLeast(0),
+                    viewCount = entry.optInt("view_count", 0).coerceAtLeast(0),
+                    patchCount = entry.optInt("patch_count", 0).coerceAtLeast(0),
+                )
+            }
+            TvSkillsUsage(
+                bySkill = bySkill,
+                totalInvocations = json.optInt("total_invocations", 0).coerceAtLeast(0),
+                uniqueSkillsUsed = json.optInt("unique_skills_used", 0).coerceAtLeast(0),
             )
+        } catch (_: Exception) {
+            null
         }
-        TvSkillsUsage(
-            bySkill = bySkill,
-            totalInvocations = json.optInt("total_invocations", 0).coerceAtLeast(0),
-            uniqueSkillsUsed = json.optInt("unique_skills_used", 0).coerceAtLeast(0),
-        )
-    } catch (_: Exception) {
-        null
     }
 
     /** Чипы категорий: [ALL] первым, затем уникальные непустые категории по алфавиту. */

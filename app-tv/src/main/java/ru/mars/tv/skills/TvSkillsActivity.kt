@@ -145,7 +145,7 @@ class TvSkillsActivity : AppCompatActivity() {
 
         controller = TvSkillsController(
             surface,
-            HttpTvSkillsGateway(MarsApi.BASE_URL) { store.read() },
+            HttpTvSkillsGateway(MarsApi.BASE_URL, credentialProvider = { store.read() }),
         )
         TvFocusLift.attachAll(backButton, sortButton, refreshButton, retryButton)
         backButton.requestFocus()
