@@ -42,6 +42,9 @@ data class MiniPlayerUiState(
     }
 }
 
+/** Direction of the mini-player strip motion for an incoming state. */
+enum class MiniPlayerAction { NONE, REVEAL, HIDE }
+
 /**
  * Pure presentation logic for the ChatActivity mini-player: header formatting and
  * play/pause status. No Android imports — JVM unit-testable; [ChatActivity] only maps
@@ -50,7 +53,6 @@ data class MiniPlayerUiState(
 object MiniPlayerPresenter {
     /** Separator between title and artist in the single-line header. */
     const val SEPARATOR = " · "
-
     /** Fallback header when both title and artist are blank. */
     const val UNKNOWN_TITLE = "Неизвестный трек"
 
@@ -66,6 +68,21 @@ object MiniPlayerPresenter {
     /** CARD_EXPAND duration, capped at [MAX_REVEAL_MS]; 0 under reduced motion. */
     private fun revealDurationMs(reducedMotion: Boolean): Int =
         MotionPolicy.durationFor(MotionCue.CARD_EXPAND, reducedMotion).coerceIn(0, MAX_REVEAL_MS)
+
+    /**
+     * Motion to run for an incoming state, given the strip's INTENDED visibility.
+     *
+     * The view layer must pass the *intended* flag, never `View.visibility`: during a
+     * hide the view is still VISIBLE until the end action lands GONE, so a track
+     * arriving inside that window (track→null→track faster than the motion) would be
+     * ignored and the hide would finish on a live track. Comparing intent makes the
+     * reveal cancel the in-flight hide instead.
+     */
+    fun motionAction(intendedVisible: Boolean, nextVisible: Boolean): MiniPlayerAction = when {
+        nextVisible && !intendedVisible -> MiniPlayerAction.REVEAL
+        !nextVisible && intendedVisible -> MiniPlayerAction.HIDE
+        else -> MiniPlayerAction.NONE
+    }
 
     /**
      * Motion for the strip appearing: fade+slide in (alpha 0→1, translationY 6dp→0) over

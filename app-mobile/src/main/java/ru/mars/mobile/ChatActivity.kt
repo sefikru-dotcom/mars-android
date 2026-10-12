@@ -192,6 +192,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     // Mini-player in chat
     private lateinit var miniPlayerBox: LinearLayout
+    /**
+     * INTENDED visibility of the mini-player strip (not `View.visibility`, which stays
+     * VISIBLE for the whole hide animation). Mirrors [miniPlayerBox]'s target state so a
+     * track arriving mid-hide cancels the hide instead of being dropped. Starts false —
+     * the strip is built GONE.
+     */
+    private var miniPlayerVisible = false
     private lateinit var miniPlayerTitle: TextView
     private lateinit var miniPlayerPlayBtn: ImageButton
     private lateinit var quickChipsScroll: HorizontalScrollView
@@ -393,20 +400,34 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun updateMiniPlayer(track: MusicTrack?, isPlaying: Boolean) {
         // Presentation logic (visibility, header formatting, play/pause status) is pure — MiniPlayerPresenter.
         val state = MiniPlayerPresenter.resolve(track, isPlaying)
-        if (!state.visible) {
-            if (miniPlayerBox.visibility != View.GONE) {
+        // Decide from the INTENDED visibility, not View.visibility: mid-hide the view is
+        // still VISIBLE, so a track arriving inside that window would be dropped and the
+        // hide would land GONE on a live track. Comparing intent lets the reveal cancel it.
+        when (MiniPlayerPresenter.motionAction(miniPlayerVisible, state.visible)) {
+            MiniPlayerAction.HIDE -> {
+                miniPlayerVisible = false
                 applyMiniPlayerMotion(MiniPlayerPresenter.hideMotion(isReducedMotion()), appearing = false)
+                return
             }
-            return
+            MiniPlayerAction.REVEAL -> {
+                miniPlayerVisible = true
+                miniPlayerTitle.text = state.titleText
+                miniPlayerPlayBtn.contentDescription = state.statusLabel
+                miniPlayerPlayBtn.setImageDrawable(
+                    ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
+                )
+                // Only a fresh reveal restarts the fade; a status-only change must not.
+                applyMiniPlayerMotion(MiniPlayerPresenter.showMotion(isReducedMotion()), appearing = true)
+                return
+            }
+            MiniPlayerAction.NONE -> Unit
         }
+        if (!state.visible) return
         miniPlayerTitle.text = state.titleText
         miniPlayerPlayBtn.contentDescription = state.statusLabel
         miniPlayerPlayBtn.setImageDrawable(
             ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
         )
-        if (miniPlayerBox.visibility != View.VISIBLE) {
-            applyMiniPlayerMotion(MiniPlayerPresenter.showMotion(isReducedMotion()), appearing = true)
-        }
     }
 
     /** Reads Settings.Global.ANIMATOR_DURATION_SCALE — the same source MusicActivity uses. */

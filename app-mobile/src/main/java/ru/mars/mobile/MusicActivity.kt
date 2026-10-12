@@ -105,8 +105,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
     private var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
-    /** Running play/pause glyph crossfades; ended at their final frame in onPause/onStop. */
-    private val iconCrossfades = ArrayList<AnimatorSet>()
+    /** Running play/pause glyph crossfades, one per button; ended at their final frame in onPause/onStop. */
+    private val iconCrossfades = HashMap<ImageButton, AnimatorSet>()
     private val ticker = object : Runnable {
         override fun run() {
             if (::seek.isInitialized) {
@@ -167,6 +167,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onDestroy() {
+        finishIconCrossfades()
         MarsMusicPlayer.unregisterListener(this)
         seek.removeCallbacks(ticker)
         job?.cancel()
@@ -220,7 +221,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             })
         }
-        iconCrossfades.add(crossfade)
+        // One crossfade per button: drop any in-flight one first. Its end listener is
+        // guarded by `button.tag`, which now holds the NEW target, so cancelling it is a
+        // no-op that just frees the animator — long sessions never accumulate them.
+        iconCrossfades.remove(button)?.let { runCatching { it.cancel() } }
+        iconCrossfades[button] = crossfade
         crossfade.start()
     }
 
@@ -229,7 +234,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * target glyph) and drops the references — nothing animated outlives onPause/onStop.
      */
     private fun finishIconCrossfades() {
-        iconCrossfades.forEach { runCatching { it.end() } }
+        iconCrossfades.values.forEach { runCatching { it.end() } }
         iconCrossfades.clear()
     }
 
