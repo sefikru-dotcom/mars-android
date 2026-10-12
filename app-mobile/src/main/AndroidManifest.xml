@@ -25,6 +25,7 @@
         <activity android:name=".TodosActivity" />
         <activity android:name=".CronActivity" />
         <activity android:name=".SettingsActivity" />
+        <activity android:name=".SpacesActivity" />
         <activity
             android:name=".MainActivity"
             android:exported="true">
