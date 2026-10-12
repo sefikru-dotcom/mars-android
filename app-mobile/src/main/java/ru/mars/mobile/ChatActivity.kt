@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -35,6 +36,7 @@ import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -190,6 +192,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     // Mini-player in chat
     private lateinit var miniPlayerBox: LinearLayout
+    /**
+     * INTENDED visibility of the mini-player strip (not `View.visibility`, which stays
+     * VISIBLE for the whole hide animation). Mirrors [miniPlayerBox]'s target state so a
+     * track arriving mid-hide cancels the hide instead of being dropped. Starts false —
+     * the strip is built GONE.
+     */
+    private var miniPlayerVisible = false
     private lateinit var miniPlayerTitle: TextView
     private lateinit var miniPlayerPlayBtn: ImageButton
     private lateinit var quickChipsScroll: HorizontalScrollView
@@ -353,6 +362,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (::interactiveController.isInitialized) interactiveController.destroy()
         if (::compressionController.isInitialized) compressionController.destroy()
         if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
+        if (::miniPlayerBox.isInitialized) miniPlayerBox.animate().cancel()
         MarsMusicPlayer.unregisterListener(this)
         // Живой ход умирает вместе с экраном (destroy — точка прерывания collect send-пути
         // и recovery-цикла).
@@ -390,13 +400,65 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun updateMiniPlayer(track: MusicTrack?, isPlaying: Boolean) {
         // Presentation logic (visibility, header formatting, play/pause status) is pure — MiniPlayerPresenter.
         val state = MiniPlayerPresenter.resolve(track, isPlaying)
-        miniPlayerBox.visibility = if (state.visible) View.VISIBLE else View.GONE
+        // Decide from the INTENDED visibility, not View.visibility: mid-hide the view is
+        // still VISIBLE, so a track arriving inside that window would be dropped and the
+        // hide would land GONE on a live track. Comparing intent lets the reveal cancel it.
+        when (MiniPlayerPresenter.motionAction(miniPlayerVisible, state.visible)) {
+            MiniPlayerAction.HIDE -> {
+                miniPlayerVisible = false
+                applyMiniPlayerMotion(MiniPlayerPresenter.hideMotion(isReducedMotion()), appearing = false)
+                return
+            }
+            MiniPlayerAction.REVEAL -> {
+                miniPlayerVisible = true
+                miniPlayerTitle.text = state.titleText
+                miniPlayerPlayBtn.contentDescription = state.statusLabel
+                miniPlayerPlayBtn.setImageDrawable(
+                    ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
+                )
+                // Only a fresh reveal restarts the fade; a status-only change must not.
+                applyMiniPlayerMotion(MiniPlayerPresenter.showMotion(isReducedMotion()), appearing = true)
+                return
+            }
+            MiniPlayerAction.NONE -> Unit
+        }
         if (!state.visible) return
         miniPlayerTitle.text = state.titleText
         miniPlayerPlayBtn.contentDescription = state.statusLabel
         miniPlayerPlayBtn.setImageDrawable(
             ContextCompat.getDrawable(this, if (state.showPauseIcon) R.drawable.ic_pause else R.drawable.ic_play)
         )
+    }
+
+    /** Reads Settings.Global.ANIMATOR_DURATION_SCALE — the same source MusicActivity uses. */
+    private fun isReducedMotion(): Boolean = MotionPolicy.isReducedMotion(
+        Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+    )
+
+    /**
+     * Calm fade+slide of the mini-player strip (alpha + translationY only, no scale).
+     * Under reduced motion [MiniPlayerMotion.instant] applies the final state without
+     * starting any animator.
+     */
+    private fun applyMiniPlayerMotion(motion: MiniPlayerMotion, appearing: Boolean) {
+        miniPlayerBox.animate().cancel()
+        val density = resources.displayMetrics.density
+        if (motion.instant) {
+            miniPlayerBox.alpha = motion.alphaTo
+            miniPlayerBox.translationY = motion.translationToDp * density
+            miniPlayerBox.visibility = if (appearing) View.VISIBLE else View.GONE
+            return
+        }
+        miniPlayerBox.visibility = View.VISIBLE
+        miniPlayerBox.alpha = motion.alphaFrom
+        miniPlayerBox.translationY = motion.translationFromDp * density
+        miniPlayerBox.animate()
+            .alpha(motion.alphaTo)
+            .translationY(motion.translationToDp * density)
+            .setDuration(motion.durationMs.toLong())
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction { if (!appearing) miniPlayerBox.visibility = View.GONE }
+            .start()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -538,38 +600,72 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
 
-        // Быстрые разделы: сетка 2-в-ряд (Задачи, Планировщик, Проекты, Музыка, Память, Скиллы, Настройки).
-        listOf(
-            "Задачи" to { startActivity(Intent(this@ChatActivity, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }) },
-            "Планировщик" to { startActivity(Intent(this@ChatActivity, CronActivity::class.java)) },
-            "Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
-            "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
-            "Память" to { startActivity(Intent(this@ChatActivity, MemoryActivity::class.java)) },
-            "Скиллы" to { startActivity(Intent(this@ChatActivity, SkillsActivity::class.java)) },
-            "Настройки" to { startActivity(Intent(this@ChatActivity, SettingsActivity::class.java)) }
-        ).chunked(2).forEach { rowActions ->
-            val quickRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            rowActions.forEach { (title, action) ->
-                quickRow.addView(Button(this).apply {
-                    text = title
-                    textSize = 12f
-                    setTextColor(MarsTheme.TEXT)
-                    background = MarsTheme.button(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
-                    setPadding(dp(10), dp(4), dp(10), dp(4))
-                    setOnClickListener {
-                        drawer.closeDrawer(GravityCompat.START)
-                        action()
-                    }
-                }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(6) })
-            }
-            panel.addView(quickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-        }
+        // Быстрые разделы: вертикальный WebUI-подобный список с иконками.
+        // Состав и порядок — только из SidebarNavPolicy.sections.
+        panel.addView(buildSidebarNav(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         drawerSessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val listScroll = ScrollView(this).apply { addView(drawerSessionList, ViewGroup.LayoutParams(-1, -2)) }
         panel.addView(listScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(10) })
         renderSessionList()
         return panel
+    }
+
+    /**
+     * Быстрые разделы бокового меню: вертикальный WebUI-подобный список
+     * «иконка + подпись». Состав, порядок, подписи и иконки берутся только
+     * из [SidebarNavPolicy.sections]; здесь живёт лишь сопоставление
+     * [NavTarget] -> Activity и резолвинг iconKey -> drawable.
+     */
+    private fun buildSidebarNav(): View {
+        fun navIntent(target: NavTarget): Intent = when (target) {
+            NavTarget.TODOS ->
+                Intent(this, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }
+            NavTarget.CRON -> Intent(this, CronActivity::class.java)
+            NavTarget.PROJECTS -> Intent(this, ProjectsActivity::class.java)
+            NavTarget.MUSIC -> Intent(this, MusicActivity::class.java)
+            NavTarget.MEMORY -> Intent(this, MemoryActivity::class.java)
+            NavTarget.SKILLS -> Intent(this, SkillsActivity::class.java)
+            NavTarget.SETTINGS -> Intent(this, SettingsActivity::class.java)
+        }
+
+        val nav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        SidebarNavPolicy.sections.forEachIndexed { index, section ->
+            val iconRes = resources.getIdentifier(section.iconKey, "drawable", packageName)
+                .takeIf { it != 0 } ?: R.drawable.ic_mars
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), 0, dp(10), 0)
+                background = MarsTheme.button(
+                    this@ChatActivity,
+                    MarsTheme.SURFACE,
+                    radiusDp = 8,
+                    strokeColor = MarsTheme.BORDER_SUBTLE
+                )
+                isClickable = true
+                contentDescription = section.label
+                setOnClickListener {
+                    drawer.closeDrawer(GravityCompat.START)
+                    startActivity(navIntent(section.target))
+                }
+            }
+            row.addView(ImageView(this).apply {
+                setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
+                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            }, LinearLayout.LayoutParams(dp(18), dp(18)))
+            row.addView(TextView(this).apply {
+                text = section.label
+                textSize = 12.5f
+                setTextColor(MarsTheme.TEXT)
+                isSingleLine = true
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
+            nav.addView(
+                row,
+                LinearLayout.LayoutParams(-1, dp(38)).apply { if (index > 0) topMargin = dp(4) }
+            )
+        }
+        return nav
     }
 
     private fun buildChatContent(): View {
