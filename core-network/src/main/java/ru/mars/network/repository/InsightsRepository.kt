@@ -8,45 +8,42 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
-import ru.mars.network.model.InsightsChunkError
-import ru.mars.network.model.InsightsErrorGroup
-import ru.mars.network.model.InsightsKnowledge
-import ru.mars.network.model.InsightsKnowledgeRecent
-import ru.mars.network.model.InsightsSession
+import ru.mars.network.model.InsightsDailyTokens
+import ru.mars.network.model.InsightsHourActivity
+import ru.mars.network.model.InsightsModelUsage
 import ru.mars.network.model.InsightsSnapshot
-import ru.mars.network.model.InsightsTimelinePoint
+import ru.mars.network.model.InsightsWeekdayActivity
 import java.io.IOException
 
 /** Outcome of `GET /api/insights`. */
 sealed interface InsightsResult {
-    /** 2xx with a parseable snapshot. */
+    /** 2xx with a parseable usage snapshot. */
     data class Snapshot(val snapshot: InsightsSnapshot) : InsightsResult
 
-    /** 400 — invalid `days`/`limit`/`status` filter (server rejects, nothing fetched). */
-    data class InvalidRequest(val message: String) : InsightsResult
-
-    /** 503 — insights pipeline unavailable on the server (ImportError). */
-    data class Unavailable(val message: String) : InsightsResult
-
-    /** Other HTTP errors (mapped `error` message when present) or transport failure. */
+    /**
+     * Any non-2xx (auth-guard 401/403 `{"error": …}`, unexpected 500), an
+     * unparseable 2xx body, or a transport failure. The route itself has no
+     * validation branches — `days` is clamped server-side, never rejected.
+     */
     data class Failed(val message: String) : InsightsResult
 }
 
 /**
- * `GET /api/insights` — session/error/knowledge digest of the WebUI backend
- * (contract verified read-only against `/opt/hermes-webui/api/route_insights.py`;
- * error bodies are `{"error": "<msg>"}`).
+ * `GET /api/insights?days=` — usage analytics of the WebUI backend (contract
+ * verified read-only against the deployed `/opt/hermes-webui/api/route_insights.py`).
  *
- * Filters (all optional, validated server-side):
- * - [days]   — 1..365, server default 7;
- * - [limit]  — 1..1000, server default 50 (the server CLAMPS over-limit requests and
- *   echoes `requested_limit`/`effective_limit`/`max_limit` in the snapshot);
- * - [status] — `active` | `stuck` | `error` | `all` (default `all`);
- * - [scope]  — reserved by the server, echoed back verbatim.
+ * [days] is the ONLY query param and it can never be "invalid": the server
+ * parses it tolerantly, clamps into 1..365 and defaults to 30 when absent or
+ * unparsable (`period_days` in the snapshot echoes the applied value). The
+ * client passes the caller's value through as-is so the UI shows the window
+ * the server actually aggregated; there is no 400 branch to surface.
  *
- * Client-side values are passed through as-is: the server's 400 answer is surfaced
- * as [InsightsResult.InvalidRequest] instead of being silently pre-clamped, so a UI
- * bug stays visible rather than fetching a window the caller did not ask for.
+ * Payload: totals (`total_sessions`/`total_messages`/`total_*_tokens`/
+ * `total_cache_hit_percent`/`total_cost`), per-model breakdown (`models[]`),
+ * zero-filled per-day token series (`daily_tokens[]`), weekday buckets
+ * (`activity_by_day[]`, Mon..Sun) and hour buckets (`activity_by_hour[]`,
+ * 0..23). Parsing is tolerant: absent/null/garbage fields degrade to safe
+ * defaults instead of failing the whole snapshot.
  */
 class InsightsRepository(private val client: OkHttpClient = HttpClients.rest) {
 
@@ -54,16 +51,10 @@ class InsightsRepository(private val client: OkHttpClient = HttpClients.rest) {
         baseUrl: String,
         credential: ConsumedDeviceCredential,
         days: Int? = null,
-        limit: Int? = null,
-        status: String? = null,
-        scope: String? = null,
     ): InsightsResult = withContext(Dispatchers.IO) {
         val url = baseUrl.toHttpUrl().newBuilder()
             .addPathSegments("api/insights")
             .intParam("days", days)
-            .intParam("limit", limit)
-            .stringParam("status", status)
-            .stringParam("scope", scope)
             .build()
         val request = Request.Builder()
             .url(url)
@@ -78,8 +69,6 @@ class InsightsRepository(private val client: OkHttpClient = HttpClients.rest) {
                 when {
                     root == null && code in 200..299 ->
                         InsightsResult.Failed("HTTP $code: unparseable body")
-                    code == 400 -> InsightsResult.InvalidRequest(errorOf(root, code))
-                    code == 503 -> InsightsResult.Unavailable(errorOf(root, code))
                     code in 200..299 -> InsightsResult.Snapshot(parseSnapshot(root!!))
                     else -> InsightsResult.Failed(errorOf(root, code))
                 }
@@ -93,107 +82,61 @@ class InsightsRepository(private val client: OkHttpClient = HttpClients.rest) {
     private fun errorOf(root: Map<String, Any?>?, code: Int): String =
         TolerantJson.string(root, "error") ?: "HTTP $code"
 
-    // ── parsing (tolerant: every counter/section degrades to zero/empty when absent) ──
+    // ── parsing (tolerant: every counter/series degrades to zero/empty when absent) ──
 
     internal fun parseSnapshot(root: Map<String, Any?>): InsightsSnapshot = InsightsSnapshot(
-        ok = TolerantJson.bool(root, "ok"),
-        generatedAt = TolerantJson.string(root, "generated_at"),
-        days = TolerantJson.int(root, "days"),
-        scope = TolerantJson.string(root, "scope").orEmpty(),
-        limit = TolerantJson.int(root, "limit"),
-        requestedLimit = TolerantJson.intOrNull(root, "requested_limit"),
-        effectiveLimit = TolerantJson.intOrNull(root, "effective_limit"),
-        maxLimit = TolerantJson.intOrNull(root, "max_limit"),
+        periodDays = TolerantJson.int(root, "period_days"),
         totalSessions = TolerantJson.int(root, "total_sessions"),
-        filteredSessions = TolerantJson.int(root, "filtered_sessions"),
-        returnedSessions = TolerantJson.int(root, "returned_sessions"),
-        sessionsScanned = TolerantJson.int(root, "sessions_scanned"),
-        sessionsImported = TolerantJson.int(root, "sessions_imported"),
-        sessionsImportFailed = TolerantJson.int(root, "sessions_import_failed"),
-        active = TolerantJson.int(root, "active"),
-        stuck = TolerantJson.int(root, "stuck"),
-        longRunning = TolerantJson.int(root, "long_running"),
-        errorStates = TolerantJson.int(root, "error_states"),
-        errors = TolerantJson.listField(root, "errors").mapNotNull { entry ->
-            val map = entry as? Map<*, *> ?: return@mapNotNull null
-            InsightsErrorGroup(
-                sample = TolerantJson.string(map, "sample").orEmpty(),
-                kind = TolerantJson.string(map, "kind").orEmpty(),
-                count = TolerantJson.int(map, "count"),
-                firstSeen = TolerantJson.string(map, "first_seen"),
-                lastSeen = TolerantJson.string(map, "last_seen"),
+        totalMessages = TolerantJson.int(root, "total_messages"),
+        totalInputTokens = TolerantJson.long(root, "total_input_tokens"),
+        totalOutputTokens = TolerantJson.long(root, "total_output_tokens"),
+        totalCacheReadTokens = TolerantJson.long(root, "total_cache_read_tokens"),
+        // Null is a legitimate server value (nothing meaningful to display).
+        totalCacheHitPercent = TolerantJson.intOrNull(root, "total_cache_hit_percent"),
+        totalTokens = TolerantJson.long(root, "total_tokens"),
+        totalCost = TolerantJson.doubleOrNull(root, "total_cost") ?: 0.0,
+        models = TolerantJson.listField(root, "models").mapNotNull { entry ->
+            val map = entry as? Map<*, *> ?: return@mapNotNull null // junk row — drop it
+            InsightsModelUsage(
+                model = TolerantJson.string(map, "model").orEmpty(),
+                sessions = TolerantJson.int(map, "sessions"),
+                inputTokens = TolerantJson.long(map, "input_tokens"),
+                outputTokens = TolerantJson.long(map, "output_tokens"),
+                cacheReadTokens = TolerantJson.long(map, "cache_read_tokens"),
+                cacheHitPercent = TolerantJson.intOrNull(map, "cache_hit_percent"),
+                totalTokens = TolerantJson.long(map, "total_tokens"),
+                cost = TolerantJson.doubleOrNull(map, "cost") ?: 0.0,
+                sessionShare = TolerantJson.int(map, "session_share"),
+                tokenShare = TolerantJson.int(map, "token_share"),
+                costShare = TolerantJson.int(map, "cost_share"),
             )
         },
-        kinds = TolerantJson.intCounts(root, "kinds"),
-        timeline = TolerantJson.listField(root, "timeline").mapNotNull { entry ->
+        dailyTokens = TolerantJson.listField(root, "daily_tokens").mapNotNull { entry ->
             val map = entry as? Map<*, *> ?: return@mapNotNull null
-            InsightsTimelinePoint(
+            InsightsDailyTokens(
+                date = TolerantJson.string(map, "date").orEmpty(),
+                inputTokens = TolerantJson.long(map, "input_tokens"),
+                outputTokens = TolerantJson.long(map, "output_tokens"),
+                cacheReadTokens = TolerantJson.long(map, "cache_read_tokens"),
+                sessions = TolerantJson.int(map, "sessions"),
+                cost = TolerantJson.doubleOrNull(map, "cost") ?: 0.0,
+            )
+        },
+        activityByDay = TolerantJson.listField(root, "activity_by_day").mapNotNull { entry ->
+            val map = entry as? Map<*, *> ?: return@mapNotNull null
+            InsightsWeekdayActivity(
                 day = TolerantJson.string(map, "day").orEmpty(),
-                count = TolerantJson.int(map, "count"),
+                sessions = TolerantJson.int(map, "sessions"),
             )
         },
-        sessions = TolerantJson.listField(root, "sessions").mapNotNull { entry ->
+        activityByHour = TolerantJson.listField(root, "activity_by_hour").mapNotNull { entry ->
             val map = entry as? Map<*, *> ?: return@mapNotNull null
-            InsightsSession(
-                sessionId = TolerantJson.string(map, "session_id").orEmpty(),
-                source = TolerantJson.string(map, "source").orEmpty(),
-                whenEpoch = TolerantJson.longOrNull(map, "when"),
-                isoTime = TolerantJson.string(map, "iso_time"),
-                title = TolerantJson.string(map, "title"),
-                model = TolerantJson.string(map, "model"),
-                messageCount = TolerantJson.int(map, "message_count"),
-                hasErrors = TolerantJson.bool(map, "has_errors"),
-                errorCount = TolerantJson.int(map, "error_count"),
-                firstError = TolerantJson.string(map, "first_error"),
-                errorSample = TolerantJson.string(map, "error_sample"),
-                errorKinds = TolerantJson.stringListOrEmpty(map, "error_kinds"),
-            )
-        },
-        knowledge = TolerantJson.mapField(root, "knowledge")?.let { parseKnowledge(it) },
-    )
-
-    private fun parseKnowledge(map: Map<String, Any?>): InsightsKnowledge = InsightsKnowledge(
-        indexed = TolerantJson.int(map, "indexed"),
-        queued = TolerantJson.int(map, "queued"),
-        failed = TolerantJson.int(map, "failed"),
-        queueSize = TolerantJson.int(map, "queue_size"),
-        pendingChunks = TolerantJson.int(map, "pending_chunks"),
-        chunkErrorCount = TolerantJson.int(map, "chunk_error_count"),
-        totalChunks = TolerantJson.int(map, "total_chunks"),
-        totalDocuments = TolerantJson.int(map, "total_documents"),
-        totalProjects = TolerantJson.int(map, "total_projects"),
-        sessionCount = TolerantJson.int(map, "session_count"),
-        status = TolerantJson.string(map, "status"),
-        statusMessage = TolerantJson.string(map, "status_message"),
-        lastIndexedAt = TolerantJson.string(map, "last_indexed_at"),
-        lastIndexedRelative = TolerantJson.string(map, "last_indexed_relative"),
-        lastIndexError = TolerantJson.string(map, "last_index_error"),
-        chunkErrors = TolerantJson.listField(map, "chunk_errors").mapNotNull { entry ->
-            val row = entry as? Map<*, *> ?: return@mapNotNull null
-            InsightsChunkError(
-                sessionId = TolerantJson.string(row, "session_id").orEmpty(),
-                errorCount = TolerantJson.int(row, "error_count"),
-                firstError = TolerantJson.string(row, "first_error"),
-                lastError = TolerantJson.string(row, "last_error"),
-            )
-        },
-        recent = TolerantJson.listField(map, "recent").mapNotNull { entry ->
-            val row = entry as? Map<*, *> ?: return@mapNotNull null
-            InsightsKnowledgeRecent(
-                sessionId = TolerantJson.string(row, "session_id").orEmpty(),
-                chunks = TolerantJson.int(row, "chunks"),
-                documents = TolerantJson.int(row, "documents"),
-                project = TolerantJson.string(row, "project"),
-                status = TolerantJson.string(row, "status"),
-                error = TolerantJson.string(row, "error"),
-                indexedAt = TolerantJson.string(row, "indexed_at"),
-                indexedAtRelative = TolerantJson.string(row, "indexed_at_relative"),
+            InsightsHourActivity(
+                hour = TolerantJson.int(map, "hour"),
+                sessions = TolerantJson.int(map, "sessions"),
             )
         },
     )
-
-    private fun HttpUrl.Builder.stringParam(name: String, value: String?): HttpUrl.Builder =
-        apply { value?.takeIf(String::isNotBlank)?.let { addQueryParameter(name, it) } }
 
     private fun HttpUrl.Builder.intParam(name: String, value: Int?): HttpUrl.Builder =
         apply { value?.let { addQueryParameter(name, it.toString()) } }
