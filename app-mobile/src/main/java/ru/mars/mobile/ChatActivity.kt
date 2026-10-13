@@ -239,6 +239,42 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var searchPosition: Int = -1
     private var searchHighlightedCard: View? = null
 
+    // --- ANR-устойчивость транскрипта (инкрементальный рендер + троттлинг стрима) ---------------
+    // Чистые политики (JVM-тесты): StreamRenderThrottle (кадровый троттлинг SSE-событий),
+    // CardSnapshotPolicy/IncrementalTranscriptPolicy (что перерисовывать: «грязные» карточки,
+    // а не весь контейнер), FrameVersionGate (устаревший фоновый кадр не публикуется поверх
+    // свежего). Хост здесь — только view-обвязка.
+    /** Карточка транскрипта: wrapper («день-разделитель + пузырь») и последний ОТРИСОВАННЫЙ снимок. */
+    private class CardEntry(
+        val wrapper: LinearLayout,
+        var snapshot: CardSnapshot,
+        /** Секция markdown внутри пузыря; null, пока текст пуст (секции ещё нет). */
+        var markdownHost: LinearLayout?,
+    )
+
+    /** Нарисованные карточки: children контейнера [messages] ↔ cardEntries 1:1 по индексу. */
+    private val cardEntries = mutableListOf<CardEntry>()
+
+    /** Снимки последнего завершённого рендера (вход [IncrementalTranscriptPolicy.plan]). */
+    private var renderedSnapshots: List<CardSnapshot> = emptyList()
+
+    /**
+     * Эпоха «хрома»: события, влияющие сразу на ВСЕ карточки (режим активности,
+     * свёртка code-блока). Инкремент в [CardSnapshot.chromeEpoch] делает все снимки
+     * «грязными» → политика выбирает FullRebuild (как и было до инкрементального рендера).
+     */
+    private var transcriptChromeEpoch = 0L
+
+    private val streamThrottle = StreamRenderThrottle()
+
+    /** Отложенный trailing-flush стрима (ровно один; отменяется любым состоявшимся рендером). */
+    private var streamFlushJob: Job? = null
+
+    private val frameGate = FrameVersionGate()
+
+    /** Фоновый парсинг markdown стримящегося пузыря (ровно один в полёте). */
+    private var markdownParseJob: Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
@@ -405,6 +441,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onResume() {
         super.onResume()
         if (::voiceOutput.isInitialized) voiceOutput.onResume()
+        // Возврат на передний план: хвост стрима не должен ждать trailing-окно —
+        // отложенная перерисовка выполняется немедленно (renderMessages гасит job сам).
+        if (streamFlushJob != null) renderMessages()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
         // Выбор пространства мог измениться на экране SpacesActivity (общее
         // хранилище mars-workspace-choice): перечитываем chip из storage.
@@ -1574,7 +1613,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
                     interactiveController.onEvent(event)
                     if (::compressionController.isInitialized) compressionController.onEvent(event)
-                    renderMessages()
+                    // ANR-фикс: НЕ на каждый токен — троттлинг кадров стрима (StreamRenderThrottle).
+                    // Терминальные события (Done/Error → status != TYPING) рисуются немедленно внутри.
+                    scheduleStreamRender()
                     setStatus()
                 }
             }
@@ -1736,6 +1777,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun teardownLiveTurn() {
         liveTurnGuard.invalidate()
         if (::recovery.isInitialized) recovery.cancelRecovery()
+        // Отложенный trailing-flush и фоновый парсинг убитого хода отменяются: контекст
+        // (сессия/экран) сменился, публиковать их результат больше некуда и незачем.
+        streamFlushJob?.cancel()
+        streamFlushJob = null
+        streamThrottle.onTrailingCancelled()
+        markdownParseJob?.cancel()
+        markdownParseJob = null
         // Смена диалога / «Стоп» / новый чат: озвучка предыдущего ответа не должна перетекать
         // в следующий контекст (one-shot «ответ на голос» тоже сбрасывается).
         if (::voiceOutput.isInitialized) voiceOutput.onSessionSwitch()
@@ -2096,364 +2144,95 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         else -> value
     }
 
+    /**
+     * Отрисовка транскрипта: ИНКРЕМЕНТАЛЬНАЯ (ANR-фикс волны 1310). Контейнер больше не
+     * сносится целиком на каждый кадр — чистая IncrementalTranscriptPolicy сравнивает
+     * снимки карточек ([CardSnapshotPolicy]) и выбирает план:
+     * - NoChange: ничего не рисуем (политика скролла всё равно применяется — pin-to-bottom жив);
+     * - FullRebuild: сессия сменилась / список укоротился / эпоха хрома — разовая полная сборка;
+     * - Patch: пересобираются ТОЛЬКО «грязные» карточки и дозапускается хвост. На кадре стрима
+     *   грязным обычно является ровно один пузырь (TEXT_ONLY) — его markdown парсится в фоне.
+     *
+     * Любой состоявшийся рендер закрывает окно троттлинга, гасит отложенный trailing-flush
+     * и инвалидирует фоновые кадры: этот рендер синхронный и более свежий, чем они.
+     */
     private fun renderMessages() {
+        if (!::messages.isInitialized) return
         // Take the auto-scroll decision from the PRE-render viewport (synchronously, before any
         // mutation): a user scrolled up reading history stays put while SSE tokens keep coming;
         // only a pinned viewport follows the stream to the bottom.
         autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
         scrollToBottomPolicy.onViewportDistanceFromBottom(distanceFromBottomPx())
-        messages.removeAllViews()
-        // Разделители суток: первая известная метка и каждая смена локального дня
-        // получают день-чип («Сегодня»/«Вчера»/«9 октября») — чистая MessageTimePolicy.
-        var previousTimestamp = MessageTimePolicy.UNKNOWN_TIMESTAMP
-        uiState.messages.forEachIndexed { index, message ->
-            if (MessageTimePolicy.showDaySeparator(previousTimestamp, message.timestamp)) {
-                messages.addView(
-                    buildDaySeparator(message.timestamp),
-                    LinearLayout.LayoutParams(-2, -2).apply {
-                        gravity = Gravity.CENTER_HORIZONTAL
-                        topMargin = dp(10)
-                    }
-                )
+
+        streamFlushJob?.cancel()
+        streamFlushJob = null
+        streamThrottle.onRendered(SystemClock.elapsedRealtime())
+        markdownParseJob?.cancel()
+        markdownParseJob = null
+        frameGate.invalidateInFlight()
+
+        val current = currentSnapshots()
+        when (val plan = IncrementalTranscriptPolicy.plan(renderedSnapshots, current)) {
+            TranscriptPlan.FullRebuild -> rebuildTranscript(current)
+            is TranscriptPlan.Patch -> {
+                // Fast path: только текст стримящегося пузыря — тяжёлый парсинг уходит в фон.
+                if (tryAsyncTextOnlyUpdate(plan, current)) return
+                applyTranscriptPatch(plan, current)
             }
-            if (message.timestamp > MessageTimePolicy.UNKNOWN_TIMESTAMP) previousTimestamp = message.timestamp
-            val isUser = message.role == "user"
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(14), dp(10), dp(14), dp(10))
-                background = if (isUser) {
-                    MarsTheme.userBubble(this@ChatActivity)
-                } else {
-                    MarsTheme.botMessageCard(this@ChatActivity)
-                }
-            }
-
-            val labelRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            if (!isUser) {
-                // Vector status dot with ambient glow (WebUI parity)
-                val dot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
-                labelRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
-            }
-            val label = TextView(this).apply {
-                text = if (isUser) "Вы" else "Марс"
-                setTextColor(if (isUser) MarsTheme.TEXT_MUTED else MarsTheme.TEXT_STRONG)
-                textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
-            }
-            labelRow.addView(label)
-
-            if (!isUser) {
-                modelSelection.buttonLabel()?.let { modelName ->
-                    val modelPill = TextView(this).apply {
-                        text = modelName
-                        textSize = 9.5f
-                        setTextColor(MarsTheme.ACCENT_TEXT)
-                        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
-                        setPadding(dp(6), dp(1), dp(6), dp(1))
-                    }
-                    labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
-                }
-            }
-
-            // Час сообщения справа в шапке карточки; при неизвестной метке не показываем.
-            MessageTimePolicy.clockLabel(message.timestamp)?.let { clock ->
-                labelRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-                labelRow.addView(TextView(this).apply {
-                    text = clock
-                    textSize = 10.5f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    isSingleLine = true
-                })
-            }
-            card.addView(labelRow)
-
-            if (message.attachments.isNotEmpty()) {
-                card.addView(TextView(this).apply {
-                    text = message.attachments.joinToString("\n") { "[Файл: $it]" }
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    textSize = 12f
-                    setPadding(0, dp(4), 0, 0)
-                })
-            }
-
-            if (message.text.isNotBlank()) {
-                renderMarkdownBlocks(message.text, card, isUser, index)
-                val actionsRow = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(4), 0, 0)
-                }
-                val copyBtn = Button(this).apply {
-                    text = "Копировать"
-                    textSize = 11f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    background = null
-                    setPadding(0, 0, 0, 0)
-                    minimumHeight = 0
-                    minHeight = 0
-                    gravity = Gravity.START
-                    setOnClickListener { copyMessage(message.text) }
-                }
-                actionsRow.addView(copyBtn)
-                // «⋮» button: full message-actions sheet (copy/quote/share), WebUI parity.
-                val moreBtn = MarsTheme.circleIconButton(
-                    this,
-                    R.drawable.ic_more_vert,
-                    "Действия с сообщением",
-                    bg = Color.TRANSPARENT,
-                    iconTint = MarsTheme.TEXT_MUTED,
-                    sizeDp = 30,
-                    strokeColor = 0
-                ).apply {
-                    setOnClickListener { showMessageActions(message) }
-                }
-                actionsRow.addView(moreBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
-                if (!isUser) {
-                    // Speaker button: read Mars's answer aloud through the speech filter.
-                    val speakBtn = MarsTheme.circleIconButton(
-                        this,
-                        R.drawable.ic_volume,
-                        "Озвучить сообщение",
-                        bg = Color.TRANSPARENT,
-                        iconTint = MarsTheme.TEXT_MUTED,
-                        sizeDp = 30,
-                        strokeColor = 0
-                    ).apply {
-                        setOnClickListener { speakMessage(message.text) }
-                    }
-                    actionsRow.addView(speakBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
-                }
-                card.addView(actionsRow)
-            }
-
-            if (message.thoughts.isNotEmpty()) {
-                val isStreaming = index == uiState.messages.lastIndex && uiState.status == ChatStatus.TYPING
-                val thinkingView = ThinkingCardPresenter.present(
-                    thoughts = message.thoughts,
-                    expanded = message.thoughtsExpanded,
-                    streaming = isStreaming
-                )
-                if (thinkingView.visible) {
-                    val thoughtBox = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        background = MarsTheme.thinkingCard(this@ChatActivity)
-                        setPadding(dp(10), dp(6), dp(10), dp(6))
-                    }
-                    val header = LinearLayout(this).apply {
-                        gravity = Gravity.CENTER_VERTICAL
-                        isClickable = true
-                        setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
-                    }
-                    val chevron = ImageView(this).apply {
-                        setImageDrawable(ContextCompat.getDrawable(
-                            this@ChatActivity,
-                            if (thinkingView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
-                        ))
-                        imageTintList = ColorStateList.valueOf(thinkingView.chipColor)
-                    }
-                    header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
-
-                    val chipTitle = TextView(this).apply {
-                        text = thinkingView.chipLabel
-                        textSize = 12f
-                        setTypeface(null, Typeface.BOLD)
-                        setTextColor(thinkingView.chipColor)
-                    }
-                    header.addView(chipTitle, LinearLayout.LayoutParams(0, -2, 1f))
-
-                    if (thinkingView.statusLabel != null) {
-                        val statusBadge = TextView(this).apply {
-                            text = thinkingView.statusLabel
-                            textSize = 10.5f
-                            setTextColor(if (thinkingView.streaming) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
-                            setPadding(dp(6), dp(2), dp(6), dp(2))
-                            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = 0)
-                        }
-                        header.addView(statusBadge)
-                    }
-                    thoughtBox.addView(header, LinearLayout.LayoutParams(-1, -2))
-
-                    if (thinkingView.expanded) {
-                        val body = TextView(this).apply {
-                            text = thinkingView.bodyText
-                            setTextColor(thinkingView.bodyColor)
-                            textSize = 12.5f
-                            setTypeface(null, Typeface.ITALIC)
-                            setLineSpacing(dp(2).toFloat(), 1f)
-                            setPadding(dp(thinkingView.bodyIndentDp), dp(6), 0, dp(4))
-                        }
-                        thoughtBox.addView(body)
-
-                        val copyBtn = Button(this).apply {
-                            text = thinkingView.copyLabel
-                            textSize = 11f
-                            setTextColor(MarsTheme.TEXT_MUTED)
-                            background = null
-                            isAllCaps = false
-                            setPadding(dp(thinkingView.bodyIndentDp), dp(2), 0, 0)
-                            minimumHeight = 0
-                            minHeight = 0
-                            gravity = Gravity.START
-                            setOnClickListener { copyMessage(thinkingView.copySource) }
-                        }
-                        thoughtBox.addView(copyBtn)
-                    }
-                    card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-                }
-            }
-
-            message.tools.forEachIndexed { toolIndex, tool ->
-                val toolView = ToolCardPresenter.present(tool)
-                val toolBox = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.toolCallCard(this@ChatActivity)
-                    setPadding(dp(10), dp(6), dp(8), dp(6))
-                }
-                val header = LinearLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    isClickable = true
-                    setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
-                }
-                val toolIconRes = when (toolView.kind) {
-                    ToolKind.TERMINAL -> R.drawable.ic_chip
-                    ToolKind.FILESYSTEM -> R.drawable.ic_plan
-                    ToolKind.WEB -> R.drawable.ic_search
-                    ToolKind.MCP -> R.drawable.ic_refresh
-                    ToolKind.GENERIC -> R.drawable.ic_status
-                }
-                val toolIcon = ImageView(this).apply {
-                    setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, toolIconRes))
-                    imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
-                }
-                header.addView(toolIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
-
-                val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                val kindBadge = TextView(this).apply {
-                    text = toolView.kindLabel
-                    textSize = 9.5f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                }
-                titleCol.addView(kindBadge)
-                val toolTitle = TextView(this).apply {
-                    text = toolView.toolName
-                    textSize = 11.5f
-                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                    setTextColor(toolView.titleColor)
-                }
-                titleCol.addView(toolTitle)
-                header.addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
-
-                val stateBadge = TextView(this).apply {
-                    text = toolView.stateLabel
-                    textSize = 9.5f
-                    setTypeface(Typeface.MONOSPACE)
-                    val statusEnum = if (toolView.state == ToolState.DONE) MarsGradients.Status.DONE else MarsGradients.Status.RUNNING
-                    MarsTheme.applyStatusBadge(this, statusEnum)
-                }
-                header.addView(stateBadge)
-
-                val chevron = ImageView(this).apply {
-                    setImageDrawable(ContextCompat.getDrawable(
-                        this@ChatActivity,
-                        if (toolView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
-                    ))
-                    imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-                }
-                header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
-
-                val copyBtn = MarsTheme.circleIconButton(
-                    this,
-                    R.drawable.ic_copy,
-                    "Копировать инструмент",
-                    bg = Color.TRANSPARENT,
-                    iconTint = MarsTheme.TEXT_MUTED,
-                    sizeDp = 28,
-                    strokeColor = 0
-                ).apply {
-                    setOnClickListener {
-                        copyMessage(toolView.copySource)
-                        Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
-                    }
-                }
-                header.addView(copyBtn, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(4) })
-                toolBox.addView(header, LinearLayout.LayoutParams(-1, -2))
-
-                if (!toolView.expanded && toolView.detailLabel != null) {
-                    toolBox.addView(TextView(this).apply {
-                        text = toolView.detailLabel
-                        textSize = 11f
-                        typeface = Typeface.MONOSPACE
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        isSingleLine = true
-                        ellipsize = android.text.TextUtils.TruncateAt.END
-                        setPadding(dp(22), dp(4), 0, 0)
-                    })
-                }
-
-                if (toolView.expanded) {
-                    toolView.argsSection?.let { section ->
-                        toolBox.addView(TextView(this).apply {
-                            text = section.label
-                            textSize = 10.5f
-                            setTextColor(MarsTheme.TEXT_MUTED)
-                            setTypeface(null, Typeface.BOLD)
-                            setPadding(0, dp(6), 0, dp(2))
-                        })
-                        val argsScroll = HorizontalScrollView(this).apply {
-                            addView(TextView(this@ChatActivity).apply {
-                                text = section.visibleText
-                                textSize = 11f
-                                typeface = Typeface.MONOSPACE
-                                setTextColor(MarsTheme.TEXT)
-                                setTextIsSelectable(true)
-                                setPadding(dp(8), dp(6), dp(8), dp(6))
-                                background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
-                            })
-                        }
-                        toolBox.addView(argsScroll)
-                    }
-
-                    toolView.resultSection?.let { section ->
-                        toolBox.addView(TextView(this).apply {
-                            text = section.label
-                            textSize = 10.5f
-                            setTextColor(MarsTheme.TEXT_MUTED)
-                            setTypeface(null, Typeface.BOLD)
-                            setPadding(0, dp(6), 0, dp(2))
-                        })
-                        val resScroll = HorizontalScrollView(this).apply {
-                            addView(TextView(this@ChatActivity).apply {
-                                text = section.visibleText
-                                textSize = 11f
-                                typeface = Typeface.MONOSPACE
-                                setTextColor(MarsTheme.TEXT)
-                                setTextIsSelectable(true)
-                                setPadding(dp(8), dp(6), dp(8), dp(6))
-                                background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
-                            })
-                        }
-                        toolBox.addView(resScroll)
-                    }
-                }
-                card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-            }
-
-            val params = LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .88).toInt(), -2).apply {
-                topMargin = dp(8)
-                gravity = if (isUser) Gravity.END else Gravity.START
-            }
-            if (message.text.isNotBlank()) {
-                // Long-press anywhere on the bubble opens the message-actions sheet.
-                card.setOnLongClickListener { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    showMessageActions(message)
-                    true
-                }
-            }
-            // Тег = индекс сообщения: по нему поиск находит карточку для подсветки/скролла.
-            card.tag = index
-            messages.addView(card, params)
+            TranscriptPlan.NoChange -> Unit
         }
+        renderedSnapshots = current
+        finishTranscriptRender()
+    }
+
+    /**
+     * Перерисовка кадров стрима: НЕ на каждый токен (это и был ANR), а через
+     * StreamRenderThrottle — передний кадр сразу + ровно один trailing-flush на окно (~20 к/с).
+     * Нетипинговые состояния (Done/Error → RECEIVED/ERROR, интерактив → IDLE) рисуются
+     * немедленно: хвост терминального события не должен теряться. Вызывается из двух точек:
+     * первичный collect и RecoveryListener.onStreamEvent (attachToStream + Last-Event-ID).
+     */
+    private fun scheduleStreamRender() {
+        if (!::messages.isInitialized) return
+        if (uiState.status != ChatStatus.TYPING) {
+            renderMessages()
+            return
+        }
+        when (val decision = streamThrottle.onStreamEvent(SystemClock.elapsedRealtime())) {
+            StreamRenderDecision.RenderNow -> renderMessages()
+            is StreamRenderDecision.ScheduleAfter -> {
+                streamFlushJob?.cancel()
+                streamFlushJob = lifecycleScope.launch {
+                    delay(decision.delayMs)
+                    streamFlushJob = null
+                    renderMessages() // сам сбрасывает окно (onRendered) и гасит этот job
+                }
+            }
+            StreamRenderDecision.Ignore -> Unit
+        }
+    }
+
+    /** Актуальные снимки всех сообщений: сообщение + день-разделитель + стрим-флаг + эпоха хрома. */
+    private fun currentSnapshots(): List<CardSnapshot> {
+        var previousTimestamp = MessageTimePolicy.UNKNOWN_TIMESTAMP
+        val lastIndex = uiState.messages.size - 1
+        val typing = uiState.status == ChatStatus.TYPING
+        return uiState.messages.mapIndexed { index, message ->
+            val snapshot = CardSnapshotPolicy.of(
+                message = message,
+                previousTimestamp = previousTimestamp,
+                chromeEpoch = transcriptChromeEpoch,
+                streamingFlag = typing && index == lastIndex,
+            )
+            // Разделители суток: первая известная метка и каждая смена локального дня
+            // получают день-чип («Сегодня»/«Вчера»/«9 октября») — чистая MessageTimePolicy.
+            if (message.timestamp > MessageTimePolicy.UNKNOWN_TIMESTAMP) previousTimestamp = message.timestamp
+            snapshot
+        }
+    }
+
+    /** Хвост рендера (общий для синхронного и фонового путей): поиск, чипы, автоскролл. */
+    private fun finishTranscriptRender() {
         // Открытый поиск переживает перерисовку (стрим/новый ход): совпадения пересчитываются,
         // позиция сохраняется, скролл не дёргается — пользователь остаётся там, где читал.
         if (::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE) {
@@ -2461,6 +2240,474 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         renderSmartChips()
         if (autoScroll.shouldScrollOnContentChanged()) scrollToBottom() else syncScrollToBottomFab()
+    }
+
+
+    /** Разовая полная сборка (смена сессии / эпоха хрома / укорочение списка) — как старый рендер. */
+    private fun rebuildTranscript(current: List<CardSnapshot>) {
+        messages.removeAllViews()
+        cardEntries.clear()
+        uiState.messages.forEachIndexed { index, message ->
+            val entry = buildCardEntry(index, message, current[index])
+            messages.addView(entry.wrapper, LinearLayout.LayoutParams(-1, -2))
+            cardEntries.add(entry)
+        }
+    }
+
+    /** Точечный патч: грязные карточки заменяются на месте, новые дозапускаются в хвост. */
+    private fun applyTranscriptPatch(plan: TranscriptPlan.Patch, current: List<CardSnapshot>) {
+        for (patch in plan.updates) {
+            val message = uiState.messages.getOrNull(patch.index) ?: continue
+            val old = cardEntries.getOrNull(patch.index) ?: continue
+            val newSnapshot = current[patch.index]
+            // Text-only: карточка живёт, пересобирается только markdown-секция (без шапки/кнопок).
+            val host = old.markdownHost
+            if (patch.kind == CardUpdateKind.TEXT_ONLY && host != null) {
+                host.removeAllViews()
+                renderMarkdownBlocks(message.text, host, message.role == "user", patch.index)
+                old.snapshot = newSnapshot
+                continue
+            }
+            val replacement = buildCardEntry(patch.index, message, newSnapshot)
+            val position = messages.indexOfChild(old.wrapper).takeIf { it >= 0 } ?: patch.index
+            messages.removeViewAt(position)
+            messages.addView(replacement.wrapper, position, LinearLayout.LayoutParams(-1, -2))
+            cardEntries[patch.index] = replacement
+        }
+        for (index in plan.appendFrom until current.size) {
+            val message = uiState.messages.getOrNull(index) ?: continue
+            val entry = buildCardEntry(index, message, current[index])
+            messages.addView(entry.wrapper, LinearLayout.LayoutParams(-1, -2))
+            cardEntries.add(entry)
+        }
+    }
+
+    /**
+     * Fast path стрима: грязная карточка ровно одна и изменился только её текст. Тяжёлый
+     * MarkdownFormatter.parseBlocks уходит на Dispatchers.Default; на UI-поток возвращается
+     * только публикация готовых блоков. Версионирование кадров ([FrameVersionGate]): устаревший
+     * кадр не публикуется поверх более свежего рендера. Job живёт в lifecycleScope — умирает
+     * вместе с активити, висящих корутин не оставляет.
+     *
+     * @return true — обновление запланировано фоном; синхронный патч в этот кадр не нужен.
+     */
+    private fun tryAsyncTextOnlyUpdate(plan: TranscriptPlan.Patch, current: List<CardSnapshot>): Boolean {
+        if (plan.appendFrom != current.size) return false // есть новые карточки — общий синхронный патч
+        val only = plan.updates.singleOrNull() ?: return false
+        if (only.kind != CardUpdateKind.TEXT_ONLY) return false
+        val entry = cardEntries.getOrNull(only.index) ?: return false
+        val host = entry.markdownHost ?: return false // секции ещё нет (пустой пузырь) — полная сборка
+        val message = uiState.messages.getOrNull(only.index) ?: return false
+        val text = message.text
+        val isUser = message.role == "user"
+        val messageIndex = only.index
+        val version = frameGate.beginFrame()
+        markdownParseJob = lifecycleScope.launch(Dispatchers.Default) {
+            val blocks = MarkdownFormatter.parseBlocks(text)
+            withContext(Dispatchers.Main.immediate) {
+                if (!frameGate.canApply(version)) return@withContext // кадр устарел (прошёл синхронный рендер)
+                markdownParseJob = null
+                if (isDestroyed || !::messages.isInitialized) return@withContext
+                // Карточку могли заменить синхронным патчем, пока парсинг летел, — обновляем только «свою».
+                if (cardEntries.getOrNull(messageIndex) !== entry) return@withContext
+                host.removeAllViews()
+                renderParsedMarkdownBlocks(blocks, host, isUser, messageIndex)
+                entry.snapshot = current[messageIndex]
+                renderedSnapshots = current
+                frameGate.commit(version)
+                finishTranscriptRender()
+            }
+        }
+        return true
+    }
+
+    /** Собирает одну карточку: wrapper = необязательный день-разделитель + пузырь (метрики прежние). */
+    private fun buildCardEntry(index: Int, message: ChatMessage, snapshot: CardSnapshot): CardEntry {
+        val wrapper = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (snapshot.showDaySeparator) {
+            wrapper.addView(
+                buildDaySeparator(snapshot.separatorTimestamp),
+                LinearLayout.LayoutParams(-2, -2).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    topMargin = dp(10)
+                }
+            )
+        }
+        if (message.isTrimAnchor) {
+            wrapper.addView(buildTrimAnchorCard(message), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            return CardEntry(wrapper, snapshot, null)
+        }
+        val views = buildMessageCard(message, index, snapshot)
+        wrapper.addView(views.root, cardLayoutParams(snapshot))
+        return CardEntry(wrapper, snapshot, views.markdownHost)
+    }
+
+    /** Геометрия пузыря: 88% ширины экрана, справа у пользователя, слева у ассистента, отступ 8dp. */
+    private fun cardLayoutParams(snapshot: CardSnapshot): LinearLayout.LayoutParams {
+        val params = LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * .88).toInt(), -2)
+        params.topMargin = dp(8)
+        params.gravity = if (snapshot.isUser) Gravity.END else Gravity.START
+        return params
+    }
+
+    /** Карточка-якорь «старые сообщения подрезаны» ([TranscriptCapPolicy]). */
+    private fun buildTrimAnchorCard(message: ChatMessage): View = TextView(this).apply {
+        text = TranscriptCapPolicy.anchorLabel(message.trimmedCount)
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        gravity = Gravity.CENTER
+        setPadding(dp(12), dp(6), dp(12), dp(6))
+    }
+
+    /** Корень пузыря + его markdown-секция (null, если текст пуст — секции нет). */
+    private class CardViews(val root: View, val markdownHost: LinearLayout?)
+
+    /**
+     * Сборка ОДНОЙ карточки сообщения. Тело перенесено из прежнего монолитного renderMessages
+     * почти дословно; отличия: snapshot.streamingFlag вместо пересчёта, markdown в отдельной
+     * секции (для text-only обновлений), текст/действия резолвятся по индексу в момент клика
+     * (карточка теперь переживает кадры стрима и захваченная копия устаревает).
+     */
+    private fun buildMessageCard(message: ChatMessage, index: Int, snapshot: CardSnapshot): CardViews {
+        val isUser = message.role == "user"
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = if (isUser) {
+                MarsTheme.userBubble(this@ChatActivity)
+            } else {
+                MarsTheme.botMessageCard(this@ChatActivity)
+            }
+        }
+
+        val labelRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        if (!isUser) {
+            // Vector status dot with ambient glow (WebUI parity)
+            val dot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
+            labelRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
+        }
+        val label = TextView(this).apply {
+            text = if (isUser) "Вы" else "Марс"
+            setTextColor(if (isUser) MarsTheme.TEXT_MUTED else MarsTheme.TEXT_STRONG)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        labelRow.addView(label)
+
+        if (!isUser) {
+            modelSelection.buttonLabel()?.let { modelName ->
+                val modelPill = TextView(this).apply {
+                    text = modelName
+                    textSize = 9.5f
+                    setTextColor(MarsTheme.ACCENT_TEXT)
+                    background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
+                    setPadding(dp(6), dp(1), dp(6), dp(1))
+                }
+                labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+            }
+        }
+
+        // Час сообщения справа в шапке карточки; при неизвестной метке не показываем.
+        MessageTimePolicy.clockLabel(message.timestamp)?.let { clock ->
+            labelRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            labelRow.addView(TextView(this).apply {
+                text = clock
+                textSize = 10.5f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+            })
+        }
+        card.addView(labelRow)
+
+        if (message.attachments.isNotEmpty()) {
+            card.addView(TextView(this).apply {
+                text = message.attachments.joinToString("\n") { "[Файл: $it]" }
+                setTextColor(MarsTheme.TEXT_MUTED)
+                textSize = 12f
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+
+        var markdownHost: LinearLayout? = null
+        if (message.text.isNotBlank()) {
+            // markdown — в отдельную секцию: кадры стрима пересобирают только её
+            // (text-only), не трогая шапку/кнопки карточки. Ядро ANR-фикса.
+            val host = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            renderMarkdownBlocks(message.text, host, isUser, index)
+            card.addView(host, LinearLayout.LayoutParams(-1, -2))
+            markdownHost = host
+            val actionsRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(4), 0, 0)
+            }
+            val copyBtn = Button(this).apply {
+                text = "Копировать"
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                background = null
+                setPadding(0, 0, 0, 0)
+                minimumHeight = 0
+                minHeight = 0
+                gravity = Gravity.START
+                setOnClickListener { copyMessage(uiState.messages.getOrNull(index)?.text ?: message.text) }
+            }
+            actionsRow.addView(copyBtn)
+            // «⋮» button: full message-actions sheet (copy/quote/share), WebUI parity.
+            val moreBtn = MarsTheme.circleIconButton(
+                this,
+                R.drawable.ic_more_vert,
+                "Действия с сообщением",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30,
+                strokeColor = 0
+            ).apply {
+                setOnClickListener { showMessageActions(uiState.messages.getOrNull(index) ?: message) }
+            }
+            actionsRow.addView(moreBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
+            if (!isUser) {
+                // Speaker button: read Mars's answer aloud through the speech filter.
+                val speakBtn = MarsTheme.circleIconButton(
+                    this,
+                    R.drawable.ic_volume,
+                    "Озвучить сообщение",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 30,
+                    strokeColor = 0
+                ).apply {
+                    setOnClickListener { speakMessage(uiState.messages.getOrNull(index)?.text ?: message.text) }
+                }
+                actionsRow.addView(speakBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
+            }
+            card.addView(actionsRow)
+        }
+
+        if (message.thoughts.isNotEmpty()) {
+            val isStreaming = snapshot.streamingFlag
+            val thinkingView = ThinkingCardPresenter.present(
+                thoughts = message.thoughts,
+                expanded = message.thoughtsExpanded,
+                streaming = isStreaming
+            )
+            if (thinkingView.visible) {
+                val thoughtBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = MarsTheme.thinkingCard(this@ChatActivity)
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                }
+                val header = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    isClickable = true
+                    setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
+                }
+                val chevron = ImageView(this).apply {
+                    setImageDrawable(ContextCompat.getDrawable(
+                        this@ChatActivity,
+                        if (thinkingView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+                    ))
+                    imageTintList = ColorStateList.valueOf(thinkingView.chipColor)
+                }
+                header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+                val chipTitle = TextView(this).apply {
+                    text = thinkingView.chipLabel
+                    textSize = 12f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(thinkingView.chipColor)
+                }
+                header.addView(chipTitle, LinearLayout.LayoutParams(0, -2, 1f))
+
+                if (thinkingView.statusLabel != null) {
+                    val statusBadge = TextView(this).apply {
+                        text = thinkingView.statusLabel
+                        textSize = 10.5f
+                        setTextColor(if (thinkingView.streaming) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
+                        setPadding(dp(6), dp(2), dp(6), dp(2))
+                        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = 0)
+                    }
+                    header.addView(statusBadge)
+                }
+                thoughtBox.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+                if (thinkingView.expanded) {
+                    val body = TextView(this).apply {
+                        text = thinkingView.bodyText
+                        setTextColor(thinkingView.bodyColor)
+                        textSize = 12.5f
+                        setTypeface(null, Typeface.ITALIC)
+                        setLineSpacing(dp(2).toFloat(), 1f)
+                        setPadding(dp(thinkingView.bodyIndentDp), dp(6), 0, dp(4))
+                    }
+                    thoughtBox.addView(body)
+
+                    val copyBtn = Button(this).apply {
+                        text = thinkingView.copyLabel
+                        textSize = 11f
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                        background = null
+                        isAllCaps = false
+                        setPadding(dp(thinkingView.bodyIndentDp), dp(2), 0, 0)
+                        minimumHeight = 0
+                        minHeight = 0
+                        gravity = Gravity.START
+                        setOnClickListener { copyMessage(thinkingView.copySource) }
+                    }
+                    thoughtBox.addView(copyBtn)
+                }
+                card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
+        }
+
+        message.tools.forEachIndexed { toolIndex, tool ->
+            val toolView = ToolCardPresenter.present(tool)
+            val toolBox = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = MarsTheme.toolCallCard(this@ChatActivity)
+                setPadding(dp(10), dp(6), dp(8), dp(6))
+            }
+            val header = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
+            }
+            val toolIconRes = when (toolView.kind) {
+                ToolKind.TERMINAL -> R.drawable.ic_chip
+                ToolKind.FILESYSTEM -> R.drawable.ic_plan
+                ToolKind.WEB -> R.drawable.ic_search
+                ToolKind.MCP -> R.drawable.ic_refresh
+                ToolKind.GENERIC -> R.drawable.ic_status
+            }
+            val toolIcon = ImageView(this).apply {
+                setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, toolIconRes))
+                imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+            }
+            header.addView(toolIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+            val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val kindBadge = TextView(this).apply {
+                text = toolView.kindLabel
+                textSize = 9.5f
+                setTextColor(MarsTheme.TEXT_MUTED)
+            }
+            titleCol.addView(kindBadge)
+            val toolTitle = TextView(this).apply {
+                text = toolView.toolName
+                textSize = 11.5f
+                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                setTextColor(toolView.titleColor)
+            }
+            titleCol.addView(toolTitle)
+            header.addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
+
+            val stateBadge = TextView(this).apply {
+                text = toolView.stateLabel
+                textSize = 9.5f
+                setTypeface(Typeface.MONOSPACE)
+                val statusEnum = if (toolView.state == ToolState.DONE) MarsGradients.Status.DONE else MarsGradients.Status.RUNNING
+                MarsTheme.applyStatusBadge(this, statusEnum)
+            }
+            header.addView(stateBadge)
+
+            val chevron = ImageView(this).apply {
+                setImageDrawable(ContextCompat.getDrawable(
+                    this@ChatActivity,
+                    if (toolView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+                ))
+                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            }
+            header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
+
+            val copyBtn = MarsTheme.circleIconButton(
+                this,
+                R.drawable.ic_copy,
+                "Копировать инструмент",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 28,
+                strokeColor = 0
+            ).apply {
+                setOnClickListener {
+                    copyMessage(toolView.copySource)
+                    Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
+                }
+            }
+            header.addView(copyBtn, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(4) })
+            toolBox.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+            if (!toolView.expanded && toolView.detailLabel != null) {
+                toolBox.addView(TextView(this).apply {
+                    text = toolView.detailLabel
+                    textSize = 11f
+                    typeface = Typeface.MONOSPACE
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(22), dp(4), 0, 0)
+                })
+            }
+
+            if (toolView.expanded) {
+                toolView.argsSection?.let { section ->
+                    toolBox.addView(TextView(this).apply {
+                        text = section.label
+                        textSize = 10.5f
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                        setTypeface(null, Typeface.BOLD)
+                        setPadding(0, dp(6), 0, dp(2))
+                    })
+                    val argsScroll = HorizontalScrollView(this).apply {
+                        addView(TextView(this@ChatActivity).apply {
+                            text = section.visibleText
+                            textSize = 11f
+                            typeface = Typeface.MONOSPACE
+                            setTextColor(MarsTheme.TEXT)
+                            setTextIsSelectable(true)
+                            setPadding(dp(8), dp(6), dp(8), dp(6))
+                            background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
+                        })
+                    }
+                    toolBox.addView(argsScroll)
+                }
+
+                toolView.resultSection?.let { section ->
+                    toolBox.addView(TextView(this).apply {
+                        text = section.label
+                        textSize = 10.5f
+                        setTextColor(MarsTheme.TEXT_MUTED)
+                        setTypeface(null, Typeface.BOLD)
+                        setPadding(0, dp(6), 0, dp(2))
+                    })
+                    val resScroll = HorizontalScrollView(this).apply {
+                        addView(TextView(this@ChatActivity).apply {
+                            text = section.visibleText
+                            textSize = 11f
+                            typeface = Typeface.MONOSPACE
+                            setTextColor(MarsTheme.TEXT)
+                            setTextIsSelectable(true)
+                            setPadding(dp(8), dp(6), dp(8), dp(6))
+                            background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
+                        })
+                    }
+                    toolBox.addView(resScroll)
+                }
+            }
+            card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        }
+
+        if (message.text.isNotBlank()) {
+            // Long-press anywhere on the bubble opens the message-actions sheet.
+            card.setOnLongClickListener { view ->
+                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                // Резолвим в момент клика: захваченная при сборке копия устаревает за кадры стрима.
+                showMessageActions(uiState.messages.getOrNull(index) ?: message)
+                true
+            }
+        }
+        // Тег = индекс сообщения: по нему поиск находит карточку для подсветки/скролла.
+        card.tag = index
+        return CardViews(card, markdownHost)
     }
 
     // --- Поиск по диалогу: хост чистой TranscriptSearchPolicy ------------------------------------
@@ -2542,7 +2789,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
-        val blocks = MarkdownFormatter.parseBlocks(value)
+        renderParsedMarkdownBlocks(MarkdownFormatter.parseBlocks(value), parent, user, messageIndex)
+    }
+
+    /**
+     * Сборка markdown-view из УЖЕ распарсенных блоков (view-инфлейт — только main-поток).
+     * Тяжёлый [MarkdownFormatter.parseBlocks] делается либо синхронно выше (история/полная
+     * перерисовка), либо в фоне с версионированием кадров — см. tryAsyncTextOnlyUpdate:
+     * на UI-поток возвращается только публикация готового результата.
+     */
+    private fun renderParsedMarkdownBlocks(blocks: List<ContentBlock>, parent: LinearLayout, user: Boolean, messageIndex: Int) {
         blocks.forEachIndexed { blockIndex, block ->
             when (block) {
                 is ContentBlock.Text -> {
@@ -2683,6 +2939,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                             gravity = Gravity.START or Gravity.CENTER_VERTICAL
                             setOnClickListener {
                                 uiState.toggleCodeBlock(messageIndex, blockIndex)
+                                // Свёртка code-блока живёт ВНЕ снимка сообщения (ключ messageIndex:blockIndex
+                                // в ChatUiState): bumps эпохи хрома → политика даст FullRebuild, как раньше.
+                                transcriptChromeEpoch++
                                 renderMessages()
                             }
                         }, LinearLayout.LayoutParams(-1, dp(26)))
@@ -3131,7 +3390,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
             interactiveController.onEvent(event)
             if (::compressionController.isInitialized) compressionController.onEvent(event)
-            renderMessages()
+            // Тот же троттлинг кадров, что и в первичном collect: reattach-стрим не должен
+            // перерисовывать транскрипт на каждый токен.
+            scheduleStreamRender()
             setStatus()
         }
 
@@ -3764,6 +4025,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 d.dismiss()
                 uiState.setActivityMode(picked)
                 updateActivityModeButton()
+                // Режим активности меняет видимость мыслей/инструментов во ВСЕХ карточках:
+                // эпоха хрома → FullRebuild вместо «снимки равны, ничего не делать».
+                transcriptChromeEpoch++
                 renderMessages()
                 setStatus()
             }
