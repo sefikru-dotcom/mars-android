@@ -77,8 +77,8 @@ import ru.mars.network.repository.PendingClarifyLookup
 import ru.mars.network.repository.ReasoningRepository
 import ru.mars.network.repository.ReasoningStatusResult
 import ru.mars.network.repository.SessionRepository
-import ru.mars.network.repository.SessionYoloRepository
-import ru.mars.network.repository.YoloLookup
+import ru.mars.network.repository.SessionAutonomyRepository
+import ru.mars.network.repository.AutonomyLookup
 import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
 import ru.mars.network.repository.WorkspaceRepository
@@ -279,9 +279,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         ).also { interactiveView.listener = it }
 
         interactiveController.onClarifyAnswered = { answer -> echoClarifyAnswer(answer) }
-        interactiveView.yoloEnabledProvider = { uiState.yoloEnabled }
-        interactiveController.onYoloChanged = { enabled ->
-            Toast.makeText(this, if (enabled) "Автономный режим включён" else "Автономный режим выключен", Toast.LENGTH_SHORT).show()
+        interactiveView.autonomyEnabledProvider = { uiState.autonomyEnabled }
+        interactiveController.onAutonomyChanged = { enabled ->
+            Toast.makeText(this, if (enabled) "Автономность включена" else "Автономность выключена", Toast.LENGTH_SHORT).show()
         }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         reasoningSelection = ReasoningEffortSelection(PrefsReasoningChoiceStorage(getSharedPreferences("mars-reasoning-choice", MODE_PRIVATE)))
@@ -1456,7 +1456,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     }
                     if (event is ChatEvent.SessionBound) {
                         currentSessionId = event.sessionId
-                        refreshYoloState()
+                        refreshAutonomyState()
                     }
                     if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
                     if (event is ChatEvent.ContextUsage) updateContextIndicator()
@@ -2955,7 +2955,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 renderMessages()
                 setStatus()
                 updateTodoWidget()
-                refreshYoloState()
+                refreshAutonomyState()
                 // Stream recovery: a session that is still streaming server-side must resume
                 // live instead of showing a frozen transcript.
                 reattachActiveTurn(detail.activeTurn)
@@ -3231,7 +3231,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 autoScroll.pinToBottom()
                 renderMessages()
                 updateTodoWidget()
-                refreshYoloState()
+                refreshAutonomyState()
             }
         }
     }
@@ -3928,22 +3928,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // --- Autonomous execution state --------------------------------------------------------------
 
     /** Refreshes the server-side execution approval state without exposing internal terminology in the UI. */
-    private fun refreshYoloState() {
+    private fun refreshAutonomyState() {
         val sid = currentSessionId
         val credential = store.read()
         if (sid == null || credential == null) {
-            uiState.setYoloEnabled(false)
+            uiState.setAutonomyEnabled(false)
             return
         }
         lifecycleScope.launch {
             val enabled = withContext(Dispatchers.IO) {
-                when (val lookup = SessionYoloRepository().fetchState(BASE_URL, credential, sid)) {
-                    is YoloLookup.State -> lookup.enabled
-                    is YoloLookup.Failed -> false
+                when (val lookup = SessionAutonomyRepository().fetchState(BASE_URL, credential, sid)) {
+                    is AutonomyLookup.State -> lookup.enabled
+                    is AutonomyLookup.Failed -> false
                 }
             }
             if (currentSessionId == sid) {
-                uiState.setYoloEnabled(enabled)
+                uiState.setAutonomyEnabled(enabled)
                 }
         }
     }
@@ -4018,8 +4018,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 offlineQueue.removeMessagesFor(sid)
                 closeSessionLocally(report)
                 restoreComposerDraft()
-                // YOLO does not outlive the session being closed; make the pill reflect reality.
-                if (report != null) uiState.setYoloEnabled(false)
+                // Autonomy does not outlive the session being closed; make the pill reflect reality.
+                if (report != null) uiState.setAutonomyEnabled(false)
                 } else {
                 // Пользователь ушёл в другой диалог во время финиша — его состояние и
                 // композитор не трогаем; черновик закрытой сессии чистим в любом случае.
