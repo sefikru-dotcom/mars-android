@@ -19,7 +19,7 @@ import ru.mars.network.repository.StreamEventMapper
  * 3. ToolCall/ToolResult МЕЖДУ chunk;
  * 4. Done (включая повторный Done из replay);
  * 5. recovery/reattach поверх истории (placeholder + replay + 404-отмена);
- * 6. история с несколькими assistant;
+ * 6. история: один ход (несколько assistant-сегментов + tool-строки) = одна карточка;
  * 7. исключение служебного tool-output из пользовательского текста.
  *
  * Сквозной инвариант: события стрима НЕ плодят новые карточки (appendFrom всегда
@@ -263,10 +263,10 @@ class TranscriptEndToEndTest {
         assertEquals(MessageStatus.COMPLETE, state.messages[1].status)
     }
 
-    // ---- 6. История с несколькими assistant ------------------------------------------------------
+    // ---- 6. История: один ход = одна карточка (GAP-1) ----------------------------------------
 
     @Test
-    fun multiAssistantHistoryRendersOneBubblePerVisibleRowWithServerTimestamps() {
+    fun multiAssistantHistoryGroupsOneTurnIntoOneCardWithServerTimestamps() {
         val rows = listOf(
             SessionMessage(role = "user", content = "задача", createdAt = "1791921200.0"),
             SessionMessage(role = "assistant", content = "Шаг 1.", createdAt = "1791921210.0"),
@@ -278,10 +278,15 @@ class TranscriptEndToEndTest {
         )
         val state = ChatUiState()
         state.bindSession("s1", "Тест", HistoryTranscriptPolicy.of(rows))
-        assertEquals(4, state.messages.size)
-        assertEquals(listOf("user", "assistant", "assistant", "assistant"), state.messages.map { it.role })
-        assertEquals(listOf("Шаг 1.", "Шаг 2.", "Готово."), state.messages.drop(1).map { it.text })
-        assertEquals(listOf(1, 1, 0), state.messages.drop(1).map { it.tools.size })
+        // 3 assistant-сегмента одного хода — ОДНА карточка: user + assistant, а не 4 пузыря.
+        assertEquals(2, state.messages.size)
+        assertEquals(listOf("user", "assistant"), state.messages.map { it.role })
+        val card = state.messages[1]
+        assertEquals(
+            "Шаг 1.${HistoryTranscriptPolicy.SEGMENT_SEPARATOR}Шаг 2.${HistoryTranscriptPolicy.SEGMENT_SEPARATOR}Готово.",
+            card.text,
+        )
+        assertEquals(listOf("c1", "c2"), card.tools.map { it.id })
         // Epoch-секунды wire-строк доходят до снимков: часы и день-разделитель живы.
         assertTrue(state.messages.all { it.timestamp > MessageTimePolicy.UNKNOWN_TIMESTAMP })
         val snaps = snapshots(state)
@@ -290,10 +295,10 @@ class TranscriptEndToEndTest {
 
         // Новый ход поверх такой истории открывается своим пузырём, а не допиской в хвост истории.
         assertTrue(state.begin("ещё вопрос"))
-        assertEquals(6, state.messages.size)
+        assertEquals(4, state.messages.size)
         feed(state, "token", """{"text":"Новый ответ."}""")
-        assertEquals("Новый ответ.", state.messages[5].text)
-        assertEquals("Готово.", state.messages[3].text)
+        assertEquals("Новый ответ.", state.messages[3].text)
+        assertTrue(state.messages[1].text.endsWith("Готово."))
     }
 
     // ---- 7. Исключение служебного tool-output --------------------------------------------------
@@ -333,11 +338,17 @@ class TranscriptEndToEndTest {
                 SessionMessage(role = "assistant", content = "Поправил."),
             )
         )
-        assertEquals(3, bubbles.size)
+        // Один ход — одна карточка: оба assistant-сегмента склеены, tool внутри.
+        assertEquals(2, bubbles.size)
         assertTrue(bubbles.none { it.text.contains("BLOCKED") || it.text.contains("status") })
-        val card = bubbles[1].tools.single()
-        assertEquals("execute_code", card.name)
-        assertTrue(card.result!!.contains("BLOCKED"))
-        assertFalse(card.expanded)
+        val card = bubbles[1]
+        assertEquals(
+            "Проверяю.${HistoryTranscriptPolicy.SEGMENT_SEPARATOR}Поправил.",
+            card.text,
+        )
+        val tool = card.tools.single()
+        assertEquals("execute_code", tool.name)
+        assertTrue(tool.result!!.contains("BLOCKED"))
+        assertFalse(tool.expanded)
     }
 }
