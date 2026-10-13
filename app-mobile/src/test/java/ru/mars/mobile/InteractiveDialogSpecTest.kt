@@ -60,7 +60,7 @@ class InteractiveDialogSpecTest {
             listOf(
                 "Разрешить один раз",
                 "Разрешить для этой сессии",
-                InteractiveDialogSpec.YOLO_ENABLE_LABEL,
+                InteractiveDialogSpec.AUTONOMY_ENABLE_LABEL,
                 "Отклонить",
             ),
             options.map { it.label }
@@ -71,7 +71,7 @@ class InteractiveDialogSpecTest {
     fun approvalOptionsGateSessionByPayloadFlag() {
         val options = InteractiveDialogSpec.approvalOptions(approval(allowSession = false))
         assertEquals(listOf(ApprovalChoice.ONCE, ApprovalChoice.ONCE, ApprovalChoice.DENY), options.map { it.choice })
-        assertEquals(listOf(false, true, false), options.map { it.yolo })
+        assertEquals(listOf(false, true, false), options.map { it.grantsAutonomy })
     }
 
     @Test
@@ -91,13 +91,13 @@ class InteractiveDialogSpecTest {
     }
 
     @Test
-    fun yoloGrantOfferedOnlyWhileYoloIsOff() {
-        val off = InteractiveDialogSpec.approvalOptions(approval(), yoloEnabled = false)
-        val on = InteractiveDialogSpec.approvalOptions(approval(), yoloEnabled = true)
-        val yoloOption = off.single { it.yolo }
-        assertEquals(InteractiveDialogSpec.YOLO_ENABLE_LABEL, yoloOption.label)
-        assertEquals(ApprovalChoice.ONCE, yoloOption.choice) // web parity: 'once' + yolo:true
-        assertFalse(on.any { it.yolo })
+    fun autonomyGrantOfferedOnlyWhileAutonomyIsOff() {
+        val off = InteractiveDialogSpec.approvalOptions(approval(), autonomyEnabled = false)
+        val on = InteractiveDialogSpec.approvalOptions(approval(), autonomyEnabled = true)
+        val autonomyOption = off.single { it.grantsAutonomy }
+        assertEquals(InteractiveDialogSpec.AUTONOMY_ENABLE_LABEL, autonomyOption.label)
+        assertEquals(ApprovalChoice.ONCE, autonomyOption.choice) // web parity: 'once' + the autonomy grant
+        assertFalse(on.any { it.grantsAutonomy })
         assertEquals(
             listOf(ApprovalChoice.ONCE, ApprovalChoice.SESSION, ApprovalChoice.DENY),
             on.map { it.choice }
@@ -105,9 +105,9 @@ class InteractiveDialogSpecTest {
     }
 
     @Test
-    fun yoloGrantIsNotFlaggedAsDeny() {
+    fun autonomyGrantIsNotFlaggedAsDeny() {
         val options = InteractiveDialogSpec.approvalOptions(approval())
-        assertFalse(InteractiveDialogSpec.isDeny(options.single { it.yolo }))
+        assertFalse(InteractiveDialogSpec.isDeny(options.single { it.grantsAutonomy }))
     }
 
     // --- approval presentation --------------------------------------------------------------

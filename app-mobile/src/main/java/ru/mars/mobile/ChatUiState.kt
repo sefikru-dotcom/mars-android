@@ -81,15 +81,16 @@ class ChatUiState(
     fun setTodoState(snapshot: TodoSnapshot?) { todoState = snapshot }
 
     /**
-     * Session-scoped YOLO mode (autonomous run without blocking confirmations). Mirrors the
-     * server-side per-session flag (`/api/session/yolo`); never persisted locally and reset on
-     * every session switch/new chat — exactly the WebUI `_yoloEnabled` lifecycle.
+     * Session-scoped autonomy mode (the agent runs without blocking confirmations). Mirrors the
+     * server-side per-session flag (toggle endpoint mapped by the core-network wire adapter);
+     * never persisted locally and reset on every session switch/new chat — exactly the WebUI
+     * session-flag lifecycle.
      */
-    var yoloEnabled: Boolean = false
+    var autonomyEnabled: Boolean = false
         private set
 
-    /** Applies the settled YOLO state reported by the server (toggle result or fresh lookup). */
-    fun setYoloEnabled(value: Boolean) { yoloEnabled = value }
+    /** Applies the settled autonomy state reported by the server (toggle result or fresh lookup). */
+    fun setAutonomyEnabled(value: Boolean) { autonomyEnabled = value }
 
     /**
      * Active-turn metadata of the loaded session (`GET /api/session` → `activeTurn`):
@@ -287,7 +288,7 @@ class ChatUiState(
     fun complete() { status = ChatStatus.RECEIVED; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
     fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
 
     /**
@@ -333,7 +334,7 @@ class ChatUiState(
         return result
     }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 

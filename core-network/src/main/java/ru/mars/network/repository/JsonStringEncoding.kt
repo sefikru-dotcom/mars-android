@@ -3,7 +3,7 @@ package ru.mars.network.repository
 /**
  * Single RFC 8259 §7–compliant escaper for every hand-built JSON request body in
  * this module (`/api/chat/start`, `/api/chat`, `/api/chat/steer`, approval/clarify
- * respond, YOLO toggle, pairing exchange/login).
+ * respond, session-autonomy toggle, pairing exchange/login).
  *
  * Why this exists: the server parses bodies with Python `json.loads` in STRICT
  * mode (hermes-webui api/helpers.py `read_body` → `ValueError('Invalid JSON

@@ -39,11 +39,11 @@ data class ComposerQuotePlate(
     }
 }
 
-/** Визуальный тон чипа: обычный, рубиновый (YOLO), предупреждение/опасность (контекст). */
+/** Визуальный тон чипа: обычный, рубиновый (автономность), предупреждение/опасность (контекст). */
 enum class ComposerChipTone { NEUTRAL, RUBY, WARNING, CRITICAL }
 
 /** Стабильный идентификатор чипа сессии (маппинг иконок живёт в Activity). */
-enum class ComposerChipId { MODEL, REASONING, WORKSPACE, YOLO, CONTEXT }
+enum class ComposerChipId { MODEL, REASONING, WORKSPACE, AUTONOMY, CONTEXT }
 
 /** Чип функционального бара — нижний уровень композера, слева в горизонтальном скролле. */
 data class ComposerChip(
@@ -95,7 +95,7 @@ data class ComposerSnapshot(
     val modelLabel: String? = null,
     val reasoningLabel: String? = null,
     val workspacePath: String? = null,
-    val yoloEnabled: Boolean = false,
+    val autonomyEnabled: Boolean = false,
     val contextPercent: Int? = null,
     val recordingVoice: Boolean = false,
 )
@@ -105,7 +105,7 @@ data class ComposerViewState(
     val hint: String,
     val maxInputLines: Int,
     val quotePlate: ComposerQuotePlate,
-    /** Видимые чипы в порядке: модель, reasoning, воркспейс, YOLO, контекст. */
+    /** Видимые чипы в порядке: модель, reasoning, воркспейс, автономность, контекст. */
     val chips: List<ComposerChip>,
     val send: ComposerSendButton,
     val attach: ComposerActionButton,
@@ -176,8 +176,8 @@ class ComposerLayoutPresenter {
         /** Предел отрывка в плашке: компактный предпросмотр, а не вся цитата. */
         const val PLATE_EXCERPT_CHARS = 120
 
-        /** Подпись пилюли YOLO (без вариантов — состояние передаёт тон). */
-        const val YOLO_LABEL = "YOLO"
+        /** Подпись пилюли автономности (без вариантов — состояние передаёт тон). */
+        const val AUTONOMY_LABEL = "Автономность"
 
         /** Метка «Авто» у reasoning-селектора: уровень не активен — чип скрыт. */
         const val REASONING_AUTO_LABEL = "Авто"
@@ -226,12 +226,12 @@ class ComposerLayoutPresenter {
             return collapsed.take(PLATE_EXCERPT_CHARS).trimEnd() + "…"
         }
 
-        /** Видимые чипы сессии в фиксированном порядке: модель, reasoning, воркспейс, YOLO, контекст. */
+        /** Видимые чипы сессии в фиксированном порядке: модель, reasoning, воркспейс, автономность, контекст. */
         fun chipsRow(snapshot: ComposerSnapshot): List<ComposerChip> = listOf(
             modelChip(snapshot.modelLabel),
             reasoningChip(snapshot.reasoningLabel),
             workspaceChip(snapshot.workspacePath),
-            yoloChip(snapshot.yoloEnabled),
+            autonomyChip(snapshot.autonomyEnabled),
             contextChip(snapshot.contextPercent),
         ).filter { it.visible }
 
@@ -289,16 +289,16 @@ class ComposerLayoutPresenter {
             }
         }
 
-        /** Пилюля YOLO: видна всегда, активный режим подсвечивается рубиновым тоном. */
-        fun yoloChip(enabled: Boolean): ComposerChip = ComposerChip(
-            id = ComposerChipId.YOLO,
+        /** Пилюля автономности: видна всегда, активный режим подсвечивается рубиновым тоном. */
+        fun autonomyChip(enabled: Boolean): ComposerChip = ComposerChip(
+            id = ComposerChipId.AUTONOMY,
             visible = true,
-            label = YOLO_LABEL,
+            label = AUTONOMY_LABEL,
             tone = if (enabled) ComposerChipTone.RUBY else ComposerChipTone.NEUTRAL,
             contentDescription = if (enabled) {
-                "Режим YOLO включён — автономная работа без подтверждений"
+                "Автономность включена — действия выполняются без подтверждений"
             } else {
-                "Режим YOLO выключен — работа с подтверждениями"
+                "Автономность выключена — действия требуют подтверждения"
             },
         )
 

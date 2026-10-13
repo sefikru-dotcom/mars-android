@@ -161,24 +161,24 @@ class InteractiveRequestsRepositoryTest {
     }
 
     @Test
-    fun approvalYoloFlagOnlyWhenRequested() {
+    fun approvalGrantFlagOnlyWhenRequested() {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"ok":true,"yolo_enabled":true}"""))
             val result = repository.respondApproval(
                 server.url("/").toString(), credential(), "sess-1",
                 ApprovalPayload(approvalId = "a", command = "c", description = ""),
-                ApprovalChoice.ONCE, yolo = true,
+                ApprovalChoice.ONCE, grantAutonomy = true,
             )
             assertTrue(server.takeRequest().body.readUtf8().contains("\"yolo\":true"))
-            assertEquals(InteractiveRespondResult.Accepted(yoloEnabled = true), result)
+            assertEquals(InteractiveRespondResult.Accepted(autonomyEnabled = true), result)
         }
     }
 
     @Test
-    fun rejectedApprovalStillCarriesSettledYoloFlag() {
-        // Web parity (`_applyApprovalYoloProjection` on the error payload): the server may fail
-        // the gateway relay (409) while still committing YOLO — `yolo_enabled` must survive in
-        // the Rejected result so the UI can project the real session state.
+    fun rejectedApprovalStillCarriesSettledAutonomyFlag() {
+        // Web parity (settled-flag projection on the error payload): the server may fail the
+        // gateway relay (409) while still committing the autonomy flag — the settled wire field
+        // must survive in the Rejected result so the UI can project the real session state.
         MockWebServer().use { server ->
             server.enqueue(
                 MockResponse().setResponseCode(409)
@@ -187,10 +187,10 @@ class InteractiveRequestsRepositoryTest {
             val result = repository.respondApproval(
                 server.url("/").toString(), credential(), "sess-1",
                 ApprovalPayload(approvalId = "a", command = "c", description = ""),
-                ApprovalChoice.ONCE, yolo = true,
+                ApprovalChoice.ONCE, grantAutonomy = true,
             )
             assertEquals(
-                InteractiveRespondResult.Rejected("Gateway run unavailable", 409, "gateway_run_unavailable", yoloEnabled = true),
+                InteractiveRespondResult.Rejected("Gateway run unavailable", 409, "gateway_run_unavailable", autonomyEnabled = true),
                 result,
             )
         }

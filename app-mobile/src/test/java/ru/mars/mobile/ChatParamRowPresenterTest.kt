@@ -23,11 +23,11 @@ class ChatParamRowPresenterTest {
         )
     }
 
-    @Test fun noYoloOrSubagentControlAnywhere() {
+    @Test fun noAutonomyOrSubagentControlAnywhere() {
         val ids = ParamRowControlId.entries.map { it.name }
-        assertFalse(ids.any { it.contains("YOLO") })
+        assertFalse(ids.any { it.contains("AUTONOMY") })
         assertFalse(ids.any { it.contains("SUBAGENT") })
-        assertFalse(presenter.resolve().controls.any { it.label.contains("YOLO", ignoreCase = true) })
+        assertFalse(presenter.resolve().controls.any { it.label.contains("Автономн", ignoreCase = true) })
     }
 
     @Test fun allControlsAlwaysVisibleEvenOnFreshPresenter() {

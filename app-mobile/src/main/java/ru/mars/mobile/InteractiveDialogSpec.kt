@@ -16,8 +16,9 @@ object InteractiveDialogSpec {
     data class ApprovalOption(
         val label: String,
         val choice: ApprovalChoice,
-        /** True for the YOLO grant: submits `choice` with `yolo:true` (server toggles the session flag). */
-        val yolo: Boolean = false,
+        /** True for the autonomy grant: submits `choice` with the grant flag (server toggles
+         *  session-wide autonomy; wire mapping in core-network). */
+        val grantsAutonomy: Boolean = false,
     )
 
     /** One tappable answer in the clarify dialog: either a preset choice or the free-text trigger. */
@@ -44,24 +45,25 @@ object InteractiveDialogSpec {
     const val ANSWER_HINT = "Ваш ответ…"
     const val PATTERN_PREFIX = "Шаблон"
     const val TOOL_PREFIX = "Инструмент"
-    const val YOLO_ENABLE_LABEL = "Больше не спрашивать (YOLO)"
+    const val AUTONOMY_ENABLE_LABEL = "Больше не спрашивать (выполнять автоматически)"
 
     /**
      * Approval options in display order; session/permanent gated by the payload flags.
-     * When YOLO is not yet active, a trailing grant offers to enable it (web parity:
-     * respondApproval 'once' + `yolo:true` — the server flips the session flag and releases
-     * every pending confirmation). Hidden once [yoloEnabled] is true: nothing left to offer.
+     * When session-wide autonomy is not yet active, a trailing grant offers to enable it
+     * (web parity: respondApproval 'once' + the grant flag — the server flips the session flag
+     * and releases every pending confirmation). Hidden once [autonomyEnabled] is true: nothing
+     * left to offer.
      */
-    fun approvalOptions(payload: ApprovalPayload, yoloEnabled: Boolean = false): List<ApprovalOption> = buildList {
+    fun approvalOptions(payload: ApprovalPayload, autonomyEnabled: Boolean = false): List<ApprovalOption> = buildList {
         add(ApprovalOption("Разрешить один раз", ApprovalChoice.ONCE))
         if (payload.allowSession) add(ApprovalOption("Разрешить для этой сессии", ApprovalChoice.SESSION))
         if (payload.allowPermanent) add(ApprovalOption("Разрешать всегда", ApprovalChoice.ALWAYS))
-        if (!yoloEnabled) add(ApprovalOption(YOLO_ENABLE_LABEL, ApprovalChoice.ONCE, yolo = true))
+        if (!autonomyEnabled) add(ApprovalOption(AUTONOMY_ENABLE_LABEL, ApprovalChoice.ONCE, grantsAutonomy = true))
         add(ApprovalOption("Отклонить", ApprovalChoice.DENY))
     }
 
     /** Deny is visually separated from the grants: it is rendered as the destructive action. */
-    fun isDeny(option: ApprovalOption): Boolean = option.choice == ApprovalChoice.DENY && !option.yolo
+    fun isDeny(option: ApprovalOption): Boolean = option.choice == ApprovalChoice.DENY && !option.grantsAutonomy
 
     /** Header title with the queue indicator ("1 из N") when several prompts are pending. */
     fun approvalTitle(pendingCount: Int): String =

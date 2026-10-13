@@ -5,12 +5,12 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.ApprovalChoice
+import ru.mars.network.repository.AutonomyToggleResult
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.InteractiveRespondResult
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
-import ru.mars.network.repository.SessionYoloRepository
-import ru.mars.network.repository.YoloToggleResult
+import ru.mars.network.repository.SessionAutonomyRepository
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
@@ -37,10 +37,11 @@ interface InteractiveRequestView {
 /** User actions surfaced by [InteractiveRequestView] implementations back to the controller. */
 interface InteractiveRequestListener {
     /**
-     * User picked an approval option. [yolo] is true for the YOLO grant: the respond is sent
-     * with `yolo:true`, which flips the session's YOLO flag server-side (web parity).
+     * User picked an approval option. [grantsAutonomy] is true for the autonomy grant: the
+     * respond carries the grant flag (wire mapping in core-network), which flips session-wide
+     * autonomy server-side (web parity).
      */
-    fun onApprovalChoice(choice: ApprovalChoice, yolo: Boolean = false)
+    fun onApprovalChoice(choice: ApprovalChoice, grantsAutonomy: Boolean = false)
     /** User cancelled the approval dialog. MUST NOT be interpreted as a decision (silence ≠ consent). */
     fun onApprovalDismissed()
     fun onClarifyResponse(text: String)
@@ -53,12 +54,12 @@ interface InteractiveRequestListener {
  * on device; unit tests substitute a fake to exercise dialog flows without HTTP.
  */
 interface InteractiveRequestsGateway {
-    fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice, yolo: Boolean = false): InteractiveRespondResult
+    fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice, grantAutonomy: Boolean = false): InteractiveRespondResult
     fun respondClarify(sessionId: String, payload: ClarifyPayload, response: String): InteractiveRespondResult
     fun fetchPendingApproval(sessionId: String): PendingApprovalLookup
     fun fetchPendingClarify(sessionId: String): PendingClarifyLookup
-    /** `POST /api/session/yolo {session_id, enabled}` — the explicit YOLO pill/command toggle. */
-    fun setSessionYolo(sessionId: String, enabled: Boolean): YoloToggleResult
+    /** Server toggle of session-wide autonomy (explicit pill/command); wire contract lives in the core-network adapter. */
+    fun setSessionAutonomy(sessionId: String, enabled: Boolean): AutonomyToggleResult
 }
 
 /**
@@ -71,12 +72,12 @@ class RepositoryInteractiveGateway(
     private val baseUrl: String,
     private val credentialProvider: () -> ConsumedDeviceCredential?,
 ) : InteractiveRequestsGateway {
-    /** YOLO client is construction-injected-free on purpose: the gateway's test seam is the interface itself. */
-    private val yoloRepository = SessionYoloRepository()
+    /** Autonomy client is construction-injected-free on purpose: the gateway's test seam is the interface itself. */
+    private val autonomyRepository = SessionAutonomyRepository()
 
-    override fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice, yolo: Boolean): InteractiveRespondResult {
+    override fun respondApproval(sessionId: String, payload: ApprovalPayload, choice: ApprovalChoice, grantAutonomy: Boolean): InteractiveRespondResult {
         val credential = credentialProvider() ?: return InteractiveRespondResult.Rejected(AUTH_REQUIRED, 0)
-        return repository.respondApproval(baseUrl, credential, sessionId, payload, choice, yolo = yolo)
+        return repository.respondApproval(baseUrl, credential, sessionId, payload, choice, grantAutonomy = grantAutonomy)
     }
 
     override fun respondClarify(sessionId: String, payload: ClarifyPayload, response: String): InteractiveRespondResult {
@@ -94,9 +95,9 @@ class RepositoryInteractiveGateway(
         return repository.fetchPendingClarify(baseUrl, credential, sessionId)
     }
 
-    override fun setSessionYolo(sessionId: String, enabled: Boolean): YoloToggleResult {
-        val credential = credentialProvider() ?: return YoloToggleResult.Failed(AUTH_REQUIRED)
-        return yoloRepository.setEnabled(baseUrl, credential, sessionId, enabled)
+    override fun setSessionAutonomy(sessionId: String, enabled: Boolean): AutonomyToggleResult {
+        val credential = credentialProvider() ?: return AutonomyToggleResult.Failed(AUTH_REQUIRED)
+        return autonomyRepository.setEnabled(baseUrl, credential, sessionId, enabled)
     }
 
     companion object {
@@ -189,11 +190,11 @@ class InteractiveRequestController(
     var onClarifyAnswered: ((String) -> Unit)? = null
 
     /**
-     * Optional YOLO hook: invoked ON THE UI DISPATCHER THREAD with the settled server-side state
-     * whenever a respond or an explicit toggle flipped the session's YOLO flag (web parity:
-     * `_applyApprovalYoloProjection` + pill/toast). Fires only on actual changes.
+     * Optional autonomy hook: invoked ON THE UI DISPATCHER THREAD with the settled server-side
+     * state whenever a respond or an explicit toggle flipped session-wide autonomy (web parity:
+     * settled-flag projection + pill/toast). Fires only on actual changes.
      */
-    var onYoloChanged: ((Boolean) -> Unit)? = null
+    var onAutonomyChanged: ((Boolean) -> Unit)? = null
 
     /** Feed every stream event here from the Activity's collect loop (UI thread). */
     fun onEvent(event: ChatEvent) {
@@ -231,7 +232,7 @@ class InteractiveRequestController(
         view.showClarify(event.payload)
     }
 
-    override fun onApprovalChoice(choice: ApprovalChoice, yolo: Boolean) {
+    override fun onApprovalChoice(choice: ApprovalChoice, grantsAutonomy: Boolean) {
         if (destroyed) return
         val current = currentApproval ?: return
         if (approvalResponding) return
@@ -247,7 +248,7 @@ class InteractiveRequestController(
             // Best-effort pre-flight: a cancel/destroy that landed after the tap must not fire
             // the respond call at all (the authoritative guards run on the dispatcher below).
             if (destroyed || gen != generation) return@execute
-            val result = gateway.respondApproval(sid, current.payload, choice, yolo)
+            val result = gateway.respondApproval(sid, current.payload, choice, grantsAutonomy)
             uiDispatcher.dispatch {
                 if (destroyed || gen != generation) return@dispatch
                 // Identity guard: dialog was superseded or dismissed while the call was in
@@ -256,9 +257,9 @@ class InteractiveRequestController(
                 if (currentApproval !== current) return@dispatch
                 when (result) {
                     is InteractiveRespondResult.Accepted -> {
-                        // YOLO projection: the server may have flipped the session flag with
-                        // this respond (`yolo_enabled` in the accepted body).
-                        result.yoloEnabled?.let { applyYoloState(it) }
+                        // Autonomy projection: the server may have flipped the session flag
+                        // with this respond (settled flag in the accepted body).
+                        result.autonomyEnabled?.let { applyAutonomyState(it) }
                         clearApproval()
                         view.dismissApproval()
                         if (result.staleCleared || current.payload.pendingCount > 1) showNextPendingApproval(sid)
@@ -269,9 +270,9 @@ class InteractiveRequestController(
                         view.showNotice(result.message)
                     }
                     is InteractiveRespondResult.Rejected -> {
-                        // Web parity: failed gateway relays still commit the YOLO flag —
+                        // Web parity: failed gateway relays still commit the autonomy flag —
                         // project it before surfacing the error.
-                        result.yoloEnabled?.let { applyYoloState(it) }
+                        result.autonomyEnabled?.let { applyAutonomyState(it) }
                         approvalResponding = false
                         view.setApprovalResponding(false)
                         view.showError(result.message)
@@ -287,11 +288,11 @@ class InteractiveRequestController(
     }
 
     /**
-     * Explicit YOLO toggle (header pill / command): `POST /api/session/yolo`. Guarded by the
-     * session identity (NOT the generation counter — a stream finishing mid-flight must not
-     * drop a pill toggle), applied on the UI dispatcher thread like every other state write.
+     * Explicit autonomy toggle (header pill / command). Guarded by the session identity (NOT
+     * the generation counter — a stream finishing mid-flight must not drop a pill toggle),
+     * applied on the UI dispatcher thread like every other state write.
      */
-    fun setYoloEnabled(enabled: Boolean) {
+    fun setAutonomyEnabled(enabled: Boolean) {
         if (destroyed) return
         val sid = sessionProvider()
         if (sid.isNullOrBlank()) {
@@ -300,13 +301,13 @@ class InteractiveRequestController(
         }
         executor.execute {
             if (destroyed || sid != sessionProvider()) return@execute
-            val result = gateway.setSessionYolo(sid, enabled)
+            val result = gateway.setSessionAutonomy(sid, enabled)
             uiDispatcher.dispatch {
                 if (destroyed || sid != sessionProvider()) return@dispatch
                 when (result) {
-                    is YoloToggleResult.Applied -> applyYoloState(result.enabled)
-                    is YoloToggleResult.Failed -> {
-                        result.knownState?.let { applyYoloState(it) }
+                    is AutonomyToggleResult.Applied -> applyAutonomyState(result.enabled)
+                    is AutonomyToggleResult.Failed -> {
+                        result.knownState?.let { applyAutonomyState(it) }
                         view.showError(result.message)
                     }
                 }
@@ -314,11 +315,11 @@ class InteractiveRequestController(
         }
     }
 
-    /** Single write path for the YOLO flag; [onYoloChanged] fires only on actual changes. */
-    private fun applyYoloState(value: Boolean) {
-        val previous = state?.yoloEnabled
-        state?.setYoloEnabled(value)
-        if (previous != value) onYoloChanged?.invoke(value)
+    /** Single write path for the autonomy flag; [onAutonomyChanged] fires only on actual changes. */
+    private fun applyAutonomyState(value: Boolean) {
+        val previous = state?.autonomyEnabled
+        state?.setAutonomyEnabled(value)
+        if (previous != value) onAutonomyChanged?.invoke(value)
     }
 
     override fun onApprovalDismissed() {

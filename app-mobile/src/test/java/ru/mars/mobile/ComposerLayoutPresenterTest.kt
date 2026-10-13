@@ -209,18 +209,18 @@ class ComposerLayoutPresenterTest {
         assertEquals("/", ComposerLayoutPresenter.shortenWorkspacePath("/"))
     }
 
-    @Test fun yoloChipAlwaysVisibleWithRubyToneWhenOn() {
-        val on = ComposerLayoutPresenter.yoloChip(enabled = true)
+    @Test fun autonomyChipAlwaysVisibleWithRubyToneWhenOn() {
+        val on = ComposerLayoutPresenter.autonomyChip(enabled = true)
         assertTrue(on.visible)
-        assertEquals("YOLO", on.label)
+        assertEquals("Автономность", on.label)
         assertEquals(ComposerChipTone.RUBY, on.tone)
         assertFalse(on.showChevron)
-        assertTrue(on.contentDescription.contains("включён"))
+        assertTrue(on.contentDescription.contains("включена"))
 
-        val off = ComposerLayoutPresenter.yoloChip(enabled = false)
+        val off = ComposerLayoutPresenter.autonomyChip(enabled = false)
         assertTrue(off.visible)
         assertEquals(ComposerChipTone.NEUTRAL, off.tone)
-        assertTrue(off.contentDescription.contains("выключен"))
+        assertTrue(off.contentDescription.contains("выключена"))
     }
 
     @Test fun contextChipHiddenWithoutMeasurement() {
@@ -251,7 +251,7 @@ class ComposerLayoutPresenterTest {
                 modelLabel = "Gemini 3.8 Flash",
                 reasoningLabel = "High",
                 workspacePath = "/root/workspace",
-                yoloEnabled = true,
+                autonomyEnabled = true,
                 contextPercent = 12,
             ),
         )
@@ -260,16 +260,16 @@ class ComposerLayoutPresenterTest {
                 ComposerChipId.MODEL,
                 ComposerChipId.REASONING,
                 ComposerChipId.WORKSPACE,
-                ComposerChipId.YOLO,
+                ComposerChipId.AUTONOMY,
                 ComposerChipId.CONTEXT,
             ),
             chipIds(state),
         )
     }
 
-    @Test fun emptySnapshotLeavesOnlyYoloChip() {
+    @Test fun emptySnapshotLeavesOnlyAutonomyChip() {
         val state = ComposerLayoutPresenter.resolveWith(null, ComposerSnapshot())
-        assertEquals(listOf(ComposerChipId.YOLO), chipIds(state))
+        assertEquals(listOf(ComposerChipId.AUTONOMY), chipIds(state))
     }
 
     // --- Полная резолюция состояния ----------------------------------------------------------------

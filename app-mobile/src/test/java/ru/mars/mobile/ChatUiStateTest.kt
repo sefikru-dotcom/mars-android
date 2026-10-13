@@ -92,23 +92,23 @@ class ChatUiStateTest {
         state.bindSession("s1", "t", emptyList()); assertNull(state.contextUsage)
     }
 
-    @Test fun yoloEnabledTracksServerStateAndResetsOnSessionChange() {
+    @Test fun autonomyEnabledTracksServerStateAndResetsOnSessionChange() {
         val state = ChatUiState()
-        assertFalse(state.yoloEnabled)
+        assertFalse(state.autonomyEnabled)
 
-        state.setYoloEnabled(true)
-        assertTrue(state.yoloEnabled)
-        state.setYoloEnabled(false)
-        assertFalse(state.yoloEnabled)
+        state.setAutonomyEnabled(true)
+        assertTrue(state.autonomyEnabled)
+        state.setAutonomyEnabled(false)
+        assertFalse(state.autonomyEnabled)
 
         // WebUI parity: the flag is session-scoped and cleared on every session switch/new chat.
-        state.setYoloEnabled(true)
+        state.setAutonomyEnabled(true)
         state.startNewSession()
-        assertFalse(state.yoloEnabled)
+        assertFalse(state.autonomyEnabled)
 
-        state.setYoloEnabled(true)
+        state.setAutonomyEnabled(true)
         state.bindSession("s2", "t", emptyList())
-        assertFalse(state.yoloEnabled)
+        assertFalse(state.autonomyEnabled)
     }
 
     @Test fun steerLeftoverRecordsThoughtTraceOnRunningAssistantMessage() {

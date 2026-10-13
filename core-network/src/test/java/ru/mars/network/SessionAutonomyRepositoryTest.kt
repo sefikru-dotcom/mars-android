@@ -6,19 +6,20 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
-import ru.mars.network.repository.SessionYoloRepository
-import ru.mars.network.repository.YoloLookup
-import ru.mars.network.repository.YoloToggleResult
+import ru.mars.network.repository.AutonomyLookup
+import ru.mars.network.repository.AutonomyToggleResult
+import ru.mars.network.repository.SessionAutonomyRepository
 
 /**
- * Request-level contract tests for the session YOLO endpoints (`GET/POST /api/session/yolo`),
- * replayed with MockWebServer against the bodies hermes-webui `api/routes.py` returns
- * (`{"yolo_enabled": bool}` / `{"ok": true, "yolo_enabled": bool}` / error payload with the
- * settled flag). Mirrors the web client behaviour in static/commands.js `cmdYolo`.
+ * Request-level contract tests for the session-autonomy endpoints, replayed with MockWebServer
+ * against the bodies hermes-webui `api/routes.py` returns. The legacy wire names (path,
+ * `yolo_enabled` field) are asserted VERBATIM here on purpose: they pin the server contract that
+ * the isolated [ru.mars.network.repository.SessionModeWire] adapter maps to the neutral domain
+ * language. Mirrors the web client behaviour (static/commands.js session-mode command).
  */
-class SessionYoloRepositoryTest {
+class SessionAutonomyRepositoryTest {
 
-    private val repository = SessionYoloRepository()
+    private val repository = SessionAutonomyRepository()
 
     private fun credential() = ConsumedDeviceCredential(
         accessToken = "native-token", tokenType = "Bearer", deviceId = "device-1",
@@ -33,7 +34,7 @@ class SessionYoloRepositoryTest {
             server.enqueue(MockResponse().setBody("""{"yolo_enabled":true}"""))
             val result = repository.fetchState(server.url("/").toString(), credential(), "sess-1")
 
-            assertEquals(YoloLookup.State(true), result)
+            assertEquals(AutonomyLookup.State(true), result)
             val request = server.takeRequest()
             assertEquals("GET", request.method)
             assertEquals("/api/session/yolo?session_id=sess-1", request.path)
@@ -46,7 +47,7 @@ class SessionYoloRepositoryTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"yolo_enabled":false}"""))
             assertEquals(
-                YoloLookup.State(false),
+                AutonomyLookup.State(false),
                 repository.fetchState(server.url("/").toString(), credential(), "sess-1"),
             )
         }
@@ -57,7 +58,7 @@ class SessionYoloRepositoryTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"Missing session_id"}"""))
             val result = repository.fetchState(server.url("/").toString(), credential(), "sess-1")
-            assertEquals(YoloLookup.Failed("Missing session_id"), result)
+            assertEquals(AutonomyLookup.Failed("Missing session_id"), result)
         }
     }
 
@@ -67,14 +68,14 @@ class SessionYoloRepositoryTest {
             val url = server.url("/").toString()
             server.shutdown()
             val result = repository.fetchState(url, credential(), "sess-1")
-            assertTrue(result is YoloLookup.Failed)
+            assertTrue(result is AutonomyLookup.Failed)
         }
     }
 
     @Test
     fun blankSessionIdIsRejectedLocallyWithoutRequest() {
         MockWebServer().use { server ->
-            assertTrue(repository.fetchState(server.url("/").toString(), credential(), " ") is YoloLookup.Failed)
+            assertTrue(repository.fetchState(server.url("/").toString(), credential(), " ") is AutonomyLookup.Failed)
             assertEquals(0, server.requestCount)
         }
     }
@@ -87,7 +88,7 @@ class SessionYoloRepositoryTest {
             server.enqueue(MockResponse().setBody("""{"ok":true,"yolo_enabled":true}"""))
             val result = repository.setEnabled(server.url("/").toString(), credential(), "sess-1", true)
 
-            assertEquals(YoloToggleResult.Applied(true), result)
+            assertEquals(AutonomyToggleResult.Applied(true), result)
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/api/session/yolo", request.path)
@@ -104,7 +105,7 @@ class SessionYoloRepositoryTest {
             server.enqueue(MockResponse().setBody("""{"ok":true,"yolo_enabled":false}"""))
             val result = repository.setEnabled(server.url("/").toString(), credential(), "sess-1", false)
 
-            assertEquals(YoloToggleResult.Applied(false), result)
+            assertEquals(AutonomyToggleResult.Applied(false), result)
             assertTrue(server.takeRequest().body.readUtf8().contains("\"enabled\":false"))
         }
     }
@@ -112,7 +113,7 @@ class SessionYoloRepositoryTest {
     @Test
     fun failedEnableKeepsSettledFlagFromErrorBody() {
         // Web parity: the server may fail the pending relay (409 gateway_run_unavailable) while
-        // still committing the YOLO flag — the settled state must survive as knownState.
+        // still committing the autonomy flag — the settled state must survive as knownState.
         MockWebServer().use { server ->
             server.enqueue(
                 MockResponse().setResponseCode(409)
@@ -121,7 +122,7 @@ class SessionYoloRepositoryTest {
             val result = repository.setEnabled(server.url("/").toString(), credential(), "sess-1", true)
 
             assertEquals(
-                YoloToggleResult.Failed("gateway relay unavailable", knownState = true),
+                AutonomyToggleResult.Failed("gateway relay unavailable", knownState = true),
                 result,
             )
         }
@@ -133,7 +134,7 @@ class SessionYoloRepositoryTest {
             server.enqueue(MockResponse().setBody("""{"ok":false,"error":"YOLO transition already running"}"""))
             val result = repository.setEnabled(server.url("/").toString(), credential(), "sess-1", true)
 
-            assertEquals(YoloToggleResult.Failed("YOLO transition already running", knownState = null), result)
+            assertEquals(AutonomyToggleResult.Failed("YOLO transition already running", knownState = null), result)
         }
     }
 
@@ -143,7 +144,7 @@ class SessionYoloRepositoryTest {
             val url = server.url("/").toString()
             server.shutdown()
             val result = repository.setEnabled(url, credential(), "sess-1", true)
-            assertTrue(result is YoloToggleResult.Failed && result.knownState == null)
+            assertTrue(result is AutonomyToggleResult.Failed && result.knownState == null)
         }
     }
 

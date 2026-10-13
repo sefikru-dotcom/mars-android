@@ -29,9 +29,10 @@ sealed interface InteractiveRespondResult {
      * HTTP 200 with `{"ok": true, ...}`.
      * @param staleCleared approval only: the answered `approval_id` was already gone and the server
      *   cleared a stale head instead (`stale_cleared: true`) — the client should re-fetch pending.
-     * @param yoloEnabled present when the response toggled YOLO mode (`yolo_enabled`).
+     * @param autonomyEnabled present when the response toggled session-wide autonomy
+     *   (settled server flag; wire mapping in [SessionModeWire]).
      */
-    data class Accepted(val staleCleared: Boolean = false, val yoloEnabled: Boolean? = null) : InteractiveRespondResult
+    data class Accepted(val staleCleared: Boolean = false, val autonomyEnabled: Boolean? = null) : InteractiveRespondResult
 
     /**
      * Clarify: HTTP 409 with `{"ok": false, "stale": true}` — the prompt expired or was already
@@ -44,15 +45,16 @@ sealed interface InteractiveRespondResult {
      * (`code` carries e.g. `gateway_run_unavailable`), 4xx validation errors, or local pre-flight
      * validation ([httpStatus] = 0, no request was sent).
      *
-     * @param yoloEnabled present when the failed response still toggled YOLO mode (web parity:
-     *   respondApproval projects `yolo_enabled` from error payloads too — the server commits the
-     *   flag even when the individual approval relay fails, e.g. `gateway_run_unavailable`).
+     * @param autonomyEnabled present when the failed response still toggled session-wide
+     *   autonomy (web parity: the settled flag is projected from error payloads too — the server
+     *   commits it even when the individual approval relay fails, e.g. `gateway_run_unavailable`;
+     *   wire mapping in [SessionModeWire]).
      */
     data class Rejected(
         val message: String,
         val httpStatus: Int,
         val code: String? = null,
-        val yoloEnabled: Boolean? = null,
+        val autonomyEnabled: Boolean? = null,
     ) : InteractiveRespondResult
 
     /** Transport failure; no HTTP response was observed. */
@@ -97,7 +99,8 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClien
      * Answers a pending approval. Body contract (messages.js respondApproval):
      * `{"session_id", "choice", "approval_id"}` plus `run_id`/`mirror_token` ONLY when both are
      * present (a partial gateway triple is rejected by the server with 409
-     * `gateway_run_unavailable`) and `yolo` only when true.
+     * `gateway_run_unavailable`) and the autonomy-grant flag only when true (wire name in
+     * [SessionModeWire]).
      */
     fun respondApproval(
         baseUrl: String,
@@ -105,7 +108,7 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClien
         sessionId: String,
         payload: ApprovalPayload,
         choice: ApprovalChoice,
-        yolo: Boolean = false,
+        grantAutonomy: Boolean = false,
     ): InteractiveRespondResult {
         if (sessionId.isBlank()) return localRejection("session_id is required")
         val body = buildString {
@@ -118,7 +121,7 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClien
                 append(",\"run_id\":").append(jsonString(runId))
                 append(",\"mirror_token\":").append(jsonString(mirrorToken))
             }
-            if (yolo) append(",\"yolo\":true")
+            if (grantAutonomy) append(SessionModeWire.grantSuffix())
             append('}')
         }
         val request = jsonPost(baseUrl, "api/approval/respond", body, credential)
@@ -229,7 +232,7 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClien
         if (code in 200..299 && ok) {
             return InteractiveRespondResult.Accepted(
                 staleCleared = obj?.get("stale_cleared") == true,
-                yoloEnabled = obj?.get("yolo_enabled") as? Boolean,
+                autonomyEnabled = SessionModeWire.readEnabledFlag(obj),
             )
         }
         // Clarify 409 always carries stale:true; treat a bare 409 the same (frontend parity:
@@ -249,7 +252,7 @@ class InteractiveRequestsRepository(private val client: OkHttpClient = HttpClien
             message = message,
             httpStatus = code,
             code = obj?.get("code")?.toString()?.takeIf { it.isNotBlank() },
-            yoloEnabled = obj?.get("yolo_enabled") as? Boolean,
+            autonomyEnabled = SessionModeWire.readEnabledFlag(obj),
         )
     }
 
