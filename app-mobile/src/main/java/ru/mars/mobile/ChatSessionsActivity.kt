@@ -238,19 +238,31 @@ class ChatSessionsActivity : ComponentActivity() {
                 isClickable = true
                 isFocusable = true
             }
-            // Клик по карточке родителя с детьми переключает раскрытие ветки
-            // (дочерние сессии — внутри родителя, не отдельный уровень);
-            // клик по leaf открывает диалог.
-            val onRowClick: () -> Unit = {
+            // Карточка и название всегда открывают сам диалог. Раскрытие воркеров
+            // выполняется отдельной кнопкой, чтобы родительский чат нельзя было
+            // случайно сделать недоступным.
+            val openRow: () -> Unit = { openSession(session.id) }
+            val toggleChildren: () -> Unit = {
                 if (node.hasChildren) {
                     if (!expandedParents.remove(session.id)) expandedParents.add(session.id)
                     renderSessionList()
-                } else {
-                    openSession(session.id)
                 }
             }
-            card.setOnClickListener { onRowClick() }
+            card.setOnClickListener { openRow() }
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            if (node.hasChildren) {
+                row.addView(MarsTheme.circleIconButton(
+                    this,
+                    if (expandedParents.contains(session.id)) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                    if (expandedParents.contains(session.id)) "Свернуть воркеры" else "Развернуть воркеры",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 32,
+                    strokeColor = 0,
+                ).apply {
+                    setOnClickListener { toggleChildren() }
+                }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(4) })
+            }
             row.addView(android.widget.Button(this).apply {
                 text = session.title ?: "Новый диалог"
                 textSize = 14f
@@ -259,7 +271,7 @@ class ChatSessionsActivity : ComponentActivity() {
                 isSingleLine = true
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                setOnClickListener { onRowClick() }
+                setOnClickListener { openRow() }
             }, LinearLayout.LayoutParams(0, -2, 1f))
 
             // Rename/delete only for manageable rows; the server `read_only`

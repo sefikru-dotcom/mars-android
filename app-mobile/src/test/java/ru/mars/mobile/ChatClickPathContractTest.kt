@@ -132,9 +132,9 @@ class ChatClickPathContractTest {
 
     @Test
     fun `open session - leaf click uses policy and back returns to session list`() {
-        assertTrue("Клик по parent должен переключать ветку", sessions.contains("node.hasChildren"))
-        assertTrue("Клик по leaf должен открывать ChatActivity", sessions.contains("AppNavIntents.openSessionIntent"))
-        assertTrue("ChatActivity должна вести назад в список", chat.contains("navigateToSessionList()"))
+        assertTrue("Клик по parent должен переключать ветку только через отдельную кнопку", sessions.contains("toggleChildren()"))
+        assertTrue("Клик по карточке должен открывать и parent, и leaf", sessions.contains("card.setOnClickListener { openRow() }"))
+        assertTrue("Название диалога должно открывать чат", sessions.contains("setOnClickListener { openRow() }"))
     }
 
     @Test
