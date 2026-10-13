@@ -58,7 +58,48 @@ object MarkdownFormatter {
     private val ESCAPED_PIPE_SPLIT_REGEX = Regex("(?<!\\\\)\\|")
     private val TABLE_SEPARATOR_CELL_REGEX = Regex("^:?-+:?$")
 
+    /** Ёмкость LRU-кэша результатов разбора: последние ~64 сообщения/состояния стрима. */
+    internal const val PARSE_CACHE_MAX_ENTRIES = 64
+
+    /**
+     * Тексты длиннее этого не кэшируются: промежуточные состояния очень длинного
+     * стрима иначе заняли бы весь кэш и удерживали бы мегабайты строк в памяти.
+     */
+    internal const val PARSE_CACHE_MAX_LENGTH = 64_000
+
+    // Кэш thread-safe (ThreadSafeLru): парсинг может вызываться и с UI-потока,
+    // и из фонового потока. Ключ — сам текст: точное совпадение без коллизий
+    // fingerprint-хэшей; строки сообщений и так живут в ChatUiState, поэтому
+    // 64 записи не создают заметного давления на память.
+    private val PARSE_CACHE = ThreadSafeLru<String, List<ContentBlock>>(PARSE_CACHE_MAX_ENTRIES)
+
+    /** Тестовые хуки (internal, обратно совместимое добавление). */
+    internal fun parseCacheSize(): Int = PARSE_CACHE.size()
+
+    internal fun clearParseCache() = PARSE_CACHE.clear()
+
+    /**
+     * Разбирает сообщение на блоки. Результат кэшируется по точному тексту:
+     * при стриме каждый кадр перерисовывает ВСЕ видимые сообщения, но меняется
+     * только последнее — остальные получают готовый разбор из кэша вместо
+     * ~16 проходов регексов по всему тексту. Возвращаемый список read-only
+     * и разделяется между вызовами — вызывающая сторона его не мутирует.
+     */
     fun parseBlocks(raw: String): List<ContentBlock> {
+        if (raw.isEmpty()) return emptyList()
+        PARSE_CACHE.get(raw)?.let { return it }
+        // Fast path: в тексте нет ни одного маркера markdown-синтаксиса —
+        // полный регекс-проход (code fences, таблицы) заведомо ничего не найдёт.
+        val parsed = if (hasMarkdownMarkers(raw)) parseBlocksUncached(raw) else plainTextBlocks(raw)
+        if (raw.length <= PARSE_CACHE_MAX_LENGTH) PARSE_CACHE.put(raw, parsed)
+        return parsed
+    }
+
+    /**
+     * Полный разбор без кэша и fast path. Сохранён как internal: на нём
+     * тесты сверяют эквивалентность кэша и быстрой дорожки (behavioral parity).
+     */
+    internal fun parseBlocksUncached(raw: String): List<ContentBlock> {
         val blocks = mutableListOf<ContentBlock>()
         var lastIndex = 0
         for (match in CODE_BLOCK_REGEX.findAll(raw)) {
@@ -85,6 +126,57 @@ object MarkdownFormatter {
     }
 
     /**
+     * Текст без markdown-маркеров: ровно один [ContentBlock.Text] — тот же
+     * результат, что дал бы полный путь (code fence и таблица требуют
+     * символов, которых здесь нет по определению [hasMarkdownMarkers]).
+     */
+    private fun plainTextBlocks(raw: String): List<ContentBlock> =
+        listOf(ContentBlock.Text(parseLineList(raw.split("\n"))))
+
+    /**
+     * Однократный скан текста: есть ли хоть один символ, с которого может
+     * начинаться markdown-синтаксис. Любой блок/строка требует один из:
+     * - в любой позиции: `` ` `` (код), `*` (bold/italic/divider), `[` (ссылки
+     *   и картинки — `![` тоже содержит `[`), `|` (таблицы), `~` (strikethrough);
+     * - в начале строки (после переводов строк и пробельных символов, как в
+     *   `trim()`): `#` `>` `-` `+` `_` (заголовки, цитаты, буллиты, divider)
+     *   или ASCII-цифра (`1.` — нумерованный список; `\d` в Java-регексе это
+     *   только `0-9`).
+     * Всё остальное разбор игнорирует, поэтому отсутствие маркеров гарантирует
+     * идентичность «быстрого» результата полному. Стоимость — один проход
+     * с посимвольными сравнениями вместо ~16 findAll/substring по всему тексту.
+     */
+    internal fun hasMarkdownMarkers(raw: String): Boolean {
+        var atLineStart = true
+        for (c in raw) {
+            when {
+                c == '`' || c == '*' || c == '[' || c == '|' || c == '~' -> return true
+                c == '#' || c == '>' || c == '-' || c == '+' || c == '_' -> {
+                    if (atLineStart) return true
+                    atLineStart = false
+                }
+                c == '\n' -> atLineStart = true
+                // Пробельные символы (включая \r, \t, unicode-пробелы) не сбрасывают
+                // «начало строки»: trim() в parseLines убирает их так же.
+                c.isWhitespace() -> Unit
+                else -> {
+                    if (atLineStart && c in '0'..'9') return true
+                    atLineStart = false
+                }
+            }
+        }
+        return false
+    }
+
+    /** Маркеры только inline-синтаксиса: код, bold/italic, ссылки/картинки, strike. */
+    internal fun hasInlineMarkers(raw: String): Boolean {
+        for (c in raw) {
+            if (c == '`' || c == '*' || c == '[' || c == '~') return true
+        }
+        return false
+    }
+
+    /**
      * Splits a non-code text segment into [ContentBlock.Text] and [ContentBlock.Table] blocks.
      * A table starts at a pipe row immediately followed by a `|---|---|` separator row;
      * consecutive pipe rows after the separator become data rows. Cells are trimmed
@@ -97,7 +189,9 @@ object MarkdownFormatter {
         val pending = mutableListOf<String>()
         fun flushPending() {
             if (pending.isNotEmpty()) {
-                blocks.add(ContentBlock.Text(parseLines(pending.joinToString("\n"))))
+                // Строки передаются списком напрямую: joinToString("\n") + повторный
+                // split("\n") внутри parseLines были лишней парой проходов/аллокаций.
+                blocks.add(ContentBlock.Text(parseLineList(pending)))
                 pending.clear()
             }
         }
@@ -147,34 +241,50 @@ object MarkdownFormatter {
         return trimmed.split(ESCAPED_PIPE_SPLIT_REGEX).map { it.trim().replace("\\|", "|") }
     }
 
-    fun parseLines(raw: String): List<RichLine> {
-        return raw.split("\n").map { line ->
+    fun parseLines(raw: String): List<RichLine> = parseLineList(raw.split("\n"))
+
+    private fun parseLineList(lines: List<String>): List<RichLine> {
+        return lines.map { line ->
             val trimmed = line.trim()
             when {
                 trimmed.isEmpty() -> RichLine.Normal(emptyList())
+                // Fast path: в строке нет маркеров — ни один из строчных
+                // регексов не сматчит, сразу обычный текст.
+                !hasMarkdownMarkers(trimmed) -> RichLine.Normal(parseInline(line))
                 DIVIDER_REGEX.matches(trimmed) -> RichLine.Divider
-                HEADER_REGEX.matches(trimmed) -> {
-                    val m = HEADER_REGEX.find(trimmed)!!
+                // Один проход на структуру вместо matches() + find() + find()!!:
+                // fullMatch эквивалентен matches(), но возвращает уже найденный
+                // результат с группами.
+                else -> fullMatch(HEADER_REGEX, trimmed)?.let { m ->
                     RichLine.Header(m.groupValues[1].length, parseInline(m.groupValues[2]))
-                }
-                QUOTE_REGEX.matches(trimmed) -> RichLine.Quote(parseInline(QUOTE_REGEX.find(trimmed)!!.groupValues[1]))
-                TASK_ITEM_REGEX.matches(trimmed) -> {
-                    val m = TASK_ITEM_REGEX.find(trimmed)!!
+                } ?: fullMatch(QUOTE_REGEX, trimmed)?.let { m ->
+                    RichLine.Quote(parseInline(m.groupValues[1]))
+                } ?: fullMatch(TASK_ITEM_REGEX, trimmed)?.let { m ->
                     val isChecked = m.groupValues[1].equals("x", ignoreCase = true)
                     RichLine.TaskItem(isChecked, parseInline(m.groupValues[2]))
-                }
-                BULLET_REGEX.matches(trimmed) -> RichLine.Bullet(parseInline(BULLET_REGEX.find(trimmed)!!.groupValues[1]))
-                NUMBERED_REGEX.matches(trimmed) -> {
-                    val m = NUMBERED_REGEX.find(trimmed)!!
+                } ?: fullMatch(BULLET_REGEX, trimmed)?.let { m ->
+                    RichLine.Bullet(parseInline(m.groupValues[1]))
+                } ?: fullMatch(NUMBERED_REGEX, trimmed)?.let { m ->
                     RichLine.Numbered("${m.groupValues[1]}.", parseInline(m.groupValues[2]))
-                }
-                else -> RichLine.Normal(parseInline(line))
+                } ?: RichLine.Normal(parseInline(line))
             }
         }
     }
 
+    /**
+     * Точный аналог [Regex.matches] одним проходом: первый [Regex.find],
+     * покрывающий всю строку. (Чистый `find` без проверки покрытия был бы
+     * не эквивалентен: `$` в Java матчится и перед завершающим терминатором
+     * строки, например \u0085, который `trim()` не убирает.)
+     */
+    private fun fullMatch(regex: Regex, s: String): MatchResult? =
+        regex.find(s)?.takeIf { it.range.first == 0 && it.range.last == s.lastIndex }
+
     fun parseInline(raw: String): List<InlineSpan> {
         if (raw.isEmpty()) return emptyList()
+        // Fast path: нет inline-маркеров — ни один из 7 inline-регексов
+        // (картинки, ссылки, код, strike, bold, italic) не сматчит.
+        if (!hasInlineMarkers(raw)) return listOf(InlineSpan.Normal(raw))
         val spans = mutableListOf<InlineSpan>()
 
         // 0. Images first (![alt](url)) so the `!` is consumed with the image and the
@@ -214,6 +324,9 @@ object MarkdownFormatter {
 
     private fun parseInlineFormatting(raw: String): List<InlineSpan> {
         if (raw.isEmpty()) return emptyList()
+        // Fast path: сегменты между ссылками/картинками часто «голые» —
+        // без маркеров 4 findAll-прохода гарантированно не найдут токенов.
+        if (!hasInlineMarkers(raw)) return listOf(InlineSpan.Normal(raw))
         val result = mutableListOf<InlineSpan>()
 
         data class Token(val range: IntRange, val span: InlineSpan)

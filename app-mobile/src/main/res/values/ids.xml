@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Ключ второго tag-слота ImageView для ImageLoader.DetachWatcher:
+         tag(Object) уже занят URL (защита от stale async result), поэтому
+         watcher живёт в именованном слоте setTag(id, ...). -->
+    <item name="mars_image_load_watcher" type="id" />
+</resources>
