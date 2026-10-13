@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.inputmethod.EditorInfo
@@ -245,6 +246,31 @@ class TvMusicActivity : AppCompatActivity() {
         // трекам без залипания. Открываем её только явным нажатием (DPAD_CENTER/клик).
         searchInput.setShowSoftInputOnFocus(false)
         searchInput.setOnClickListener { showIme() }
+        // Android EditText ПОТРЕБЛЯЕТ стрелки D-pad сам (UP/DOWN — переход по строкам,
+        // LEFT/RIGHT — курсор), поэтому nextFocusDown поля не срабатывает никогда:
+        // DOWN залипал в поиске и до списка треков пультом было не добраться. Явный
+        // перехват: DOWN — на цель из rewireSearchDownFocus() (первый трек или
+        // «Повторить»), UP — обратно в шапку. При открытой клавиатуре не вмешиваемся:
+        // стрелки принадлежат IME.
+        searchInput.setOnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) {
+                false
+            } else when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (imeVisible) {
+                        false
+                    } else {
+                        val target = searchInput.nextFocusDownId
+                        val view = if (target != View.NO_ID) findViewById<View>(target) else null
+                        view?.requestFocus() ?: false
+                    }
+                }
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (imeVisible) false else backButton.requestFocus()
+                }
+                else -> false
+            }
+        }
         // BACK: сначала закрываем экранную клавиатуру (фокус остаётся на searchInput),
         // и только без IME — штатно закрываем экран. Решение — чистая
         // [TvMusicFocusPolicy.backAction], видимость IME считает [globalLayoutListener].
