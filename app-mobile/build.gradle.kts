@@ -42,8 +42,8 @@ android {
         applicationId = "ru.mars.mobile"
         minSdk = 28
         targetSdk = 34
-        versionCode = 26
-        versionName = "1.5.0"
+        versionCode = 27
+        versionName = "1.5.1"
     }
 
     signingConfigs {
