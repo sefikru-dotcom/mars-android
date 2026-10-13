@@ -221,6 +221,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drawerFilter: EditText
     private var drawerFilterQuery: String = ""
 
+    /** Id раскрытых родительских сессий дерева шторки (SessionTreePolicy). */
+    private val expandedSessionParents: MutableSet<String> = mutableSetOf()
+
     // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
     // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
     // хост лишь рисует панель, подсвечивает карточку найденного сообщения и скроллит к ней.
@@ -2971,19 +2974,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun renderSessionList() {
         if (!::drawerSessionList.isInitialized) return
         drawerSessionList.removeAllViews()
-        val rows = uiState.drawerSessions(false, currentSessionId)
-        val filtered = if (drawerFilterQuery.isBlank()) rows else {
-            val byId = rows.associateBy { it.id }
-            val matches = rows.filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
-            val included = mutableSetOf<String>()
-            matches.forEach { match ->
-                var row: SessionItem? = match
-                while (row != null && included.add(row.id)) {
-                    row = byId[row.parentSessionId]
-                }
-            }
-            rows.filter { it.id in included }
-        }
+        // Дерево сессий: SessionTreePolicy фильтрует поиск (filterForSearch внутри
+        // tree), группирует дочерние сессии под родителями, раскрывает ветку
+        // найденного/текущего ребёнка; видимы только строки раскрытых родителей.
+        val tree = SessionTreePolicy.tree(
+            sessions = uiState.drawerSessions(showSubagents = true),
+            query = drawerFilterQuery,
+            expandedParents = expandedSessionParents,
+            currentSessionId = currentSessionId,
+        )
+        val filtered = SessionTreePolicy.visibleRows(tree)
         if (filtered.isEmpty()) {
             drawerSessionList.addView(TextView(this).apply {
                 text = "Нет подходящих сессий"
@@ -2992,8 +2992,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             })
             return
         }
-        filtered.forEach { session ->
-            val isCurrent = session.id == currentSessionId
+        filtered.forEach { node ->
+            val session = node.session
+            val isCurrent = node.isCurrent
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 background = if (isCurrent) {
@@ -3001,8 +3002,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 } else {
                     MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 12, strokeColor = MarsTheme.BORDER_SUBTLE)
                 }
-                setPadding(dp(if (session.isSubagent && session.parentSessionId != null) 28 else 12), dp(8), dp(8), dp(8))
+                setPadding(dp(12 + node.depth * 16), dp(8), dp(8), dp(8))
             }
+            // Клик по карточке родителя с детьми переключает раскрытие ветки;
+            // клик по leaf открывает сессию.
+            val onRowClick: () -> Unit = {
+                if (node.hasChildren) {
+                    if (!expandedSessionParents.remove(session.id)) expandedSessionParents.add(session.id)
+                    renderSessionList()
+                } else {
+                    drawer.closeDrawer(GravityCompat.START)
+                    loadSession(session)
+                }
+            }
+            card.setOnClickListener { onRowClick() }
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             row.addView(Button(this).apply {
                 text = session.title ?: "Новый диалог"
@@ -3012,10 +3025,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 isSingleLine = true
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                setOnClickListener {
-                    drawer.closeDrawer(GravityCompat.START)
-                    loadSession(session)
-                }
+                setOnClickListener { onRowClick() }
             }, LinearLayout.LayoutParams(0, -2, 1f))
 
             // Rename/delete only for manageable rows; the server `read_only`
