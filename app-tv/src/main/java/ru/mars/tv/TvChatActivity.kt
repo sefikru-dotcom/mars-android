@@ -2,7 +2,9 @@ package ru.mars.tv
 
 import android.content.Intent
 import android.os.Bundle
+import android.text.Editable
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -33,6 +35,13 @@ import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.MidTurnRecoveryCoordinator
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.StreamResumeTracker
+import ru.mars.tv.chat.TvActivityDisplayMode
+import ru.mars.tv.chat.TvActivityDisplayPolicy
+import ru.mars.tv.chat.TvActivityModePrefs
+import ru.mars.tv.chat.TvActivityModeSelection
+import ru.mars.tv.chat.TvMarkdownBlocks
+import ru.mars.tv.chat.TvMarkdownRenderer
+import ru.mars.tv.chat.TvSteerPolicy
 
 /**
  * TV chat screen: transcript, composer and the live turn status strip.
@@ -82,6 +91,16 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var sessionsStatus: TextView
     private lateinit var sessionList: LinearLayout
     private lateinit var closeSessions: Button
+    private lateinit var displayModeButton: Button
+
+    /** Режим показа хода (паритет с мобильным ActivityDisplayMode): выбор + персистентность. */
+    private lateinit var activityMode: TvActivityModeSelection
+
+    /** Последнее событие живого хода — вход политики статус-полосы («Тишина» глушит детали). */
+    private var lastLiveEvent: ChatEvent? = null
+
+    /** Явный статус (исход steer, смена режима); живёт до следующего события/отправки. */
+    private var explicitStatus: String? = null
 
     /** «К последнему» jump control: visible only while the reader is away from the live edge. */
     private lateinit var jumpToBottom: Button
@@ -204,6 +223,12 @@ class TvChatActivity : AppCompatActivity() {
         sessionsStatus = findViewById(R.id.sessionsStatus)
         sessionList = findViewById(R.id.sessionList)
         closeSessions = findViewById(R.id.closeSessionsButton)
+        displayModeButton = findViewById(R.id.displayModeButton)
+        // Режим показа хода: восстановленный из SharedPreferences выбор + переключение по клику.
+        activityMode = TvActivityModeSelection(
+            TvActivityModePrefs(getSharedPreferences(TvActivityModePrefs.PREFS_FILE, MODE_PRIVATE))
+        )
+        renderDisplayModeButton()
         jumpToBottom = findViewById(R.id.jumpToBottomButton)
         jumpThresholdPx = dp(64)
         jumpToBottom.setOnClickListener {
@@ -227,7 +252,7 @@ class TvChatActivity : AppCompatActivity() {
         newChat.setOnClickListener { startNewChat() }
         sessionsButton.setOnClickListener { openSessionBrowser() }
         closeSessions.setOnClickListener { closeSessionBrowser() }
-        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, miniPlayerToggle, jumpToBottom)
+        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, displayModeButton, miniPlayerToggle, jumpToBottom)
         miniPlayerToggle.setOnClickListener {
             TvMusicPlayer.togglePlayPause()
             renderMiniPlayer()
@@ -249,9 +274,20 @@ class TvChatActivity : AppCompatActivity() {
                 )
             )
         }
-        // While a turn is live the same button becomes «Остановить» (mobile parity).
-        send.setOnClickListener { if (sessionFlow.canStop) stopCurrentTurn() else sendMessage() }
-        input.setOnEditorActionListener { _, _, _ -> sendMessage(); true }
+        // Live turn: one button, two roles (mobile parity) — «Уточнить» (steer) with text
+        // in the composer, «Остановить» with an empty one. Idle turn: «Отправить».
+        displayModeButton.setOnClickListener { onDisplayModeClicked() }
+        send.setOnClickListener { dispatchSend() }
+        input.setOnEditorActionListener { _, _, _ -> dispatchSend(); true }
+        // While a turn is live the primary button flips between «Остановить» and «Уточнить»
+        // as the composer gains/loses text — the label must follow every keystroke.
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                if (sessionFlow.canStop) renderSendControl()
+            }
+        })
         wireInteractive()
         buildQuickChips()
         renderSendControl()
@@ -330,7 +366,7 @@ class TvChatActivity : AppCompatActivity() {
         val credential = store.read() ?: return false
         input.text.clear()
         append("Вы", text, isUser = true)
-        val answer = append("Марс", "", isUser = false)
+        val answer = appendLivePlaceholder()
         // An outgoing message re-pins: the user always sees their own turn and the
         // answer that streams after it, whatever they read before.
         pinAndScrollToBottom()
@@ -347,6 +383,8 @@ class TvChatActivity : AppCompatActivity() {
         resumeTracker.reset()
         recoveryCoordinator.reset()
         stopping = false
+        explicitStatus = null
+        lastLiveEvent = null
         sessionFlow.beginTurn()
         renderSendControl()
         renderStatus()
@@ -439,9 +477,17 @@ class TvChatActivity : AppCompatActivity() {
     private fun handleStreamEvent(event: ChatEvent, generation: Int) {
         if (generation != streamGeneration) return
         sessionFlow.onEvent(event)
+        // Событие хода снимает явный статус (steer/смена режима) и питает политику «Тишины».
+        explicitStatus = null
+        lastLiveEvent = event
         // Interactive gates are handled explicitly — they must never fall into
         // a silent `else -> Unit` (P0: the turn would hang with no way to answer).
         if (::interactive.isInitialized) interactive.onEvent(event)
+        // Режим «Всё»: мысли и инструменты дополнительно дублируются строками в ленту.
+        TvActivityDisplayPolicy.transcriptLine(activityMode.current, event)?.let { line ->
+            appendActivityLine(line)
+            scrollDown()
+        }
         when (event) {
             // Terminal lock lives in the accumulator (first Done/Error wins):
             // a late chunk after Error no longer clobbers «Ошибка: …», a late
@@ -456,9 +502,12 @@ class TvChatActivity : AppCompatActivity() {
                 renderSendControl() // terminal event disarms «Остановить»
             }
             is ChatEvent.Done -> {
-                liveAccumulator?.onDone()
+                if (liveAccumulator?.onDone() == true) finalizeLiveAnswerRich()
                 renderSendControl()
             }
+            // Уточнение, которое агент не успел прочитать: текст возвращается в поле
+            // ввода (мобильный restoreSteerText паритет) — правка не должна теряться.
+            is ChatEvent.SteerLeftover -> restoreSteerText(event.text)
             is ChatEvent.ApprovalRequired -> scrollDown() // card rendered by the surface
             is ChatEvent.ClarifyRequired -> scrollDown()
             // A reattached/recovered turn arms «Остановить» only when its StreamStarted lands.
@@ -569,7 +618,7 @@ class TvChatActivity : AppCompatActivity() {
      */
     private fun beginReattachedTurn() {
         if (liveAccumulator?.state != TvAnswerAccumulator.State.STREAMING || liveAnswer == null) {
-            val answer = append("Марс", "", isUser = false)
+            val answer = appendLivePlaceholder()
             liveAnswer = answer
             liveAccumulator = TvAnswerAccumulator(answer.text.toString())
         }
@@ -635,6 +684,8 @@ class TvChatActivity : AppCompatActivity() {
         messages.removeAllViews()
         liveAnswer = null
         liveAccumulator = null
+        lastLiveEvent = null
+        explicitStatus = null
         TvSessionBrowserPolicy.transcript(detail).forEach { row ->
             append(row.author, row.text, row.isUser)
         }
@@ -733,6 +784,8 @@ class TvChatActivity : AppCompatActivity() {
         messages.removeAllViews()
         liveAnswer = null
         liveAccumulator = null
+        lastLiveEvent = null
+        explicitStatus = null
         pinAndScrollToBottom()
         renderSendControl()
         renderStatus()
@@ -778,6 +831,78 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /**
+     * Диспетчер основной кнопки (чистое решение — [TvSteerPolicy.actionFor]): живой ход +
+     * текст в композиторе -> steer («Уточнить»), живой ход + пустой композитор -> «Остановить»,
+     * иначе обычная отправка. IME-«отправить» идёт через тот же диспетчер.
+     */
+    private fun dispatchSend() {
+        when (TvSteerPolicy.actionFor(sessionFlow.canStop, input.text.isNullOrBlank())) {
+            TvSteerPolicy.SendAction.STEER -> steerCurrentTurn()
+            TvSteerPolicy.SendAction.STOP -> stopCurrentTurn()
+            TvSteerPolicy.SendAction.SEND -> sendMessage()
+        }
+    }
+
+    /**
+     * Steer («уточнение поверх активного хода», мобильный `steerMessage` паритет): POST
+     * /api/chat/steer НЕ отменяет и не перезапускает ход — агент дочитывает правку внутри
+     * текущего стрима. Признак успеха — поле `accepted` ответа (его уже трактует
+     * core-network `executeControl`); при отказе текст остаётся в поле ввода.
+     */
+    private fun steerCurrentTurn() {
+        val text = input.text.toString().trim()
+        if (text.isEmpty()) return
+        val id = sessionFlow.sessionId
+        if (id == null) {
+            explicitStatus = TvSteerPolicy.STATUS_NO_SESSION
+            renderStatus()
+            return
+        }
+        send.isEnabled = false
+        lifecycleScope.launch {
+            val accepted = withContext(Dispatchers.IO) { controlGateway.steer(id, text) }
+            if (accepted) {
+                // Чистим поле только если пользователь не дописал текст, пока шёл запрос.
+                if (input.text.toString().trim() == text) input.text.clear()
+                explicitStatus = TvSteerPolicy.STATUS_ACCEPTED
+            } else {
+                explicitStatus = TvSteerPolicy.STATUS_REJECTED
+            }
+            renderStatus()
+            renderSendControl()
+        }
+    }
+
+    /**
+     * Недоставленный steer (SSE `pending_steer_leftover` -> [ChatEvent.SteerLeftover]):
+     * текст, который агент не успел прочитать, возвращается в поле ввода — правка не
+     * теряется (мобильный `restoreSteerText` паритет); ход при этом НЕ отменяется.
+     */
+    private fun restoreSteerText(text: String) {
+        if (TvSteerPolicy.canRestoreLeftover(text, input.text?.toString().orEmpty())) {
+            input.setText(text)
+        }
+        explicitStatus = TvSteerPolicy.LEFTOVER_STATUS
+        renderStatus()
+        renderSendControl()
+        input.requestFocus()
+    }
+
+    /** Клик кнопки режима: цикл FULL -> WINDOW -> QUIET, выбор персистентен. */
+    private fun onDisplayModeClicked() {
+        val picked = activityMode.cycle()
+        renderDisplayModeButton()
+        explicitStatus = TvActivityDisplayPolicy.switchNotice(picked)
+        // «Тишина»/«Всё» применяются к живому ходу немедленно — статус-полоса перерисовывается.
+        renderStatus()
+    }
+
+    /** Подпись кнопки режима в шапке («Режим: Окно»). */
+    private fun renderDisplayModeButton() {
+        displayModeButton.text = TvActivityDisplayPolicy.buttonCaption(activityMode.current)
+    }
+
+    /**
      * Fire-and-forget cancel of the live server turn when the screen leaves the session
      * («Новый чат», BACK/onDestroy). Runs on [applicationScope] so it survives Activity
      * teardown; the outcome is intentionally not surfaced (the transcript is already gone).
@@ -789,16 +914,17 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /**
-     * The primary button mirrors the turn state (mobile send-becomes-stop parity):
-     * «Остановить» + stop icon while the agent turn is live, «Отправить» otherwise. It stays
-     * enabled and focusable in BOTH states — a D-pad user must never lose the ability to
-     * interrupt a running turn.
+     * The primary button mirrors the turn state (mobile parity): on a live turn an empty
+     * composer gives «Остановить» + stop icon, a non-empty one gives «Уточнить» (steer);
+     * idle it is «Отправить». It stays enabled and focusable in ALL states — a D-pad user
+     * must never lose the ability to interrupt or steer a running turn.
      */
     private fun renderSendControl() {
-        val liveTurn = sessionFlow.canStop
-        send.text = if (liveTurn) STOP_LABEL else SEND_LABEL
+        val action = TvSteerPolicy.actionFor(sessionFlow.canStop, input.text.isNullOrBlank())
+        send.text = TvSteerPolicy.buttonLabel(action)
         send.setCompoundDrawablesRelativeWithIntrinsicBounds(
-            if (liveTurn) R.drawable.ic_stop else R.drawable.ic_send, 0, 0, 0)
+            if (TvSteerPolicy.buttonShowsStopIcon(action)) R.drawable.ic_stop else R.drawable.ic_send,
+            0, 0, 0)
         send.compoundDrawableTintList = ContextCompat.getColorStateList(this, R.color.mars_on_accent)
         send.isEnabled = true
         renderChips()
@@ -891,9 +1017,17 @@ class TvChatActivity : AppCompatActivity() {
     /**
      * Header status strip: live reasoning/tool status line plus the context-fill pill
      * (green <=50%, orange <=75%, red above — WebUI ring parity). Both hide when unknown.
+     * Режим показа хода ([TvActivityDisplayPolicy.status]) глушит детали хода в «Тишине»;
+     * явный статус (исход steer, смена режима) имеет приоритет до следующего события.
      */
     private fun renderStatus() {
-        val status = sessionFlow.statusText
+        val mode = if (::activityMode.isInitialized) {
+            activityMode.current
+        } else {
+            TvActivityDisplayMode.DEFAULT
+        }
+        val status = explicitStatus
+            ?: TvActivityDisplayPolicy.status(mode, sessionFlow.canStop, lastLiveEvent, sessionFlow.statusText)
         statusView.text = status
         statusView.visibility = if (status.isEmpty()) View.GONE else View.VISIBLE
         val usageText = sessionFlow.contextUsageText
@@ -912,8 +1046,17 @@ class TvChatActivity : AppCompatActivity() {
      * (USER_BUBBLE + USER_BORDER), Mars side gets the bot card
      * (BOT_CARD + BOT_BORDER). Both are focusable — under D-pad focus the
      * bg_bubble_* StateListDrawable cross-fades to a ruby border.
+     *
+     * Ответ Марса из ИСТОРИИ с таблицей/чек-листом рендерится «богато»
+     * ([TvMarkdownRenderer.richBubble]) вместо плоского текста.
      */
-    private fun append(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
+    private fun append(author: String, text: String, isUser: Boolean): View {
+        if (!isUser && text.isNotEmpty() && TvMarkdownBlocks.isRich(text)) return richBubble(text)
+        return appendPlain(author, text, isUser)
+    }
+
+    /** Плоский текстовый пузырь (прежний рендер): пользователь, пустой placeholder, обычный ответ. */
+    private fun appendPlain(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
         this.text = "$author: $text"
         textSize = 22f
         setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -922,6 +1065,56 @@ class TvChatActivity : AppCompatActivity() {
         isFocusable = true
         TvFocusLift.attach(this)
         messages.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+    }
+
+    /** Пузырь-заготовка живого ответа (поток chunk'ов пишет в него через [liveAnswer]). */
+    private fun appendLivePlaceholder(): TextView = appendPlain("Марс", "", isUser = false)
+
+    /** Собирает и добавляет в ленту «богатый» пузырь ответа (таблицы/чек-листы). */
+    private fun richBubble(text: String): View =
+        TvMarkdownRenderer.richBubble(this, text, ::dp).also { bubble ->
+            messages.addView(bubble, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        }
+
+    /**
+     * Ответ ДОТЕКАЛ до конца и содержит таблицу/чек-лист: плоский стриминговый пузырь
+     * заменяется «богатым» рендером того же текста (markdown-паритет с мобильным).
+     * Делается ровно один раз — [TvAnswerAccumulator.onDone] возвращает true только первым.
+     */
+    private fun finalizeLiveAnswerRich() {
+        val accumulator = liveAccumulator ?: return
+        val answer = liveAnswer ?: return
+        if (accumulator.state != TvAnswerAccumulator.State.DONE) return
+        val text = accumulator.text()
+        if (!TvMarkdownBlocks.isRich(text)) return
+        val index = messages.indexOfChild(answer)
+        if (index < 0) return
+        val params = answer.layoutParams
+        messages.removeViewAt(index)
+        messages.addView(TvMarkdownRenderer.richBubble(this, text, ::dp), index, params)
+        // Пузырь заменён — поздние chunk'и терминального ответа уже отброшены аккумулятором,
+        // а reattach после Done заведёт свежий placeholder (liveAnswer == null).
+        liveAnswer = null
+    }
+
+    /**
+     * Режим «Всё»: мысли/инструменты дополнительно дублируются в ленту приглушёнными
+     * строками на плашке «размышлений» (bg_thinking) — ТВ-эквивалент мобильного
+     * раскрытого thoughts/tools блока.
+     */
+    private fun appendActivityLine(line: String) {
+        val view = TextView(this).apply {
+            text = line
+            textSize = 18f
+            setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+            setBackgroundResource(R.drawable.bg_thinking)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            isFocusable = true
+            TvFocusLift.attach(this)
+        }
+        messages.addView(view, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
     }
 
     /**
@@ -1199,6 +1392,8 @@ class TvChatActivity : AppCompatActivity() {
                     messages.removeAllViews()
                     liveAnswer = null
                     liveAccumulator = null
+                    lastLiveEvent = null
+                    explicitStatus = null
                     TvSessionBrowserPolicy.transcript(outcome.detail).forEach { row ->
                         append(row.author, row.text, row.isUser)
                     }
@@ -1219,8 +1414,6 @@ class TvChatActivity : AppCompatActivity() {
 
     companion object {
         private const val BASE_URL = "https://marscore.ru"
-        private const val SEND_LABEL = "Отправить"
-        private const val STOP_LABEL = "Остановить"
         private const val STOPPING = "Останавливаю…"
         private const val LOADING_SESSIONS = "Загружаю список…"
         private const val OPENING_SESSION = "Открываю диалог…"
