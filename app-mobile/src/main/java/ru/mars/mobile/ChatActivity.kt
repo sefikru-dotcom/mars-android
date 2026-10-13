@@ -215,14 +215,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var quickChipsScroll: HorizontalScrollView
     private lateinit var smartChipsRow: HorizontalScrollView
 
-    // Sessions side panel (DrawerLayout)
+    // Левый бар (DrawerLayout): ТОЛЬКО приложенческие разделы (AppSectionsBar) —
+    // двухуровневый навигатор волны 2; список диалогов вынесен на отдельный
+    // уровень ChatSessionsActivity (корень раздела CHAT).
     private lateinit var drawer: DrawerLayout
-    private lateinit var drawerSessionList: LinearLayout
-    private lateinit var drawerFilter: EditText
-    private var drawerFilterQuery: String = ""
-
-    /** Id раскрытых родительских сессий дерева шторки (SessionTreePolicy). */
-    private val expandedSessionParents: MutableSet<String> = mutableSetOf()
 
     // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
     // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
@@ -393,17 +389,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // При старте/пересоздании экрана композитор сразу получает черновик текущего диалога.
         restoreComposerDraft()
 
+        // Системный Back — чистая NavBackPolicy (лестница: чат → диалоги → разделы →
+        // выход). ChatActivity — уровень диалога: сначала закрывается панель поиска
+        // по транскрипту, затем шторка разделов (оверлей над диалогом), иначе back
+        // ведёт на уровень списка диалогов (ChatSessionsActivity, корень CHAT —
+        // AppNavPolicy.back из ChatLevel.Session). Системный выход из чата невозможен.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE) {
-                    // «Назад» сначала закрывает панель поиска по диалогу, потом шторку/экран.
-                    closeTranscriptSearch()
-                } else if (drawer.isDrawerOpen(GravityCompat.START)) {
-                    drawer.closeDrawer(GravityCompat.START)
-                } else {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
-                    isEnabled = true
+                when (NavBackPolicy.resolve(
+                    level = NavBackPolicy.Level.CHAT,
+                    searchOpen = ::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE,
+                    drawerOpen = drawer.isDrawerOpen(GravityCompat.START),
+                )) {
+                    NavBackPolicy.Action.CLOSE_SEARCH -> closeTranscriptSearch()
+                    NavBackPolicy.Action.CLOSE_DRAWER -> drawer.closeDrawer(GravityCompat.START)
+                    NavBackPolicy.Action.GO_TO_SESSION_LIST -> navigateToSessionList()
+                    else -> Unit
                 }
             }
         })
@@ -554,12 +555,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun buildView(): View {
         drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.BG) }
         drawer.addView(buildChatContent(), DrawerLayout.LayoutParams(-1, -1))
-        drawer.addView(buildSessionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
+        drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
         return drawer
     }
 
-    /** Sessions side panel */
-    private fun buildSessionsDrawer(): View {
+    /**
+     * Шторка левого бара: ТОЛЬКО приложенческие разделы (AppSectionsBar/
+     * AppSectionsPolicy). Прежняя смешанная панель («Сессии» + новый диалог +
+     * поиск + сетка разделов + список диалогов) разделена двухуровневым
+     * навигатором: разделы остаются здесь, список диалогов — отдельный уровень
+     * ChatSessionsActivity (корень раздела CHAT). Дубль входа «Настройки» в
+     * хедере сокращён: настройки (и logout) доступны только своим разделом бара.
+     */
+    private fun buildSectionsDrawer(): View {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(10))
@@ -577,27 +585,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(0, 0, 0, dp(8))
         }
         headerRow.addView(TextView(this).apply {
-            text = "Сессии"
+            text = "Разделы"
             textSize = 20f
             setTextColor(MarsTheme.TEXT_STRONG)
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.05f
         }, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val settingsBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_settings,
-            "Настройки",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 36
-        ).apply {
-            setOnClickListener {
-                drawer.closeDrawer(GravityCompat.START)
-                startActivity(Intent(this@ChatActivity, SettingsActivity::class.java))
-            }
-        }
-        headerRow.addView(settingsBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(8) })
 
         val closeBtn = MarsTheme.circleIconButton(
             this,
@@ -612,122 +605,56 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         headerRow.addView(closeBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
         panel.addView(headerRow)
 
-        val newChatBtn = Button(this).apply {
-            text = "+ Новый диалог"
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            background = MarsTheme.button(this@ChatActivity, MarsTheme.ACCENT, radiusDp = 12)
-            setOnClickListener {
-                drawer.closeDrawer(GravityCompat.START)
-                startNewChat()
-            }
-        }
-        panel.addView(newChatBtn, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(6) })
-
-        // Search container
-        val searchBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 12)
-            setPadding(dp(10), 0, dp(10), 0)
-        }
-        val searchIcon = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_search))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-        }
-        searchBox.addView(searchIcon, LinearLayout.LayoutParams(dp(18), dp(18)))
-
-        drawerFilter = EditText(this).apply {
-            hint = "Поиск диалогов…"
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setHintTextColor(MarsTheme.TEXT_MUTED)
-            textSize = 14f
-            background = null
-            setPadding(dp(8), dp(10), dp(8), dp(10))
-            isSingleLine = true
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    drawerFilterQuery = s?.toString().orEmpty()
-                    renderSessionList()
-                }
-                override fun afterTextChanged(s: android.text.Editable?) {}
-            })
-        }
-        searchBox.addView(drawerFilter, LinearLayout.LayoutParams(0, -2, 1f))
-        panel.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-
-        // Быстрые разделы: вертикальный WebUI-подобный список с иконками.
-        // Состав и порядок — только из SidebarNavPolicy.sections.
-        panel.addView(buildSidebarNav(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-
-        drawerSessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val listScroll = ScrollView(this).apply { addView(drawerSessionList, ViewGroup.LayoutParams(-1, -2)) }
-        panel.addView(listScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(10) })
-        renderSessionList()
+        panel.addView(
+            AppSectionsBar(
+                context = this,
+                currentSection = { AppDestination.CHAT },
+                onSectionClick = ::onSectionSelected,
+            ).build(),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) }
+        )
         return panel
     }
 
     /**
-     * Быстрые разделы бокового меню: вертикальный WebUI-подобный список
-     * «иконка + подпись». Состав, порядок, подписи и иконки берутся только
-     * из [SidebarNavPolicy.sections]; здесь живёт лишь сопоставление
-     * [NavTarget] -> Activity и резолвинг iconKey -> drawable.
+     * Клик по разделу левого бара — живой [AppNavPolicy.selectSection]: раздел
+     * становится текущим и сбрасывается на корень. CHAT → корень раздела
+     * (уровень списка диалогов, отдельный экран); остальные разделы → свои
+     * Activity через [AppNavIntents.sectionIntent] (legacy-маршрутизатор
+     * NavTarget → Activity из ChatActivity удалён).
      */
-    private fun buildSidebarNav(): View {
-        fun navIntent(target: NavTarget): Intent = when (target) {
-            NavTarget.TODOS ->
-                Intent(this, TodosActivity::class.java).apply { putExtra("EXTRA_SESSION_ID", currentSessionId) }
-            NavTarget.CRON -> Intent(this, CronActivity::class.java)
-            NavTarget.PROJECTS -> Intent(this, ProjectsActivity::class.java)
-            NavTarget.MUSIC -> Intent(this, MusicActivity::class.java)
-            NavTarget.MEMORY -> Intent(this, MemoryActivity::class.java)
-            NavTarget.SKILLS -> Intent(this, SkillsActivity::class.java)
-            NavTarget.SPACES -> SpacesActivity.newIntent(this)
-            NavTarget.KANBAN -> KanbanActivity.newIntent(this)
-            NavTarget.INSIGHTS -> InsightsActivity.newIntent(this)
-            NavTarget.LOGS -> InsightsActivity.newIntent(this, MonitorTab.LOGS)
-            NavTarget.SETTINGS -> Intent(this, SettingsActivity::class.java)
+    private fun onSectionSelected(destination: AppDestination) {
+        drawer.closeDrawer(GravityCompat.START)
+        val current = chatNavState()
+        val next = AppNavPolicy.selectSection(current, destination)
+        if (next == current) return // идемпотентно: уже на корне раздела
+        if (next.section == AppDestination.CHAT) {
+            navigateToSessionList()
+            return
         }
+        startActivity(AppNavIntents.sectionIntent(this, destination, currentSessionId))
+    }
 
-        val nav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        SidebarNavPolicy.sections.forEachIndexed { index, section ->
-            val iconRes = resources.getIdentifier(section.iconKey, "drawable", packageName)
-                .takeIf { it != 0 } ?: R.drawable.ic_mars
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), 0, dp(10), 0)
-                background = MarsTheme.button(
-                    this@ChatActivity,
-                    MarsTheme.SURFACE,
-                    radiusDp = 8,
-                    strokeColor = MarsTheme.BORDER_SUBTLE
-                )
-                isClickable = true
-                contentDescription = section.label
-                setOnClickListener {
-                    drawer.closeDrawer(GravityCompat.START)
-                    startActivity(navIntent(section.target))
-                }
-            }
-            row.addView(ImageView(this).apply {
-                setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
-                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-            }, LinearLayout.LayoutParams(dp(18), dp(18)))
-            row.addView(TextView(this).apply {
-                text = section.label
-                textSize = 12.5f
-                setTextColor(MarsTheme.TEXT)
-                isSingleLine = true
-            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
-            nav.addView(
-                row,
-                LinearLayout.LayoutParams(-1, dp(38)).apply { if (index > 0) topMargin = dp(4) }
-            )
-        }
-        return nav
+    /**
+     * Живое навигационное состояние экрана ([AppNavState]): ChatActivity —
+     * уровень диалога раздела CHAT, всегда [ChatLevel.Session]. «Новый чат»,
+     * ещё не созданный на сервере, представляется UI-ключом [NEW_CHAT_NAV_KEY]
+     * (плейсхолдер не покидает UI-слой), поэтому ChatActivity никогда не
+     * является корнем раздела — корень хостит ChatSessionsActivity.
+     */
+    private fun chatNavState(): AppNavState = AppNavPolicy.openSession(
+        AppNavState.INITIAL,
+        currentSessionId?.trim().orEmpty().ifEmpty { NEW_CHAT_NAV_KEY },
+    )
+
+    /**
+     * чат → диалоги: корневой уровень раздела CHAT. CLEAR_TOP|SINGLE_TOP
+     * переиспользует уже существующий ChatSessionsActivity из стека и
+     * закрывает диалог над ним — стек остаётся двухуровневым.
+     */
+    private fun navigateToSessionList() {
+        startActivity(AppNavIntents.sessionListIntent(this))
+        finish()
     }
 
     private fun buildChatContent(): View {
@@ -752,7 +679,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val menuBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_menu,
-            "Сессии",
+            "Разделы",
             bg = MarsTheme.SURFACE,
             iconTint = MarsTheme.TEXT,
             sizeDp = 40
@@ -2971,181 +2898,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun toolDump(tool: ToolExecution): String =
         "Параметры:\n${tool.arguments}\n\nРезультат:\n${tool.result ?: "Выполняется…"}"
 
-    private fun renderSessionList() {
-        if (!::drawerSessionList.isInitialized) return
-        drawerSessionList.removeAllViews()
-        // Дерево сессий: SessionTreePolicy фильтрует поиск (filterForSearch внутри
-        // tree), группирует дочерние сессии под родителями, раскрывает ветку
-        // найденного/текущего ребёнка; видимы только строки раскрытых родителей.
-        val tree = SessionTreePolicy.tree(
-            sessions = uiState.drawerSessions(showSubagents = true),
-            query = drawerFilterQuery,
-            expandedParents = expandedSessionParents,
-            currentSessionId = currentSessionId,
-        )
-        val filtered = SessionTreePolicy.visibleRows(tree)
-        if (filtered.isEmpty()) {
-            drawerSessionList.addView(TextView(this).apply {
-                text = "Нет подходящих сессий"
-                setTextColor(MarsTheme.TEXT_MUTED)
-                setPadding(0, dp(14), 0, dp(14))
-            })
-            return
-        }
-        filtered.forEach { node ->
-            val session = node.session
-            val isCurrent = node.isCurrent
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = if (isCurrent) {
-                    MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.ACCENT)
-                } else {
-                    MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE, radiusDp = 12, strokeColor = MarsTheme.BORDER_SUBTLE)
-                }
-                setPadding(dp(12 + node.depth * 16), dp(8), dp(8), dp(8))
-            }
-            // Клик по карточке родителя с детьми переключает раскрытие ветки;
-            // клик по leaf открывает сессию.
-            val onRowClick: () -> Unit = {
-                if (node.hasChildren) {
-                    if (!expandedSessionParents.remove(session.id)) expandedSessionParents.add(session.id)
-                    renderSessionList()
-                } else {
-                    drawer.closeDrawer(GravityCompat.START)
-                    loadSession(session)
-                }
-            }
-            card.setOnClickListener { onRowClick() }
-            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-            row.addView(Button(this).apply {
-                text = session.title ?: "Новый диалог"
-                textSize = 14f
-                setTextColor(MarsTheme.TEXT_STRONG)
-                background = null
-                isSingleLine = true
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                setOnClickListener { onRowClick() }
-            }, LinearLayout.LayoutParams(0, -2, 1f))
-
-            // Rename/delete only for manageable rows; the server `read_only`
-            // flag is the single authority (pure policy in SessionRowActions).
-            if (SessionRowActions.canManage(session)) {
-                val renameBtn = MarsTheme.circleIconButton(
-                    this,
-                    R.drawable.ic_edit,
-                    "Переименовать",
-                    bg = Color.TRANSPARENT,
-                    iconTint = MarsTheme.TEXT_MUTED,
-                    sizeDp = 32,
-                    strokeColor = 0
-                ).apply {
-                    setOnClickListener { renameSession(session) }
-                }
-                row.addView(renameBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
-
-                val deleteBtn = MarsTheme.circleIconButton(
-                    this,
-                    R.drawable.ic_trash,
-                    "Удалить",
-                    bg = Color.TRANSPARENT,
-                    iconTint = MarsTheme.STATUS_ERROR,
-                    sizeDp = 32,
-                    strokeColor = 0
-                ).apply {
-                    setOnClickListener { deleteSession(session) }
-                }
-                row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
-            }
-            card.addView(row)
-
-            // Мета активности: когда диалог обновлялся и сколько в нём сообщений
-            // («5 мин назад · 12 сообщений») — чистая SessionMetaPolicy + MessageTimePolicy.
-            val metaLine = SessionMetaPolicy.metaLine(
-                updatedAtMillis = MessageTimePolicy.parseServerTimestamp(session.updatedAt ?: session.createdAt),
-                messageCount = session.messageCount,
-                nowMillis = System.currentTimeMillis(),
-            )
-            if (metaLine != null) {
-                card.addView(TextView(this).apply {
-                    text = metaLine
-                    textSize = 11f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), dp(2))
-                })
-            }
-
-            if (!session.preview.isNullOrBlank()) {
-                card.addView(TextView(this).apply {
-                    text = session.preview
-                    textSize = 12f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), dp(2))
-                })
-            }
-
-            // Subagent marker for revealed delegated children (read-only on the
-            // server; hidden from the main list by default).
-            if (session.isSubagent) {
-                card.addView(TextView(this).apply {
-                    text = buildString {
-                        append(session.sourceLabel?.takeIf { it.isNotBlank() } ?: "субагент")
-                        if (session.readOnly) append(" · только чтение")
-                    }
-                    textSize = 11f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), 0)
-                })
-            }
-
-            // Active-turn/attention badge: which sessions are live or waiting for the user.
-            val turn = session.activeTurn
-            val turnAttention = turn.attention
-            // Clean textual badges — status is carried by the themed color, not symbol glyphs.
-            val badge: Pair<String, Int>? = when {
-                turnAttention != null -> attentionLabel(turnAttention) to MarsTheme.STATUS_WARNING
-                turn.isStreaming -> "Активный ход" to MarsTheme.STATUS_ONLINE
-                turn.hasPendingUserMessage -> "Сообщение в очереди" to MarsTheme.STATUS_INFO
-                else -> null
-            }
-            if (badge != null) {
-                card.addView(TextView(this).apply {
-                    text = badge.first
-                    textSize = 11f
-                    setTextColor(badge.second)
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), 0)
-                })
-            }
-            drawerSessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
-        }
-    }
-
     private fun loadSessions(onFinished: (() -> Unit)? = null) {
         val c = store.read() ?: run { onFinished?.invoke(); return }
         lifecycleScope.launch {
             try {
                 val fresh = SessionRepository().getSessions(BASE_URL, c)
                 // Пустой ответ (сбой сети — репозиторий не бросает исключение, — или диалогов
-                // действительно нет) сверяется с офлайн-кэшем: на сбое drawer показывает
-                // последний сохранённый снимок вместо пустого списка.
+                // действительно нет) сверяется с офлайн-кэшем: на сбое состояние уровня
+                // держит последний сохранённый снимок вместо пустого списка.
                 uiState.setSessions(withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) })
-                renderSessionList()
             } finally {
                 // Throttle обновления списка (защита от шторма) отмечает завершение полёта.
                 onFinished?.invoke()
             }
         }
     }
-
-    private fun loadSession(session: SessionItem) = loadSessionById(session.id)
 
     /**
      * Открывает диалог по id — клик по drawer'у или восстановление после пересоздания экрана.
@@ -3238,14 +3005,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * Восстановление открытого диалога после пересоздания Activity (поворот, тёмная тема,
-     * смерть процесса): чистая политика [SessionRecreationPolicy] решает по savedInstanceState,
-     * открывать ли сохранённый session_id заново. Загрузка идёт через общий guard
-     * [sessionNavigation], а одноразовость политики исключает повторное восстановление
-     * в этом же экземпляре экрана. Холодный старт (savedInstanceState == null) — новый чат.
+     * Вход в уровень диалога: [EXTRA_OPEN_SESSION_ID] (открыть конкретный чат —
+     * переход [NavTransition.OpenSession]) → savedInstanceState (пересоздание) →
+     * холодный старт нового чата. При пересоздании чистая политика
+     * [SessionRecreationPolicy] решает по savedInstanceState, открывать ли
+     * сохранённый session_id заново. Загрузка идёт через общий guard
+     * [sessionNavigation], а одноразовость политики исключает повторное
+     * восстановление в этом же экземпляре экрана.
      */
     private fun restoreOpenSession(savedInstanceState: Bundle?) {
-        val plan = recreationPolicy.planFor(savedInstanceState?.getString(KEY_OPEN_SESSION_ID))
+        val requested = intent?.getStringExtra(EXTRA_OPEN_SESSION_ID)?.trim().orEmpty()
+        val target = requested.ifEmpty { savedInstanceState?.getString(KEY_OPEN_SESSION_ID) }
+        val plan = recreationPolicy.planFor(target)
         if (plan is RecreationPlan.Reopen) {
             loadSessionById(plan.sessionId)
         } else {
@@ -3254,6 +3025,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             initialRestoreDone = true
             echoPendingOfflineMessages()
             flushOfflineQueue()
+        }
+    }
+
+    /**
+     * Повторный вход в уровень диалога (корень списка под стеком переиспользуется
+     * флагами CLEAR_TOP|SINGLE_TOP): новый [EXTRA_OPEN_SESSION_ID] открывает
+     * соответствующий чат; без extra экран остаётся как есть.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val requested = intent.getStringExtra(EXTRA_OPEN_SESSION_ID)?.trim().orEmpty()
+        if (requested.isNotEmpty() && requested != currentSessionId) {
+            loadSessionById(requested)
         }
     }
 
@@ -3449,63 +3234,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 refreshYoloState()
             }
         }
-    }
-
-    private fun deleteSession(session: SessionItem) {
-        val c = store.read() ?: return
-        lifecycleScope.launch {
-            if (SessionRepository().deleteSession(BASE_URL, c, session.id)) {
-                drafts.onSessionRemoved(session.id)
-                // Удалённый диалог больше не существует: его буферизованные сообщения
-                // и офлайн-кэш транскрипта стираются вместе с ним.
-                offlineQueue.removeMessagesFor(session.id)
-                uiState.setSessions(uiState.sessions.filterNot { it.id == session.id })
-                withContext(Dispatchers.IO) {
-                    offlineCache.removeMessages(session.id)
-                    offlineCache.saveSessions(uiState.sessions)
-                }
-                if (currentSessionId == session.id) {
-                    // Удаление текущего диалога: его текст не должен «уезжать» в новый чат —
-                    // композитор переключается на черновик нового чата, а pending-загрузка
-                    // удалённой сессии инвалидируется (её callback уже не применится).
-                    sessionNavigation.invalidatePending()
-                    // Живой ход удалённого диалога не переживает удаление: collect send-пути
-                    // и recovery-цикл убиваются — reattach мёртвой сессии бессмыслен, а поздние
-                    // кадры старого хода не должны попасть в сброшенный транскрипт.
-                    teardownLiveTurn()
-                    interactiveController.dismissAll()
-                    compressionController.onSessionChanged()
-                    uiState.startNewSession()
-                    currentSessionId = null
-                    currentSessionReadOnly = false
-                    modelSelection.clearSessionModel()
-                    restoreComposerDraft()
-                    echoPendingOfflineMessages()
-                }
-                renderSessionList()
-                updateNetworkBanner()
-            }
-        }
-    }
-
-    private fun renameSession(session: SessionItem) {
-        val c = store.read() ?: return
-        val nameInput = EditText(this).apply { setText(session.title.orEmpty()); setSingleLine(true); setTextColor(Color.WHITE) }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Переименовать диалог")
-            .setView(nameInput)
-            .setPositiveButton("Сохранить") { _, _ ->
-                val title = nameInput.text.toString().trim()
-                if (title.isNotBlank()) {
-                    lifecycleScope.launch {
-                        if (SessionRepository().renameSession(BASE_URL, c, session.id, title)) {
-                            loadSessions()
-                        }
-                    }
-                }
-            }
-            .setNegativeButton("Отмена", null)
-            .show()
     }
 
     private fun chooseAttachment() {
@@ -4392,17 +4120,34 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     companion object {
         const val BASE_URL = "https://marscore.ru"
 
+        /**
+         * Extra уровня диалога: id открываемого диалога (AppNavIntents.openSessionIntent
+         * — переход [NavTransition.OpenSession] модели [AppNavState]).
+         */
+        const val EXTRA_OPEN_SESSION_ID = "extra_open_session_id"
+
+        /**
+         * UI-ключ «нового чата» в навигационной модели: диалог ещё не создан на
+         * сервере, но уровень уже открыт — [AppNavState.sessionId] не должен быть
+         * пустым (уровень Session), поэтому используется этот плейсхолдер.
+         */
+        const val NEW_CHAT_NAV_KEY = "__new_chat__"
+
         /** Lightbox guards: payload cap and max decoded dimension (memory discipline). */
         private const val MAX_VIEWER_IMAGE_BYTES = 25L * 1024 * 1024
         private const val MAX_VIEWER_IMAGE_DIMENSION = 4096
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         private const val KEY_OPEN_SESSION_ID = "open_session_id"
         /** Privately-stored plaintext data cleared on every auth-exit path. */
-        private const val DRAFTS_PREFS = "mars-session-drafts"
+        internal const val DRAFTS_PREFS = "mars-session-drafts"
         private const val MUSIC_HISTORY_PREFS = "mars-music-search-history"
-        /** Приватные хранилища офлайн-устойчивости: кэш сессий и очередь неотправленных. */
-        private const val OFFLINE_CACHE_PREFS = "mars-offline-cache"
-        private const val PENDING_QUEUE_PREFS = "mars-pending-messages"
+        /**
+         * Приватные хранилища офлайн-устойчивости: кэш сессий и очередь неотправленных.
+         * internal: уровень списка диалогов ([ChatSessionsActivity]) читает тот же кэш
+         * и стирает черновики/очередь удалённых диалогов (ключи не дублируются).
+         */
+        internal const val OFFLINE_CACHE_PREFS = "mars-offline-cache"
+        internal const val PENDING_QUEUE_PREFS = "mars-pending-messages"
         /** Подсказки статуса для офлайн-сценариев (копия из кэша / вложения / лимит очереди). */
         private const val OFFLINE_SESSION_HINT = "Нет связи — показана сохранённая копия диалога"
         private const val OFFLINE_ATTACHMENT_STATUS = "Нет связи — сообщение с вложениями будет отправлено после восстановления"
