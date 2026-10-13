@@ -2,6 +2,9 @@ package ru.mars.tv
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
@@ -39,9 +42,11 @@ import ru.mars.tv.chat.TvActivityDisplayMode
 import ru.mars.tv.chat.TvActivityDisplayPolicy
 import ru.mars.tv.chat.TvActivityModePrefs
 import ru.mars.tv.chat.TvActivityModeSelection
+import ru.mars.tv.chat.TvLiveRenderBatchPolicy
 import ru.mars.tv.chat.TvMarkdownBlocks
 import ru.mars.tv.chat.TvMarkdownRenderer
 import ru.mars.tv.chat.TvSteerPolicy
+import ru.mars.tv.chat.TvTranscriptRetentionPolicy
 
 /**
  * TV chat screen: transcript, composer and the live turn status strip.
@@ -203,6 +208,31 @@ class TvChatActivity : AppCompatActivity() {
     /** True while an explicit «Остановить» teardown is in flight (the stream finally defers to it). */
     private var stopping = false
 
+    // --- устойчивость транскрипта (caps/подрезка/батчинг — решения в chat-политиках) ----
+
+    /**
+     * Handler отложенного flush живого пузыря. Все отложенные задачи снимаются в
+     * [onDestroy] — postDelayed не переживает Activity и не держит на неё ссылку.
+     */
+    private val uiHandler = Handler(Looper.getMainLooper())
+
+    /** Ещё не отрисованный текст живого пузыря (батчинг: [TvLiveRenderBatchPolicy]). */
+    private var pendingLiveRender: String? = null
+    private var liveFlushScheduled = false
+    private var lastLiveRenderMs = 0L
+    private val liveFlushRunnable = Runnable {
+        liveFlushScheduled = false
+        flushLiveAnswer()
+    }
+
+    /** Строки активности («Всё») в порядке добавления: cap снимает самые старые. */
+    private val activityLineViews = ArrayDeque<View>()
+
+    /** Счётчики скрытого для маркера «…ранее скрыто» (срезы истории + живая подрезка). */
+    private var hiddenMessages = 0
+    private var hiddenActivity = 0
+    private var hiddenMarkerView: TextView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
@@ -354,6 +384,13 @@ class TvChatActivity : AppCompatActivity() {
             cancelServerTurnBestEffort()
         }
         cancelLocalStreamJobs()
+        // Отложенные flush живого пузыря снимаются — postDelayed не должен переживать
+        // Activity (утечка окна через Runnable в main-looper).
+        uiHandler.removeCallbacksAndMessages(null)
+        pendingLiveRender = null
+        activityLineViews.clear()
+        hiddenMarkerView = null
+        browserReturnFocus = null
         if (::interactive.isInitialized) interactive.destroy()
         super.onDestroy()
     }
@@ -376,6 +413,8 @@ class TvChatActivity : AppCompatActivity() {
         // a fresh accumulator, so the next answer streams normally.
         liveAnswer = answer
         liveAccumulator = TvAnswerAccumulator(answer.text.toString())
+        cancelLiveFlush(applyPending = false)
+        lastLiveRenderMs = SystemClock.uptimeMillis()
         // A fresh user turn invalidates any stale local stream work and starts the resume
         // cursor + recovery budget from zero (a cursor of the previous stream must never
         // leak into a new Last-Event-ID header).
@@ -493,15 +532,20 @@ class TvChatActivity : AppCompatActivity() {
             // a late chunk after Error no longer clobbers «Ошибка: …», a late
             // chunk after Done no longer mutates the finished answer, and a
             // tail Error after Done no longer overwrites it. null = ignore.
+            // Отрисовка батчится (TvLiveRenderBatchPolicy): не чаще одного обновления
+            // текста в интервал — частота чанков не превращается в частоту релayout'ов.
             is ChatEvent.Chunk -> liveAccumulator?.onChunk(event.text)?.let { rendered ->
-                liveAnswer?.text = rendered
-                scrollDown()
+                onLiveAnswerText(rendered)
             }
             is ChatEvent.Error -> {
+                // Недорисованный текст отбрасывается: ошибка заменяет пузырь ЦЕЛИКОМ.
+                cancelLiveFlush(applyPending = false)
                 liveAccumulator?.onError(event.message)?.let { liveAnswer?.text = it }
                 renderSendControl() // terminal event disarms «Остановить»
             }
             is ChatEvent.Done -> {
+                // Терминал вне очереди: хвостовой чанк доезжает в пузырь до фиксации.
+                cancelLiveFlush(applyPending = true)
                 if (liveAccumulator?.onDone() == true) finalizeLiveAnswerRich()
                 renderSendControl()
             }
@@ -621,6 +665,8 @@ class TvChatActivity : AppCompatActivity() {
             val answer = appendLivePlaceholder()
             liveAnswer = answer
             liveAccumulator = TvAnswerAccumulator(answer.text.toString())
+            cancelLiveFlush(applyPending = false)
+            lastLiveRenderMs = SystemClock.uptimeMillis()
         }
         sessionFlow.markReattaching()
         renderStatus()
@@ -677,19 +723,26 @@ class TvChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Replaces the transcript with the server's settled history (live `GET /api/session`). */
+    /**
+     * Replaces the transcript with the server's settled history (live `GET /api/session`).
+     * Сборка — вне экранного контейнера, подмена одним проходом ([renderTranscriptRows]):
+     * длинная история больше не сносит/не инфлейтит ленту по одному view на главный поток.
+     */
     private fun renderSessionDetailHistory(detail: SessionDetail?) {
         detail ?: return
         if (::interactive.isInitialized) interactive.dismissAll()
-        messages.removeAllViews()
+        resetLiveAnswerState()
+        renderTranscriptRows(TvSessionBrowserPolicy.transcript(detail))
+        pinAndScrollToBottom()
+    }
+
+    /** Сброс пер-тёрн состояния ответа (новый чат/история/открытый диалог). */
+    private fun resetLiveAnswerState() {
+        cancelLiveFlush(applyPending = false)
         liveAnswer = null
         liveAccumulator = null
         lastLiveEvent = null
         explicitStatus = null
-        TvSessionBrowserPolicy.transcript(detail).forEach { row ->
-            append(row.author, row.text, row.isUser)
-        }
-        pinAndScrollToBottom()
     }
 
     /**
@@ -781,11 +834,7 @@ class TvChatActivity : AppCompatActivity() {
         // Cards of the dead stream go first (invalidates in-flight responds), then the transcript.
         if (::interactive.isInitialized) interactive.dismissAll()
         sessionFlow.startNewChat()
-        messages.removeAllViews()
-        liveAnswer = null
-        liveAccumulator = null
-        lastLiveEvent = null
-        explicitStatus = null
+        clearTranscript()
         pinAndScrollToBottom()
         renderSendControl()
         renderStatus()
@@ -1050,13 +1099,19 @@ class TvChatActivity : AppCompatActivity() {
      * Ответ Марса из ИСТОРИИ с таблицей/чек-листом рендерится «богато»
      * ([TvMarkdownRenderer.richBubble]) вместо плоского текста.
      */
-    private fun append(author: String, text: String, isUser: Boolean): View {
-        if (!isUser && text.isNotEmpty() && TvMarkdownBlocks.isRich(text)) return richBubble(text)
-        return appendPlain(author, text, isUser)
-    }
+    private fun append(author: String, text: String, isUser: Boolean): View =
+        buildBubble(author, text, isUser).also { addTranscriptView(it) }
+
+    /** Единая фабрика пузыря (лента И внеэкранная сборка истории): вид, но не добавление. */
+    private fun buildBubble(author: String, text: String, isUser: Boolean): View =
+        if (!isUser && text.isNotEmpty() && TvMarkdownBlocks.isRich(text)) {
+            TvMarkdownRenderer.richBubble(this, text, ::dp)
+        } else {
+            plainBubble(author, text, isUser)
+        }
 
     /** Плоский текстовый пузырь (прежний рендер): пользователь, пустой placeholder, обычный ответ. */
-    private fun appendPlain(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
+    private fun plainBubble(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
         this.text = "$author: $text"
         textSize = 22f
         setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -1064,17 +1119,24 @@ class TvChatActivity : AppCompatActivity() {
         setBackgroundResource(if (isUser) R.drawable.bg_bubble_user else R.drawable.bg_bubble_bot)
         isFocusable = true
         TvFocusLift.attach(this)
-        messages.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+    }
+
+    /** Общие параметры пузыря в ленте (отступ сверху). */
+    private fun bubbleParams(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+
+    /**
+     * Добавление в ленту с общим cap'ом ([TvTranscriptRetentionPolicy.trimPlan]):
+     * контейнер никогда не растёт бесконечно — самые старые записи подрезаются.
+     */
+    private fun addTranscriptView(view: View, params: LinearLayout.LayoutParams = bubbleParams()) {
+        messages.addView(view, params)
+        enforceTranscriptCap()
     }
 
     /** Пузырь-заготовка живого ответа (поток chunk'ов пишет в него через [liveAnswer]). */
-    private fun appendLivePlaceholder(): TextView = appendPlain("Марс", "", isUser = false)
-
-    /** Собирает и добавляет в ленту «богатый» пузырь ответа (таблицы/чек-листы). */
-    private fun richBubble(text: String): View =
-        TvMarkdownRenderer.richBubble(this, text, ::dp).also { bubble ->
-            messages.addView(bubble, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
-        }
+    private fun appendLivePlaceholder(): TextView =
+        plainBubble("Марс", "", isUser = false).also { addTranscriptView(it) }
 
     /**
      * Ответ ДОТЕКАЛ до конца и содержит таблицу/чек-лист: плоский стриминговый пузырь
@@ -1090,6 +1152,7 @@ class TvChatActivity : AppCompatActivity() {
         val index = messages.indexOfChild(answer)
         if (index < 0) return
         val params = answer.layoutParams
+        detachTranscriptView(answer)
         messages.removeViewAt(index)
         messages.addView(TvMarkdownRenderer.richBubble(this, text, ::dp), index, params)
         // Пузырь заменён — поздние chunk'и терминального ответа уже отброшены аккумулятором,
@@ -1101,6 +1164,11 @@ class TvChatActivity : AppCompatActivity() {
      * Режим «Всё»: мысли/инструменты дополнительно дублируются в ленту приглушёнными
      * строками на плашке «размышлений» (bg_thinking) — ТВ-эквивалент мобильного
      * раскрытого thoughts/tools блока.
+     *
+     * Строки capped ([TvTranscriptRetentionPolicy.ACTIVITY_LINE_CAP]): долгий ход в
+     * режиме «Всё» — это тысячи событий, бесконечный рост View ронял TV-приставку.
+     * Самые старые строки снимаются (со снятием колбэков), счётчик уходит в маркер
+     * «…ранее скрыто».
      */
     private fun appendActivityLine(line: String) {
         val view = TextView(this).apply {
@@ -1113,8 +1181,208 @@ class TvChatActivity : AppCompatActivity() {
             ellipsize = TextUtils.TruncateAt.END
             isFocusable = true
             TvFocusLift.attach(this)
+            tag = TAG_ACTIVITY_LINE
         }
-        messages.addView(view, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        activityLineViews.addLast(view)
+        addTranscriptView(view, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        enforceActivityLineCap()
+    }
+
+    // --- устойчивость транскрипта: caps, подрезка, внеэкранная подмена истории ------------
+
+    /** Cap строк активности: снимаем самые старые, пока не вписались. */
+    private fun enforceActivityLineCap() {
+        val overflow = TvTranscriptRetentionPolicy.activityOverflow(activityLineViews.size)
+        if (overflow <= 0) return
+        repeat(overflow) {
+            val oldest = activityLineViews.removeFirstOrNull() ?: return
+            hiddenActivity++
+            detachTranscriptView(oldest)
+            messages.removeView(oldest)
+        }
+        updateHiddenMarker()
+    }
+
+    /** Общий cap ленты: план подрезки (чистый) + снятие самых старых View с колбэками. */
+    private fun enforceTranscriptCap() {
+        val count = messages.childCount
+        if (count <= TvTranscriptRetentionPolicy.MAX_TRANSCRIPT_VIEWS) return
+        val kinds = List(count) { kindOf(messages.getChildAt(it)) }
+        val plan = TvTranscriptRetentionPolicy.trimPlan(kinds)
+        if (plan.isEmpty()) return
+        // Индексы плана валидны до первого удаления — снимаем с конца.
+        plan.asReversed().forEach { index ->
+            val victim = messages.getChildAt(index) ?: return@forEach
+            when (kindOf(victim)) {
+                TvTranscriptRetentionPolicy.Kind.ACTIVITY_LINE -> {
+                    hiddenActivity++
+                    activityLineViews.remove(victim)
+                }
+                TvTranscriptRetentionPolicy.Kind.PROTECTED -> Unit // план их не содержит
+                TvTranscriptRetentionPolicy.Kind.MESSAGE -> hiddenMessages++
+            }
+            detachTranscriptView(victim)
+            messages.removeViewAt(index)
+        }
+        updateHiddenMarker()
+    }
+
+    /**
+     * Категория ребёнка ленты для чистой политики: интерактивные карточки, живой пузырь
+     * и маркер скрытого защищены; строки активности помечены тегом; прочее — сообщения.
+     */
+    private fun kindOf(child: View): TvTranscriptRetentionPolicy.Kind = when {
+        child is TvInteractiveCard -> TvTranscriptRetentionPolicy.Kind.PROTECTED
+        child === hiddenMarkerView -> TvTranscriptRetentionPolicy.Kind.PROTECTED
+        child === liveAnswer -> TvTranscriptRetentionPolicy.Kind.PROTECTED
+        child.tag == TAG_ACTIVITY_LINE -> TvTranscriptRetentionPolicy.Kind.ACTIVITY_LINE
+        else -> TvTranscriptRetentionPolicy.Kind.MESSAGE
+    }
+
+    /**
+     * Снятие колбэков у удаляемой View (защита от утечек): фокус уводится в композер,
+     * анимации TvFocusLift и focus-листенер гасятся — удалённая View не держит ссылок
+     * на окно и не получает событий.
+     */
+    private fun detachTranscriptView(view: View) {
+        if (view.hasFocus()) input.requestFocus()
+        view.animate().cancel()
+        view.onFocusChangeListener = null
+        view.tag = null
+    }
+
+    /** Полная очистка ленты («Новый чат»): View, строки активности, счётчики, live-состояние. */
+    private fun clearTranscript() {
+        for (index in 0 until messages.childCount) detachTranscriptView(messages.getChildAt(index))
+        messages.removeAllViews()
+        activityLineViews.clear()
+        hiddenMessages = 0
+        hiddenActivity = 0
+        hiddenMarkerView = null
+        resetLiveAnswerState()
+    }
+
+    /**
+     * Подмена транскрипта историей БЕЗ полного сноса на главном потоке: пузыри
+     * собираются в offscreen-контейнере (не присоединён к окну — addView не тянет
+     * measure/layout на каждую строку), затем содержимое меняется одним проходом в
+     * одном кадре (пустого кадра нет). Длинная история режется до последних
+     * [TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES] сообщений с маркером
+     * «…ранее скрыто» (чистое решение — [TvTranscriptRetentionPolicy.historySlice]).
+     * D-pad фокус возвращается на прежнюю позицию (или в композер).
+     */
+    private fun renderTranscriptRows(rows: List<TvSessionBrowserPolicy.TranscriptRow>) {
+        val slice = TvTranscriptRetentionPolicy.historySlice(rows.size)
+        val offscreen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var marker: TextView? = null
+        if (slice.hiddenMessages > 0) {
+            marker = buildHiddenMarker(TvTranscriptRetentionPolicy.hiddenMarkerText(slice.hiddenMessages, 0))
+            offscreen.addView(marker, LinearLayout.LayoutParams(-1, -2))
+        }
+        rows.drop(slice.firstRowIndex).forEach { row ->
+            offscreen.addView(buildBubble(row.author, row.text, row.isUser), bubbleParams())
+        }
+        swapTranscript(offscreen)
+        activityLineViews.clear()
+        hiddenMessages = slice.hiddenMessages
+        hiddenActivity = 0
+        hiddenMarkerView = marker
+    }
+
+    /** Атомарная подмена содержимого ленты: фокус сохраняется, пустого кадра нет. */
+    private fun swapTranscript(prepared: LinearLayout) {
+        val focusedIndex = (0 until messages.childCount)
+            .firstOrNull { messages.getChildAt(it).hasFocus() }
+        for (index in 0 until messages.childCount) detachTranscriptView(messages.getChildAt(index))
+        messages.removeAllViews()
+        while (prepared.childCount > 0) {
+            val child = prepared.getChildAt(0)
+            prepared.removeViewAt(0)
+            messages.addView(child, child.layoutParams)
+        }
+        if (focusedIndex != null) {
+            val target = messages.getChildAt(minOf(focusedIndex, messages.childCount - 1))
+            if (target != null && target.isFocusable) target.requestFocus() else input.requestFocus()
+        }
+    }
+
+    /** Маркер «…ранее скрыто»: приглушённая незафокусируемая строка в начале ленты. */
+    private fun buildHiddenMarker(text: String?): TextView = TextView(this).apply {
+        this.text = text.orEmpty()
+        textSize = 15f
+        setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+        setPadding(dp(24), dp(10), dp(24), dp(4))
+        isFocusable = false
+    }
+
+    /** Перерисовка/снятие маркера по счётчикам скрытого. */
+    private fun updateHiddenMarker() {
+        val text = TvTranscriptRetentionPolicy.hiddenMarkerText(hiddenMessages, hiddenActivity)
+        if (text == null) {
+            hiddenMarkerView?.let { marker ->
+                detachTranscriptView(marker)
+                messages.removeView(marker)
+            }
+            hiddenMarkerView = null
+            return
+        }
+        val existing = hiddenMarkerView
+        if (existing != null && messages.indexOfChild(existing) >= 0) {
+            existing.text = text
+            return
+        }
+        val marker = buildHiddenMarker(text)
+        hiddenMarkerView = marker
+        messages.addView(marker, 0, LinearLayout.LayoutParams(-1, -2))
+        // Маркер добавлен — общий cap проверяется заново (рекурсия ограничена: повторный
+        // проход маркер уже находит и только обновляет текст).
+        enforceTranscriptCap()
+    }
+
+    // --- батчинг живого пузыря (TvLiveRenderBatchPolicy) ----------------------------------
+
+    /** Накопленный текст чанков рисуется не чаще одного раза в интервал. */
+    private fun onLiveAnswerText(rendered: String) {
+        pendingLiveRender = rendered
+        when (val decision = TvLiveRenderBatchPolicy.decide(
+            flushPending = liveFlushScheduled,
+            elapsedSinceLastRenderMs = SystemClock.uptimeMillis() - lastLiveRenderMs,
+        )) {
+            TvLiveRenderBatchPolicy.Decision.Now -> flushLiveAnswer()
+            is TvLiveRenderBatchPolicy.Decision.Defer -> {
+                liveFlushScheduled = true
+                uiHandler.postDelayed(liveFlushRunnable, decision.delayMs)
+            }
+            TvLiveRenderBatchPolicy.Decision.Nothing -> Unit
+        }
+    }
+
+    /** Фактическая отрисовка: всегда ПОСЛЕДНИЙ накопленный текст (не очередь чанков). */
+    private fun flushLiveAnswer() {
+        uiHandler.removeCallbacks(liveFlushRunnable)
+        liveFlushScheduled = false
+        val rendered = pendingLiveRender ?: return
+        pendingLiveRender = null
+        lastLiveRenderMs = SystemClock.uptimeMillis()
+        liveAnswer?.text = rendered
+        scrollDown()
+    }
+
+    /**
+     * Снятие отложенного flush (терминал/сброс/новый ход). [applyPending] дорисовывает
+     * недоставленный текст — используется на Done, чтобы хвостовой чанк не потерялся.
+     */
+    private fun cancelLiveFlush(applyPending: Boolean) {
+        uiHandler.removeCallbacks(liveFlushRunnable)
+        liveFlushScheduled = false
+        if (applyPending) {
+            pendingLiveRender?.let { rendered ->
+                lastLiveRenderMs = SystemClock.uptimeMillis()
+                liveAnswer?.text = rendered
+                scrollDown()
+            }
+        }
+        pendingLiveRender = null
     }
 
     /**
@@ -1389,14 +1657,10 @@ class TvChatActivity : AppCompatActivity() {
                 is TvSessionBrowserPolicy.LoadOutcome.Open -> {
                     sessionFlow.startNewChat()
                     sessionFlow.onEvent(ChatEvent.SessionBound(outcome.detail.id))
-                    messages.removeAllViews()
-                    liveAnswer = null
-                    liveAccumulator = null
-                    lastLiveEvent = null
-                    explicitStatus = null
-                    TvSessionBrowserPolicy.transcript(outcome.detail).forEach { row ->
-                        append(row.author, row.text, row.isUser)
-                    }
+                    resetLiveAnswerState()
+                    // Внеэкранная сборка + подмена одним проходом (renderTranscriptRows):
+                    // длинная история не блокирует главный поток и не даёт пустого кадра.
+                    renderTranscriptRows(TvSessionBrowserPolicy.transcript(outcome.detail))
                     input.text.clear()
                     // A live server turn is reattached (never cancelled): the recreated
                     // or reopened screen continues the same dialog.
@@ -1419,6 +1683,9 @@ class TvChatActivity : AppCompatActivity() {
         private const val OPENING_SESSION = "Открываю диалог…"
         private const val KEY_SESSION_ID = "tv_chat_session_id"
         private const val KEY_STREAM_ID = "tv_chat_active_stream_id"
+
+        /** Тег View строк активности — по нему чистая политика отличает их от сообщений. */
+        private const val TAG_ACTIVITY_LINE = "tv-transcript-activity-line"
 
         /** Recovery give-up label of a dead credential ([MidTurnRecoveryCoordinator.giveUpReason]). */
         private const val GIVE_UP_AUTH_PREFIX = "auth rejected"
