@@ -182,7 +182,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var activityModeBtn: Button? = null
     private lateinit var workspaceSelection: WorkspaceSelection
     private var workspaceBtn: Button? = null
-    private var yoloBtn: Button? = null
     private var contextIndicator: TextView? = null
     private lateinit var compressionController: ContextCompressionController
     private lateinit var autoCompressionStorage: AutoCompressionStorage
@@ -221,13 +220,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drawerSessionList: LinearLayout
     private lateinit var drawerFilter: EditText
     private var drawerFilterQuery: String = ""
-
-    /**
-     * Reveals delegated subagent children in the drawer (WebUI parity
-     * #5244/#5305: they are hidden from the main list by default).
-     */
-    private var drawerShowSubagents: Boolean = false
-    private var drawerSubagentToggle: Button? = null
 
     // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
     // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
@@ -290,8 +282,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         interactiveController.onClarifyAnswered = { answer -> echoClarifyAnswer(answer) }
         interactiveView.yoloEnabledProvider = { uiState.yoloEnabled }
         interactiveController.onYoloChanged = { enabled ->
-            updateYoloPill()
-            Toast.makeText(this, if (enabled) "YOLO включён — Марс работает без подтверждений" else "YOLO выключен", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, if (enabled) "Автономный режим включён" else "Автономный режим выключен", Toast.LENGTH_SHORT).show()
         }
         modelSelection = ModelSelection(PrefsModelChoiceStorage(getSharedPreferences("mars-model-choice", MODE_PRIVATE)))
         reasoningSelection = ReasoningEffortSelection(PrefsReasoningChoiceStorage(getSharedPreferences("mars-reasoning-choice", MODE_PRIVATE)))
@@ -664,20 +655,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         searchBox.addView(drawerFilter, LinearLayout.LayoutParams(0, -2, 1f))
         panel.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
-        // Subagent visibility toggle: delegated children are hidden from the
-        // main list by default (WebUI parity #5244/#5305); the toggle reveals
-        // them marked with a «субагент» badge.
-        drawerSubagentToggle = Button(this).apply {
-            textSize = 11f
-            setPadding(dp(10), dp(2), dp(10), dp(2))
-            isAllCaps = false
-            setOnClickListener {
-                drawerShowSubagents = !drawerShowSubagents
-                renderSessionList()
-            }
-        }
-        panel.addView(drawerSubagentToggle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
-
         // Быстрые разделы: вертикальный WebUI-подобный список с иконками.
         // Состав и порядок — только из SidebarNavPolicy.sections.
         panel.addView(buildSidebarNav(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
@@ -818,42 +795,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { startNewChat() }
         }
         header.addView(newChatBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
-
-        val musicBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_music,
-            "Музыка",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40
-        ).apply {
-            setOnClickListener { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) }
-        }
-        header.addView(musicBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
-
-        val projectsBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_projects,
-            "Проекты",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40
-        ).apply {
-            setOnClickListener { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) }
-        }
-        header.addView(projectsBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
-
-        val logoutBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_logout,
-            "Выйти",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40
-        ).apply {
-            setOnClickListener { leaveChat() }
-        }
-        header.addView(logoutBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
 
         root.addView(header)
 
@@ -1237,7 +1178,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(0, dp(4), 0, 0)
         }
 
-        // Left: horizontal scrollable session chips (Model, Reasoning, ActivityMode, Workspace, YOLO, Context)
+        // Left: compact controls for model, reasoning level, and always-visible context.
         val chipsScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
         }
@@ -1309,27 +1250,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { chooseWorkspace() }
         }
         chipsRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-
-        yoloBtn = Button(this).apply {
-            text = "YOLO"
-            textSize = 10.5f
-            contentDescription = "Режим YOLO — автономная работа без подтверждений"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setOnClickListener {
-                if (currentSessionReadOnly) {
-                    statusView.text = "Сессия доступна только для чтения"
-                } else {
-                    interactiveController.setYoloEnabled(!uiState.yoloEnabled)
-                }
-            }
-        }
-        chipsRow.addView(yoloBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-        updateYoloPill()
 
         contextIndicator = TextView(this).apply {
             textSize = 9.5f
@@ -3051,22 +2971,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun renderSessionList() {
         if (!::drawerSessionList.isInitialized) return
         drawerSessionList.removeAllViews()
-        // Delegated subagent children are hidden from the main list by default
-        // (WebUI parity #5244/#5305); the toggle reveals them, and the
-        // currently-open session always stays visible.
-        val subagentCount = uiState.sessions.count { it.isSubagent }
-        drawerSubagentToggle?.apply {
-            text = if (drawerShowSubagents) "Субагенты: $subagentCount (активны)" else "Субагенты: скрыты ($subagentCount)"
-            setTextColor(if (drawerShowSubagents) MarsTheme.TEXT_STRONG else MarsTheme.TEXT_MUTED)
-            background = MarsTheme.button(
-                this@ChatActivity,
-                if (drawerShowSubagents) MarsTheme.SURFACE_CARD else MarsTheme.SURFACE,
-                radiusDp = 8,
-                strokeColor = if (drawerShowSubagents) MarsTheme.ACCENT else MarsTheme.BORDER_SUBTLE,
-            )
-            visibility = if (subagentCount > 0 || drawerShowSubagents) View.VISIBLE else View.GONE
-        }
-        val rows = uiState.drawerSessions(drawerShowSubagents, currentSessionId)
+        val rows = uiState.drawerSessions(false, currentSessionId)
         val filtered = if (drawerFilterQuery.isBlank()) rows else {
             val byId = rows.associateBy { it.id }
             val matches = rows.filter { "${it.title.orEmpty()} ${it.preview.orEmpty()}".contains(drawerFilterQuery, true) }
@@ -3319,7 +3224,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setStatus()
         updateControls()
         updateTodoWidget()
-        updateYoloPill()
         flushOfflineQueue()
     }
 
@@ -4259,7 +4163,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         renderMessages()
         setStatus()
         updateControls()
-        updateYoloPill()
         flushOfflineQueue()
     }
 
@@ -4284,37 +4187,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    // --- YOLO mode ------------------------------------------------------------------------------
+    // --- Autonomous execution state --------------------------------------------------------------
 
-    /** Header pill: clean «YOLO» label — accent tint while autonomous, muted while off. */
-    private fun updateYoloPill() {
-        val btn = yoloBtn ?: return
-        val on = uiState.yoloEnabled
-        btn.text = "YOLO"
-        btn.contentDescription = if (on) {
-            "Режим YOLO включён — автономная работа без подтверждений"
-        } else {
-            "Режим YOLO выключен — работа с подтверждениями"
-        }
-        btn.setTextColor(if (on) Color.WHITE else MarsTheme.TEXT_MUTED)
-        btn.background = MarsTheme.pill(
-            this,
-            if (on) MarsTheme.ACCENT else MarsTheme.SURFACE,
-            strokeColor = if (on) MarsTheme.ACCENT else MarsTheme.BORDER,
-        )
-    }
-
-    /**
-     * Re-reads the server-side YOLO flag for [currentSessionId] (GET /api/session/yolo) and
-     * projects it into the UI state — web parity with loadSession's `_yoloEnabled` reset+fetch.
-     * Silently keeps the flag off when the lookup fails (session-scoped, in-memory server state).
-     */
+    /** Refreshes the server-side execution approval state without exposing internal terminology in the UI. */
     private fun refreshYoloState() {
         val sid = currentSessionId
         val credential = store.read()
         if (sid == null || credential == null) {
             uiState.setYoloEnabled(false)
-            updateYoloPill()
             return
         }
         lifecycleScope.launch {
@@ -4326,8 +4206,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
             if (currentSessionId == sid) {
                 uiState.setYoloEnabled(enabled)
-                updateYoloPill()
-            }
+                }
         }
     }
 
@@ -4403,8 +4282,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 restoreComposerDraft()
                 // YOLO does not outlive the session being closed; make the pill reflect reality.
                 if (report != null) uiState.setYoloEnabled(false)
-                updateYoloPill()
-            } else {
+                } else {
                 // Пользователь ушёл в другой диалог во время финиша — его состояние и
                 // композитор не трогаем; черновик закрытой сессии чистим в любом случае.
                 drafts.onSessionRemoved(sid)
