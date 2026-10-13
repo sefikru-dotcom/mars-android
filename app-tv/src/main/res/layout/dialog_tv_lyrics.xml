@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Панель «Текст песни» (диалог): Dark Obsidian + Ruby, D-pad фокус, только цвета темы, без эмодзи. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="32dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/lyricsTitleText"
+        android:text="Текст песни"
+        android:textColor="@color/mars_text_strong"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/lyricsTrackText"
+        android:textColor="@color/mars_accent_text"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:layout_marginTop="6dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/lyricsMetaText"
+        android:textColor="@color/mars_muted"
+        android:textSize="14sp"
+        android:visibility="gone"
+        android:layout_marginTop="4dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- D-pad-скролл текста: ScrollView фокусируемый, стрелки листают куплеты. -->
+    <ScrollView
+        android:id="@+id/lyricsScroll"
+        android:scrollbars="none"
+        android:focusable="true"
+        android:layout_marginTop="16dp"
+        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="0dp">
+
+        <TextView
+            android:id="@+id/lyricsBodyText"
+            android:textColor="@color/mars_muted"
+            android:textSize="18sp"
+            android:lineSpacingExtra="4dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </ScrollView>
+
+    <Button
+        android:id="@+id/lyricsCloseButton"
+        android:text="Закрыть"
+        android:textSize="18sp"
+        android:textColor="@color/mars_text"
+        android:background="@drawable/bg_focus_card"
+        android:paddingStart="28dp"
+        android:paddingEnd="28dp"
+        android:gravity="center"
+        android:focusable="true"
+        android:layout_marginTop="16dp"
+        android:layout_width="wrap_content"
+        android:layout_height="64dp" />
+</LinearLayout>
