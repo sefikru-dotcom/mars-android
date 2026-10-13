@@ -13,6 +13,14 @@ import ru.mars.network.repository.ChatRepository
  */
 interface TvChatControlGateway {
     fun cancelStream(streamId: String): Boolean
+
+    /**
+     * Steer live turn: POST /api/chat/steer (мобильный `steerMessage` паритет).
+     * Успех — поле `accepted` ответа, а НЕ HTTP-код: `executeControl` уже трактует
+     * HTTP 200 + `{"accepted": false}` как отказ. Блокирующий вызов (хосты — IO-поток),
+     * исключений не бросает.
+     */
+    fun steer(sessionId: String, text: String): Boolean
 }
 
 /**
@@ -32,6 +40,13 @@ class RepositoryTvChatControlGateway(
         val credential = credentialProvider() ?: return false
         return runCatching {
             repository.executeControl(repository.cancelRequest(baseUrl, streamId, credential.accessToken))
+        }.getOrDefault(false)
+    }
+
+    override fun steer(sessionId: String, text: String): Boolean {
+        val credential = credentialProvider() ?: return false
+        return runCatching {
+            repository.executeControl(repository.steerRequest(baseUrl, sessionId, text, credential.accessToken))
         }.getOrDefault(false)
     }
 

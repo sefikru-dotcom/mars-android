@@ -45,4 +45,43 @@ class RepositoryTvChatControlGatewayTest {
             assertEquals(0, server.requestCount)
         }
     }
+
+    // --- steer («уточнение поверх активного хода») -------------------------------------------------
+
+    @Test fun steerPostsSessionIdAndTextWithAuthHeader() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"accepted":true}"""))
+            assertTrue(gatewayFor(server).steer("s-1", "точнее: проверь логи"))
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/chat/steer", request.path)
+            assertEquals("Bearer tok", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"session_id\":\"s-1\""))
+            assertTrue(body.contains("\"text\":\"точнее: проверь логи\""))
+        }
+    }
+
+    @Test fun steerHttp200WithAcceptedFalseIsFailure() {
+        // Контракт _handle_chat_steer: HTTP 200 + accepted:false — ОТКАЗ, не успех.
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200)
+                .setBody("""{"accepted":false,"fallback":"no_cached_agent","stream_id":null}"""))
+            assertFalse(gatewayFor(server).steer("s-1", "уточнение"))
+        }
+    }
+
+    @Test fun steerHttpFailureMapsToFalse() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"boom"}"""))
+            assertFalse(gatewayFor(server).steer("s-1", "уточнение"))
+        }
+    }
+
+    @Test fun steerMissingCredentialMapsToFalseWithoutAnyHttpCall() {
+        MockWebServer().use { server ->
+            assertFalse(gatewayFor(server, cred = null).steer("s-1", "уточнение"))
+            assertEquals(0, server.requestCount)
+        }
+    }
 }
