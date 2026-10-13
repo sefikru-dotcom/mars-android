@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.ErrorOrigin
 import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
@@ -483,6 +484,56 @@ class StreamEventMapperTest {
         assertNull(StreamEventMapper.sideEvent("todo_state", """{"todos":[],"summary":{"total":0},"version":1}"""))
         assertNull(StreamEventMapper.sideEvent("state_saved", "{}"))
         assertNull(StreamEventMapper.sideEvent(null, """{"title":"x"}"""))
+    }
+
+    // ---- `context_status`: статус префилл-контекста хода (api/streaming.py
+    // put('context_status', {session_id, prefill: _public_prefill_context_status(...)})).
+    // Android-клиент терял кадр молча; теперь он доставляется через side-канал
+    // ([ContextStatusUpdate]), не расширяя sealed ChatEvent.
+
+    /** `loaded`-префилл: поля доставляются дословно; бюджетные хвосты (original_*, max_chars) в контракт не входят. */
+    @Test fun sideEventDeliversContextStatusLoadedPrefill() {
+        val payload = """{"session_id":"s7","prefill":{"status":"loaded","source":"script","label":"session recall","message_count":3,"compacted":true,"original_source":"file","original_message_count":9,"original_char_count":52000,"max_chars":24000}}"""
+        assertEquals(
+            ContextStatusUpdate(
+                sessionId = "s7",
+                status = "loaded",
+                label = "session recall",
+                source = "script",
+                messageCount = 3,
+                error = null,
+                compacted = true,
+            ),
+            StreamEventMapper.sideEvent("context_status", payload)
+        )
+        // Sealed-контракт не расширяем: кадр живёт ТОЛЬКО в side-канале.
+        assertNull(StreamEventMapper.map("context_status", null, payload))
+    }
+
+    /** `error`-префилл: текст серверной ошибки сохраняется для предупреждения в UI. */
+    @Test fun sideEventDeliversContextStatusErrorWithReason() {
+        val update = StreamEventMapper.sideEvent(
+            "context_status",
+            """{"session_id":"s7","prefill":{"status":"error","source":"none","label":"session recall","message_count":0,"error":"prefill script failed"}}"""
+        ) as ContextStatusUpdate
+        assertEquals("error", update.status)
+        assertEquals("prefill script failed", update.error)
+        assertEquals(0, update.messageCount)
+        assertFalse(update.compacted)
+    }
+
+    /** `not_configured` доставляется (UI сам решает не показывать); кадр без prefill/status и не-JSON отбрасываются. */
+    @Test fun sideEventDeliversNotConfiguredAndDropsFramesWithoutStatus() {
+        assertEquals(
+            ContextStatusUpdate(sessionId = "s7", status = "not_configured", label = "session recall", source = "none"),
+            StreamEventMapper.sideEvent(
+                "context_status",
+                """{"session_id":"s7","prefill":{"status":"not_configured","source":"none","label":"session recall","message_count":0}}"""
+            )
+        )
+        assertNull(StreamEventMapper.sideEvent("context_status", """{"session_id":"s7"}"""))
+        assertNull(StreamEventMapper.sideEvent("context_status", """{"session_id":"s7","prefill":{"label":"x"}}"""))
+        assertNull(StreamEventMapper.sideEvent("context_status", "not-json"))
     }
 
     // ---- SSE edge payloads reaching the mapper (SseChunkParser boundary) ----

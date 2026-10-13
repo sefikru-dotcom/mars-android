@@ -5,6 +5,7 @@ import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.ErrorOrigin
 import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
@@ -107,7 +108,8 @@ object StreamEventMapper {
             // Unknown frames (state_saved, ...) carry no chat content;
             // `todo_state` is deliberately NOT mapped onto ChatEvent — it is
             // delivered via [todoState] on the side channel (see below), and the
-            // `title` text / `goal` / `goal_continue` frames travel via [sideEvent].
+            // `title` text / `goal` / `goal_continue` / `context_status` frames
+            // travel via [sideEvent].
             else -> null
         }
     }
@@ -151,19 +153,24 @@ object StreamEventMapper {
      *   alias of `continuation_prompt`). DELIVERY ONLY — the continuation is
      *   never auto-sent by the transport; queuing it as the next user message
      *   is an explicit UI-layer decision (WebUI /goal parity).
+     * - `context_status` → [ContextStatusUpdate]: `{session_id, prefill:
+     *   {status, source, label, message_count, error?, compacted?}}` — статус
+     *   префилл-контекста хода (api/streaming.py `_public_prefill_context_status`).
+     *   Кадр без `prefill`/`status` → null (доставлять нечего).
      *
      * Independent of [map]: a `title` frame yields BOTH [ChatEvent.SessionBound]
      * (via [map]) and a [SessionTitleUpdate] (via this function).
      */
     fun sideEvent(eventName: String?, payload: String): StreamSideEvent? {
         val name = eventName?.trim()
-        if (name != "title" && name != "goal" && name != "goal_continue") return null
+        if (name != "title" && name != "goal" && name != "goal_continue" && name != "context_status") return null
         val obj = parseObject(payload) ?: return null
         return when (name) {
             "title" -> stringField(obj, "title")
                 ?.let { SessionTitleUpdate(sessionId(obj, payload), it) }
             "goal" -> goalUpdate(obj, payload)
-            else -> goalContinuation(obj, payload)
+            "goal_continue" -> goalContinuation(obj, payload)
+            else -> contextStatusUpdate(obj, payload)
         }
     }
 
@@ -199,6 +206,29 @@ object StreamEventMapper {
             messageKey = stringField(obj, "message_key"),
             messageArgs = stringList(obj["message_args"]),
             decisionJson = decisionJson(obj),
+        )
+    }
+
+    /**
+     * SSE `context_status` → [ContextStatusUpdate]. Форма серверного payload
+     * (api/streaming.py `_public_prefill_context_status`): `{session_id,
+     * prefill: {status, source, label, message_count, error?, compacted?, ...}}`.
+     * Поля `prefill` доставляются дословно (WebUI-дефолты `not_configured`/
+     * `session recall` применяет UI-презентер, не транспорт); кадр без `prefill`
+     * или без `status` ничего не несёт и отбрасывается (null).
+     */
+    private fun contextStatusUpdate(obj: Map<String, Any?>, payload: String): ContextStatusUpdate? {
+        @Suppress("UNCHECKED_CAST")
+        val prefill = obj["prefill"] as? Map<String, Any?> ?: return null
+        val status = stringField(prefill, "status") ?: return null
+        return ContextStatusUpdate(
+            sessionId = sessionId(obj, payload),
+            status = status,
+            label = stringField(prefill, "label"),
+            source = stringField(prefill, "source"),
+            messageCount = intField(prefill, "message_count") ?: 0,
+            error = stringField(prefill, "error"),
+            compacted = prefill["compacted"] == true,
         )
     }
 

@@ -59,6 +59,7 @@ import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
@@ -165,6 +166,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private val firstSessionFlow = FirstSessionFlow(SessionRepository(), BASE_URL)
     private var explicitStatus: String? = null
+
+    /**
+     * Транзиентная строка статуса префилл-контекста (SSE `context_status`,
+     * [ContextStatusPresenter]): видна в статус-баре ограниченное время и
+     * сбрасывается/перезаписывается каждым новым кадром — не накапливается.
+     */
+    private var contextStatusLine: String? = null
+    private var contextStatusJob: Job? = null
     private lateinit var modelSelection: ModelSelection
     private var modelBtn: Button? = null
     private lateinit var reasoningSelection: ReasoningEffortSelection
@@ -337,6 +346,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     ChatRepository().attachToStream(
                         BASE_URL, attachCredential, streamId, lastEventId,
                         onTodoState = todoCallback(currentSessionId),
+                        onSideEvent = sideEventCallback(currentSessionId),
                         onEventId = onEventId,
                     )
                 }
@@ -1517,6 +1527,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 modelProvider = choice?.providerId,
                 explicitModelPick = choice?.explicitPick == true,
                 onTodoState = todoCallback(currentSessionId),
+                onSideEvent = sideEventCallback(currentSessionId),
                 // Курсор Last-Event-ID продвигается на КАЖДОМ id-кадре (до маппинга),
                 // чтобы оборвавшийся доставленный ход восстанавливался без потерь.
                 onEventId = { id -> if (::recovery.isInitialized) recovery.resumeTracker.onFrameId(id) },
@@ -1731,6 +1742,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         stream?.cancel()
         stream = null
         currentStreamId = null
+        // Строка статуса префилл-контекста принадлежит убитому ходу/диалогу — в новый
+        // контекст она перетекать не должна (сброс, не накопление).
+        clearContextStatus()
     }
 
     private fun cancelStream() {
@@ -1859,6 +1873,59 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    /**
+     * Side-канал SSE-метаданных ([ru.mars.network.model.StreamSideEvent]) живого хода:
+     * мобильный чат показывает из него только `context_status` (статус префилл-контекста);
+     * остальные носители доставляются, но остаются без реакции. Кадр приходит на IO-контексте
+     * потока — прыжок на UI-поток здесь. [boundSessionId] фиксирует сессию на момент старта
+     * хода: кадр, опоздавший к сменившемуся экрану, не перекрасит новый диалог (тот же
+     * guard, что в [todoCallback]); сверка самого кадра с активной сессией — в
+     * [ContextStatusPresenter].
+     */
+    private fun sideEventCallback(boundSessionId: String?): (ru.mars.network.model.StreamSideEvent) -> Unit = { event ->
+        if (event is ContextStatusUpdate) {
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    onContextStatus(event)
+                }
+            }
+        }
+    }
+
+    /**
+     * Строка статуса префилл-контекста: каждый кадр ПЕРЕЗАПИСЫВАЕТ предыдущую строку
+     * (не накапливает), видна [ContextStatusPresenter.DISPLAY_DURATION_MS] и гаснет,
+     * возвращая обычную статус-цепочку («Марс печатает…» и т.п.). Кадр, который
+     * показывать нечего (`not_configured`/чужая сессия), гасит строку сразу.
+     */
+    private fun onContextStatus(update: ContextStatusUpdate) {
+        contextStatusJob?.cancel()
+        val line = ContextStatusPresenter.statusLine(update, currentSessionId)
+        if (line == null) {
+            contextStatusJob = null
+            if (contextStatusLine != null) {
+                contextStatusLine = null
+                setStatus()
+            }
+            return
+        }
+        contextStatusLine = line
+        setStatus()
+        contextStatusJob = lifecycleScope.launch {
+            delay(ContextStatusPresenter.DISPLAY_DURATION_MS)
+            contextStatusLine = null
+            contextStatusJob = null
+            setStatus()
+        }
+    }
+
+    /** Сброс строки статуса контекста при любом уходе с контекста диалога (без setStatus — вызывающий путь обновляет статус сам). */
+    private fun clearContextStatus() {
+        contextStatusJob?.cancel()
+        contextStatusJob = null
+        contextStatusLine = null
+    }
+
     private fun updateQuotePlate() {
         if (!::composerQuoteView.isInitialized) return
         val plate = composerLayoutPresenter.quotePlate
@@ -1985,7 +2052,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun setStatus() {
         val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
-        statusView.text = explicitStatus ?: when {
+        statusView.text = explicitStatus ?: contextStatusLine ?: when {
             uiState.todoState?.todos?.isNotEmpty() == true && uiState.status == ChatStatus.TYPING -> {
                 val todos = requireNotNull(uiState.todoState).todos
                 val done = todos.count { it.status == "completed" }

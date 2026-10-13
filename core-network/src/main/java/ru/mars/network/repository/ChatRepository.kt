@@ -118,8 +118,9 @@ class ChatRepository(
      *
      * [onSideEvent] — optional NON-SEALED transport callback (same delivery
      * pattern as [onTodoState]) for SSE metadata frames without a sealed
-     * [ChatEvent] carrier: `title` text, `goal` and `goal_continue`
-     * ([ru.mars.network.model.StreamSideEvent]). Delivered in stream order on
+     * [ChatEvent] carrier: `title` text, `goal`, `goal_continue` and
+     * `context_status` ([ru.mars.network.model.StreamSideEvent]). Delivered in
+     * stream order on
      * this flow's IO context, ALONGSIDE the [ChatEvent] flow (a `title` frame
      * still emits [ChatEvent.SessionBound]). Delivery only: receivers must not
      * auto-send a goal continuation — that is an explicit UI decision. Default
@@ -223,7 +224,8 @@ class ChatRepository(
      * (the journaled replay of a reattached stream can contain `todo_state` frames too);
      * see its KDoc for the delivery contract.
      *
-     * [onSideEvent] — same `title`/`goal`/`goal_continue` side-channel callback as in
+     * [onSideEvent] — same `title`/`goal`/`goal_continue`/`context_status`
+     * side-channel callback as in
      * [sendMessage] (a reattached stream replays these frames from the journal too).
      *
      * [onEventId] — same per-frame resume-cursor callback as in [sendMessage]: receives
@@ -407,7 +409,8 @@ class ChatRepository(
      * no sealed ChatEvent carrier exists) instead of reaching [StreamEventMapper.map],
      * which returns null for them. When null, behaviour is unchanged (frames are dropped).
      *
-     * [onSideEvent]: when non-null, `title`/`goal`/`goal_continue` frames are ALSO
+     * [onSideEvent]: when non-null, `title`/`goal`/`goal_continue`/`context_status`
+     * frames are ALSO
      * parsed by [StreamEventMapper.sideEvent] and handed to it (typed
      * [StreamSideEvent] side channel). Unlike `todo_state` this does NOT divert
      * the frame from [StreamEventMapper.map] — a `title` frame still emits
