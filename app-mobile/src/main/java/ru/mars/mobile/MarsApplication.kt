@@ -10,15 +10,11 @@ import android.app.Application
  * (JVM-тесты: MemoryTrimPolicyTest); здесь только dispatch.
  *
  * Что чистим:
- * - битмап-кэш [ImageLoader]: публичного метода очистки на этой ветке нет —
- *   зона render-primitives (параллельный воркер) добавляет кэши/чистку внутри
- *   ImageLoader обратно совместимо. Вызов идёт best-effort по отражению
- *   (`trimMemoryCache`): после слияния веток заработает автоматически, а пока
- *   метода нет — runCatching молча не делает ничего. Сам ImageLoader здесь не
- *   меняется; его LruCache в любом случае ограничен бюджетом
- *   [ImageLoaderPolicy.cacheBudgetBytes] (≤ 24 МБ) и вытесняет сам.
- * - кэши парсинга Markdown — аналогично: кэш живёт внутри MarkdownFormatter (зона B),
- *   вызов также best-effort (`trimCache`).
+ * - битмап-кэш [ImageLoader] ([ImageLoader.trimMemoryCache]): LruCache ограничен
+ *   бюджетом [ImageLoaderPolicy.cacheBudgetBytes] (≤ 24 МБ), под давлением памяти
+ *   освобождается целиком, битмапы перезагружаются по URL лениво;
+ * - кэш разбора Markdown ([MarkdownFormatter.trimCache]): восстанавливается лениво
+ *   при следующем рендере.
  *
  * Транскрипт «подрезать» здесь не нужно: рост состояния уже ограничен
  * [TranscriptCapPolicy] (cap на число сообщений и текст пузыря), а view-дерево
@@ -37,16 +33,7 @@ class MarsApplication : Application() {
     }
 
     private fun clearProcessCaches() {
-        invokeIfExists(ImageLoader::class.java, ImageLoader, "trimMemoryCache")
-        invokeIfExists(MarkdownFormatter::class.java, MarkdownFormatter, "trimCache")
-    }
-
-    /**
-     * Best-effort вызов необязательного public-метода без аргументов: метод может
-     * отсутствовать (контракт веток — сигнатуры существующих входов неизменны,
-     * новые добавляются независимо), поэтому любой отказ молча игнорируется.
-     */
-    private fun invokeIfExists(owner: Class<*>, instance: Any, methodName: String) {
-        runCatching { owner.getMethod(methodName).invoke(instance) }
+        ImageLoader.trimMemoryCache()
+        MarkdownFormatter.trimCache()
     }
 }

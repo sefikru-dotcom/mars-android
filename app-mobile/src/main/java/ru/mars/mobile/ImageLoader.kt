@@ -55,6 +55,15 @@ object ImageLoader {
     /** Один разделяемый fetch+decode на URL: дедупликация одновременных запросов. */
     private val inFlight = ConcurrentHashMap<String, Deferred<Bitmap?>>()
 
+    /**
+     * Полная очистка кэша миниатюр под системным давлением памяти
+     * (вызывает [MarsApplication] из onTrimMemory/onLowMemory). Битмапы
+     * перезагружаются по URL при следующем показе — корректность не страдает.
+     */
+    fun trimMemoryCache() {
+        cache.evictAll()
+    }
+
     fun load(rawUrl: String, imageView: ImageView) {
         val url = ThumbnailUrlResolver.resolve(rawUrl)
         if (url == null) {
