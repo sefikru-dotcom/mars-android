@@ -44,6 +44,10 @@ android {
         targetSdk = 34
         versionCode = 27
         versionName = "1.5.1"
+        // Instrumented UI-тесты (Espresso) в src/androidTest: ручная View-вёрстка
+        // проверяется на эмуляторе; harness детерминированный (фейковый credential +
+        // seeded офлайн-кэш, радио выключено — боевой сервер не задействуется).
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -73,7 +77,12 @@ android {
         }
     }
 
-    testOptions { unitTests.isReturnDefaultValues = true }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+        // Инструментальные UI-тесты: системные анимации отключаются на устройстве,
+        // иначе Espresso-синхронизация flaky на drawer/переходах.
+        animationsDisabled = true
+    }
 }
 
 dependencies {
@@ -84,4 +93,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+
+    // --- Instrumented UI-тесты (src/androidTest) ---
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    androidTestImplementation("androidx.test.espresso:espresso-intents:3.5.1")
 }
