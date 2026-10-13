@@ -3199,15 +3199,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Maps a persisted session transcript to bubbles (shared by loadSession and post-compression reload). */
-    private fun historyMessages(detail: SessionDetail): List<ChatMessage> = detail.messages.map {
-        // Реальное серверное время сообщения (createdAt): метки питают час на карточке и
-        // разделители суток; нераспознанная/отсутствующая метка -> UNKNOWN (время не показываем).
-        ChatMessage(
-            if (it.role == "user") "user" else "assistant",
-            it.content,
-            timestamp = MessageTimePolicy.parseServerTimestamp(it.createdAt),
-        )
-    }
+    private fun historyMessages(detail: SessionDetail): List<ChatMessage> =
+        // Чистая HistoryTranscriptPolicy: user/assistant пузыри с серверными метками,
+        // служебные role:"tool" строки сворачиваются в карточки на assistant-якоре и
+        // НИКОГДА не рендерятся текстом (WebUI parity); прочие роли не показываются.
+        HistoryTranscriptPolicy.of(detail.messages)
 
     /**
      * Re-fetches the transcript of [currentSessionId] after compression replaced the server-side
