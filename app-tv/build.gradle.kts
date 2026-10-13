@@ -62,6 +62,15 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.leanback:leanback:1.0.0")
+    // Media3/ExoPlayer вместо android.media.MediaPlayer: на Mi TV (Android 9, MSSP1)
+    // MediaPlayer с AAC-стримом уходит в compressed-offload ветку AudioFlinger
+    // («Offload request, forcing to Direct Output», flags #10 COMPRESS_OFFLOAD) и вывод
+    // на Speaker/Bluetooth глохнет. ExoPlayer 1.2.1 offload не имеет вовсе: только
+    // программное декодирование в PCM и обычный AudioTrack через микшер — как системные
+    // звуки, которые на этом ТВ слышно всегда. Версия зафиксирована: в 1.4+ у
+    // DefaultRenderersFactory появился audio-offload режим, его сюда пускать нельзя.
+    implementation("androidx.media3:media3-exoplayer:1.2.1")
+    implementation("androidx.media3:media3-datasource:1.2.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20240303")

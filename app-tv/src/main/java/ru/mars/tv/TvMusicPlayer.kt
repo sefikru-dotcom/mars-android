@@ -5,16 +5,31 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.os.PowerManager
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import ru.mars.network.model.MusicTrack
 
 /**
- * Process-wide (global) TV playback transport: a Kotlin object whose MediaPlayer survives
- * Activity recreation and screen changes (mobile MarsMusicPlayer parity). Music keeps
- * playing after the music screen closes — only an explicit [stop] (or a new [play]/
+ * Process-wide (global) TV playback transport: a Kotlin object whose Media3 [ExoPlayer]
+ * survives Activity recreation and screen changes (mobile MarsMusicPlayer parity). Music
+ * keeps playing after the music screen closes — only an explicit [stop] (or a new [play]/
  * [playPlaylist], which replaces the stream) tears the player down. The controller talks
  * to it through the [TvMusicTransport] seam, so unit tests never touch this Android code.
+ *
+ * ENGINE — Media3 ExoPlayer (software decode to PCM), NOT android.media.MediaPlayer:
+ * live diagnostics on Mi TV (Android 9, MSSP1) showed MediaPlayer routing the AAC stream
+ * into AudioFlinger's compressed-offload branch («Offload request, forcing to Direct
+ * Output», flags #10 COMPRESS_OFFLOAD, «Frames written» frozen) where the output to
+ * Speaker/Bluetooth goes silent while mixer-path system sounds stay audible. ExoPlayer
+ * 1.2.1 has no offload route at all: it decodes to PCM and renders through a regular
+ * AudioTrack over the same mixer the audible system sounds use. The version is pinned —
+ * later Media3 releases added an opt-in audio-offload mode that must not creep in here.
  *
  * Continuous playback: [playPlaylist] binds a whole list; when a track completes the
  * transport asks [TvPlaybackModePolicy.advanceOnCompletion] where to go under
@@ -28,16 +43,23 @@ import ru.mars.network.model.MusicTrack
  * - Audio focus is requested before every start/resume; a permanent LOSS stops the
  *   transport, a TRANSIENT loss pauses it and the returning GAIN resumes, CAN_DUCK only
  *   lowers the volume. A pause the USER made never auto-resumes. Focus integration needs
- *   an application [Context] — screens call [attachContext]; without one the transport
- *   plays exactly like before (best-effort, never crashes).
+ *   an application [Context] — screens call [attachContext]. ExoPlayer additionally
+ *   REQUIRES a context to be built; without one the transport parks with an honest
+ *   [lastError] (every production screen attaches in onCreate before playback starts).
  * - Network streams hold a PARTIAL_WAKE_LOCK while a player is bound, but only when the
- *   WAKE_LOCK permission is actually granted (acquiring it otherwise throws
- *   SecurityException at start()).
- * - [positionMs] is crash-safe: invalid MediaPlayer states yield 0, never an exception.
+ *   WAKE_LOCK permission is actually granted ([ExoPlayer.setWakeMode] otherwise risks a
+ *   SecurityException once rendering starts).
+ * - [positionMs] is crash-safe: any engine anomaly yields 0, never an exception.
  *
  * Stream URL contract: `GET {MUSIC_BASE_URL}/api/stream/{id}` — MusicRepository.getStreamUrl
  * parity. A dead/unreachable stream is recorded in [lastError] and never crashes the app.
+ *
+ * THREADING: the engine is built on the calling thread's looper (main in production —
+ * every call site is a UI handler or the controller's UI-thread dispatch) and its
+ * [Player.Listener] callbacks arrive on that same looper, so the [Synchronized] transport
+ * methods and the listener never race off-thread; no thread ever sleeps waiting on the engine.
  */
+@OptIn(UnstableApi::class)
 object TvMusicPlayer : TvMusicTransport {
 
     /** Track currently bound to the transport (null when idle/stopped). */
@@ -45,7 +67,7 @@ object TvMusicPlayer : TvMusicTransport {
     var currentTrack: MusicTrack? = null
         private set
 
-    /** True while the MediaPlayer is actually rendering audio. */
+    /** True while the ExoPlayer engine is actually rendering audio. */
     @Volatile
     var isPlaying: Boolean = false
         private set
@@ -74,7 +96,13 @@ object TvMusicPlayer : TvMusicTransport {
     var repeatMode: TvRepeatMode = TvRepeatMode.OFF
         private set
 
-    private var mediaPlayer: MediaPlayer? = null
+    /**
+     * The Media3 engine (created per track — see [startCurrentTrack]). `null` while idle;
+     * released on stop/auto-advance/skip. ExoPlayer replaces the old MediaPlayer field —
+     * deliberately NOT an android.media.MediaPlayer: that engine is what sank the AAC
+     * stream into the silent compressed-offload branch on this TV (class KDoc).
+     */
+    private var player: ExoPlayer? = null
 
     /** Consecutive stream failures; circuit-breaker input for [TvPlaylistPolicy.skipAfterFailure]. */
     private var consecutiveFailures = 0
@@ -100,6 +128,30 @@ object TvMusicPlayer : TvMusicTransport {
         onAudioFocusChanged(change)
     }
 
+    /**
+     * The engine callback, mapped onto the SAME transport transitions MediaPlayer had:
+     * STATE_READY == onPrepared+start (playWhenReady is armed before prepare(), so READY
+     * means rendering began), STATE_ENDED == onCompletion (auto-advance under
+     * [repeatMode]), onPlayerError == onError (record + skip-or-park). One shared
+     * listener, detached from each engine before it is released — a dying player can
+     * never notify over its successor.
+     */
+    private val playerListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            when (playbackState) {
+                Player.STATE_READY -> onTrackReady()
+                Player.STATE_ENDED -> onTrackCompleted()
+                else -> Unit // IDLE/BUFFERING: nothing to transition yet
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // errorCode is Media3's stable classification (I/O, parsing, decoder…);
+            // the message is what the screen may surface verbatim.
+            onTrackFailed(error.errorCode, 0, error.message ?: error.errorCodeName)
+        }
+    }
+
     private val audioManager: AudioManager?
         get() = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
@@ -114,9 +166,10 @@ object TvMusicPlayer : TvMusicTransport {
     var onTransportChanged: (() -> Unit)? = null
 
     /**
-     * Binds the application [Context] used for audio-focus integration and the network
-     * wake mode (idempotent; called from the music/chat screens' onCreate). Without a
-     * context the transport still plays — focus and wake mode are simply skipped.
+     * Binds the application [Context] used for audio-focus integration, the network wake
+     * mode and the engine itself (idempotent; called from the music/chat screens'
+     * onCreate). Without a context the transport cannot build the ExoPlayer and parks
+     * with an honest [lastError] — focus and wake mode are skipped as before.
      */
     fun attachContext(context: Context) {
         appContext = context.applicationContext
@@ -153,7 +206,7 @@ object TvMusicPlayer : TvMusicTransport {
         return repeatMode
     }
 
-    /** (Re)builds the MediaPlayer for [playlist]@[currentIndex]; callers hold the lock. */
+    /** (Re)builds the ExoPlayer for [playlist]@[currentIndex]; callers hold the lock. */
     private fun startCurrentTrack() {
         val track = playlist.getOrNull(currentIndex) ?: return
         releasePlayer()
@@ -171,32 +224,61 @@ object TvMusicPlayer : TvMusicTransport {
             notifyChanged()
             return
         }
-        val player = MediaPlayer()
-        mediaPlayer = player
+        val context = appContext
+        if (context == null) {
+            // Unlike MediaPlayer, ExoPlayer cannot be built without a Context. Every
+            // production screen attaches one in onCreate before playback starts; if it
+            // is still missing, park honestly instead of crashing or faking playback.
+            isPlaying = false
+            lastError = "Плеер не инициализирован — перезапустите приложение"
+            notifyChanged()
+            return
+        }
         try {
-            player.setAudioStreamType(AudioManager.STREAM_MUSIC)
+            // Media3 1.2.1 DefaultRenderersFactory has no audio-offload route: the sink
+            // always renders decoded PCM through a regular AudioTrack (the mixer path
+            // that IS audible on this TV) — this is the fix for the offload silence.
+            // handleAudioFocus=false: focus stays owned by this transport verbatim
+            // (TvAudioAutonomyPolicy), ExoPlayer's built-in focus handling would apply
+            // its own divergent duck/pause policy.
+            val engine = ExoPlayer.Builder(
+                context,
+                DefaultMediaSourceFactory(context), // https stream via DefaultHttpDataSource
+            ).build()
+            player = engine
+            engine.setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder()
+                    .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                    .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus= */ false,
+            )
             // Network stream: keep the CPU awake while rendering (permission-gated).
-            applyWakeMode(player)
-            player.setOnPreparedListener { prepared ->
-                prepared.start()
-                isPlaying = true
-                consecutiveFailures = 0
-                notifyChanged()
-            }
-            // Track finished naturally: the pure mode policy decides where to go next.
-            player.setOnCompletionListener { onTrackCompleted() }
-            player.setOnErrorListener { _, what, extra ->
-                onTrackFailed(what, extra)
-                true
-            }
-            player.setDataSource(streamUrlFor(track.id))
-            player.prepareAsync()
+            applyWakeMode(engine)
+            engine.addListener(playerListener)
+            engine.setMediaItem(MediaItem.fromUri(streamUrlFor(track.id)))
+            // Armed BEFORE prepare(): STATE_READY then means rendering actually started
+            // (the old onPrepared -> start() pair collapses into this one flag).
+            engine.playWhenReady = true
+            engine.prepare()
         } catch (error: Exception) {
-            // A dead stream must not crash the screen: treat it like a player error
-            // (onTrackFailed releases the half-built player and decides skip-vs-park).
+            // A dead stream or a broken engine build must not crash the screen: treat it
+            // like a player error (onTrackFailed releases the half-built engine and
+            // decides skip-vs-park).
             isPlaying = false
             onTrackFailed(0, 0, error.message ?: error.javaClass.simpleName)
         }
+        notifyChanged()
+    }
+
+    /**
+     * STATE_READY under playWhenReady — the onPrepared+start() parity point: rendering
+     * has begun, the stream proved reachable, so the failure streak resets.
+     */
+    @Synchronized
+    private fun onTrackReady() {
+        isPlaying = true
+        consecutiveFailures = 0
         notifyChanged()
     }
 
@@ -254,14 +336,14 @@ object TvMusicPlayer : TvMusicTransport {
      */
     @Synchronized
     fun pause() {
-        val player = mediaPlayer ?: return
+        val engine = player ?: return
         if (!isPlaying) return
         try {
-            player.pause()
+            engine.pause() // playWhenReady=false — position kept, no engine exception path
             isPlaying = false
             notifyChanged()
-        } catch (_: IllegalStateException) {
-            // The player slipped into a bad state: keep the flag honest, no crash.
+        } catch (_: Exception) {
+            // The engine slipped into a bad state: keep the flag honest, no crash.
             isPlaying = false
         }
     }
@@ -269,13 +351,12 @@ object TvMusicPlayer : TvMusicTransport {
     /**
      * Continues a paused track: no-op while already playing or when no player is
      * bound (idle transport). Re-requests audio focus first — a resume after ANY
-     * interruption must not play over whatever grabbed the output. A start on a
-     * not-yet-prepared player is rejected by MediaPlayer and swallowed — the prepared
-     * callback starts the audio anyway.
+     * interruption must not play over whatever grabbed the output; a definitive
+     * DENIAL keeps the transport paused (the user's pause state is preserved).
      */
     @Synchronized
     fun resume() {
-        val player = mediaPlayer ?: return
+        val engine = player ?: return
         if (isPlaying) return
         // A resume after ANY interruption must not play over whoever grabbed the output:
         // an explicit focus DENIAL keeps the transport paused (the user's pause state is
@@ -284,15 +365,15 @@ object TvMusicPlayer : TvMusicTransport {
         pausedByFocusLoss = false
         duckedByFocus = false
         try {
-            player.setVolume(1f, 1f)
-        } catch (_: IllegalStateException) {
-            // Player in a transitional state: the duck flag is cleared regardless.
+            engine.volume = 1f
+        } catch (_: Exception) {
+            // Engine in a transitional state: the duck flag is cleared regardless.
         }
         try {
-            player.start()
+            engine.playWhenReady = true // renders now, or the moment buffering finishes
             isPlaying = true
             notifyChanged()
-        } catch (_: IllegalStateException) {
+        } catch (_: Exception) {
             isPlaying = false
         }
     }
@@ -304,16 +385,17 @@ object TvMusicPlayer : TvMusicTransport {
     }
 
     /**
-     * Safe playback position in milliseconds: 0 while nothing is bound, 0 whenever
-     * [MediaPlayer.getCurrentPosition] throws (device-dependent IllegalStateException in
-     * error/transitional states) and never negative ([TvAudioAutonomyPolicy]) — progress
-     * UIs must not crash the transport.
+     * Safe playback position in milliseconds: 0 while nothing is bound, 0 whenever the
+     * engine position is unreadable (any anomaly is caught) and never negative
+     * ([TvAudioAutonomyPolicy.sanitizePositionMs]) — progress UIs must not crash the
+     * transport.
      */
     @Synchronized
     fun positionMs(): Int {
-        val player = mediaPlayer ?: return 0
+        val engine = player ?: return 0
         return try {
-            TvAudioAutonomyPolicy.sanitizePositionMs(player.currentPosition)
+            val raw = engine.currentPosition.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+            TvAudioAutonomyPolicy.sanitizePositionMs(raw)
         } catch (_: Exception) {
             0
         }
@@ -343,9 +425,9 @@ object TvMusicPlayer : TvMusicTransport {
             TvAudioAutonomyPolicy.Action.DUCK -> {
                 duckedByFocus = true
                 try {
-                    mediaPlayer?.setVolume(DUCKED_VOLUME, DUCKED_VOLUME)
-                } catch (_: IllegalStateException) {
-                    // Bad player state: the flag stays honest, resume restores volume.
+                    player?.volume = DUCKED_VOLUME
+                } catch (_: Exception) {
+                    // Bad engine state: the flag stays honest, resume restores volume.
                 }
             }
             TvAudioAutonomyPolicy.Action.STOP -> {
@@ -356,8 +438,8 @@ object TvMusicPlayer : TvMusicTransport {
             TvAudioAutonomyPolicy.Action.RESTORE -> {
                 duckedByFocus = false
                 try {
-                    mediaPlayer?.setVolume(1f, 1f)
-                } catch (_: IllegalStateException) {
+                    player?.volume = 1f
+                } catch (_: Exception) {
                     // Player gone: nothing to restore the volume of.
                 }
                 if (pausedByFocusLoss) {
@@ -411,18 +493,19 @@ object TvMusicPlayer : TvMusicTransport {
     }
 
     /**
-     * Arms the network wake mode on [player] when allowed: the WAKE_LOCK permission must
-     * be granted ([TvAudioAutonomyPolicy.shouldHoldWakeLock] — without it acquiring the
-     * lock throws SecurityException at start()), and any framework failure degrades to
-     * playing without the lock instead of crashing.
+     * Arms the network wake mode on [engine] when allowed: the WAKE_LOCK permission must
+     * be granted ([TvAudioAutonomyPolicy.shouldHoldWakeLock] — without it the lock risks
+     * a SecurityException once rendering starts), and any framework failure degrades to
+     * playing without the lock instead of crashing. ExoPlayer manages the lock lifetime
+     * itself: held while the engine loads/renders, released on stop/release.
      */
-    private fun applyWakeMode(player: MediaPlayer) {
+    private fun applyWakeMode(engine: ExoPlayer) {
         val context = appContext ?: return
         val granted = context.checkCallingOrSelfPermission(android.Manifest.permission.WAKE_LOCK) ==
             PackageManager.PERMISSION_GRANTED
         if (!TvAudioAutonomyPolicy.shouldHoldWakeLock(granted)) return
         try {
-            player.setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK)
+            engine.setWakeMode(PowerManager.PARTIAL_WAKE_LOCK)
         } catch (_: Exception) {
             // Wake mode is an optimization; playback continues without it.
         }
@@ -452,16 +535,21 @@ object TvMusicPlayer : TvMusicTransport {
         }
     }
 
+    /**
+     * Detaches the shared listener and releases the engine. ExoPlayer.release() is
+     * state-safe (no MediaPlayer-style IllegalStateException window); the catch is
+     * belt-and-braces so teardown can never crash the transport.
+     */
     private fun releasePlayer() {
-        mediaPlayer?.let { player ->
+        player?.let { engine ->
             try {
-                if (player.isPlaying) player.stop()
-            } catch (_: IllegalStateException) {
-                // Player in a bad state: release() below is still safe.
+                engine.removeListener(playerListener)
+                engine.release()
+            } catch (_: Exception) {
+                // A dying engine must not take the transport down; the field is dropped below.
             }
-            player.release()
         }
-        mediaPlayer = null
+        player = null
         isPlaying = false
     }
 
