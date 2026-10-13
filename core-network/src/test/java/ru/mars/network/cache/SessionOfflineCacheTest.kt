@@ -125,6 +125,28 @@ class SessionOfflineCacheTest {
     }
 
     @Test
+    fun `tool metadata survives save and load so offline history keeps folded cards`() {
+        val cache = newCache()
+        val messages = listOf(
+            message("1", role = "assistant", content = "Смотрю."),
+            SessionMessage(
+                id = "2", role = "tool",
+                content = """{"ok":true}""",
+                createdAt = "2026-10-02T11:00:02", eventId = "ev-2",
+                toolName = "terminal", toolCallId = "call_9",
+            ),
+        )
+
+        assertTrue(cache.saveMessages("s1", messages))
+        val loaded = cache.loadMessages("s1").orEmpty()
+        assertEquals(messages, loaded)
+        val tool = loaded[1]
+        assertEquals("tool", tool.role)
+        assertEquals("terminal", tool.toolName)
+        assertEquals("call_9", tool.toolCallId)
+    }
+
+    @Test
     fun `empty session list round trips as empty snapshot not null`() {
         val cache = newCache()
 

@@ -37,6 +37,23 @@ class MessageTimePolicyTest {
     }
 
     @Test
+    fun `parses epoch seconds and millis from persisted history rows`() {
+        // sidecar-строки истории несут `timestamp` — epoch-секунды (строка или число,
+        // нормализованное SessionRepository); без этой ветки часы и день-разделители
+        // всей истории молча терялись (P0-регрессия транскрипта).
+        assertEquals(1_791_921_277_839L, MessageTimePolicy.parseServerTimestamp("1791921277.8392885"))
+        assertEquals(1_791_921_277_000L, MessageTimePolicy.parseServerTimestamp("1791921277"))
+        assertEquals(1_791_921_277_000L, MessageTimePolicy.parseServerTimestamp(" 1791921277 "))
+        // 13+ значащих цифр — уже миллисекунды.
+        assertEquals(1_791_921_277_839L, MessageTimePolicy.parseServerTimestamp("1791921277839"))
+        // Мелкие/нулевые значения — не эпоха сообщений.
+        assertEquals(MessageTimePolicy.UNKNOWN_TIMESTAMP, MessageTimePolicy.parseServerTimestamp("0"))
+        assertEquals(MessageTimePolicy.UNKNOWN_TIMESTAMP, MessageTimePolicy.parseServerTimestamp("42"))
+        // ISO-строки с цифрами внутри не должны уходить в epoch-ветку.
+        assertEquals(millis("2026-10-11 14:05:03"), MessageTimePolicy.parseServerTimestamp("2026-10-11 14:05:03"))
+    }
+
+    @Test
     fun `clock label is HH-mm in the given zone, null for unknown`() {
         assertEquals("14:05", MessageTimePolicy.clockLabel(millis("2026-10-11 14:05:00"), zone))
         assertEquals("09:00", MessageTimePolicy.clockLabel(millis("2026-10-11 09:00:00"), zone))

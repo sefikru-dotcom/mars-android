@@ -236,8 +236,34 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
         // ONLY: an assistant message never carries a real sentinel, and a literal "[Workspace::v1: …]"
         // quoted inside model output must survive verbatim.
         val content = if (role == "user") WorkspacePrefix.strip(raw) else raw
-        return SessionMessage(string(o, "id", "message_id"), role, content, string(o, "created_at", "createdAt"), string(o, "event_id"))
+        return SessionMessage(
+            id = string(o, "id", "message_id"),
+            role = role,
+            content = content,
+            createdAt = createdAt(o),
+            eventId = string(o, "event_id"),
+            toolName = string(o, "tool_name", "name"),
+            toolCallId = string(o, "tool_call_id"),
+        )
     }
+
+    /**
+     * History timestamp of one wire row. `GET /api/session` messages carry the
+     * persisted `timestamp` (epoch SECONDS — state.db REAL or sidecar string like
+     * "1791921277.8392885"), not `created_at`; without this alias every history
+     * bubble loses its clock label and day separators. Moshi decodes JSON numbers
+     * as Double, so the plain-string form is restored via BigDecimal to avoid the
+     * scientific notation ("1.791921277E9") that no display-side parser accepts.
+     */
+    private fun createdAt(o: Map<*, *>): String? {
+        string(o, "created_at", "createdAt")?.let { return it }
+        return when (val value = o["timestamp"]) {
+            is String -> value.trim().takeIf(String::isNotBlank)
+            is Number -> java.math.BigDecimal.valueOf(value.toDouble()).toPlainString()
+            else -> null
+        }
+    }
+
     private fun string(o: Map<*, *>, vararg keys: String) = keys.firstNotNullOfOrNull { o[it]?.toString()?.takeIf(String::isNotBlank) }
     private fun bearer(c: ConsumedDeviceCredential) = "Bearer ${c.accessToken}"
 }

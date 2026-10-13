@@ -293,6 +293,8 @@ class SessionOfflineCache(
         "content" to message.content.take(MAX_CONTENT_CHARS),
         "created_at" to message.createdAt,
         "event_id" to message.eventId,
+        "tool_name" to message.toolName,
+        "tool_call_id" to message.toolCallId,
     )
 
     private fun rowToMessage(row: Any?): SessionMessage? {
@@ -303,6 +305,10 @@ class SessionOfflineCache(
             content = map.string("content"),
             createdAt = map.stringOrNull("created_at"),
             eventId = map.stringOrNull("event_id"),
+            // Старые кэши (до tool-полей) просто вернут null — строки всё равно
+            // свернутся в карточку с нейтральным именем на слое отображения.
+            toolName = map.stringOrNull("tool_name"),
+            toolCallId = map.stringOrNull("tool_call_id"),
         )
     }
 

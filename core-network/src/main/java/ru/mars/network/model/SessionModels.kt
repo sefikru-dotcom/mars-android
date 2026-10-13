@@ -157,6 +157,15 @@ data class SessionMessage(
     val content: String,
     val createdAt: String? = null,
     val eventId: String? = null,
+    /**
+     * Service `role:"tool"` rows only: the tool that produced the row
+     * (wire `tool_name`, fallback `name`). Persisted history carries one row
+     * per tool result; the display layer folds it into a collapsed tool card
+     * on its assistant anchor instead of rendering raw output as a bubble.
+     */
+    val toolName: String? = null,
+    /** Correlation id of the tool call (wire `tool_call_id`), kept for card identity/dedupe. */
+    val toolCallId: String? = null,
 )
 
 /** Full session returned by the session detail endpoint. */

@@ -27,12 +27,26 @@ object MessageTimePolicy {
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm[:ss[.SSSSSS][.SSS]]")
 
     /**
+     * Epoch-метка сохранённой истории: state.db/sidecar несут `timestamp`
+     * epoch-СЕКУНДАМИ (целыми или дробными). Граница [EPOCH_MILLIS_FLOOR]:
+     * значения ниже неё — секунды (эпоха до 2286 года), выше — миллисекунды.
+     */
+    private val EPOCH_NUMBER = Regex("^\\d{9,15}(\\.\\d+)?$")
+    private const val EPOCH_MILLIS_FLOOR = 1e12
+
+    /**
      * Разбор серверной метки: ISO со смещением, ISO-instant («…Z»), «YYYY-MM-DD HH:MM:SS»
-     * (трактуется как UTC). null/пусто/нераспознанное -> [fallback].
+     * (трактуется как UTC) и epoch-число истории (секунды, порог [EPOCH_MILLIS_FLOOR] —
+     * миллисекунды). null/пусто/нераспознанное -> [fallback].
      */
     fun parseServerTimestamp(raw: String?, fallback: Long = UNKNOWN_TIMESTAMP): Long {
         val value = raw?.trim().orEmpty()
         if (value.isEmpty()) return fallback
+        if (EPOCH_NUMBER.matches(value)) {
+            value.toDoubleOrNull()?.takeIf { it > 0 }?.let { epoch ->
+                return (if (epoch >= EPOCH_MILLIS_FLOOR) epoch else epoch * 1000.0).toLong()
+            }
+        }
         return runCatching { DateTimeFormatter.ISO_OFFSET_DATE_TIME.parse(value, Instant::from).toEpochMilli() }
             .recoverCatching { DateTimeFormatter.ISO_INSTANT.parse(value, Instant::from).toEpochMilli() }
             .recoverCatching { LocalDateTime.parse(value, SPACE_FORMATTER).toInstant(ZoneOffset.UTC).toEpochMilli() }

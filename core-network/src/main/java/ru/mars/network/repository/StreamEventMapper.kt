@@ -289,7 +289,12 @@ object StreamEventMapper {
         ChatEvent.ToolResult(id, name, capToolPayload(preview ?: legacy.orEmpty()))
     }
 
-    private fun capToolPayload(value: String): String {
+    /**
+     * Единый ограничитель служебного tool-вывода (live-стрим И сохранённая история):
+     * кадр/строка больше [MAX_TOOL_PAYLOAD_CHARS] обрезается с явным маркером полной
+     * длины — карточка инструмента не должна превращаться в мегабайтный мегапузырь.
+     */
+    fun capToolPayload(value: String): String {
         if (value.length <= MAX_TOOL_PAYLOAD_CHARS) return value
         val marker = "\n… обрезано: полная длина ${value.length} симв."
         return value.take((MAX_TOOL_PAYLOAD_CHARS - marker.length).coerceAtLeast(0)) + marker
