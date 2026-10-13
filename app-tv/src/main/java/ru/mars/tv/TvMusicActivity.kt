@@ -2,10 +2,12 @@ package ru.mars.tv
 
 import android.app.Dialog
 import android.content.res.ColorStateList
+import android.graphics.Rect
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -14,6 +16,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import ru.mars.network.model.MusicTrack
@@ -35,6 +38,9 @@ import ru.mars.network.model.MusicTrack
  */
 internal object TvMusicFocusPolicy {
 
+    /** [View.NO_ID] mirror for JVM tests: «нет цели — фокус остаётся где был». */
+    const val NO_FOCUS = -1
+
     /**
      * True when the focus held by a disappearing affordance must be handed to the stable
      * header first: the view is on screen, it holds focus, and this render hides it.
@@ -42,6 +48,42 @@ internal object TvMusicFocusPolicy {
      */
     fun handoffBeforeHide(viewVisible: Boolean, viewHasFocus: Boolean, staysVisible: Boolean): Boolean =
         viewVisible && viewHasFocus && !staysVisible
+
+    /** What BACK does on the music screen: the IME absorbs the first press, the screen the next. */
+    enum class BackAction { HIDE_IME, CLOSE_SCREEN }
+
+    /**
+     * BACK при открытой экранной клавиатуре закрывает ТОЛЬКО её (фокус остаётся на
+     * searchInput); без клавиатуры — штатно закрывает экран.
+     */
+    fun backAction(imeVisible: Boolean): BackAction =
+        if (imeVisible) BackAction.HIDE_IME else BackAction.CLOSE_SCREEN
+
+    /**
+     * LEFT/RIGHT focus pairs for the header buttons that are VISIBLE right now:
+     * neighbours reference each other, both ends self-loop, so the D-pad never leaves
+     * the row and never chases into a GONE view. Caller passes ids in visual order.
+     */
+    fun horizontalChain(ids: List<Int>): Map<Int, Pair<Int, Int>> {
+        if (ids.isEmpty()) return emptyMap()
+        return ids.mapIndexed { index, id ->
+            val left = if (index == 0) ids.first() else ids[index - 1]
+            val right = if (index == ids.lastIndex) ids.last() else ids[index + 1]
+            id to (left to right)
+        }.toMap()
+    }
+
+    /**
+     * DOWN target from the search row: the first rendered track row wins; while the list
+     * is empty a visible «Повторить» catches the press; otherwise there is no target
+     * ([NO_FOCUS]) and focus honestly stays on the search row.
+     */
+    fun downTargetFromSearchRow(firstTrackRowId: Int?, retryButtonId: Int?, retryVisible: Boolean): Int =
+        when {
+            firstTrackRowId != null -> firstTrackRowId
+            retryVisible && retryButtonId != null -> retryButtonId
+            else -> NO_FOCUS
+        }
 }
 
 /**
@@ -117,6 +159,21 @@ class TvMusicActivity : AppCompatActivity() {
     private var lyricsDialog: Dialog? = null
 
     /**
+     * Видимость экранной клавиатуры: её высота съедает низ окна, [globalLayoutListener]
+     * считает разницу по [View.getWindowVisibleDisplayFrame]. Нужна для BACK: сначала
+     * закрывается IME ([TvMusicFocusPolicy.backAction]), и только потом экран.
+     */
+    private var imeVisible = false
+
+    private val globalLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        val root = window.decorView
+        val visible = Rect()
+        root.getWindowVisibleDisplayFrame(visible)
+        // 80dp порога: системные бары ТВ не дают такой разницы, а панель IME — даёт.
+        imeVisible = root.height - visible.bottom > dp(80)
+    }
+
+    /**
      * Rendered track rows — restyled in place on transport changes.
      * [label] красится акцентом у текущего трека, [marker] (ic_music) у него же виден.
      */
@@ -183,6 +240,31 @@ class TvMusicActivity : AppCompatActivity() {
             searchInput.setText("")
             controller.clearSearch()
         }
+        // Клавиатура НЕ всплывает на фокус сама (setShowSoftInputOnFocus(false), у XML-
+        // атрибута нет публичного статуса): D-pad проходит через поле поиска вниз к
+        // трекам без залипания. Открываем её только явным нажатием (DPAD_CENTER/клик).
+        searchInput.setShowSoftInputOnFocus(false)
+        searchInput.setOnClickListener { showIme() }
+        // BACK: сначала закрываем экранную клавиатуру (фокус остаётся на searchInput),
+        // и только без IME — штатно закрываем экран. Решение — чистая
+        // [TvMusicFocusPolicy.backAction], видимость IME считает [globalLayoutListener].
+        window.decorView.viewTreeObserver.addOnGlobalLayoutListener(globalLayoutListener)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when (TvMusicFocusPolicy.backAction(imeVisible)) {
+                    TvMusicFocusPolicy.BackAction.HIDE_IME -> {
+                        hideIme()
+                        searchInput.requestFocus()
+                    }
+                    TvMusicFocusPolicy.BackAction.CLOSE_SCREEN -> {
+                        // Штатный путь: на мгновение снимаем callback и пропускаем BACK дальше.
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            }
+        })
         TvFocusLift.attach(backButton)
         TvFocusLift.attach(retryButton)
         TvFocusLift.attach(stopButton)
@@ -203,6 +285,18 @@ class TvMusicActivity : AppCompatActivity() {
     /** Submits the field text as a search and dismisses the IME so results stay visible. */
     private fun submitSearch() {
         controller.search(searchInput.text.toString())
+        hideIme()
+    }
+
+    /** Явный показ экранной клавиатуры (DPAD_CENTER на searchInput). */
+    private fun showIme() {
+        searchInput.requestFocus()
+        val ime = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        ime.showSoftInput(searchInput, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    /** Скрыть экранную клавиатуру; видимость пересчитает [globalLayoutListener]. */
+    private fun hideIme() {
         val ime = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
         ime.hideSoftInputFromWindow(searchInput.windowToken, 0)
     }
@@ -217,6 +311,8 @@ class TvMusicActivity : AppCompatActivity() {
         lyricsDialog?.dismiss()
         lyricsDialog = null
         TvMusicPlayer.onTransportChanged = null
+        window.decorView.viewTreeObserver.takeIf { it.isAlive }
+            ?.removeOnGlobalLayoutListener(globalLayoutListener)
         super.onDestroy()
     }
 
@@ -250,6 +346,10 @@ class TvMusicActivity : AppCompatActivity() {
             }
         }
         renderTransportState()
+        // DOWN из строки поиска ведёт к списку треков: список динамический, поэтому
+        // цель переставляется кодом после каждого рендера (XML nextFocusDown — лишь
+        // стартовый fallback на @+id/trackList).
+        rewireSearchDownFocus()
     }
 
     private fun renderTracks(tracks: List<MusicTrack>) {
@@ -282,6 +382,9 @@ class TvMusicActivity : AppCompatActivity() {
                 setBackgroundResource(R.drawable.bg_focus_card)
                 isFocusable = true
                 isClickable = true
+                // Динамические строки получают собственный id, чтобы код мог навести
+                // nextFocusDown поля поиска на ПЕРВЫЙ трек: rewireSearchDownFocus().
+                id = View.generateViewId()
                 setOnClickListener { controller.onTrackActivated(index) }
             }
             row.addView(
@@ -367,6 +470,58 @@ class TvMusicActivity : AppCompatActivity() {
         renderRepeatMode()
         renderNowPlaying()
         trackRows.forEach { applyRowState(it) }
+        // Видимость транспортных кнопок изменилась — пересобираем LEFT/RIGHT цепочку
+        // шапки только из видимых кнопок, чтобы фокус никогда не терялся и не «нырял»
+        // в GONE-вьюху (чистая [TvMusicFocusPolicy.horizontalChain]).
+        rewireHeaderFocusChain()
+    }
+
+    /**
+     * Взаимные nextFocus* всех кнопок верхней панели + строки поиска — только между
+     * ВИДИМЫМИ элементами; края самопетлят (фокус остаётся в панели). Вызывается
+     * после каждой смены видимости транспорта ([renderTransportState]).
+     */
+    private fun rewireHeaderFocusChain() {
+        val visible = listOf(backButton, repeatButton, lyricsButton, playPauseButton, stopButton)
+            .filter { it.visibility == View.VISIBLE }
+        TvMusicFocusPolicy.horizontalChain(visible.map { it.id }).forEach { (id, sides) ->
+            findViewById<View>(id).apply {
+                nextFocusLeftId = sides.first
+                nextFocusRightId = sides.second
+            }
+        }
+        // Вниз из любой кнопки шапки — в поле поиска; вверх — оставаться в шапке.
+        visible.forEach {
+            it.nextFocusDownId = R.id.searchInput
+            it.nextFocusUpId = it.id
+        }
+        // Вверх из строки поиска — только в видимые кнопки шапки.
+        searchInput.nextFocusUpId = backButton.id
+        searchButton.nextFocusUpId = repeatButton.id
+        chartsButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
+    }
+
+    /**
+     * Код-механизм «поиск -> динамический список треков»: после рендера наводим
+     * nextFocusDown строки поиска (и соседей) на ПЕРВУЮ строку [trackList]; если списка
+     * нет — на видимую «Повторить», иначе цели нет и фокус честно остаётся на месте.
+     * Первый трек получает nextFocusUp обратно в поле поиска.
+     */
+    private fun rewireSearchDownFocus() {
+        val firstRow = trackList.getChildAt(0)
+        val target = TvMusicFocusPolicy.downTargetFromSearchRow(
+            firstTrackRowId = firstRow?.id?.takeIf { it != View.NO_ID },
+            retryButtonId = R.id.retryButton,
+            retryVisible = retryButton.visibility == View.VISIBLE,
+        )
+        searchInput.nextFocusDownId = target
+        searchButton.nextFocusDownId = target
+        chartsButton.nextFocusDownId = target
+        // «Повторить» вниз — в первый трек, а без треков цели нет (фокус остаётся на месте;
+        // самопетлю GONE-кнопке не ставим, чтобы чужой focusSearch не зациклился о невидимое).
+        retryButton.nextFocusDownId = firstRow?.id ?: TvMusicFocusPolicy.NO_FOCUS
+        retryButton.nextFocusUpId = R.id.searchInput
+        firstRow?.nextFocusUpId = R.id.searchInput
     }
 
     /** Repeat-toggle label mirrors the transport preference (pure: [TvMusicNowPlayingSpec]). */
