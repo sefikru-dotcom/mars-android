@@ -267,7 +267,14 @@ class MidTurnRecoveryController(
         try {
             transport.attach(streamId, resumeFrom) { id ->
                 // id-кадры убитого цикла не должны двигать курсор нового поколения.
-                if (gen == generation) resumeTracker.onFrameId(id)
+                if (gen == generation) {
+                    resumeTracker.onFrameId(id)
+                    // Проволочный кадр с id — ВЕРИФИЦИРОВАННЫЙ прогресс журнала: переустанавливает
+                    // per-turn cap координатора (реплей ≤ курсора не двигает high-water и cap НЕ
+                    // переустанавливает — RunJournalCursor). Без этой подачи честный длинный ход с
+                    // >24 суммарными обрывами терялся бы на cap, хотя прогресс шёл каждый attach.
+                    coordinator.onStreamFrame(id)
+                }
             }.collect { event ->
                 if (gen != generation) throw CancellationException("recovery generation superseded")
                 when {
