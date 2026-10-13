@@ -36,6 +36,7 @@ class ChatClickPathContractTest {
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
     private val main by lazy { source("src/main/java/ru/mars/mobile/MainActivity.kt") }
     private val manifest by lazy { source("src/main/AndroidManifest.xml") }
+    private val sessions by lazy { source("src/main/java/ru/mars/mobile/ChatSessionsActivity.kt") }
 
     // --- Шаг 1: запуск ------------------------------------------------------------------
 
@@ -80,60 +81,28 @@ class ChatClickPathContractTest {
     // --- Шаг 2: открытие drawer/раздела диалогов ----------------------------------------
 
     @Test
-    fun `drawer - menu button toggles sessions drawer`() {
-        val menuBtn = chat.substringAfter("val menuBtn = MarsTheme.circleIconButton")
-            .substringBefore("header.addView(menuBtn")
-        assertTrue("Кнопка шторки обязана иметь contentDescription «Сессии»", menuBtn.contains("\"Сессии\""))
-        assertTrue(
-            "Клик по кнопке обязан переключать шторку (toggle), а не только открывать",
-            menuBtn.contains("drawer.isDrawerOpen(GravityCompat.START)") &&
-                menuBtn.contains("drawer.closeDrawer(GravityCompat.START)") &&
-                menuBtn.contains("drawer.openDrawer(GravityCompat.START)")
-        )
+    fun `drawer - menu button opens the sections drawer`() {
+        assertTrue("Кнопка разделов должна быть wired в ChatActivity", chat.contains("openDrawer(GravityCompat.START)"))
+        assertTrue("Левый бар должен строиться через AppSectionsBar", chat.contains("AppSectionsBar("))
+        assertTrue("Список диалогов должен быть отдельным экраном", chat.contains("ChatSessionsActivity"))
     }
 
     @Test
-    fun `drawer - session list renders through SessionTreePolicy with subagents`() {
-        // Тело renderSessionList до следующего top-level private fun (вложенные
-        // локальные функции имеют больший отступ и границу не пересекают).
-        val render = chat.substringAfter("private fun renderSessionList() {")
-            .substringBefore("\n    private fun ")
-        assertTrue(
-            "Список шторки обязан строиться через SessionTreePolicy.tree",
-            render.contains("SessionTreePolicy.tree(")
-        )
-        assertTrue(
-            "Дерево обязано включать субагентов (showSubagents = true)",
-            render.contains("drawerSessions(showSubagents = true)")
-        )
-        assertTrue(
-            "Поиск шторки обязан передаваться в дерево как query = drawerFilterQuery",
-            render.contains("query = drawerFilterQuery")
-        )
-        assertTrue(
-            "Видимые строки — только SessionTreePolicy.visibleRows",
-            render.contains("SessionTreePolicy.visibleRows(")
-        )
-        assertTrue(
-            "Пустой результат обязан показывать «Нет подходящих сессий»",
-            render.contains("Нет подходящих сессий")
-        )
+    fun `session list - renders through SessionTreePolicy and opens leaf`() {
+        assertTrue("ChatSessionsActivity должен быть объявлен", sessions.contains("class ChatSessionsActivity"))
+        assertTrue("Список обязан строиться через SessionTreePolicy.tree", sessions.contains("SessionTreePolicy.tree("))
+        assertTrue("Дерево обязано использовать visibleRows", sessions.contains("SessionTreePolicy.visibleRows(tree)"))
+        assertTrue("Родитель раскрывает детей внутри карточки", sessions.contains("expandedParents.add(session.id)"))
+        assertTrue("Leaf открывается через AppNavIntents", sessions.contains("AppNavIntents.openSessionIntent"))
     }
 
     // --- Шаг 3: поиск в диалогах ---------------------------------------------------------
 
     @Test
-    fun `search - drawer filter feeds drawerFilterQuery and re-renders list`() {
-        val filter = chat.substringAfter("drawerFilter = EditText(this)")
-            .substringBefore("searchBox.addView(drawerFilter")
-        assertTrue(
-            "Фильтр шторки обязан обновлять drawerFilterQuery по вводу",
-            filter.contains("drawerFilterQuery = s?.toString().orEmpty()")
-        )
-        assertTrue(
-            "Ввод в фильтр обязан перерисовывать список сессий",
-            filter.contains("renderSessionList()")
-        )
+    fun `search - session filter feeds filterQuery and re-renders list`() {
+        assertTrue("Фильтр диалогов должен быть в ChatSessionsActivity", sessions.contains("filterQuery"))
+        assertTrue("Ввод должен перерисовывать список", sessions.contains("renderSessionList()"))
+        assertTrue("Поиск должен попадать в SessionTreePolicy", sessions.contains("query = filterQuery"))
     }
 
     @Test
@@ -162,62 +131,27 @@ class ChatClickPathContractTest {
     // --- Шаг 4: открытие сессии ----------------------------------------------------------
 
     @Test
-    fun `open session - leaf click closes drawer and loads session, parent click toggles branch`() {
-        val rowClick = chat.substringAfter("val onRowClick: () -> Unit = {")
-            .substringBefore("card.setOnClickListener { onRowClick() }")
-        assertTrue(
-            "Клик по родителю с детьми обязан переключать раскрытие ветки и перерисовывать список",
-            rowClick.contains("node.hasChildren") &&
-                rowClick.contains("expandedSessionParents.remove(session.id)") &&
-                rowClick.contains("expandedSessionParents.add(session.id)") &&
-                rowClick.contains("renderSessionList()")
-        )
-        assertTrue(
-            "Клик по leaf обязан закрывать шторку и открывать сессию",
-            rowClick.contains("drawer.closeDrawer(GravityCompat.START)") &&
-                rowClick.contains("loadSession(session)")
-        )
+    fun `open session - leaf click uses policy and back returns to session list`() {
+        assertTrue("Клик по parent должен переключать ветку", sessions.contains("node.hasChildren"))
+        assertTrue("Клик по leaf должен открывать ChatActivity", sessions.contains("AppNavIntents.openSessionIntent"))
+        assertTrue("ChatActivity должна вести назад в список", chat.contains("navigateToSessionList()"))
     }
 
     @Test
-    fun `open session - navigation is token-guarded so stale callbacks cannot repaint`() {
-        val load = chat.substringAfter("private fun loadSessionById(sessionId: String) {")
-            .substringBefore("private fun ")
-        assertTrue(
-            "Открытие сессии обязано брать токен SessionNavigationPolicy.beginNavigation",
-            load.contains("sessionNavigation.beginNavigation()")
-        )
-        assertTrue(
-            "Callback применяется только если токен текущий (isCurrent)",
-            load.contains("sessionNavigation.isCurrent(token)")
-        )
-        assertTrue(
-            "Открытая сессия обязана обновлять server-authoritative модель чипа",
-            load.contains("modelSelection.setSessionModel(detail.model, detail.modelProvider)")
-        )
+    fun `open session - navigation uses the real intent bridge`() {
+        assertTrue("Intent bridge должен открывать ChatActivity", sessions.contains("openSessionIntent"))
+        assertTrue("Intent должен нести session id", sessions.contains("sessionId"))
     }
 
     // --- Шаг 5: Back-навигация -----------------------------------------------------------
 
     @Test
-    fun `back - ladder closes search plate, then drawer, then exits`() {
-        val back = chat.substringAfter("onBackPressedDispatcher.addCallback")
-            .substringBefore("MarsMusicPlayer.registerListener(this)")
-        val searchIdx = back.indexOf("closeTranscriptSearch()")
-        val drawerCheckIdx = back.indexOf("drawer.isDrawerOpen(GravityCompat.START)")
-        val drawerCloseIdx = back.indexOf("drawer.closeDrawer(GravityCompat.START)")
-        val exitIdx = back.indexOf("onBackPressedDispatcher.onBackPressed()")
-        assertTrue("Back обязан закрывать панель поиска", searchIdx >= 0)
-        assertTrue("Back обязан закрывать шторку", drawerCheckIdx >= 0 && drawerCloseIdx >= 0)
-        assertTrue("Back обязан выходить из экрана последней очередью", exitIdx >= 0)
-        assertTrue(
-            "Порядок Back: сначала поиск, потом шторка, потом выход",
-            searchIdx < drawerCheckIdx && drawerCheckIdx < exitIdx
-        )
-        assertTrue(
-            "Панель поиска проверяется по фактической видимости searchPlate",
-            back.contains("searchPlate.visibility == View.VISIBLE")
-        )
+    fun `back - policy wires chat to sessions and sessions to sections`() {
+        assertTrue("ChatActivity должна использовать NavBackPolicy", chat.contains("NavBackPolicy.resolve"))
+        assertTrue("ChatActivity должна вести в список диалогов", chat.contains("GO_TO_SESSION_LIST"))
+        assertTrue("Список должен использовать NavBackPolicy", sessions.contains("NavBackPolicy.resolve"))
+        assertTrue("Список должен открывать разделы по Back", sessions.contains("Action.OPEN_DRAWER"))
+        assertTrue("Повторный Back из открытых разделов должен завершать экран", sessions.contains("Action.SYSTEM_EXIT"))
     }
 
     // --- Шаг 6: модель/reasoning controls -------------------------------------------------
