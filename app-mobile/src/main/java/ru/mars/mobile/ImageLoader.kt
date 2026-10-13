@@ -6,14 +6,18 @@ import android.util.LruCache
 import android.view.View
 import android.widget.ImageView
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.lang.ref.WeakReference
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Small process-wide thumbnail cache for the music UI.
@@ -25,6 +29,15 @@ import java.lang.ref.WeakReference
  * - oversized downloads are rejected by Content-Length and by a streaming byte cap;
  * - the fetch coroutine holds only a [WeakReference] to the ImageView: a slow request no
  *   longer pins the view (and through it the Activity) after the screen is closed.
+ *
+ * Hot-path hardening (render/stream):
+ * - concurrent [load] calls for the SAME url share one in-flight fetch+decode
+ *   ([inFlight] dedup): a chat/music list rebind no longer starts N duplicate
+ *   downloads of one cover; the first requested target size wins, consistent
+ *   with the URL-keyed bitmap cache;
+ * - the per-view delivery job is cancelled when the view leaves the window
+ *   ([DetachWatcher]), so recycled/detached views don't schedule pointless
+ *   main-thread hops; the shared fetch itself keeps running to fill the cache.
  *
  * Known limitation: there is no disk cache — adding one means owning eviction, journaling
  * and cache-dir lifecycle, a rewrite out of scope here; refetch happens after process death
@@ -38,6 +51,9 @@ object ImageLoader {
     ) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
+
+    /** Один разделяемый fetch+decode на URL: дедупликация одновременных запросов. */
+    private val inFlight = ConcurrentHashMap<String, Deferred<Bitmap?>>()
 
     fun load(rawUrl: String, imageView: ImageView) {
         val url = ThumbnailUrlResolver.resolve(rawUrl)
@@ -54,9 +70,21 @@ object ImageLoader {
         // 0x0 (not laid out yet) falls back to ImageLoaderPolicy.DEFAULT_TARGET_PX.
         val targetPx = ImageLoaderPolicy.targetSizePx(imageView.width, imageView.height)
         val viewRef = WeakReference(imageView)
-        scope.launch {
-            val bitmap = fetch(url, targetPx)
-            if (bitmap != null) cache.put(url, bitmap)
+        // Dedup: computeIfAbsent атомарен — второй load() того же URL не начнёт
+        // повторную загрузку, а подождёт результат первой. Ключ — только URL:
+        // targetPx первого запроса выигрывает (как и в URL-кэше битмапов).
+        val fetchDeferred = inFlight.computeIfAbsent(url) { key ->
+            scope.async {
+                val bitmap = fetch(key, targetPx)
+                if (bitmap != null) cache.put(key, bitmap)
+                // Сначала кладём в кэш, потом снимаем in-flight: новый load()
+                // между этими шагами уже попадёт в кэш, а не в новый fetch.
+                inFlight.remove(key)
+                bitmap
+            }
+        }
+        val deliveryJob = scope.launch {
+            val bitmap = fetchDeferred.await()
             withContext(Dispatchers.Main) {
                 // Защита от stale async result и утечки: ImageView держится только через
                 // WeakReference; если view собрана сборщиком или переиспользована (tag
@@ -65,6 +93,35 @@ object ImageLoader {
                 if (view.tag != url) return@withContext
                 if (bitmap != null) view.setImageBitmap(bitmap) else view.visibility = View.GONE
             }
+        }
+        watchDetach(imageView, deliveryJob)
+    }
+
+    /**
+     * Отменяет ДОСТАВКУ результата (не общий fetch — он кормит кэш и другие view),
+     * когда view уходит из окна: recycle списка/закрытие экрана больше не
+     * планирует main-thread hop впустую. Watcher хранится в именованном tag-слоте
+     * и один на view: повторные load() лишь обновляют job, слушатели не копятся.
+     */
+    private fun watchDetach(view: View, job: Job) {
+        val existing = view.getTag(R.id.mars_image_load_watcher) as? DetachWatcher
+        if (existing != null) {
+            existing.job = job
+            return
+        }
+        val watcher = DetachWatcher(job)
+        view.setTag(R.id.mars_image_load_watcher, watcher)
+        view.addOnAttachStateChangeListener(watcher)
+    }
+
+    private class DetachWatcher(@Volatile var job: Job?) : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) = Unit
+
+        override fun onViewDetachedFromWindow(v: View) {
+            job?.cancel()
+            job = null
+            v.removeOnAttachStateChangeListener(this)
+            v.setTag(R.id.mars_image_load_watcher, null)
         }
     }
 

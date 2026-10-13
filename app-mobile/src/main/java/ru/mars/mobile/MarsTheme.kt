@@ -77,21 +77,86 @@ object MarsTheme {
         ).toInt()
     }
 
+    // =====================================================================
+    // Кэш шаблонов Drawable (горячий путь рендера чата)
+    // =====================================================================
+    /**
+     * Кэшировать Drawable по параметрам безопасно ТОЛЬКО в форме «шаблон +
+     * независимая копия»: один и тот же экземпляр Drawable нельзя разделять
+     * между View — setBackground привязывает к нему callback и bounds
+     * конкретной View, и при переиспользовании экземпляра bounds последних
+     * layout-проходов перезаписывают предыдущие (артефакты отрисовки), а
+     * callback удерживает View (утечка). setCallback(null) от bounds не
+     * спасает, поэтому разделяемый экземпляр не кэшируется вообще.
+     *
+     * Вместо этого кэш хранит полностью настроенные «шаблоны» (GradientDrawable
+     * не держит Context — dp() сводится к float-параметрам), а наружу
+     * выдаётся копия `constantState.newDrawable().mutate()`: mutate() даёт
+     * копии собственный GradientState, шаблон остаётся нетронутым, у каждой
+     * View свой экземпляр — визуальных отличий от свежепостроенного drawable
+     * нет. В ключ включён densityDpi: параметры зависят от плотности, кэш не
+     * должен протекать между конфигурациями. Ограничение размера — LRU.
+     *
+     * RippleDrawable (button/circleIconButton) НЕ кэшируется даже шаблонами:
+     * ripple хранит per-view состояние нажатия/hotspot, а эти фабрики
+     * вызываются один раз на настройку контрола, а не на кадр стрима.
+     */
+    private const val TEMPLATE_CACHE_MAX = 32
+    private const val KIND_PILL = 1
+    private const val KIND_CARD = 2
+    private const val KIND_GRADIENT_CARD = 3
+    private const val KIND_OVAL = 4
+    private const val KIND_GLOW_BACKDROP = 5
+    private const val KIND_STATUS_BADGE = 6
+
+    private data class DrawableKey(
+        val kind: Int,
+        val densityDpi: Int,
+        val a: Int = 0,
+        val b: Int = 0,
+        val c: Int = 0,
+        val d: Int = 0,
+        val e: Int = 0,
+        val f: Int = 0,
+    )
+
+    private val drawableTemplates = ThreadSafeLru<DrawableKey, GradientDrawable>(TEMPLATE_CACHE_MAX)
+
+    private fun cachedGradient(
+        key: DrawableKey,
+        build: () -> GradientDrawable,
+    ): GradientDrawable {
+        val template = drawableTemplates.get(key) ?: build().also { drawableTemplates.put(key, it) }
+        // Если платформа не отдаёт constantState (JVM unit-тесты с
+        // returnDefaultValues), fallback — свежая сборка без кэша.
+        val copy = template.constantState?.newDrawable()?.mutate() as? GradientDrawable
+        return copy ?: build()
+    }
+
+    private fun densityKey(context: Context, kind: Int) =
+        DrawableKey(kind, context.resources.displayMetrics.densityDpi)
+
     /** Floating rounded pill / capsule (for composer, model selector, quick chips) */
     fun pill(context: Context, bg: Int, strokeColor: Int = BORDER, strokeWidthDp: Int = 1): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(bg)
-            cornerRadius = dp(context, 999).toFloat()
-            if (strokeWidthDp > 0) setStroke(dp(context, strokeWidthDp), strokeColor)
+        val key = densityKey(context, KIND_PILL).copy(a = bg, b = strokeColor, c = strokeWidthDp)
+        return cachedGradient(key) {
+            GradientDrawable().apply {
+                setColor(bg)
+                cornerRadius = dp(context, 999).toFloat()
+                if (strokeWidthDp > 0) setStroke(dp(context, strokeWidthDp), strokeColor)
+            }
         }
     }
 
     /** Rounded card with subtle border */
     fun card(context: Context, bg: Int, radiusDp: Int = 14, strokeColor: Int = BORDER, strokeWidthDp: Int = 1): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(bg)
-            cornerRadius = dp(context, radiusDp).toFloat()
-            if (strokeWidthDp > 0) setStroke(dp(context, strokeWidthDp), strokeColor)
+        val key = densityKey(context, KIND_CARD).copy(a = bg, b = radiusDp, c = strokeColor, d = strokeWidthDp)
+        return cachedGradient(key) {
+            GradientDrawable().apply {
+                setColor(bg)
+                cornerRadius = dp(context, radiusDp).toFloat()
+                if (strokeWidthDp > 0) setStroke(dp(context, strokeWidthDp), strokeColor)
+            }
         }
     }
 
@@ -147,12 +212,18 @@ object MarsTheme {
      */
     fun statusDot(context: Context, color: Int): View {
         return View(context).apply {
-            background = GradientDrawable().apply {
+            background = ovalDrawable(context, color)
+        }
+    }
+
+    /** Кэшируемый шаблон круга: выдаёт независимую копию (см. [cachedGradient]). */
+    private fun ovalDrawable(context: Context, color: Int): GradientDrawable =
+        cachedGradient(densityKey(context, KIND_OVAL).copy(a = color)) {
+            GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(color)
             }
         }
-    }
 
     // =====================================================================
     // Obsidian Depth — layered surfaces & gradient cards (see MarsGradients)
@@ -196,15 +267,25 @@ object MarsTheme {
      * two-stop LINEAR_GRADIENT fill, hairline stroke, rounded corners (999 dp = capsule).
      */
     fun gradientCard(context: Context, spec: MarsGradients.GradientSpec): GradientDrawable {
-        val radius = if (spec.isCapsule) dp(context, 999).toFloat() else dp(context, spec.radiusDp).toFloat()
-        return GradientDrawable(
-            orientationOf(spec.angle),
-            intArrayOf(spec.startColor, spec.endColor)
-        ).apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = radius
-            if (spec.hasStroke) {
-                setStroke(dp(context, spec.strokeWidthDp), spec.strokeColor)
+        val key = densityKey(context, KIND_GRADIENT_CARD).copy(
+            a = spec.startColor,
+            b = spec.endColor,
+            c = spec.angle.ordinal,
+            d = spec.radiusDp,
+            e = spec.strokeColor,
+            f = spec.strokeWidthDp,
+        )
+        return cachedGradient(key) {
+            val radius = if (spec.isCapsule) dp(context, 999).toFloat() else dp(context, spec.radiusDp).toFloat()
+            GradientDrawable(
+                orientationOf(spec.angle),
+                intArrayOf(spec.startColor, spec.endColor)
+            ).apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = radius
+                if (spec.hasStroke) {
+                    setStroke(dp(context, spec.strokeWidthDp), spec.strokeColor)
+                }
             }
         }
     }
@@ -229,10 +310,13 @@ object MarsTheme {
      * tinted capsule drawn with an inset, meant as layer 0 of a LayerDrawable.
      */
     fun glowBackdrop(context: Context, glowColor: Int, radiusDp: Int = 999): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(context, radiusDp).toFloat()
-            setColor(glowColor)
+        val key = densityKey(context, KIND_GLOW_BACKDROP).copy(a = glowColor, b = radiusDp)
+        return cachedGradient(key) {
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(context, radiusDp).toFloat()
+                setColor(glowColor)
+            }
         }
     }
 
@@ -242,14 +326,13 @@ object MarsTheme {
      * the core occupies the inner ~55%.
      */
     fun glowingStatusDot(context: Context, color: Int): View {
-        val glow = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(MarsGradients.glowRing(color))
-        }
-        val core = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-        }
+        // Овалы — из кэша шаблонов (копии независимы). LayerDrawable сознательно
+        // НЕ кэшируется: он ставится background конкретной View, а bounds и
+        // callback у Drawable принадлежат одной View — общий экземпляр дал бы
+        // пересекающиеся bounds между точками. Сборка LayerDrawable из двух
+        // готовых копий дешёвая (массив + insets).
+        val glow = ovalDrawable(context, MarsGradients.glowRing(color))
+        val core = ovalDrawable(context, color)
         val inset = dp(context, 3)
         val layers = LayerDrawable(arrayOf(glow, core))
         layers.setLayerInset(1, inset, inset, inset, inset)
@@ -261,11 +344,14 @@ object MarsTheme {
      * background, hairline stroke of the same hue. Pair with [applyStatusBadge].
      */
     fun statusBadge(context: Context, status: MarsGradients.Status): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(context, 999).toFloat()
-            setColor(status.badge.bg)
-            setStroke(dp(context, 1), status.badge.stroke)
+        val key = densityKey(context, KIND_STATUS_BADGE).copy(a = status.ordinal)
+        return cachedGradient(key) {
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(context, 999).toFloat()
+                setColor(status.badge.bg)
+                setStroke(dp(context, 1), status.badge.stroke)
+            }
         }
     }
 
