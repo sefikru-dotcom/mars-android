@@ -1,69 +1,83 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- TV dashboard: Dark Obsidian + Ruby, D-pad focused, 540dp vertical budget (Mi TV 960x540dp).
+     Все размеры — токены res/values/dimens.xml. Шапка одной строкой (логотип слева, часы справа),
+     сетка 4x3 на layout_weight: ряды делят остаток высоты поровну, поэтому все кнопки видны
+     всегда, без скролла; при показанном мини-плеере ряды автоматически становятся компактнее.
+     Все id и цепочки nextFocus сохранены — их читает DashboardActivity.kt. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:orientation="vertical"
-    android:padding="52dp"
+    android:paddingStart="@dimen/tv_screen_pad_h"
+    android:paddingEnd="@dimen/tv_screen_pad_h"
+    android:paddingTop="@dimen/tv_screen_pad_top"
+    android:paddingBottom="@dimen/tv_screen_pad_bottom"
     android:background="@drawable/bg_tv_root"
+    android:clipChildren="false"
+    android:clipToPadding="false"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <!-- Шапка: логотип+имя слева, часы+дата справа (одна строка — экономия высоты) -->
     <LinearLayout
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:layout_width="wrap_content"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
         <ImageView
             android:src="@drawable/ic_mars"
             android:contentDescription="@null"
-            android:layout_width="56dp"
-            android:layout_height="56dp" />
+            android:layout_width="@dimen/tv_dash_logo"
+            android:layout_height="@dimen/tv_dash_logo" />
 
         <TextView
             android:text="Марс"
             android:textColor="@color/mars_text_strong"
-            android:textSize="42sp"
+            android:textSize="28sp"
             android:textStyle="bold"
-            android:layout_marginStart="16dp"
-            android:layout_width="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content" />
+
+        <LinearLayout
+            android:orientation="vertical"
+            android:gravity="end"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:id="@+id/time"
+                android:textColor="@color/mars_text"
+                android:textSize="48sp"
+                android:includeFontPadding="false"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/dateLine"
+                android:textColor="@color/mars_muted"
+                android:textSize="18sp"
+                android:layout_marginTop="2dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- Без статичного «Марс онлайн»: доступность сервера здесь не проверяется,
-         живой статус показывают экраны Чат/Проекты/Задачи/Cron из реальных данных. -->
-    <TextView
-        android:id="@+id/time"
-        android:text="00:00"
-        android:textColor="@color/mars_text"
-        android:textSize="54sp"
-        android:layout_marginTop="8dp"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
-
-    <!-- Secondary clock line: full weekday + date (format decisions in TvDashboardClockSpec).
-         Muted and smaller than HH:mm — the hierarchy is time first, date second. -->
-    <TextView
-        android:id="@+id/dateLine"
-        android:textColor="@color/mars_muted"
-        android:textSize="20sp"
-        android:layout_marginTop="2dp"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
-
-    <!-- Now playing plate: mirrors the global TvMusicPlayer transport while a track is
-         bound (rules: TvMiniPlayerSpec — same spec the chat header mini player uses).
-         D-pad reachable: UP from «Чат» lands on the toggle, DOWN returns to the grid.
-         Gone when the transport is idle, so the grid keeps its usual focus chains. -->
+    <!-- Now-playing strip: mirrors the global TvMusicPlayer transport while a track is bound;
+         rules (visibility/caption/toggle label) live in TvMiniPlayerSpec. Gone when idle. -->
     <LinearLayout
         android:id="@+id/nowPlayingRow"
         android:orientation="horizontal"
         android:gravity="center_vertical"
         android:background="@drawable/bg_chip"
-        android:layout_marginTop="14dp"
-        android:paddingStart="18dp"
+        android:layout_marginTop="@dimen/tv_dash_now_margin"
+        android:paddingStart="16dp"
         android:paddingEnd="10dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
+        android:paddingTop="@dimen/tv_dash_now_pad_v"
+        android:paddingBottom="@dimen/tv_dash_now_pad_v"
         android:visibility="gone"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content">
@@ -73,13 +87,13 @@
             android:contentDescription="@null"
             app:tint="@color/mars_muted"
             android:layout_marginEnd="12dp"
-            android:layout_width="26dp"
-            android:layout_height="26dp" />
+            android:layout_width="24dp"
+            android:layout_height="24dp" />
 
         <TextView
             android:id="@+id/nowPlayingText"
             android:textColor="@color/mars_text"
-            android:textSize="18sp"
+            android:textSize="16sp"
             android:singleLine="true"
             android:ellipsize="end"
             android:layout_width="wrap_content"
@@ -91,10 +105,10 @@
             android:minWidth="0dp"
             android:minHeight="0dp"
             android:layout_marginStart="16dp"
-            android:paddingStart="18dp"
-            android:paddingEnd="18dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_pause"
             android:drawableTint="@color/icon_focus_tint"
@@ -107,277 +121,300 @@
             android:layout_height="wrap_content" />
     </LinearLayout>
 
-    <!-- Сетка кнопок 3x2: явные D-pad цепочки по строкам и столбцам, без wrap. -->
+    <!-- Сетка разделов 4 ряда x 3: ряды height=0dp+weight=1 делят остаток высоты экрана,
+         кнопки match_parent внутри ряда. Все 11 кнопок видны на 540dp без скролла. -->
     <LinearLayout
         android:orientation="horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="44dp"
+        android:layout_marginTop="@dimen/tv_dash_grid_gap_top"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
         <Button
             android:id="@+id/chatButton"
             android:text="Чат"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_chat"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/nowPlayingToggle"
             android:nextFocusRight="@id/projectsButton"
             android:nextFocusDown="@id/musicButton"
-            android:layout_marginEnd="16dp"
+            android:nextFocusUp="@id/nowPlayingToggle"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/projectsButton"
             android:text="Проекты"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_projects"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
             android:nextFocusLeft="@id/chatButton"
             android:nextFocusRight="@id/todosButton"
             android:nextFocusDown="@id/cronButton"
-            android:layout_marginEnd="16dp"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/todosButton"
             android:text="Задачи"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_todos"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
             android:nextFocusLeft="@id/projectsButton"
             android:nextFocusDown="@id/settingsButton"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
     </LinearLayout>
 
     <LinearLayout
         android:orientation="horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="@dimen/tv_dash_row_gap"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
         <Button
             android:id="@+id/musicButton"
             android:text="Музыка"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_music"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/chatButton"
             android:nextFocusRight="@id/cronButton"
+            android:nextFocusUp="@id/chatButton"
             android:nextFocusDown="@id/kanbanButton"
-            android:layout_marginEnd="16dp"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/cronButton"
             android:text="Cron"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_cron"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/projectsButton"
             android:nextFocusLeft="@id/musicButton"
             android:nextFocusRight="@id/settingsButton"
+            android:nextFocusUp="@id/projectsButton"
             android:nextFocusDown="@id/insightsButton"
-            android:layout_marginEnd="16dp"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/settingsButton"
-            android:text="Настройки / выход"
-            android:textSize="22sp"
+            android:text="Выход"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_settings"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/todosButton"
             android:nextFocusLeft="@id/cronButton"
+            android:nextFocusUp="@id/todosButton"
             android:nextFocusDown="@id/spacesButton"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
     </LinearLayout>
 
-    <!-- Третий ряд: read-only разделы паритета с мобильным клиентом. -->
     <LinearLayout
         android:orientation="horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="@dimen/tv_dash_row_gap"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
         <Button
             android:id="@+id/kanbanButton"
             android:text="Канбан"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_kanban"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/musicButton"
             android:nextFocusRight="@id/insightsButton"
+            android:nextFocusUp="@id/musicButton"
             android:nextFocusDown="@id/memoryButton"
-            android:layout_marginEnd="16dp"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/insightsButton"
             android:text="Аналитика"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_insights"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/cronButton"
             android:nextFocusLeft="@id/kanbanButton"
             android:nextFocusRight="@id/spacesButton"
+            android:nextFocusUp="@id/cronButton"
             android:nextFocusDown="@id/skillsButton"
-            android:layout_marginEnd="16dp"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/spacesButton"
             android:text="Пространства"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_spaces"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/settingsButton"
             android:nextFocusLeft="@id/insightsButton"
+            android:nextFocusUp="@id/settingsButton"
             android:nextFocusDown="@id/skillsButton"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
     </LinearLayout>
 
-    <!-- Четвёртый ряд: «Память» и «Скиллы» — read-only паритет с мобильным
-         клиентом (GET /api/memory, GET /api/skills). Невидимый спейсер третьей
-         колонки сохраняет геометрию рядов; фокус он не принимает. -->
     <LinearLayout
         android:orientation="horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="@dimen/tv_dash_row_gap"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
         <Button
             android:id="@+id/memoryButton"
             android:text="Память"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_memory"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/kanbanButton"
             android:nextFocusRight="@id/skillsButton"
-            android:layout_marginEnd="16dp"
+            android:nextFocusUp="@id/kanbanButton"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
         <Button
             android:id="@+id/skillsButton"
             android:text="Скиллы"
-            android:textSize="22sp"
             android:textColor="@color/mars_text"
+            android:textSize="22sp"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_skills"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="14dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
             android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
-            android:nextFocusUp="@id/insightsButton"
             android:nextFocusLeft="@id/memoryButton"
-            android:layout_marginEnd="16dp"
+            android:nextFocusUp="@id/insightsButton"
+            android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
 
-        <!-- Спейсер третьей колонки: геометрия рядов совпадает, фокус не принимает. -->
+        <!-- Balance cell: keeps the grid rhythm of three equal columns. -->
         <View
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="96dp" />
+            android:layout_height="match_parent" />
     </LinearLayout>
 </LinearLayout>

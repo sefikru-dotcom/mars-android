@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Единые размерные токены ТВ-клиента Марса.
+
+     Целевой экран: 960x540dp (Mi TV MSSP1, 1920x1080 @ density 320),
+     ориентация всегда landscape. Все layout обязаны брать размеры отсюда,
+     хардкод dp в экранах не добавлять.
+
+     Вертикальный бюджет дашборда (худший случай, мини-плеер виден):
+       pad_top 20 + шапка(логотип/часы) 86 + nowPlaying 53 + gap 12
+       + сетка 4 ряда + pad_bottom 16 = 540dp
+       -> ряд кнопок = (540-187-3*row_gap 8)/4 ≈ 82dp  (>= tv_dash_btn_min_h 64dp)
+     Ряды сетки на layout_weight: на низком экране кнопки автоматически
+     компактнее, на высоком — растягиваются, скролл не нужен. -->
+<resources>
+
+    <!-- Каркас экрана (все Activity) -->
+    <dimen name="tv_screen_pad_h">28dp</dimen>
+    <dimen name="tv_screen_pad_top">20dp</dimen>
+    <dimen name="tv_screen_pad_bottom">16dp</dimen>
+    <dimen name="tv_header_gap">16dp</dimen>
+
+    <!-- Дашборд: шапка -->
+    <dimen name="tv_dash_logo">40dp</dimen>
+    <dimen name="tv_dash_now_margin">10dp</dimen>
+    <dimen name="tv_dash_now_pad_v">6dp</dimen>
+
+    <!-- Дашборд: сетка кнопок -->
+    <dimen name="tv_dash_grid_gap_top">12dp</dimen>
+    <dimen name="tv_dash_row_gap">8dp</dimen>
+    <dimen name="tv_dash_btn_col_gap">12dp</dimen>
+    <dimen name="tv_dash_btn_pad_h">20dp</dimen>
+    <dimen name="tv_dash_btn_drawable_gap">12dp</dimen>
+    <dimen name="tv_dash_btn_min_h">64dp</dimen>
+
+    <!-- Музыка -->
+    <dimen name="tv_music_control_h">56dp</dimen>
+    <dimen name="tv_music_row_gap">14dp</dimen>
+
+    <!-- Чат -->
+    <dimen name="tv_chat_composer_h">56dp</dimen>
+    <dimen name="tv_chat_row_gap">10dp</dimen>
+
+    <!-- Вход (pairing) -->
+    <dimen name="tv_pair_logo">72dp</dimen>
+    <dimen name="tv_pair_field_h">64dp</dimen>
+    <dimen name="tv_pair_form_gap">24dp</dimen>
+
+</resources>
