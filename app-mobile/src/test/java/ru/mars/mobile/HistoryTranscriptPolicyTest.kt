@@ -10,7 +10,9 @@ import ru.mars.network.repository.StreamEventMapper
 
 /**
  * P0-регрессия транскрипта истории: persisted-строки `GET /api/session` (~60% —
- * служебные `role:"tool"` с сырым JSON вывода) не должны становиться пузырями.
+ * служебные `role:"tool"` с сырым JSON вывода) не должны становиться пузырями,
+ * а ОДИН ход агента (все assistant-сегменты + tool-строки между user-сообщениями)
+ * рендерится ОДНОЙ карточкой — как живой стрим (GAP-1).
  * Форма строк — реальная wire-форма sidecar/state.db (см. hermes-webui
  * api/routes.py `_message_window_for_display`: tool-строки рендерятся только
  * через assistant-якорь или скрываются).
@@ -59,8 +61,10 @@ class HistoryTranscriptPolicyTest {
         assertEquals(MessageStatus.COMPLETE, anchor.status)
     }
 
+    // ---- GAP-1: один ход = одна карточка --------------------------------------------------
+
     @Test
-    fun `history with multiple assistants keeps one bubble per visible row in order`() {
+    fun `multiple assistant rows of one turn merge into a single grouped card`() {
         val bubbles = HistoryTranscriptPolicy.of(
             listOf(
                 row("user", "задача"),
@@ -72,12 +76,69 @@ class HistoryTranscriptPolicyTest {
                 row("assistant", "Готово."),
             )
         )
-        assertEquals(4, bubbles.size)
-        assertEquals(listOf("user", "assistant", "assistant", "assistant"), bubbles.map { it.role })
-        assertEquals(listOf("Шаг 1.", "Шаг 2.", "Готово."), bubbles.drop(1).map { it.text })
-        assertEquals(listOf(1, 2, 0), bubbles.drop(1).map { it.tools.size })
-        assertEquals("t1", bubbles[1].tools.single().id)
-        assertEquals(listOf("t2", "t3"), bubbles[2].tools.map { it.id })
+        // 3 assistant-строки хода — НЕ 3 пузыря, а одна карточка.
+        assertEquals(2, bubbles.size)
+        assertEquals(listOf("user", "assistant"), bubbles.map { it.role })
+        val card = bubbles[1]
+        assertEquals(
+            "Шаг 1.${HistoryTranscriptPolicy.SEGMENT_SEPARATOR}Шаг 2.${HistoryTranscriptPolicy.SEGMENT_SEPARATOR}Готово.",
+            card.text,
+        )
+        // Tool-карточки всех сегментов — внутри этой карточки, в порядке wire-строк.
+        assertEquals(listOf("t1", "t2", "t3"), card.tools.map { it.id })
+        assertEquals(listOf("terminal", "read_file", "patch"), card.tools.map { it.name })
+        assertTrue(card.tools.all { !it.expanded })
+    }
+
+    @Test
+    fun `commentary tool and final segments of one turn render as a single card`() {
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                row("user", "почини"),
+                row("assistant", "Смотрю логи."),
+                row("tool", """{"output":"err"}""", toolName = "terminal", toolCallId = "t1"),
+                row("assistant", "Вижу причину, правлю."),
+                row("tool", """{"diff":"ok"}""", toolName = "patch", toolCallId = "t2"),
+                row("assistant", "Готово, тесты зелёные."),
+            )
+        )
+        assertEquals(2, bubbles.size)
+        val card = bubbles[1]
+        assertEquals(
+            "Смотрю логи.\n\nВижу причину, правлю.\n\nГотово, тесты зелёные.",
+            card.text,
+        )
+        assertEquals(listOf("t1", "t2"), card.tools.map { it.id })
+        assertTrue(card.tools.all { !it.expanded })
+    }
+
+    @Test
+    fun `empty assistant rows plus tools render one card with tools and no text`() {
+        // Реальная форма sidecar-хода: пустые activity-строки вокруг tool-результатов.
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                row("user", "привет"),
+                row("assistant", ""),
+                row("tool", "{}", toolName = "terminal", toolCallId = "t1"),
+                row("assistant", "   "),
+                row("tool", "{}", toolName = "read_file", toolCallId = "t2"),
+            )
+        )
+        assertEquals(2, bubbles.size)
+        val card = bubbles[1]
+        assertEquals("", card.text)
+        assertEquals(listOf("t1", "t2"), card.tools.map { it.id })
+        assertTrue(card.tools.all { !it.expanded })
+    }
+
+    @Test
+    fun `empty assistant rows without tools never render a bubble`() {
+        // Ход только из пустых activity-строк — карточки нет вовсе.
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(row("user", "привет"), row("assistant", ""), row("assistant", "  "))
+        )
+        assertEquals(1, bubbles.size)
+        assertEquals("user", bubbles.single().role)
     }
 
     @Test
@@ -89,8 +150,9 @@ class HistoryTranscriptPolicyTest {
         assertEquals(2, withoutTools.size)
         assertEquals(listOf("user", "assistant"), withoutTools.map { it.role })
         assertEquals("Ответ.", withoutTools[1].text)
+        assertTrue(withoutTools[1].tools.isEmpty())
 
-        // Пустая activity-строка С tool-хвостом материализуется якорем карточек.
+        // Пустая activity-строка С tool-хвостом — часть той же карточки хода.
         val withTools = HistoryTranscriptPolicy.of(
             listOf(
                 row("user", "привет"),
@@ -99,8 +161,8 @@ class HistoryTranscriptPolicyTest {
                 row("assistant", "Ответ."),
             )
         )
-        assertEquals(3, withTools.size)
-        assertEquals("", withTools[1].text)
+        assertEquals(2, withTools.size)
+        assertEquals("Ответ.", withTools[1].text)
         assertEquals(listOf("terminal"), withTools[1].tools.map { it.name })
     }
 
@@ -110,6 +172,31 @@ class HistoryTranscriptPolicyTest {
             listOf(row("user", "привет"), row("assistant", "Ответ."), row("assistant", "  "))
         )
         assertEquals(2, bubbles.size)
+        assertEquals("Ответ.", bubbles[1].text)
+    }
+
+    @Test
+    fun `user row closes the turn so cards never mix across turns`() {
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                row("user", "первый вопрос"),
+                row("assistant", "Первый ответ."),
+                row("tool", "{}", toolName = "terminal", toolCallId = "t1"),
+                row("user", "второй вопрос"),
+                row("tool", "{}", toolName = "terminal", toolCallId = "orphan"),
+                row("assistant", "Второй ответ."),
+                row("tool", "{}", toolName = "patch", toolCallId = "t2"),
+            )
+        )
+        assertEquals(4, bubbles.size)
+        assertEquals(listOf("user", "assistant", "user", "assistant"), bubbles.map { it.role })
+        // Каждый ход несёт только СВОИ инструменты.
+        assertEquals(listOf("t1"), bubbles[1].tools.map { it.id })
+        assertEquals(listOf("t2"), bubbles[3].tools.map { it.id })
+        // Tool-строка сразу после user-границы (до assistant-якоря хода) — сирота.
+        assertTrue(bubbles.none { card -> card.tools.any { it.id == "orphan" } })
+        assertEquals("Первый ответ.", bubbles[1].text)
+        assertEquals("Второй ответ.", bubbles[3].text)
     }
 
     @Test
@@ -158,6 +245,8 @@ class HistoryTranscriptPolicyTest {
         assertNull(tool.id)
     }
 
+    // ---- Метки времени ----------------------------------------------------------------------
+
     @Test
     fun `epoch second timestamps from the wire feed clock labels and day separators`() {
         val bubbles = HistoryTranscriptPolicy.of(
@@ -173,10 +262,43 @@ class HistoryTranscriptPolicyTest {
     }
 
     @Test
+    fun `grouped card keeps the first assistant timestamp of the turn`() {
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                row("user", "задача", timestamp = "1791921200.0"),
+                row("assistant", "", timestamp = "1791921201.0"),
+                row("tool", "{}", toolName = "terminal", toolCallId = "t1", timestamp = "1791921220.0"),
+                row("assistant", "Готово.", timestamp = "1791921300.0"),
+            )
+        )
+        assertEquals(2, bubbles.size)
+        assertEquals(1_791_921_200_000L, bubbles[0].timestamp)
+        // Метка карточки хода — начало хода (первая assistant-строка), не финал и не tool.
+        assertEquals(1_791_921_201_000L, bubbles[1].timestamp)
+    }
+
+    @Test
+    fun `turn without a timestamp on the first assistant row falls back to the next known one`() {
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                row("user", "задача"),
+                row("assistant", ""),
+                row("tool", "{}", toolName = "terminal", toolCallId = "t1", timestamp = "1791921220.0"),
+                row("assistant", "Готово.", timestamp = "1791921300.0"),
+            )
+        )
+        assertEquals(2, bubbles.size)
+        // Tool-метки не используются: первая распознанная метка assistant-строк хода.
+        assertEquals(1_791_921_300_000L, bubbles[1].timestamp)
+    }
+
+    @Test
     fun `rows without timestamps stay UNKNOWN without breaking the mapping`() {
         val bubbles = HistoryTranscriptPolicy.of(listOf(row("user", "привет"), row("assistant", "Ответ.")))
         assertTrue(bubbles.all { it.timestamp == MessageTimePolicy.UNKNOWN_TIMESTAMP })
     }
+
+    // ---- Реальная форма sidecar-сессии --------------------------------------------------------
 
     @Test
     fun `real sidecar session shape maps to the visible transcript`() {
@@ -198,13 +320,25 @@ class HistoryTranscriptPolicyTest {
             add(row("tool", """{"final":"check2"}""", toolName = "read_file", toolCallId = "call_16", timestamp = "1791921390.0"))
         }
         val bubbles = HistoryTranscriptPolicy.of(rows)
-        // 1 user + 4 assistant-текста + 1 пустой якорь с карточкой = 6 пузырей, а не 14.
-        assertEquals(6, bubbles.size)
+        // Весь ход — ОДНА assistant-карточка: 2 пузыря, а не 14 строк и не 6 построчных.
+        assertEquals(2, bubbles.size)
         assertEquals("user", bubbles[0].role)
-        assertTrue(bubbles.none { it.text.contains("\"success\"") || it.text.contains("\"released\"") })
-        assertEquals(8, bubbles.sumOf { it.tools.size })
-        // Пустой якорь materialized только благодаря tool-карточке.
-        assertTrue(bubbles.any { it.text.isEmpty() && it.tools.size == 1 })
-        assertFalse(bubbles.last().text.isEmpty())
+        val card = bubbles[1]
+        assertEquals("assistant", card.role)
+        assertTrue(card.text.contains("Скилл не найден, чиню."))
+        assertTrue(card.text.contains("Нашёл причину."))
+        assertTrue(card.text.endsWith("Готово."))
+        // Сырой tool-вывод никогда не становится текстом пузыря.
+        assertFalse(card.text.contains("\"success\"") || card.text.contains("\"released\""))
+        // Все 8 инструментов хода — collapsed-карточки внутри этой карточки, по порядку.
+        assertEquals(
+            listOf("call_9", "call_10", "call_11", "call_12", "call_13", "call_14", "call_15", "call_16"),
+            card.tools.map { it.id },
+        )
+        assertTrue(card.tools.all { !it.expanded })
+        // Пустых карточек без текста и инструментов не остаётся.
+        assertTrue(bubbles.none { it.text.isBlank() && it.tools.isEmpty() })
+        // Метка карточки — начало хода.
+        assertEquals(1_791_921_201_000L, card.timestamp)
     }
 }
