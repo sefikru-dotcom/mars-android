@@ -47,7 +47,10 @@ android {
         // Instrumented UI-тесты (Espresso) в src/androidTest: ручная View-вёрстка
         // проверяется на эмуляторе; harness детерминированный (фейковый credential +
         // seeded офлайн-кэш, радио выключено — боевой сервер не задействуется).
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // GAP-2 guard: кастомный runner завершает instrumentation на физическом
+        // устройстве ДО выполнения любого теста (UiTestHarness дополнительно
+        // дублирует guard в каждом изменяющем методе).
+        testInstrumentationRunner = "ru.mars.mobile.EmulatorOnlyTestRunner"
     }
 
     signingConfigs {
@@ -75,7 +78,27 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+
+        // Изолированный вариант ДЛЯ инструментальных UI-тестов (GAP-2): отдельный
+        // applicationId `ru.mars.mobile.uitest` → собственный UID, data-каталог и
+        // пространство AndroidKeyStore. Боевая установка `ru.mars.mobile` (debug на
+        // устройстве или release) не заменяется и не затрагивается: resetState/seed
+        // физически не видят её prefs и credential. Радио — глобальный эффект,
+        // поэтому вариант работает ТОЛЬКО в паре с EmulatorOnlyTestRunner.
+        // Ручная вёрстка не затрагивается: код/ресурсы идентичны debug, packageName
+        // в коде везде динамический (context.packageName), hardcoded-авторитетов нет.
+        create("uiTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".uitest"
+            // core-network (библиотечный модуль) знает только debug/release:
+            // зависимость резолвится в debug-вариант библиотеки.
+            matchingFallbacks += listOf("debug")
+        }
     }
+
+    // androidTest собирается и подключается только к варианту uiTest:
+    // connectedAndroidTest → connectedUiTestAndroidTest (изолированный пакет).
+    testBuildType = "uiTest"
 
     testOptions {
         unitTests.isReturnDefaultValues = true
