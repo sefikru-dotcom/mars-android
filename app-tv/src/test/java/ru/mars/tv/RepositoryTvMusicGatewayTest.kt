@@ -6,6 +6,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
 import java.net.URLDecoder
@@ -167,6 +168,64 @@ class RepositoryTvMusicGatewayTest {
             assertTrue("expected Failed, got $result", result is TvMusicChartsResult.Failed)
             assertTrue((result as TvMusicChartsResult.Failed).message.isNotBlank())
             assertEquals("a rejected query must not hit the network", 0, server.requestCount)
+        }
+    }
+
+    // --- lyrics (GET /api/lyrics/{videoId}?title=…&artist=…) --------------------------------------
+
+    @Test
+    fun flatLyricsEnvelopeMapsToLoadedAndQueryCarriesTitleArtist() {
+        // Живой контракт 13.10 (fixtures/lyrics_kino.json): ПЛОСКИЙ объект без success-обёртки.
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"lyrics":"Теплое место, но улицы ждут отпечатков наших ног.","synced":null,"source":"youtube"}""",
+                ),
+            )
+            val track = MusicTrack(id = "kino1", title = "Группа крови", artist = "Кино", duration = "4:41")
+            val result = gatewayFor(server).fetchLyrics(track)
+            assertEquals(
+                TvLyricsResult.Loaded(
+                    LyricsResult(
+                        lyrics = "Теплое место, но улицы ждут отпечатков наших ног.",
+                        synced = null,
+                        source = "youtube",
+                    ),
+                ),
+                result,
+            )
+            // title/artist ОБЯЗАТЕЛЬНЫ живому серверу — без них частая заглушка «Текст не найден.».
+            val path = server.takeRequest().path!!
+            assertTrue("expected the lyrics path, got $path", path.startsWith("/music/api/lyrics/kino1?"))
+            val query = path.substringAfter('?')
+            assertEquals(
+                "Группа крови",
+                URLDecoder.decode(query.substringAfter("title=").substringBefore('&'), Charsets.UTF_8.name()),
+            )
+            assertEquals(
+                "Кино",
+                URLDecoder.decode(query.substringAfter("artist="), Charsets.UTF_8.name()),
+            )
+        }
+    }
+
+    @Test
+    fun notFoundStubBodyStaysLoadedForThePolicyToJudge() {
+        // Шов не трактует заглушку — «Текст не найден.» распознаёт TvLyricsViewPolicy (Missing).
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"lyrics":"Текст не найден.","synced":null,"source":"youtube"}"""))
+            val result = gatewayFor(server).fetchLyrics(MusicTrack(id = "x", title = "T", artist = "A"))
+            assertTrue("expected Loaded, got $result", result is TvLyricsResult.Loaded)
+        }
+    }
+
+    @Test
+    fun lyricsHttpErrorMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503))
+            val result = gatewayFor(server).fetchLyrics(MusicTrack(id = "x", title = "T", artist = "A"))
+            assertTrue("expected Failed, got $result", result is TvLyricsResult.Failed)
+            assertTrue((result as TvLyricsResult.Failed).message.isNotBlank())
         }
     }
 }

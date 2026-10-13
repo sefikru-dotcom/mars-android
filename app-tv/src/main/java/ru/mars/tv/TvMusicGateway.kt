@@ -5,21 +5,34 @@ import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
 
 /**
- * Production [TvMusicGateway]: binds the REAL core-network [MusicRepository]
+ * Production [TvMusicGateway] + [TvLyricsGateway]: binds the REAL core-network [MusicRepository]
  * (`GET {baseUrl}/api/charts` and `GET {baseUrl}/api/search?q=…`, baseUrl =
  * [MUSIC_BASE_URL], mobile MusicActivity parity) into the TV controller's blocking seam.
  * All HTTP, envelope normalization, id cleanup and error mapping stay in core-network —
  * the TV layer only bridges suspend to blocking (the controller runs this on its
  * background executor) and guarantees that no exception ever escapes: every outcome lands
- * as an explicit [TvMusicChartsResult].
+ * as an explicit [TvMusicChartsResult] / [TvLyricsResult].
  */
 class RepositoryTvMusicGateway(
     private val repository: MusicRepository,
-) : TvMusicGateway {
+) : TvMusicGateway, TvLyricsGateway {
 
     override fun fetchCharts(): TvMusicChartsResult = fetch { repository.getCharts() }
 
     override fun search(query: String): TvMusicChartsResult = fetch { repository.search(query) }
+
+    /**
+     * `GET {baseUrl}/api/lyrics/{videoId}?title=…&artist=…`: title/artist текущего трека
+     * передаются ОБЯЗАТЕЛЬНО — живой сервер без них часто отвечает заглушкой
+     * «Текст не найден.» вместо настоящего текста.
+     */
+    override fun fetchLyrics(track: MusicTrack): TvLyricsResult = try {
+        TvLyricsResult.Loaded(
+            runBlocking { repository.getLyrics(track.id, title = track.title, artist = track.artist) },
+        )
+    } catch (error: Throwable) {
+        TvLyricsResult.Failed(error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName)
+    }
 
     /** Suspend-to-blocking bridge; contains every failure as [TvMusicChartsResult.Failed]. */
     private fun fetch(block: suspend () -> List<MusicTrack>): TvMusicChartsResult = try {
