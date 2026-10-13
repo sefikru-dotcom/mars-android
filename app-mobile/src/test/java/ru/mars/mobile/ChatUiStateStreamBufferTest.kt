@@ -100,7 +100,7 @@ class ChatUiStateStreamBufferTest {
     }
 
     @Test fun productionDefaultsKeepTranscriptVerbatimForNormalStreams() {
-        val state = ChatUiState() // production guard: 32K frame / 256K accumulated
+        val state = ChatUiState() // production guard: 32K frame / 96K accumulated (TranscriptCapPolicy.MAX_BUBBLE_CHARS)
         state.begin("hi")
         val normal = "обычный ответ ассистента. "
         repeat(1_000) { state.onEvent(ChatEvent.Chunk(normal)) } // ~26K chars — well under cap

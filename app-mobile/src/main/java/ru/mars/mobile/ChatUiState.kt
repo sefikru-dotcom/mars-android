@@ -30,14 +30,25 @@ data class ChatMessage(
     val tools: List<ToolExecution> = emptyList(),
     val timestamp: Long = System.currentTimeMillis(),
     val status: MessageStatus = MessageStatus.COMPLETE,
+    /**
+     * Якорь «старые сообщения подрезаны» ([TranscriptCapPolicy.capMessages]):
+     * служебная строка вместо скрытой головы транскрипта, не обычная карточка.
+     */
+    val isTrimAnchor: Boolean = false,
+    /** Сколько сообщений скрыто над якорем — для его подписи. */
+    val trimmedCount: Int = 0,
 )
 
 class ChatUiState(
     /**
      * Hard memory limits for streamed text accumulation (frame clamp + sliding window with
-     * a single truncation marker). Injectable for tests; production uses the defaults.
+     * a single truncation marker). Injectable for tests; production uses the defaults:
+     * скользящее окно ужато до [TranscriptCapPolicy.MAX_BUBBLE_CHARS] (96K вместо 256K) —
+     * один пузырь больше не может держать сотни КБ текста, рвущие рендер и кучу.
      */
-    private val bufferGuard: StreamBufferGuard = StreamBufferGuard(),
+    private val bufferGuard: StreamBufferGuard = StreamBufferGuard(
+        maxAccumulatedChars = TranscriptCapPolicy.MAX_BUBBLE_CHARS,
+    ),
 ) {
     var status: ChatStatus = ChatStatus.IDLE
         private set
@@ -322,7 +333,7 @@ class ChatUiState(
         return result
     }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(history); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); yoloEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 
