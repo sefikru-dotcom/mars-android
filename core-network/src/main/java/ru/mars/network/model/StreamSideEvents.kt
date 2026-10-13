@@ -70,3 +70,27 @@ data class GoalContinuation(
     val messageArgs: List<String> = emptyList(),
     val decisionJson: String? = null,
 ) : StreamSideEvent
+
+/**
+ * SSE-кадр `context_status` (hermes-webui api/streaming.py
+ * `put('context_status', {session_id, prefill})`, где `prefill` — снимок
+ * `_public_prefill_context_status`): статус префилл-контекста хода —
+ * `loaded` | `error` | `not_configured`. Раньше Android-клиент терял кадр
+ * молча (unknown-ветка [ru.mars.network.repository.StreamEventMapper] → null).
+ *
+ * [status] и [source] передаются дословно (маппинг на представление — работа
+ * UI-слоя, то же правило, что у [GoalUpdate.state]); [label] — человекочитаемое
+ * имя источника («session recall»); [messageCount] — сколько сообщений загружено
+ * в контекст; [error] — текст серверной ошибки (присутствует только при
+ * `status == "error"`); [compacted] — контекст был сжат под символьный бюджет.
+ * Бюджетные поля кадра (`original_*`, `max_chars`) в контракт не входят.
+ */
+data class ContextStatusUpdate(
+    val sessionId: String?,
+    val status: String,
+    val label: String? = null,
+    val source: String? = null,
+    val messageCount: Int = 0,
+    val error: String? = null,
+    val compacted: Boolean = false,
+) : StreamSideEvent
