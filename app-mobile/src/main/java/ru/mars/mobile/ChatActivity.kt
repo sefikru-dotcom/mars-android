@@ -934,8 +934,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         val quickBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val quickPrompts = listOf(
-            "Проекты" to { startActivity(Intent(this@ChatActivity, ProjectsActivity::class.java)) },
-            "Музыка" to { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) },
             "Погода в Ставрополе" to { quickSend("Какая сейчас погода и прогноз на день в Ставрополе?") },
             "Статус хоста" to { quickSend("Марс, проверь аптайм, диск и состояние сервисов") },
             "Новый чат" to { startNewChat() },
