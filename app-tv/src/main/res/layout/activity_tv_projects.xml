@@ -4,7 +4,10 @@
      statusView — accessibility live region (polite): обновления и ошибки объявляются голосом. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
-    android:padding="40dp"
+    android:paddingStart="@dimen/tv_screen_pad_h"
+    android:paddingEnd="@dimen/tv_screen_pad_h"
+    android:paddingTop="@dimen/tv_screen_pad_top"
+    android:paddingBottom="@dimen/tv_screen_pad_bottom"
     android:background="@drawable/bg_tv_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -81,7 +84,7 @@
     <FrameLayout
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="28dp"
+        android:layout_marginTop="@dimen/tv_header_gap"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">

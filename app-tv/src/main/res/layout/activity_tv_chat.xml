@@ -9,7 +9,10 @@
     <LinearLayout
         android:id="@+id/chatRoot"
         android:orientation="vertical"
-        android:padding="36dp"
+        android:paddingStart="@dimen/tv_screen_pad_h"
+        android:paddingEnd="@dimen/tv_screen_pad_h"
+        android:paddingTop="@dimen/tv_screen_pad_top"
+        android:paddingBottom="@dimen/tv_screen_pad_bottom"
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
@@ -125,7 +128,7 @@
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:background="@drawable/bg_chip"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/tv_chat_row_gap"
             android:paddingStart="18dp"
             android:paddingEnd="10dp"
             android:paddingTop="8dp"
@@ -176,7 +179,7 @@
         <LinearLayout
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/tv_chat_row_gap"
             android:layout_width="match_parent"
             android:layout_height="wrap_content">
 
@@ -252,7 +255,7 @@
         <!-- Quick chips: canned one-tap turns above the composer (TvQuickChipsPolicy);
              buttons are built programmatically into quickChipsRow. -->
         <HorizontalScrollView
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/tv_chat_row_gap"
             android:scrollbars="none"
             android:layout_width="match_parent"
             android:layout_height="wrap_content">
@@ -267,7 +270,7 @@
         <LinearLayout
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/tv_chat_row_gap"
             android:layout_width="match_parent"
             android:layout_height="wrap_content">
 
@@ -285,7 +288,7 @@
                 android:nextFocusRight="@id/sendButton"
                 android:layout_width="0dp"
                 android:layout_weight="1"
-                android:layout_height="64dp" />
+                android:layout_height="@dimen/tv_chat_composer_h" />
 
             <Button
                 android:id="@+id/sendButton"
@@ -303,7 +306,7 @@
                 android:nextFocusLeft="@id/messageInput"
                 android:layout_marginStart="16dp"
                 android:layout_width="wrap_content"
-                android:layout_height="64dp" />
+                android:layout_height="@dimen/tv_chat_composer_h" />
         </LinearLayout>
     </LinearLayout>
 

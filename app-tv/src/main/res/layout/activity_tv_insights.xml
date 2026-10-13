@@ -6,7 +6,10 @@
      statusView — accessibility live region (polite). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
-    android:padding="40dp"
+    android:paddingStart="@dimen/tv_screen_pad_h"
+    android:paddingEnd="@dimen/tv_screen_pad_h"
+    android:paddingTop="@dimen/tv_screen_pad_top"
+    android:paddingBottom="@dimen/tv_screen_pad_bottom"
     android:background="@drawable/bg_tv_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -87,7 +90,7 @@
         android:orientation="horizontal"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="22dp"
+        android:layout_marginTop="@dimen/tv_header_gap"
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
@@ -135,7 +138,7 @@
         android:orientation="vertical"
         android:clipChildren="false"
         android:clipToPadding="false"
-        android:layout_marginTop="18dp"
+        android:layout_marginTop="@dimen/tv_header_gap"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -152,7 +155,7 @@
         <FrameLayout
             android:clipChildren="false"
             android:clipToPadding="false"
-            android:layout_marginTop="18dp"
+            android:layout_marginTop="@dimen/tv_header_gap"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1">
@@ -252,7 +255,7 @@
         android:clipChildren="false"
         android:clipToPadding="false"
         android:visibility="gone"
-        android:layout_marginTop="18dp"
+        android:layout_marginTop="@dimen/tv_header_gap"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -278,7 +281,7 @@
         <FrameLayout
             android:clipChildren="false"
             android:clipToPadding="false"
-            android:layout_marginTop="18dp"
+            android:layout_marginTop="@dimen/tv_header_gap"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1">
