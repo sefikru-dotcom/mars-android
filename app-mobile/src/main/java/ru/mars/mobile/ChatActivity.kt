@@ -2857,7 +2857,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * файла палитры запрещён гейтом дизайн-системы (scripts/theme-parity-audit.py).
      */
     private val SEARCH_HIGHLIGHT_COLOR =
-        MarsGradients.withAlpha(MarsGradients.STATUS_WARNING, SEARCH_HIGHLIGHT_ALPHA)
+        MarsGradients.withAlpha(
+            MarsGradients.STATUS_WARNING,
+            MarsGradients.SEARCH_HIGHLIGHT_ALPHA,
+        )
 
     /** Все TextView подстава в порядке отрисовки (обход в глубину). */
     private fun collectTextViews(root: View): List<TextView> {
