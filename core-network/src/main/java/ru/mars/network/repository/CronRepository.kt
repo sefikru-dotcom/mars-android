@@ -14,6 +14,11 @@ import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.CronJob
 import ru.mars.network.model.CronJobsResponse
 
+sealed interface CronJobsResult {
+    data class Loaded(val response: CronJobsResponse) : CronJobsResult
+    data class Failed(val offline: Boolean, val httpCode: Int? = null) : CronJobsResult
+}
+
 /**
  * Access to scheduled cron jobs in the WebUI backend (/api/crons contract):
  * - GET /api/crons — `{"jobs": [...], "active_profile": "..."}`
@@ -35,7 +40,16 @@ class CronRepository(private val client: OkHttpClient = HttpClients.rest) {
     suspend fun getCronJobs(
         baseUrl: String,
         credential: ConsumedDeviceCredential,
-    ): CronJobsResponse = withContext(Dispatchers.IO) {
+    ): CronJobsResponse = when (val result = loadJobs(baseUrl, credential)) {
+        is CronJobsResult.Loaded -> result.response
+        is CronJobsResult.Failed -> CronJobsResponse(emptyList())
+    }
+
+    /** Typed outcome for UI consumers; legacy list APIs retain their empty-on-failure contract. */
+    suspend fun loadJobs(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+    ): CronJobsResult = withContext(Dispatchers.IO) {
         val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/crons").build()
         val request = Request.Builder()
             .url(url)
@@ -44,12 +58,17 @@ class CronRepository(private val client: OkHttpClient = HttpClients.rest) {
             .build()
         try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext CronJobsResponse(emptyList())
+                if (!response.isSuccessful) return@withContext CronJobsResult.Failed(
+                    offline = false,
+                    httpCode = response.code,
+                )
                 val body = response.body?.string().orEmpty()
-                parseCronJobs(body)
+                CronJobsResult.Loaded(parseCronJobs(body))
             }
+        } catch (_: java.io.IOException) {
+            CronJobsResult.Failed(offline = true)
         } catch (_: Exception) {
-            CronJobsResponse(emptyList())
+            CronJobsResult.Failed(offline = false)
         }
     }
 

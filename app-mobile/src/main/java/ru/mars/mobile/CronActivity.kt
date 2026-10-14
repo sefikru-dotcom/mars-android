@@ -21,13 +21,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.CronJob
+import ru.mars.network.repository.CronJobsResult
 import ru.mars.network.repository.CronRepository
 
 class CronActivity : ComponentActivity() {
 
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
     private val cronRepo = CronRepository()
-    private val transportFailureClassifier = TransportFailureClassifier()
 
     private lateinit var jobList: LinearLayout
     private lateinit var scaffold: SectionScaffold.Parts
@@ -70,16 +70,13 @@ class CronActivity : ComponentActivity() {
         scaffold.statusLine.visibility = View.VISIBLE
         scaffold.statusLine.text = "Загрузка задач…"
         lifecycleScope.launch {
-            try {
-                val jobs = withContext(Dispatchers.IO) {
-                    cronRepo.fetchJobs(ChatActivity.BASE_URL, cred)
-                }
-                renderJobs(jobs)
-            } catch (error: Exception) {
-                val message = error.message.orEmpty()
-                val offline = transportFailureClassifier.isTransportShaped(message)
-                showState(
-                    if (offline) SectionScreenState.Offline("Нет связи с сервером")
+            val result = withContext(Dispatchers.IO) {
+                cronRepo.loadJobs(ChatActivity.BASE_URL, cred)
+            }
+            when (result) {
+                is CronJobsResult.Loaded -> renderJobs(result.response.jobs)
+                is CronJobsResult.Failed -> showState(
+                    if (result.offline) SectionScreenState.Offline("Нет связи с сервером")
                     else SectionScreenState.Error("Не удалось загрузить задачи"),
                 )
             }
