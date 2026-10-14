@@ -119,7 +119,7 @@ class WorkspaceSelectionTest {
         val storage = FakeStorage()
         val selection = WorkspaceSelection(storage)
         assertNull(selection.current)
-        // SpacesActivity (shared `mars-workspace-choice` storage) persists a pick
+        // Another screen (shared `mars-workspace-choice` storage) persists a pick
         // while ChatActivity's instance is already constructed.
         storage.saved = WorkspaceItem("hermes-webui", "/opt/hermes-webui")
         assertEquals(WorkspaceItem("hermes-webui", "/opt/hermes-webui"), selection.reloadFromStorage())

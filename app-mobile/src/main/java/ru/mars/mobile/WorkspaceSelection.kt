@@ -125,9 +125,9 @@ class WorkspaceSelection(private val storage: WorkspaceChoiceStorage) {
     fun buttonLabel(): String? = current?.let { it.name.ifBlank { it.path } }
 
     /**
-     * Re-reads the persisted pick from [storage]: the choice is shared with
-     * SpacesActivity (`mars-workspace-choice` prefs), so a selection made on
-     * that screen must be adopted when the host Activity resumes. With no
+     * Re-reads the persisted pick from [storage]: the choice is shared via
+     * the `mars-workspace-choice` prefs, so a selection made on another
+     * screen must be adopted when the host Activity resumes. With no
      * persisted pick falls back to the server default of the last catalog
      * (same semantics as [resolveEffective], without a network reload).
      */
