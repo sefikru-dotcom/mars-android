@@ -5,12 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
@@ -21,12 +17,9 @@ import android.speech.SpeechRecognizer
 import android.text.ClipboardManager
 import android.text.SpannableStringBuilder
 import android.text.Spanned
-import android.text.TextPaint
 import android.text.method.LinkMovementMethod
-import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
-import android.text.style.ImageSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
@@ -73,9 +66,7 @@ import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.CompressionSummary
 import ru.mars.network.repository.ContextCompressionRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
-import ru.mars.network.repository.MessageSearchPolicy
 import ru.mars.network.repository.ModelsRepository
-import ru.mars.network.repository.SearchableMessage
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
@@ -88,8 +79,6 @@ import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
 import ru.mars.network.repository.WorkspaceRepository
 import ru.mars.network.repository.readBoundedUploadPayload
-import java.net.HttpURLConnection
-import java.net.URL
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var store: AndroidKeyStoreCredentialStore
@@ -233,13 +222,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var searchPlate: LinearLayout
     private lateinit var searchInput: EditText
     private lateinit var searchCounter: TextView
-    private var searchMatches: List<ru.mars.network.repository.TextMatch> = emptyList()
-    private var searchPosition: Int = -1
-    /** Якорь текущего совпадения: переживает пересчёт совпадений во время стрима. */
-    private var searchAnchor: ru.mars.network.repository.TextMatch? = null
-    private var searchHighlightedCard: View? = null
-    /** Подсвеченный спан совпадения: TextView пузыря + сам спан (снятие при шаге/закрытии). */
-    private var searchHighlightedSpan: Pair<TextView, BackgroundColorSpan>? = null
+    // Состояние поиска и вся визуальная подсветка живут в контроллере (создаётся в onCreate):
+    // Activity оставляет у себя только view-обвязку панели и узкие адаптеры к транскрипту.
+    private lateinit var transcriptSearch: TranscriptSearchHighlightController
+    private lateinit var lightbox: ChatImageLightboxController
 
     // --- ANR-устойчивость транскрипта (инкрементальный рендер + троттлинг стрима) ---------------
     // Чистые политики (JVM-тесты): StreamRenderThrottle (кадровый троттлинг SSE-событий),
@@ -367,6 +353,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         })
         setContentView(buildView())
+        // Экранные UI-контроллеры: поиск по диалогу (состояние + подсветка) и просмотрщик
+        // картинок (диалог + bounded-загрузка). Создаются после buildView(), потому что
+        // получают готовую view-обвязку через узкие адаптеры хоста.
+        transcriptSearch = TranscriptSearchHighlightController(transcriptSearchHost())
+        lightbox = ChatImageLightboxController(
+            context = this,
+            scope = lifecycleScope,
+            baseUrl = BASE_URL,
+            onError = { message -> statusView.text = message },
+        )
         // Recovery-цикл доставленного хода: транспорт — ТОЛЬКО attachToStream (повторный
         // POST chat/start структурно невозможен), listener — тонкий wiring в существующий
         // конвейер событий. Инициализация до networkObserver.start(): первый же снимок
@@ -823,7 +819,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         root.addView(statusView)
 
         // Панель поиска по диалогу: поле, счётчик «N из M», кольцевая навигация и закрытие.
-        // Решение о совпадениях/подписи — чистая TranscriptSearchPolicy (JVM-тесты).
+        // Решение о совпадениях/подписи — чистая MessageSearchPolicy (JVM-тесты);
+        // состояние и подсветка — в TranscriptSearchHighlightController.
         searchPlate = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -2227,7 +2224,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     isCodeBlockExpanded = uiState::isCodeBlockExpanded,
                     toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
                     copyMessage = ::copyMessage,
-                    openImage = ::openImageLightbox,
+                    openImage = lightbox::open,
                     openUrl = { url -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } },
                 )
                 entry.snapshot = current[messageIndex]
@@ -2719,7 +2716,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         return CardViews(card, markdownHost)
     }
 
-    // --- Поиск по диалогу: хост чистой TranscriptSearchPolicy ------------------------------------
+    // --- Поиск по диалогу: хост-обвязка TranscriptSearchHighlightController -------------------
 
     /** День-чип разделителя суток («Сегодня»/«Вчера»/«9 октября») — подпись из MessageTimePolicy. */
     private fun buildDaySeparator(timestampMillis: Long): TextView = TextView(this).apply {
@@ -2741,172 +2738,56 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun closeTranscriptSearch() {
+        // Снятие подсветки и сброс состояния — задача контроллера поиска.
+        transcriptSearch.clear()
         searchPlate.visibility = View.GONE
         searchInput.setText("")
-        searchMatches = emptyList()
-        searchPosition = -1
-        searchAnchor = null
-        clearSearchHighlight()
-        hideKeyboard()
+        searchCounter.text = ""
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(searchInput.windowToken, 0)
     }
 
+    /** Панель поиска открыта — Back сначала закрывает её (см. NavBackPolicy). */
+    private fun isTranscriptSearchOpen(): Boolean =
+        ::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE
+
     /**
-     * Пересчитывает совпадения по текущему транскрипту и обновляет счётчик.
-     * Совпадения адресует чистая [MessageSearchPolicy] (якорь messageId +
-     * ordinalInMessage): каждое вхождение — отдельный шаг, несколько вхождений
-     * в одном пузыре не «съедают» друг друга. Семантика поиска прежняя
-     * (регистронезависимость, MIN_QUERY_LENGTH, потолок совпадений — идентичны
-     * TranscriptSearchPolicy, откуда политика и была перенесена в core-network).
-     * Пузырь транскрипта = одно сообщение (card.tag = индекс), поэтому messageId
-     * синтетический: «m<индекс>» — стабильный в пределах текущего транскрипта.
-     * [resetPosition] — сброс на первое совпадение (новый запрос); без него позиция
-     * ВОССТАНАВЛИВАЕТСЯ ПО ЯКОРЮ (перерисовка во время стрима: текст растёт,
-     * индексы совпадений смещаются, а текущее совпадение не теряется).
-     * [scrollToMatch] — скроллить к совпадению (только явная навигация/новый запрос).
+     * Хост-контракт контроллера поиска: узкие адаптеры к транскрипту вместо передачи
+     * `CardEntry` (он остаётся приватным внутренним классом Activity) и view-обвязки панели.
+     * Индексы совпадают с `card.tag`: поиск адресует карточку тем же индексом, что и рендер.
      */
+    private fun transcriptSearchHost() = object : TranscriptSearchHighlightController.Host {
+        override val messageTexts: List<String>
+            get() = uiState.messages.map { it.text }
+
+        override val query: String
+            get() = searchInput.text?.toString().orEmpty()
+
+        override fun setCounter(label: String) {
+            searchCounter.text = label
+        }
+
+        override fun cardViewAt(index: Int): View? = messages.findViewWithTag(index)
+
+        override fun markdownHostAt(index: Int): View? = cardEntries.getOrNull(index)?.markdownHost
+
+        override val scrollContainer: View get() = scroll
+
+        override fun scrollTo(y: Int) {
+            scroll.smoothScrollTo(0, y)
+        }
+
+        override fun dp(value: Int) = this@ChatActivity.dp(value)
+    }
+
+    /** Пересчёт совпадений и подсветка — целиком в контроллере поиска. */
     private fun refreshTranscriptSearch(resetPosition: Boolean, scrollToMatch: Boolean) {
-        val query = searchInput.text?.toString().orEmpty()
-        searchMatches = MessageSearchPolicy.findMatches(
-            uiState.messages.mapIndexed { index, message ->
-                SearchableMessage(messageId = SEARCH_ID_PREFIX + index, text = message.text)
-            },
-            query,
-        )
-        searchPosition = when {
-            searchMatches.isEmpty() -> -1
-            resetPosition -> 0
-            else -> MessageSearchPolicy.positionOf(searchMatches, searchAnchor)
-                .takeIf { it >= 0 }
-                ?: searchPosition.coerceIn(0, searchMatches.size - 1)
-        }
-        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
-        searchCounter.text = MessageSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
-        applySearchHighlight(scrollTo = scrollToMatch && searchPosition >= 0)
+        transcriptSearch.refresh(resetPosition = resetPosition, scrollToMatch = scrollToMatch)
     }
 
-    /** Кольцевой шаг «следующее/предыдущее совпадение» + обновление счётчика и подсветки. */
+    /** Кольцевой шаг «следующее/предыдущее совпадение» — целиком в контроллере поиска. */
     private fun navigateTranscriptSearch(forward: Boolean) {
-        val next = MessageSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
-        if (next < 0) return
-        searchPosition = next
-        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
-        searchCounter.text = MessageSearchPolicy.counterLabel(
-            searchInput.text?.toString().orEmpty(), searchPosition, searchMatches.size
-        )
-        applySearchHighlight(scrollTo = true)
-    }
-
-    /**
-     * Подсветка и скролл к ТОЧНОЙ позиции совпадения (волна C, фича C):
-     * рубиновая рамка вокруг карточки + янтарный спан на самом совпадении внутри
-     * пузыря; скролл — к строке совпадения, а не к верхушке карточки/дня-разделителя.
-     * Позицию совпадения в ОТОБРАЖЁННЫХ строках пузыря находит чистая
-     * [MatchLocationPolicy] (markdown-рендер меняет текст: маркеры списков, заголовки).
-     * Если вхождение в отрисованных строках не найдено (например, текст уехал в
-     * свёрнутый блок) — откат к прежнему поведению: рамка + скролл к карточке.
-     */
-    private fun applySearchHighlight(scrollTo: Boolean) {
-        clearSearchHighlight()
-        val match = MessageSearchPolicy.anchorAt(searchMatches, searchPosition) ?: return
-        val messageIndex = match.messageId.removePrefix(SEARCH_ID_PREFIX).toIntOrNull() ?: return
-        val card = messages.findViewWithTag<View>(messageIndex) ?: return
-        // foreground, а не background: градиент пузыря/карточки остаётся нетронутым.
-        card.foreground = GradientDrawable().apply {
-            cornerRadius = dp(16).toFloat()
-            setStroke(dp(2), MarsTheme.ACCENT)
-        }
-        searchHighlightedCard = card
-
-        // Точная цель: TextView отрисованной строки + спан совпадения в нём.
-        val query = searchInput.text?.toString().orEmpty()
-        val bubble = cardEntries.getOrNull(messageIndex)?.markdownHost ?: card
-        val textViews = collectTextViews(bubble)
-        val location = MatchLocationPolicy.locate(
-            textViews.map { it.text?.toString().orEmpty() },
-            query,
-            match.ordinalInMessage,
-        )
-        var scrollTargetY: Int? = null
-        if (location != null) {
-            val target = textViews.getOrNull(location.lineIndex)
-            if (target != null) {
-                val spannable = target.text as? android.text.Spannable
-                if (spannable != null && location.end <= spannable.length) {
-                    val span = BackgroundColorSpan(SEARCH_HIGHLIGHT_COLOR)
-                    spannable.setSpan(
-                        span, location.start, location.end,
-                        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                    searchHighlightedSpan = target to span
-                }
-                scrollTargetY = offsetInScroll(target) +
-                    lineTopOffset(target, location.start)
-            }
-        }
-        if (scrollTo) {
-            // К строке совпадения (с отступом-воздухом сверху), фоллбэк — верх карточки.
-            val y = (scrollTargetY ?: offsetInScroll(card)) - dp(72)
-            scroll.smoothScrollTo(0, y.coerceAtLeast(0))
-        }
-    }
-
-    private fun clearSearchHighlight() {
-        searchHighlightedCard?.foreground = null
-        searchHighlightedCard = null
-        searchHighlightedSpan?.let { (view, span) ->
-            (view.text as? android.text.Spannable)?.removeSpan(span)
-        }
-        searchHighlightedSpan = null
-    }
-
-    /** Префикс синтетического messageId пузыря («m<индекс>») для [MessageSearchPolicy]. */
-    private val SEARCH_ID_PREFIX = "m"
-
-    /**
-     * Янтарная полупрозрачная подсветка самого совпадения (не перекрывает текст).
-     * Цвет берётся из палитры (STATUS_WARNING) и приглушается альфой: хардкод-hex вне
-     * файла палитры запрещён гейтом дизайн-системы (scripts/theme-parity-audit.py).
-     */
-    private val SEARCH_HIGHLIGHT_COLOR =
-        MarsGradients.withAlpha(
-            MarsGradients.STATUS_WARNING,
-            MarsGradients.SEARCH_HIGHLIGHT_ALPHA,
-        )
-
-    /** Все TextView подстава в порядке отрисовки (обход в глубину). */
-    private fun collectTextViews(root: View): List<TextView> {
-        val out = mutableListOf<TextView>()
-        fun walk(view: View) {
-            if (view is TextView) out += view
-            if (view is android.view.ViewGroup) {
-                for (i in 0 until view.childCount) walk(view.getChildAt(i))
-            }
-        }
-        walk(root)
-        return out
-    }
-
-    /**
-     * Вертикальное смещение view внутри контента [scroll]: сумма top по цепочке
-     * родителей. card.top сам по себе — координата ВНУТРИ обёртки с день-разделителем;
-     * без цепочки скролл уезжал к разделителю/верху контейнера (баг волны C).
-     */
-    private fun offsetInScroll(view: View): Int {
-        var y = 0
-        var current: View? = view
-        while (current != null && current !== scroll) {
-            y += current.top
-            current = current.parent as? View
-        }
-        return y
-    }
-
-    /** Верх строки Layout, содержащей символ [offset] (0, если Layout ещё не измерен). */
-    private fun lineTopOffset(view: TextView, offset: Int): Int {
-        val layout = view.layout ?: return 0
-        val textLength = layout.text?.length ?: 0
-        if (offset !in 0..textLength) return 0
-        return layout.getLineTop(layout.getLineForOffset(offset))
+        transcriptSearch.navigate(forward)
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
@@ -2919,7 +2800,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             isCodeBlockExpanded = uiState::isCodeBlockExpanded,
             toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
             copyMessage = ::copyMessage,
-            openImage = ::openImageLightbox,
+            openImage = lightbox::open,
             openUrl = { url -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } },
         )
     }
@@ -3410,101 +3291,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    /**
-     * Fullscreen image viewer (lightbox): dark backdrop, async bitmap load,
-     * close button + backdrop tap dismiss. URL resolution and the image-link
-     * heuristic live in [ImageLightboxPolicy]/[ThumbnailUrlResolver].
-     */
-    private fun openImageLightbox(rawUrl: String) {
-        val url = ImageLightboxPolicy.resolveUrl(rawUrl, BASE_URL)
-        if (url == null) {
-            statusView.text = "Изображение недоступно"
-            return
-        }
-        val dialog = Dialog(this)
-        val root = FrameLayout(this).apply {
-            setBackgroundColor(MarsTheme.LIGHTBOX_SCRIM)
-            fitsSystemWindows = true
-            setOnClickListener { dialog.dismiss() }
-        }
-        val image = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
-            contentDescription = "Просмотр изображения"
-        }
-        val progress = TextView(this).apply {
-            text = "Загрузка…"
-            setTextColor(MarsTheme.TEXT_MUTED)
-            textSize = 13f
-            gravity = Gravity.CENTER
-        }
-        root.addView(image, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-        root.addView(progress, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
-        ))
-        val closeBtn = MarsTheme.circleIconButton(
-            this, R.drawable.ic_close, "Закрыть просмотр",
-            bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT_STRONG, sizeDp = 40
-        ).apply { setOnClickListener { dialog.dismiss() } }
-        root.addView(closeBtn, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply {
-            topMargin = dp(16)
-            marginEnd = dp(16)
-        })
-        dialog.setContentView(root)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            setDimAmount(1f)
-        }
-        dialog.show()
-        lifecycleScope.launch {
-            val bitmap = withContext(Dispatchers.IO) { fetchBitmapForViewer(url) }
-            if (!dialog.isShowing) return@launch
-            if (bitmap != null) {
-                image.setImageBitmap(bitmap)
-                progress.visibility = View.GONE
-            } else {
-                progress.text = "Не удалось загрузить изображение"
-            }
-        }
-    }
-
-    /** Bounded bitmap fetch for the lightbox: ≤25 MB payload, downscaled above 4096 px. */
-    private fun fetchBitmapForViewer(url: String): Bitmap? = runCatching {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 10000
-            connection.readTimeout = 15000
-            val bytes = connection.inputStream.use { stream ->
-                val buffer = java.io.ByteArrayOutputStream()
-                val chunk = ByteArray(16 * 1024)
-                var total = 0L
-                while (true) {
-                    val read = stream.read(chunk)
-                    if (read <= 0) break
-                    total += read
-                    if (total > MAX_VIEWER_IMAGE_BYTES) return null
-                    buffer.write(chunk, 0, read)
-                }
-                buffer.toByteArray()
-            }
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            var sample = 1
-            while (bounds.outWidth / sample > MAX_VIEWER_IMAGE_DIMENSION ||
-                bounds.outHeight / sample > MAX_VIEWER_IMAGE_DIMENSION
-            ) {
-                sample *= 2
-            }
-            val options = BitmapFactory.Options().apply { inSampleSize = sample }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-        } finally {
-            connection.disconnect()
-        }
-    }.getOrNull()
-
     private fun renderAttachmentChips() {
         attachmentChips.removeAllViews()
         attachmentChips.visibility = if (attachments.isEmpty()) View.GONE else View.VISIBLE
@@ -3531,7 +3317,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     // Long-press previews the uploaded image in the fullscreen lightbox.
                     setOnLongClickListener {
                         it.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        openImageLightbox(a.path)
+                        lightbox.open(a.path)
                         true
                     }
                 }
@@ -4157,9 +3943,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
          */
         const val NEW_CHAT_NAV_KEY = "__new_chat__"
 
-        /** Lightbox guards: payload cap and max decoded dimension (memory discipline). */
-        private const val MAX_VIEWER_IMAGE_BYTES = 25L * 1024 * 1024
-        private const val MAX_VIEWER_IMAGE_DIMENSION = 4096
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         private const val KEY_OPEN_SESSION_ID = "open_session_id"
         /** Privately-stored plaintext data cleared on every auth-exit path (набор — [AuthExitStores]). */

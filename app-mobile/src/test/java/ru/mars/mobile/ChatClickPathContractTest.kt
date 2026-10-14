@@ -34,6 +34,7 @@ class ChatClickPathContractTest {
     }
 
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+    private val searchController by lazy { source("src/main/java/ru/mars/mobile/TranscriptSearchHighlightController.kt") }
     private val main by lazy { source("src/main/java/ru/mars/mobile/MainActivity.kt") }
     private val manifest by lazy { source("src/main/AndroidManifest.xml") }
     private val sessions by lazy { source("src/main/java/ru/mars/mobile/ChatSessionsActivity.kt") }
@@ -123,8 +124,9 @@ class ChatClickPathContractTest {
             chat.contains("setOnClickListener { closeTranscriptSearch() }")
         )
         assertTrue(
-            "Совпадения/счётчик — только чистая TranscriptSearchPolicy",
-            chat.contains("TranscriptSearchPolicy")
+            "Совпадения/счётчик/подсветка — контроллер поиска на чистой MessageSearchPolicy",
+            chat.contains("TranscriptSearchHighlightController") &&
+                searchController.contains("MessageSearchPolicy")
         )
     }
 
