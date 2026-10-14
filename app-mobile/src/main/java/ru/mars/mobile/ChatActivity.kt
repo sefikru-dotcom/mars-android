@@ -40,9 +40,11 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
+import androidx.core.view.AccessibilityDelegateCompat
 import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
@@ -104,6 +106,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var liveRunDetail: TextView
 
     private lateinit var todoWidgetPlate: LinearLayout
+    private lateinit var todoWidgetHeader: LinearLayout
     private lateinit var todoWidgetTitle: TextView
     private lateinit var todoWidgetChevron: ImageView
     private lateinit var todoWidgetContainer: LinearLayout
@@ -730,6 +733,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setTextColor(MarsTheme.TEXT)
             setPadding(dp(12), dp(7), dp(12), dp(7))
             visibility = View.GONE
+            // Доступность: смену сетевого статуса TalkBack озвучивает сам (polite).
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         root.addView(networkBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
@@ -799,6 +804,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             textSize = 12f
             setTextColor(MarsTheme.TEXT_MUTED)
             setPadding(dp(4), dp(4), 0, dp(4))
+            // Доступность: статусная строка озвучивается при смене текста (polite).
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         root.addView(statusView)
 
@@ -840,6 +847,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setTextColor(MarsTheme.TEXT_MUTED)
             isSingleLine = true
             setPadding(dp(6), 0, dp(6), 0)
+            // Доступность: счётчик «N из M» озвучивается при навигации по совпадениям.
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         searchPlate.addView(searchCounter, LinearLayout.LayoutParams(-2, -2))
         val searchPrevBtn = MarsTheme.circleIconButton(
@@ -963,7 +972,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
 
-        val todoHeaderRow = LinearLayout(this).apply {
+        todoWidgetHeader = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             isClickable = true
             setOnClickListener {
@@ -971,6 +980,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 updateTodoWidget()
             }
         }
+        val todoHeaderRow = todoWidgetHeader
         val todoIcon = ImageView(this).apply {
             setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_plan))
             imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
@@ -1689,11 +1699,30 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             ContextCompat.getDrawable(this, if (active) R.drawable.ic_stop else R.drawable.ic_send)
         )
         sendButton.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        // Доступность: подпись кнопки соответствует ДЕЙСТВИЮ клика (stop/send), а не иконке.
+        sendButton.contentDescription = ChatA11yPolicy.sendButtonDescription(active)
         updateContextIndicator()
         updateLiveRunPlate()
         updateQuotePlate()
         updateTodoWidget()
         renderSmartChips()
+    }
+
+    /**
+     * Доступный заголовок раскрывающейся карточки (thinking/tool/todo): роль кнопки
+     * (TalkBack озвучивает «Кнопка» и активирует двойным тапом), единая подпись с
+     * состоянием и stateDescription. Тексты решает чистая [ChatA11yPolicy];
+     * semantics клика (toggle + renderMessages) остаётся за вызывающим кодом.
+     */
+    private fun applyExpandableHeaderA11y(header: View, description: String, state: String) {
+        header.contentDescription = description
+        ViewCompat.setStateDescription(header, state)
+        ViewCompat.setAccessibilityDelegate(header, object : AccessibilityDelegateCompat() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfoCompat) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = Button::class.java.name
+            }
+        })
     }
 
     /**
@@ -1866,6 +1895,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         todoWidgetPlate.visibility = View.VISIBLE
         todoWidgetTitle.text = card.title
+        applyExpandableHeaderA11y(
+            todoWidgetHeader,
+            ChatA11yPolicy.expandableHeaderDescription(todoWidgetExpanded, card.title),
+            ChatA11yPolicy.stateDescription(todoWidgetExpanded)
+        )
         todoWidgetChevron.setImageDrawable(
             ContextCompat.getDrawable(this, if (todoWidgetExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down)
         )
@@ -2345,6 +2379,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     isClickable = true
                     setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
                 }
+                applyExpandableHeaderA11y(
+                    header,
+                    ChatA11yPolicy.expandableHeaderDescription(
+                        thinkingView.expanded,
+                        thinkingView.chipLabel,
+                        thinkingView.statusLabel
+                    ),
+                    ChatA11yPolicy.stateDescription(thinkingView.expanded)
+                )
                 val chevron = ImageView(this).apply {
                     setImageDrawable(ContextCompat.getDrawable(
                         this@ChatActivity,
@@ -2415,6 +2458,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 isClickable = true
                 setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
             }
+            applyExpandableHeaderA11y(
+                header,
+                ChatA11yPolicy.expandableHeaderDescription(toolView.expanded, toolView.kindLabel, toolView.toolName, toolView.stateLabel),
+                ChatA11yPolicy.stateDescription(toolView.expanded)
+            )
             val toolIconRes = when (toolView.kind) {
                 ToolKind.TERMINAL -> R.drawable.ic_chip
                 ToolKind.FILESYSTEM -> R.drawable.ic_plan

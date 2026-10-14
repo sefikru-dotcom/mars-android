@@ -273,6 +273,8 @@ object MarsDialog {
     fun errorStrip(context: Context): TextView {
         return text(context, "", 12, MarsTheme.ACCENT_TEXT, bold = false).apply {
             visibility = View.GONE
+            // Доступность: ошибку approval/clarify озвучивает TalkBack при смене текста.
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             background = GradientDrawable().apply {
                 setColor(MarsTheme.ACCENT_BG)
                 cornerRadius = MarsTheme.dp(context, 10).toFloat()
