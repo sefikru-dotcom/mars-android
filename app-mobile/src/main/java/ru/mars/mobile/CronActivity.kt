@@ -27,6 +27,7 @@ class CronActivity : ComponentActivity() {
 
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
     private val cronRepo = CronRepository()
+    private val transportFailureClassifier = TransportFailureClassifier()
 
     private lateinit var jobList: LinearLayout
     private lateinit var scaffold: SectionScaffold.Parts
@@ -59,29 +60,51 @@ class CronActivity : ComponentActivity() {
     private fun loadJobs() {
         val cred = store.read()
         if (cred == null) {
-            scaffold.progress.visibility = View.GONE
-            scaffold.statusLine.visibility = View.VISIBLE
-            scaffold.statusLine.text = "Нужен вход: откройте приложение и пройдите пару"
+            showState(SectionScreenState.Offline("Нужен вход: откройте приложение и пройдите пару"))
             return
         }
+        jobList.removeAllViews()
+        stateContainer.removeAllViews()
+        stateContainer.addView(SectionStateViews.loading(this, "Загрузка задач…"))
         scaffold.progress.visibility = View.VISIBLE
         scaffold.statusLine.visibility = View.VISIBLE
         scaffold.statusLine.text = "Загрузка задач…"
-        stateContainer.removeAllViews()
-        stateContainer.addView(SectionStateViews.empty(this, "Задачи планировщика отсутствуют"))
         lifecycleScope.launch {
-            val jobs = cronRepo.fetchJobs(ChatActivity.BASE_URL, cred)
-            scaffold.progress.visibility = View.GONE
-            scaffold.statusLine.visibility = View.GONE
-            renderJobs(jobs)
+            try {
+                val jobs = withContext(Dispatchers.IO) {
+                    cronRepo.fetchJobs(ChatActivity.BASE_URL, cred)
+                }
+                renderJobs(jobs)
+            } catch (error: Exception) {
+                val message = error.message.orEmpty()
+                val offline = transportFailureClassifier.isTransportShaped(message)
+                showState(
+                    if (offline) SectionScreenState.Offline("Нет связи с сервером")
+                    else SectionScreenState.Error("Не удалось загрузить задачи"),
+                )
+            }
         }
     }
 
+    private fun showState(state: SectionScreenState) {
+        scaffold.progress.visibility = View.GONE
+        scaffold.statusLine.visibility = View.GONE
+        stateContainer.removeAllViews()
+        val view = when (state) {
+            SectionScreenState.Loading -> SectionStateViews.loading(this, "Загрузка задач…")
+            is SectionScreenState.Empty -> SectionStateViews.empty(this, state.message)
+            is SectionScreenState.Error -> SectionStateViews.error(this, state.message, ::loadJobs)
+            is SectionScreenState.Offline -> SectionStateViews.offline(this, state.message)
+        }
+        stateContainer.addView(view)
+    }
+
     private fun renderJobs(jobs: List<CronJob>) {
+        scaffold.progress.visibility = View.GONE
+        scaffold.statusLine.visibility = View.GONE
         jobList.removeAllViews()
         if (jobs.isEmpty()) {
-            stateContainer.removeAllViews()
-            stateContainer.addView(SectionStateViews.empty(this, "Задачи планировщика отсутствуют"))
+            showState(SectionScreenState.Empty("Задачи планировщика отсутствуют"))
             return
         }
         stateContainer.removeAllViews()
