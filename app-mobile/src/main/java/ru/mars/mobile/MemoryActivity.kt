@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -34,6 +35,7 @@ import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.MemoryContent
 import ru.mars.network.repository.MemoryRepository
+import ru.mars.network.repository.MemoryWriteResult
 
 /**
  * Экран «Память Марса»: MEMORY.md / USER.md / SOUL.md / AGENTS.md из `GET /api/memory`.
@@ -48,6 +50,7 @@ class MemoryActivity : ComponentActivity() {
     private lateinit var chipsRow: LinearLayout
     private lateinit var body: LinearLayout
     private lateinit var copyBtn: ImageButton
+    private lateinit var editBtn: ImageButton
 
     private var currentTab = MemoryTab.MEMORY
     private var content: MemoryContent? = null
@@ -78,6 +81,10 @@ class MemoryActivity : ComponentActivity() {
         copyBtn = MarsTheme.circleIconButton(this, R.drawable.ic_copy, "Копировать секцию", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
             .apply { setOnClickListener { copyCurrentSection() } }
         controlsRow.addView(copyBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) })
+        // Правка секции — та же скромная круглая иконка, что copy: минимализм без крупных кнопок.
+        editBtn = MarsTheme.circleIconButton(this, R.drawable.ic_edit, "Править секцию", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
+            .apply { setOnClickListener { openEditor() } }
+        controlsRow.addView(editBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) })
         scaffold.content.addView(controlsRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
 
         body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -120,6 +127,7 @@ class MemoryActivity : ComponentActivity() {
     private fun renderBody() {
         val state = MemoryTabPolicy.resolve(currentTab, content, loading, failure)
         copyBtn.alpha = if (MemoryTabPolicy.canCopy(currentTab, content)) 1f else 0.4f
+        editBtn.alpha = if (MemoryEditPolicy.canEdit(currentTab, state)) 1f else 0.4f
         scaffold.progress.visibility = if (state is MemorySectionState.Loading) View.VISIBLE else View.GONE
         body.removeAllViews()
         when (state) {
@@ -165,6 +173,68 @@ class MemoryActivity : ComponentActivity() {
         val clipboard = getSystemService(ClipboardManager::class.java)
         clipboard.setPrimaryClip(ClipData.newPlainText(currentTab.fileName, text))
         Toast.makeText(this, "Скопировано: ${currentTab.fileName}", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Правка секции: диалог с monospace-редактором; сохранение — `POST /api/memory/write`
+     * через [MemoryRepository.writeSection] (полная перезапись секции), после успеха
+     * память перечитывается с сервера (источник истины — сервер, не черновик).
+     */
+    private fun openEditor() {
+        val state = MemoryTabPolicy.resolve(currentTab, content, loading, failure)
+        if (!MemoryEditPolicy.canEdit(currentTab, state)) return
+        val section = MemoryEditPolicy.writableSection(currentTab) ?: return
+        val credential = store.read()
+        if (credential == null) {
+            failure = MemoryTabPolicy.SIGNED_OUT_FAILURE
+            renderBody()
+            return
+        }
+        val tab = currentTab
+        val original = MemoryTabPolicy.textFor(tab, content)
+        var dialog: Dialog? = null
+        var saving = false
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, MemoryEditPolicy.dialogTitle(tab), tab.fileName))
+            val input = MarsDialog.textField(this, "Текст ${tab.fileName}", original).apply {
+                typeface = Typeface.MONOSPACE
+                minLines = 8
+                maxLines = 18
+            }
+            root.addView(input)
+            val error = MarsDialog.errorStrip(this)
+            root.addView(error)
+            val save = MarsDialog.primaryButton(this, MemoryEditPolicy.SAVE_LABEL) {
+                if (saving) return@primaryButton
+                val draft = input.text.toString()
+                if (!MemoryEditPolicy.canSave(draft, original)) {
+                    MarsDialog.setError(error, MemoryEditPolicy.saveBlockReason(draft, original))
+                    return@primaryButton
+                }
+                saving = true
+                MarsDialog.setResponding(listOf(input), true)
+                lifecycleScope.launch {
+                    val result = repository.writeSection(MarsApi.BASE_URL, credential, section, draft)
+                    saving = false
+                    MarsDialog.setResponding(listOf(input), false)
+                    when (result) {
+                        is MemoryWriteResult.Saved -> {
+                            dialog?.dismiss()
+                            Toast.makeText(
+                                this@MemoryActivity,
+                                MemoryEditPolicy.savedMessage(tab),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            load()
+                        }
+                        is MemoryWriteResult.Failed -> MarsDialog.setError(error, result.message)
+                    }
+                }
+            }
+            root.addView(save)
+            root.addView(MarsDialog.quietButton(this, "Отмена") { dialog?.dismiss() })
+            listOf(save)
+        }
     }
 
     /** Markdown-рендер секции: заголовки, списки, цитаты, код, таблицы — палитра MarsTheme. */

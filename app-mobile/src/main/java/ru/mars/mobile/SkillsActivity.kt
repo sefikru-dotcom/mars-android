@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -24,7 +25,9 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SkillItem
+import ru.mars.network.repository.SkillMutationResult
 import ru.mars.network.repository.SkillsRepository
 
 /**
@@ -196,6 +199,22 @@ class SkillsActivity : ComponentActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(MarsTheme.TEXT_STRONG)
         }, LinearLayout.LayoutParams(0, -2, 1f))
+        // Выключенный скилл видно сразу: короткий тихий бейдж (минимализм, без крупных плашек).
+        if (skill.disabled) {
+            row.addView(
+                MarsDialog.pill(
+                    this,
+                    SkillsAdminPolicy.DISABLED_BADGE,
+                    bg = MarsTheme.SURFACE_SUBTLE,
+                    fg = MarsTheme.TEXT_MUTED,
+                    border = MarsTheme.BORDER_MUTED,
+                ).apply {
+                    textSize = 11f
+                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) }
+            )
+        }
         if (skill.category.isNotBlank()) {
             row.addView(
                 MarsDialog.pill(
@@ -246,9 +265,128 @@ class SkillsActivity : ComponentActivity() {
                         setLineSpacing(dp(2).toFloat(), 1f)
                     })
                 }
+                root.addView(MarsDialog.quietButton(this@SkillsActivity, SkillsAdminPolicy.toggleLabel(!skill.disabled)) {
+                    dialog?.dismiss()
+                    runMutation(SkillsAdminPolicy.toggledMessage(skill.name, !skill.disabled)) { credential ->
+                        repository.toggleSkill(MarsApi.BASE_URL, credential, skill.name, enabled = !skill.disabled)
+                    }
+                })
+                root.addView(MarsDialog.quietButton(this@SkillsActivity, "Править") {
+                    dialog?.dismiss()
+                    val credential = store.read() ?: return@quietButton
+                    openSkillEditor(credential, skill, detail?.content.orEmpty())
+                })
+                root.addView(MarsDialog.quietButton(this@SkillsActivity, "Удалить") {
+                    dialog?.dismiss()
+                    confirmDeleteSkill(skill)
+                })
                 root.addView(MarsDialog.quietButton(this@SkillsActivity, "Закрыть") { dialog?.dismiss() })
                 emptyList()
             }
+        }
+    }
+
+    /**
+     * Общий финал мутаций каталога: успех — короткий тост и перечитывание каталога
+     * с сервера (источник истины — сервер), ошибка — тост с серверным `error`.
+     */
+    private fun runMutation(success: String, call: suspend (ConsumedDeviceCredential) -> SkillMutationResult) {
+        val credential = store.read() ?: return
+        lifecycleScope.launch {
+            when (val result = call(credential)) {
+                is SkillMutationResult.Ok -> {
+                    Toast.makeText(this@SkillsActivity, success, Toast.LENGTH_SHORT).show()
+                    load()
+                }
+                is SkillMutationResult.Failed ->
+                    Toast.makeText(this@SkillsActivity, result.message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * Удаление скилла необратимо (rmtree на сервере, route_skills.py `_handle_skill_delete`) —
+     * поэтому отдельный шаг админ-подтверждения с destructive-кнопкой, а не мгновенное действие.
+     */
+    private fun confirmDeleteSkill(skill: SkillItem) {
+        val credential = store.read() ?: return
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Удаление скилла", skill.name))
+            root.addView(MarsDialog.paragraph(this, SkillsAdminPolicy.deleteConfirmMessage(skill.name)))
+            root.addView(MarsDialog.denyButton(this, "Удалить") {
+                dialog?.dismiss()
+                lifecycleScope.launch {
+                    when (val result = repository.deleteSkill(MarsApi.BASE_URL, credential, skill.name)) {
+                        is SkillMutationResult.Ok -> {
+                            Toast.makeText(
+                                this@SkillsActivity,
+                                SkillsAdminPolicy.deletedMessage(skill.name),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            load()
+                        }
+                        is SkillMutationResult.Failed ->
+                            Toast.makeText(this@SkillsActivity, result.message, Toast.LENGTH_LONG).show()
+                    }
+                }
+            })
+            root.addView(MarsDialog.quietButton(this, "Отмена") { dialog?.dismiss() })
+            emptyList()
+        }
+    }
+
+    /**
+     * Правка содержимого SKILL.md: monospace-редактор, сохранение — `POST /api/skills/save`
+     * (перезапись файла; имя не редактируется — переименование = save+delete, его клиент
+     * не предлагает, чтобы не плодить необратимых сценариев).
+     */
+    private fun openSkillEditor(credential: ConsumedDeviceCredential, skill: SkillItem, initial: String) {
+        var dialog: Dialog? = null
+        var saving = false
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Правка скилла", skill.name))
+            val input = MarsDialog.textField(this, "Содержимое SKILL.md", initial).apply {
+                typeface = Typeface.MONOSPACE
+                minLines = 8
+                maxLines = 18
+            }
+            root.addView(input)
+            val error = MarsDialog.errorStrip(this)
+            root.addView(error)
+            val save = MarsDialog.primaryButton(this, "Сохранить") {
+                if (saving) return@primaryButton
+                val name = SkillsAdminPolicy.normalizeName(skill.name)
+                val draft = input.text.toString()
+                val category = skill.category
+                val block = SkillsAdminPolicy.saveBlockReason(name, draft, category)
+                if (block != null) {
+                    MarsDialog.setError(error, block)
+                    return@primaryButton
+                }
+                saving = true
+                MarsDialog.setResponding(listOf(input), true)
+                lifecycleScope.launch {
+                    val result = repository.saveSkill(MarsApi.BASE_URL, credential, name, draft, category)
+                    saving = false
+                    MarsDialog.setResponding(listOf(input), false)
+                    when (result) {
+                        is SkillMutationResult.Ok -> {
+                            dialog?.dismiss()
+                            Toast.makeText(
+                                this@SkillsActivity,
+                                SkillsAdminPolicy.savedMessage(name),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            load()
+                        }
+                        is SkillMutationResult.Failed -> MarsDialog.setError(error, result.message)
+                    }
+                }
+            }
+            root.addView(save)
+            root.addView(MarsDialog.quietButton(this, "Отмена") { dialog?.dismiss() })
+            listOf(save)
         }
     }
 
