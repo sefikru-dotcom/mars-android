@@ -22,15 +22,12 @@ import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TableLayout
 import android.widget.TableRow
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import ru.mars.network.api.MarsApi
@@ -47,9 +44,9 @@ class MemoryActivity : ComponentActivity() {
     private lateinit var store: AndroidKeyStoreCredentialStore
     private val repository = MemoryRepository()
 
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var chipsRow: LinearLayout
     private lateinit var body: LinearLayout
-    private lateinit var progress: ProgressBar
     private lateinit var copyBtn: ImageButton
 
     private var currentTab = MemoryTab.MEMORY
@@ -65,58 +62,26 @@ class MemoryActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
+        scaffold = SectionScaffold.create(this, "Память Марса", ::load)
 
-        // Header: back / title / progress / refresh / copy
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_arrow_back, "Назад", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { finish() } },
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
-        )
-        header.addView(TextView(this).apply {
-            text = "Память Марса"
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        progress = ProgressBar(this).apply {
-            visibility = View.GONE
-            isIndeterminate = true
-        }
-        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_refresh, "Обновить", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { load() } },
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(8) }
-        )
-        copyBtn = MarsTheme.circleIconButton(this, R.drawable.ic_copy, "Копировать секцию", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-            .apply { setOnClickListener { copyCurrentSection() } }
-        header.addView(copyBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-        root.addView(header)
-
-        // Tab chips: Память / Профиль / SOUL / Контекст
+        // Tab chips: Память / Профиль / SOUL / Контекст + «копировать» одной строкой;
+        // шапка, «Назад», спиннер и «Обновить» — общий shell.
         chipsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(HorizontalScrollView(this).apply {
+        val controlsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        controlsRow.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(chipsRow, ViewGroup.LayoutParams(-2, -2))
-        }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        copyBtn = MarsTheme.circleIconButton(this, R.drawable.ic_copy, "Копировать секцию", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
+            .apply { setOnClickListener { copyCurrentSection() } }
+        controlsRow.addView(copyBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) })
+        scaffold.content.addView(controlsRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
 
         body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(
+        scaffold.content.addView(
             ScrollView(this).apply {
                 isFillViewport = true
                 addView(body, ViewGroup.LayoutParams(-1, -2))
@@ -126,7 +91,7 @@ class MemoryActivity : ComponentActivity() {
 
         renderChips()
         renderBody()
-        return root
+        return scaffold.root
     }
 
     private fun renderChips() {
@@ -155,23 +120,14 @@ class MemoryActivity : ComponentActivity() {
     private fun renderBody() {
         val state = MemoryTabPolicy.resolve(currentTab, content, loading, failure)
         copyBtn.alpha = if (MemoryTabPolicy.canCopy(currentTab, content)) 1f else 0.4f
+        scaffold.progress.visibility = if (state is MemorySectionState.Loading) View.VISIBLE else View.GONE
         body.removeAllViews()
         when (state) {
-            is MemorySectionState.Loading -> statusText("Загрузка ${currentTab.fileName}…", MarsTheme.TEXT_MUTED)
-            is MemorySectionState.Failure -> statusText(state.message, MarsTheme.STATUS_WARNING)
-            is MemorySectionState.Empty -> statusText(state.message, MarsTheme.TEXT_MUTED)
+            is MemorySectionState.Loading -> body.addView(SectionStateViews.loading(this, "Загрузка ${currentTab.fileName}…"))
+            is MemorySectionState.Failure -> body.addView(SectionStateViews.error(this, state.message, ::load))
+            is MemorySectionState.Empty -> body.addView(SectionStateViews.empty(this, state.message))
             is MemorySectionState.Body -> renderMarkdown(state.text, body)
         }
-    }
-
-    private fun statusText(message: String, color: Int) {
-        body.addView(TextView(this).apply {
-            text = message
-            textSize = 14f
-            setTextColor(color)
-            setPadding(0, dp(24), 0, 0)
-            gravity = Gravity.CENTER_HORIZONTAL
-        })
     }
 
     private fun load() {
