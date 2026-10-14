@@ -2218,7 +2218,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Карточку могли заменить синхронным патчем, пока парсинг летел, — обновляем только «свою».
                 if (cardEntries.getOrNull(messageIndex) !== entry) return@withContext
                 host.removeAllViews()
-                renderParsedMarkdownBlocks(blocks, host, isUser, messageIndex)
+                ChatMarkdownRenderer.render(
+                    context = this@ChatActivity,
+                    blocks = blocks,
+                    parent = host,
+                    user = isUser,
+                    messageIndex = messageIndex,
+                    isCodeBlockExpanded = uiState::isCodeBlockExpanded,
+                    toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
+                    copyMessage = ::copyMessage,
+                    openImage = ::openImageLightbox,
+                    openUrl = { url -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } },
+                )
                 entry.snapshot = current[messageIndex]
                 renderedSnapshots = current
                 frameGate.commit(version)
@@ -2899,260 +2910,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
-        renderParsedMarkdownBlocks(MarkdownFormatter.parseBlocks(value), parent, user, messageIndex)
-    }
-
-    /**
-     * Сборка markdown-view из УЖЕ распарсенных блоков (view-инфлейт — только main-поток).
-     * Тяжёлый [MarkdownFormatter.parseBlocks] делается либо синхронно выше (история/полная
-     * перерисовка), либо в фоне с версионированием кадров — см. tryAsyncTextOnlyUpdate:
-     * на UI-поток возвращается только публикация готового результата.
-     */
-    private fun renderParsedMarkdownBlocks(blocks: List<ContentBlock>, parent: LinearLayout, user: Boolean, messageIndex: Int) {
-        blocks.forEachIndexed { blockIndex, block ->
-            when (block) {
-                is ContentBlock.Text -> {
-                    block.lines.forEach { line ->
-                        val tv = TextView(this).apply {
-                            movementMethod = LinkMovementMethod.getInstance()
-                            setTextColor(if (user) Color.WHITE else MarsTheme.TEXT)
-                            textSize = 15f
-                            setPadding(0, dp(2), 0, dp(2))
-                            setLineSpacing(dp(2).toFloat(), 1f)
-                        }
-                        val ssb = SpannableStringBuilder()
-                        when (line) {
-                            is RichLine.Header -> {
-                                tv.textSize = when (line.level) {
-                                    1 -> 18f
-                                    2 -> 17f
-                                    else -> 16f
-                                }
-                                tv.setTypeface(null, Typeface.BOLD)
-                                appendInlineSpans(ssb, line.spans)
-                            }
-                            is RichLine.Bullet -> {
-                                ssb.append("•  ")
-                                appendInlineSpans(ssb, line.spans)
-                            }
-                            is RichLine.Numbered -> {
-                                ssb.append("${line.number} ")
-                                appendInlineSpans(ssb, line.spans)
-                            }
-                            is RichLine.Quote -> {
-                                val quoteStart = ssb.length
-                                ssb.append("  ")
-                                ssb.setSpan(
-                                    android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
-                                    quoteStart,
-                                    quoteStart + 1,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                                )
-                                appendInlineSpans(ssb, line.spans)
-                                tv.setTypeface(null, Typeface.ITALIC)
-                            }
-                            is RichLine.TaskItem -> {
-                                val iconStart = ssb.length
-                                ssb.append("  ")
-                                val iconRes = if (line.checked) R.drawable.ic_check else R.drawable.ic_checkbox_empty
-                                ssb.setSpan(
-                                    ImageSpan(this@ChatActivity, iconRes, ImageSpan.ALIGN_BASELINE),
-                                    iconStart,
-                                    ssb.length,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                                )
-                                val start = ssb.length
-                                appendInlineSpans(ssb, line.spans)
-                                if (line.checked) {
-                                    ssb.setSpan(StrikethroughSpan(), start, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                                    ssb.setSpan(ForegroundColorSpan(MarsTheme.TEXT_MUTED), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                                }
-                            }
-                            is RichLine.Normal -> {
-                                appendInlineSpans(ssb, line.spans)
-                            }
-                            is RichLine.Divider -> {
-                                tv.text = ""
-                                tv.setBackgroundColor(MarsTheme.BORDER)
-                                tv.layoutParams = LinearLayout.LayoutParams(
-                                    LinearLayout.LayoutParams.MATCH_PARENT,
-                                    dp(1)
-                                ).apply {
-                                    topMargin = dp(6)
-                                    bottomMargin = dp(6)
-                                }
-                            }
-                        }
-                        tv.text = ssb
-                        parent.addView(tv)
-                    }
-                }
-                is ContentBlock.Code -> {
-                    val expanded = uiState.isCodeBlockExpanded(messageIndex, blockIndex)
-                    val view = CodeBlockPresenter.present(block, expanded)
-                    val box = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(dp(10), dp(6), dp(6), dp(6))
-                        background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 10, strokeColor = MarsTheme.CODE_BORDER)
-                    }
-                    // Block header: language title on the left, copy action on the right.
-                    val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-                    bar.addView(TextView(this).apply {
-                        text = view.languageLabel
-                        textSize = 11f
-                        setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                        setTextColor(MarsTheme.ACCENT_TEXT)
-                        setPadding(dp(2), 0, dp(8), 0)
-                    }, LinearLayout.LayoutParams(0, -2, 1f))
-                    val copyCodeBtn = MarsTheme.circleIconButton(
-                        this,
-                        R.drawable.ic_copy,
-                        "Копировать код",
-                        bg = MarsTheme.SURFACE,
-                        iconTint = MarsTheme.TEXT,
-                        sizeDp = 28,
-                        strokeColor = 0
-                    ).apply {
-                        setOnClickListener {
-                            copyMessage(view.fullCode)
-                            Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    bar.addView(copyCodeBtn, LinearLayout.LayoutParams(dp(28), dp(28)))
-                    box.addView(bar)
-                    box.addView(HorizontalScrollView(this).apply {
-                        addView(TextView(this@ChatActivity).apply {
-                            text = view.visibleCode
-                            setTextColor(MarsTheme.TEXT)
-                            typeface = Typeface.MONOSPACE
-                            textSize = 13f
-                            setPadding(0, dp(4), dp(16), dp(8))
-                        })
-                    })
-                    // Long listings are collapsed by default; the toggle flips the state.
-                    val toggleLabel = view.toggleLabel
-                    if (toggleLabel != null) {
-                        box.addView(Button(this).apply {
-                            text = toggleLabel
-                            textSize = 11f
-                            setTypeface(null, Typeface.BOLD)
-                            setTextColor(MarsTheme.ACCENT_TEXT)
-                            chevronStart(
-                                if (view.expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
-                                MarsTheme.ACCENT_TEXT,
-                            )
-                            background = null
-                            isAllCaps = false
-                            setPadding(0, 0, 0, 0)
-                            minimumHeight = 0
-                            minHeight = 0
-                            gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                            setOnClickListener {
-                                uiState.toggleCodeBlock(messageIndex, blockIndex)
-                                // Свёртка code-блока живёт ВНЕ снимка сообщения (ключ messageIndex:blockIndex
-                                // в ChatUiState): bumps эпохи хрома → политика даст FullRebuild, как раньше.
-                                transcriptChromeEpoch++
-                                renderMessages()
-                            }
-                        }, LinearLayout.LayoutParams(-1, dp(26)))
-                    }
-                    parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-                }
-                is ContentBlock.Table -> {
-                    // Card with a HorizontalScrollView around a TableLayout so wide tables
-                    // scroll sideways smoothly instead of breaking the phone layout.
-                    val card = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.BORDER)
-                        setPadding(dp(2), dp(2), dp(2), dp(2))
-                    }
-                    val table = TableLayout(this).apply {
-                        // Thin themed divider between rows instead of hardcoded paints.
-                        dividerDrawable = GradientDrawable().apply {
-                            setColor(MarsTheme.BORDER)
-                            setSize(dp(1), dp(1))
-                        }
-                        showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
-                    }
-                    fun buildTableRow(cells: List<List<InlineSpan>>, header: Boolean): TableRow =
-                        TableRow(this).apply {
-                            if (header) setBackgroundColor(MarsTheme.SURFACE_SUBTLE)
-                            cells.forEach { spans ->
-                                val cell = TextView(this@ChatActivity).apply {
-                                    movementMethod = LinkMovementMethod.getInstance()
-                                    textSize = 13f
-                                    setLineSpacing(dp(2).toFloat(), 1f)
-                                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                                    if (header) {
-                                        setTextColor(MarsTheme.TEXT_STRONG)
-                                        setTypeface(null, Typeface.BOLD)
-                                    } else {
-                                        setTextColor(MarsTheme.TEXT)
-                                    }
-                                    val cellText = SpannableStringBuilder()
-                                    appendInlineSpans(cellText, spans)
-                                    text = cellText
-                                }
-                                addView(cell)
-                            }
-                        }
-                    table.addView(buildTableRow(block.headers, header = true))
-                    block.rows.forEach { row -> table.addView(buildTableRow(row, header = false)) }
-                    card.addView(HorizontalScrollView(this).apply { addView(table) })
-                    parent.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-                }
-            }
-        }
-    }
-
-    private fun appendInlineSpans(builder: SpannableStringBuilder, spans: List<InlineSpan>) {
-        spans.forEach { span ->
-            val start = builder.length
-            when (span) {
-                is InlineSpan.Normal -> builder.append(span.text)
-                is InlineSpan.Bold -> {
-                    builder.append(span.text)
-                    builder.setSpan(StyleSpan(Typeface.BOLD), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-                is InlineSpan.Italic -> {
-                    builder.append(span.text)
-                    builder.setSpan(StyleSpan(Typeface.ITALIC), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-                is InlineSpan.Monospace -> {
-                    builder.append(span.text)
-                    builder.setSpan(TypefaceSpan("monospace"), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                    builder.setSpan(BackgroundColorSpan(MarsTheme.SURFACE_SUBTLE), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-                is InlineSpan.Link -> {
-                    builder.append(span.title)
-                    builder.setSpan(object : ClickableSpan() {
-                        override fun onClick(widget: View) {
-                            // Image links open in the fullscreen lightbox, everything else in a browser.
-                            if (ImageLightboxPolicy.isImageUrl(span.url)) {
-                                openImageLightbox(span.url)
-                            } else {
-                                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(span.url))) }
-                            }
-                        }
-                    }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-                is InlineSpan.Strikethrough -> {
-                    builder.append(span.text)
-                    builder.setSpan(StrikethroughSpan(), start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-                is InlineSpan.Image -> {
-                    // Markdown image: a clickable accent label — tap opens the fullscreen viewer.
-                    builder.append(ImageLightboxPolicy.inlineLabel(span.alt))
-                    builder.setSpan(object : ClickableSpan() {
-                        override fun onClick(widget: View) = openImageLightbox(span.url)
-                        override fun updateDrawState(ds: TextPaint) {
-                            ds.color = MarsTheme.ACCENT_TEXT
-                            ds.isUnderlineText = true
-                        }
-                    }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
-            }
-        }
+        ChatMarkdownRenderer.render(
+            context = this,
+            blocks = MarkdownFormatter.parseBlocks(value),
+            parent = parent,
+            user = user,
+            messageIndex = messageIndex,
+            isCodeBlockExpanded = uiState::isCodeBlockExpanded,
+            toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
+            copyMessage = ::copyMessage,
+            openImage = ::openImageLightbox,
+            openUrl = { url -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } },
+        )
     }
 
     private fun toolDump(tool: ToolExecution): String =
