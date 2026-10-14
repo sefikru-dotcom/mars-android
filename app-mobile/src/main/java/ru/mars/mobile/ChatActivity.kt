@@ -272,6 +272,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
+        // FCM push (волна 4): регистрируем токен на сервере, если есть credential
+        // (покрывает первый вход, перезапуск и пропущенную офлайн ротацию), и
+        // запрашиваем POST_NOTIFICATIONS на Android 13+ — без него баннеры молчат.
+        PushTokenSync.syncNow(this)
+        ru.mars.mobile.service.PushNotifications.ensurePostPermission(this)
         interactiveView = MarsInteractiveView(this)
         interactiveController = InteractiveRequestController(
             view = interactiveView,

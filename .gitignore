@@ -20,3 +20,6 @@ local.properties
 reports/
 artifacts/
 static/apk/
+
+# Firebase config — приходит из CI-секрета MARS_GOOGLE_SERVICES_*_B64, в git не хранится
+google-services.json

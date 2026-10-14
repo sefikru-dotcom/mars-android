@@ -28,6 +28,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize Firebase google-services.json from CI secrets
+        env:
+          GS_MOBILE_B64: ${{ secrets.MARS_GOOGLE_SERVICES_MOBILE_B64 }}
+          GS_TV_B64: ${{ secrets.MARS_GOOGLE_SERVICES_TV_B64 }}
+        run: |
+          set -eu
+          printf '%s' "$GS_MOBILE_B64" | base64 -d > app-mobile/google-services.json
+          printf '%s' "$GS_TV_B64" | base64 -d > app-tv/google-services.json
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -94,6 +102,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize Firebase google-services.json from CI secrets
+        env:
+          GS_MOBILE_B64: ${{ secrets.MARS_GOOGLE_SERVICES_MOBILE_B64 }}
+          GS_TV_B64: ${{ secrets.MARS_GOOGLE_SERVICES_TV_B64 }}
+        run: |
+          set -eu
+          printf '%s' "$GS_MOBILE_B64" | base64 -d > app-mobile/google-services.json
+          printf '%s' "$GS_TV_B64" | base64 -d > app-tv/google-services.json
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:

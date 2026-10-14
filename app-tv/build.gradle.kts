@@ -1,6 +1,6 @@
 import java.io.File
 
-plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("com.google.gms.google-services") }
 
 // Release signing contract — идентичен app-mobile: секреты только из env CI или
 // локального ~/.gradle/gradle.properties (не из git). Без полного контракта
@@ -71,6 +71,10 @@ dependencies {
     // DefaultRenderersFactory появился audio-offload режим, его сюда пускать нельзя.
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-datasource:1.2.1")
+    // FCM push-уведомления (волна 4) — те же версии, что в app-mobile (BoM 32.8.1
+    // совместим с AGP 8.2.2 / compileSdk 34 / Kotlin 1.9.22).
+    implementation(platform("com.google.firebase:firebase-bom:32.8.1"))
+    implementation("com.google.firebase:firebase-messaging")
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20240303")
