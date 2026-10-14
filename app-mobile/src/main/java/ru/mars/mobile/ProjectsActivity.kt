@@ -15,8 +15,6 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,10 +31,27 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Экран «Проекты»: метрики хоста и сервисов. Волна 3 — общий shell разделов
+ * [SectionScaffold] (safe-area, заголовок, «Назад», спиннер, «Обновить»);
+ * офлайн-кэш и статусная семантика экрана сохранены без изменений: мгновенный
+ * показ свежего снимка (24 ч) с бейджем возраста, сбой сети НЕ затирает
+ * показанный кэш (бейдж + ненавязчивый баннер), без годного снимка — честный
+ * фолбэк [MarsProjects] с offline-строкой ([OfflineCacheUiPolicy]).
+ */
 class ProjectsActivity : ComponentActivity() {
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var list: LinearLayout
-    private lateinit var updated: TextView
-    private lateinit var progress: ProgressBar
+
+    /**
+     * Статус-строка и спиннер общего shell. В shell статус-строка по умолчанию
+     * скрыта — экран метрик показывает её всегда (от «Загрузка метрик…» при
+     * старте до кэш-бейджа и offline-строки), поэтому [buildView] делает её
+     * видимой один раз, а вся прежняя логика записи текста/цвета сохранена.
+     */
+    private val updated: TextView get() = scaffold.statusLine
+    private val progress: ProgressBar get() = scaffold.progress
+
     private var loading = false
     private var refreshJob: Job? = null
 
@@ -75,80 +90,21 @@ class ProjectsActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
+        scaffold = SectionScaffold.create(this, "Проекты", ::loadMetrics)
 
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
-
-        // Header
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-
-        val backBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_arrow_back,
-            "Назад",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT
-        ).apply {
-            setOnClickListener { finish() }
-        }
-        header.addView(backBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
-
-        val title = TextView(this).apply {
-            text = "Проекты"
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-        }
-        header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-
-        progress = ProgressBar(this).apply {
-            visibility = View.GONE
-            isIndeterminate = true
-        }
-        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
-
-        val refreshBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_refresh,
-            "Обновить",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT
-        ).apply {
-            setOnClickListener { loadMetrics() }
-        }
-        header.addView(refreshBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-
-        root.addView(header)
-
-        updated = TextView(this).apply {
-            text = "Загрузка метрик…"
-            textSize = 13f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(0, 0, 0, dp(14))
-        }
-        root.addView(updated)
+        updated.visibility = View.VISIBLE
+        updated.text = "Загрузка метрик…"
+        updated.setTextColor(MarsTheme.TEXT_MUTED)
 
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(
+        scaffold.content.addView(
             ScrollView(this).apply {
                 addView(list, ViewGroup.LayoutParams(-1, -2))
                 isFillViewport = true
             },
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
-        return root
+        return scaffold.root
     }
 
     private fun loadMetrics() {
