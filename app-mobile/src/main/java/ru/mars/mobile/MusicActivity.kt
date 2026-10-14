@@ -106,6 +106,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var eqBtn: ImageButton
     /** Persisted sound settings (preset, on/off, Bass Boost); pure logic in [AudioFxPolicy]. */
     private lateinit var audioFx: AudioFxSettings
+    /** Persisted stream profile; the player owns the live URL/rebind contract. */
+    private lateinit var streamQuality: StreamQualitySettings
+    /** Header button for the explicit original/standard/economy picker. */
+    private lateinit var qualityBtn: ImageButton
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
     private var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
@@ -143,8 +147,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         audioFx = AudioFxSettings(
             PrefsAudioFxStorage(getSharedPreferences("mars-music-audiofx", MODE_PRIVATE))
         )
+        streamQuality = StreamQualitySettings(
+            PrefsStreamQualityStorage(getSharedPreferences("mars-music-preferences", MODE_PRIVATE))
+        )
         // The process-scoped player re-applies the saved preset to every fresh audio session.
         MarsMusicPlayer.setAudioFx(audioFx.state)
+        MarsMusicPlayer.setStreamQuality(streamQuality.value)
         setContentView(buildView())
         MarsMusicPlayer.registerListener(this)
         requestNotificationPermission()
@@ -152,6 +160,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         updateTabStyles()
         updateQueueIcons()
         updateEqIcon()
+        updateQualityIcon()
         refreshFavoriteIds()
         loadHome()
     }
@@ -357,6 +366,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { onEqClicked() }
         }
         header.addView(eqBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
+        qualityBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_settings,
+            "Качество потока",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onQualityClicked() }
+        }
+        header.addView(qualityBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+            marginStart = dp(8)
+        })
         root.addView(header)
 
         // Tabs: Чарт / Волна / Избранное / Очередь (pill toggles). Horizontally scrollable:
@@ -1667,6 +1689,51 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         eqBtn.imageTintList = ColorStateList.valueOf(
             if (audioFx.state.enabled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
         )
+    }
+
+    /** Opens the explicit original/standard/economy stream profile picker. */
+    private fun onQualityClicked() {
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Качество потока", streamQuality.value.label))
+            renderQualityBody(body)
+            root.addView(body, LinearLayout.LayoutParams(-1, -2))
+            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
+            emptyList()
+        }
+    }
+
+    /** Renders selectable quality pills and applies a choice without rebuilding the screen. */
+    private fun renderQualityBody(body: LinearLayout) {
+        body.removeAllViews()
+        val selected = streamQuality.value
+        body.addView(MarsDialog.caption(this, "Профиль аудиопотока"))
+        StreamQuality.selectable.forEach { quality ->
+            val isSelected = quality == selected
+            val pill = MarsDialog.pill(
+                this,
+                quality.label,
+                bg = if (isSelected) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
+                fg = if (isSelected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_EM,
+                border = if (isSelected) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
+            ) {
+                streamQuality.set(quality)
+                MarsMusicPlayer.setStreamQuality(quality)
+                updateQualityIcon()
+                renderQualityBody(body)
+            }
+            body.addView(pill, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+    }
+
+    /** Highlights the active explicit quality profile in the header. */
+    private fun updateQualityIcon() {
+        if (!::qualityBtn.isInitialized || !::streamQuality.isInitialized) return
+        qualityBtn.imageTintList = ColorStateList.valueOf(
+            if (streamQuality.value.isExplicit) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
+        )
+        qualityBtn.contentDescription = "Качество потока: ${streamQuality.value.label}"
     }
 
     /** «BASS BOOST · 65%»: hardware scale 0..1000 shown as percent, WebUI-style caption. */

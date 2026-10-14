@@ -26,15 +26,23 @@ enum class StreamQuality(val queryValue: String?) {
     /** Экономный профиль (минимальный битрейт). */
     ECONOMY("economy");
 
+    /** Human-readable labels shared by the quality picker and accessibility. */
+    val label: String
+        get() = when (this) {
+            DEFAULT -> "Серверный стандарт"
+            ORIGINAL -> "Максимум / Original"
+            STANDARD -> "Стандарт 128 kbps"
+            ECONOMY -> "Экономия 64 kbps"
+        }
+
     /** true, когда профиль явно передаётся серверу query-параметром. */
     val isExplicit: Boolean get() = queryValue != null
 
     companion object {
-        /**
-         * Разбор значения query-параметра `quality`: точные (регистронезависимые)
-         * `original`/`standard`/`economy`; всё остальное (null, пустая строка, мусор,
-         * `default`, `auto`) — обратный дефолт [DEFAULT], т.е. URL без параметра.
-         */
+        /** Profiles the user can select explicitly; DEFAULT remains an internal fallback. */
+        val selectable: List<StreamQuality> = listOf(ORIGINAL, STANDARD, ECONOMY)
+
+        /** Parse a persisted/query value, falling back to the server default on garbage. */
         fun fromQueryValue(raw: String?): StreamQuality {
             val key = raw?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return DEFAULT
             return entries.firstOrNull { it.queryValue == key } ?: DEFAULT
