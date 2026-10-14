@@ -74,9 +74,12 @@ class SpacesActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        scaffold = SectionScaffold.create(this, SpacesPolicy.SCREEN_TITLE) {
-            lifecycleScope.launch { presenter.load() }
-        }
+        // onRefresh — именованным: в сигнатуре shell появился параметр headerStyle.
+        scaffold = SectionScaffold.create(
+            this,
+            SpacesPolicy.SCREEN_TITLE,
+            onRefresh = { lifecycleScope.launch { presenter.load() } },
+        )
         val root = scaffold.root
         val content = scaffold.content
 

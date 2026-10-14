@@ -9,6 +9,13 @@ import android.widget.TextView
 
 /** Shared loading/empty/error/offline views for programmatic mobile screens. */
 object SectionStateViews {
+    /**
+     * Тег контрола «Повторить» внутри [error]: экраны ищут его через
+     * findViewWithTag, чтобы перенести фокус доступности при появлении ошибки
+     * (retry-focus, решение — чистая [RetryFocusPolicy]).
+     */
+    const val RETRY_TAG = "section-state-retry"
+
     fun loading(context: android.content.Context, message: String): View =
         messageView(context, message, MarsTheme.TEXT_MUTED, withProgress = true)
 
@@ -32,6 +39,7 @@ object SectionStateViews {
                 setPadding(MarsTheme.dp(context, 22), MarsTheme.dp(context, 12), MarsTheme.dp(context, 22), MarsTheme.dp(context, 12))
                 isClickable = true
                 isFocusable = true
+                tag = RETRY_TAG
                 contentDescription = "Повторить загрузку"
                 setOnClickListener { retry() }
             }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = MarsTheme.dp(context, 12) })

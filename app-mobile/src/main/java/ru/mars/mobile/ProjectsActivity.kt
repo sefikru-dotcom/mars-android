@@ -11,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -50,7 +49,7 @@ class ProjectsActivity : ComponentActivity() {
      * видимой один раз, а вся прежняя логика записи текста/цвета сохранена.
      */
     private val updated: TextView get() = scaffold.statusLine
-    private val progress: ProgressBar get() = scaffold.progress
+    private val progress: View get() = scaffold.progress
 
     private var loading = false
     private var refreshJob: Job? = null

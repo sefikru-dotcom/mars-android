@@ -104,7 +104,7 @@ class TodosActivity : ComponentActivity() {
     private fun buildView(): View {
         // Общий shell разделов: safe-area, заголовок, «Назад», спиннер и «Обновить»
         // (перезагрузка задач текущей сессии).
-        scaffold = SectionScaffold.create(this, "Задачи агента") { loadTodos(currentSessionId) }
+        scaffold = SectionScaffold.create(this, "Задачи агента", onRefresh = { loadTodos(currentSessionId) })
 
         // Сводка сеанса — статус-строка shell (всегда видна: экран показывает статус).
         summaryText.visibility = View.VISIBLE

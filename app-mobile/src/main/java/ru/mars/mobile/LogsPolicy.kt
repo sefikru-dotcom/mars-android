@@ -111,4 +111,22 @@ object LogsPolicy {
     /** Текст EMPTY: серверный `hint` (файл ещё не создан) важнее общей строки. */
     fun emptyMessage(window: ServerLogWindow): String =
         window.hint.ifBlank { MSG_EMPTY }
+
+    /**
+     * Сопоставление фазы вкладки с общим состоянием секций [SectionScreenState]
+     * (shell-волна): нет центрального [LogsUiState.message] — нет и общего вида
+     * (READY, тихий refresh поверх живых строк, offline-safe stale-строки —
+     * «Повторить» отдельно рендерит экран по [LogsUiState.canRetry]).
+     * NO_AUTH показывается offline-тоном без retry: загрузка до пары невозможна.
+     */
+    fun statusStateFor(state: LogsUiState): SectionScreenState? {
+        val message = state.message ?: return null
+        return when (state.phase) {
+            LogsPhase.LOADING -> SectionScreenState.Loading
+            LogsPhase.READY -> null
+            LogsPhase.EMPTY -> SectionScreenState.Empty(message)
+            LogsPhase.ERROR -> SectionScreenState.Error(message)
+            LogsPhase.NO_AUTH -> SectionScreenState.Offline(message)
+        }
+    }
 }

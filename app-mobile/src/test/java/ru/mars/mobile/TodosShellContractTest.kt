@@ -60,7 +60,7 @@ class TodosShellContractTest {
     fun `todos screen is built on the shared shell`() {
         assertTrue(
             "Экран обязан создаваться через SectionScaffold с заголовком «Задачи агента» и refresh-колбэком loadTodos(currentSessionId)",
-            todos.contains("SectionScaffold.create(this, \"Задачи агента\") { loadTodos(currentSessionId) }")
+            todos.contains("SectionScaffold.create(this, \"Задачи агента\", onRefresh = { loadTodos(currentSessionId) })")
         )
         assertTrue("Контент обязан добавляться в scaffold.content", todos.contains("scaffold.content.addView"))
         assertTrue("Корень экрана — scaffold.root", todos.contains("return scaffold.root"))
@@ -185,7 +185,7 @@ class TodosShellContractTest {
     fun `refresh and error retry repeat the same session`() {
         assertTrue(
             "«Обновить» shell перезагружает задачи ТЕКУЩЕГО сеанса",
-            todos.contains("SectionScaffold.create(this, \"Задачи агента\") { loadTodos(currentSessionId) }")
+            todos.contains("SectionScaffold.create(this, \"Задачи агента\", onRefresh = { loadTodos(currentSessionId) })")
         )
         assertTrue(
             "Retry общего error-состояния повторяет тот же сеанс с прежним сообщением",

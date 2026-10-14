@@ -12,6 +12,8 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -19,8 +21,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
@@ -40,8 +40,15 @@ enum class MonitorTab { INSIGHTS, LOGS }
  * Никаких мутаций и произвольных путей логов: файл/tail — серверные enum'ы.
  *
  * Слои: UI здесь, состояния — [InsightsPresenter]/[LogsPresenter], тексты —
- * [InsightsPolicy]/[LogsPolicy]. Safe-area через WindowInsets; анимации через
- * [MotionPolicy] с уважением reduce-motion.
+ * [InsightsPolicy]/[LogsPolicy]. Волна 4: экран на общем shell разделов
+ * [SectionScaffold] — safe-area, «Назад», заголовок, «Обновить» (перезагружает
+ * активную вкладку) и статус-строка (polite live-region для notice). Особая
+ * шапка монитора сохранена вариантом [SectionScaffold.HeaderStyle.COMPACT]:
+ * заголовок 17sp, точка-индикатор вместо спиннера, кнопки без фона.
+ * Центральные фазы вкладок — общие [SectionStateViews] через statusStateFor-
+ * маппинг политик; у каждой вкладки свой презентер и свой статус-бокс.
+ * Анимации — [MotionPolicy] с уважением reduce-motion; retry-focus — чистая
+ * [RetryFocusPolicy].
  */
 class InsightsActivity : ComponentActivity() {
 
@@ -54,8 +61,7 @@ class InsightsActivity : ComponentActivity() {
     private var activeTab = MonitorTab.INSIGHTS
     private var logsLoadedOnce = false
 
-    private lateinit var progressView: View
-    private lateinit var noticeView: TextView
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var tabsContainer: LinearLayout
     private lateinit var contentFrame: FrameLayout
 
@@ -64,9 +70,6 @@ class InsightsActivity : ComponentActivity() {
     private lateinit var insightsList: LinearLayout
     private lateinit var insightsScroll: ScrollView
     private lateinit var insightsStatusBox: LinearLayout
-    private lateinit var insightsStatusMessage: TextView
-    private lateinit var insightsStatusIcon: ImageView
-    private lateinit var insightsRetryButton: TextView
 
     private lateinit var logsPanel: LinearLayout
     private lateinit var logsFileChips: LinearLayout
@@ -75,18 +78,16 @@ class InsightsActivity : ComponentActivity() {
     private lateinit var logsLines: LinearLayout
     private lateinit var logsScroll: ScrollView
     private lateinit var logsStatusBox: LinearLayout
-    private lateinit var logsStatusMessage: TextView
-    private lateinit var logsStatusIcon: ImageView
-    private lateinit var logsRetryButton: TextView
 
     private var lastInsightsRowCount = 0
     private var lastLogsLineCount = 0
 
+    /** Был ли «Повторить» виден на вкладке: retry-focus срабатывает на появлении, а не каждый рендер. */
+    private val retryVisibleByTab = mutableMapOf<MonitorTab, Boolean>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = buildRootLayout()
-        setContentView(root)
-        applyWindowInsets(root)
+        setContentView(buildRootLayout())
 
         activeTab = intent.getStringExtra(EXTRA_TAB)
             ?.let { runCatching { MonitorTab.valueOf(it) }.getOrNull() }
@@ -131,32 +132,19 @@ class InsightsActivity : ComponentActivity() {
     // --------------------------------------------------------------- layout
 
     private fun buildRootLayout(): LinearLayout {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-        root.addView(buildHeader())
-        noticeView = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            background = MarsTheme.card(this@InsightsActivity, MarsTheme.SURFACE_SUBTLE)
-            val pad = MarsTheme.dp(this@InsightsActivity, 10)
-            setPadding(pad, pad / 2, pad, pad / 2)
-            visibility = View.GONE
-        }
-        root.addView(noticeView, LinearLayout.LayoutParams(
+        // Волна 4: safe-area, «Назад», заголовок, индикатор и «Обновить» — общий
+        // shell разделов в особом компактном варианте шапки монитора
+        // (HeaderStyle.COMPACT); «Обновить» перезагружает активную вкладку.
+        scaffold = SectionScaffold.create(
+            this,
+            InsightsPolicy.SCREEN_TITLE,
+            onRefresh = ::refreshActiveTab,
+            headerStyle = SectionScaffold.HeaderStyle.COMPACT,
+        )
+        scaffold.content.addView(buildTabs(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            marginStart = MarsTheme.dp(this@InsightsActivity, 16)
-            marginEnd = MarsTheme.dp(this@InsightsActivity, 16)
-            topMargin = MarsTheme.dp(this@InsightsActivity, 8)
-        })
-        root.addView(buildTabs())
+        ))
         contentFrame = FrameLayout(this)
         insightsPanel = buildInsightsPanel()
         logsPanel = buildLogsPanel()
@@ -168,63 +156,27 @@ class InsightsActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
-        root.addView(contentFrame, LinearLayout.LayoutParams(
+        scaffold.content.addView(contentFrame, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
             1f,
         ))
-        return root
+        return scaffold.root
     }
 
-    private fun buildHeader(): LinearLayout {
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            setPadding(pad, pad, pad, pad / 2)
+    /** «Обновить» особой шапки монитора: перезагрузка активной вкладки. */
+    private fun refreshActiveTab() {
+        when (activeTab) {
+            MonitorTab.INSIGHTS -> lifecycleScope.launch { insightsPresenter.load() }
+            MonitorTab.LOGS -> lifecycleScope.launch { logsPresenter.load() }
         }
-        val backButton = MarsTheme.circleIconButton(
-            this, R.drawable.ic_arrow_back, "Назад", bg = 0, strokeColor = 0,
-        ).apply { setOnClickListener { finish() } }
-        header.addView(backButton)
-        header.addView(TextView(this).apply {
-            text = InsightsPolicy.SCREEN_TITLE
-            textSize = 17f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setTypeface(typeface, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            marginStart = MarsTheme.dp(this@InsightsActivity, 16)
-        })
-        progressView = View(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(MarsTheme.ACCENT)
-            }
-            visibility = View.INVISIBLE
-        }
-        val dot = MarsTheme.dp(this, 8)
-        header.addView(progressView, LinearLayout.LayoutParams(dot, dot).apply {
-            marginEnd = MarsTheme.dp(this@InsightsActivity, 12)
-        })
-        val refreshButton = MarsTheme.circleIconButton(
-            this, R.drawable.ic_refresh, "Обновить", bg = 0, strokeColor = 0,
-        ).apply {
-            setOnClickListener {
-                when (activeTab) {
-                    MonitorTab.INSIGHTS -> lifecycleScope.launch { insightsPresenter.load() }
-                    MonitorTab.LOGS -> lifecycleScope.launch { logsPresenter.load() }
-                }
-            }
-        }
-        header.addView(refreshButton)
-        return header
     }
 
     private fun buildTabs(): LinearLayout {
         tabsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad, bottom = pad / 2)
+            // Горизонтальные отступы даёт root shell (16dp); здесь только ритм снизу.
+            updatePadding(bottom = MarsTheme.dp(this@InsightsActivity, 8))
         }
         listOf(
             MonitorTab.INSIGHTS to Pair(R.drawable.ic_insights, TAB_INSIGHTS_LABEL),
@@ -272,8 +224,7 @@ class InsightsActivity : ComponentActivity() {
         }
         insightsChips = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad, bottom = pad / 2)
+            updatePadding(bottom = MarsTheme.dp(this@InsightsActivity, 8))
         }
         chipsScroll.addView(insightsChips)
         panel.addView(chipsScroll, LinearLayout.LayoutParams(
@@ -287,20 +238,11 @@ class InsightsActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
-        insightsStatusBox = buildStatusBox(
-            iconRes = R.drawable.ic_insights,
-            messageOut = { insightsStatusMessage = it },
-            iconOut = { insightsStatusIcon = it },
-            retryOut = { insightsRetryButton = it },
-            onRetry = { lifecycleScope.launch { insightsPresenter.load() } },
-        )
+        insightsStatusBox = statusBox()
         content.addView(insightsStatusBox, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            val m = MarsTheme.dp(this@InsightsActivity, 16)
-            setMargins(m, m, m, m)
-        })
+        ))
         insightsScroll.addView(content)
         panel.addView(insightsScroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
@@ -326,8 +268,7 @@ class InsightsActivity : ComponentActivity() {
             setTextColor(MarsTheme.TEXT_MUTED)
             typeface = Typeface.MONOSPACE
             visibility = View.GONE
-            val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad, bottom = pad / 2)
+            updatePadding(bottom = MarsTheme.dp(this@InsightsActivity, 8))
         }
         panel.addView(logsMetaView, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -336,26 +277,15 @@ class InsightsActivity : ComponentActivity() {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         logsLines = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad)
         }
         content.addView(logsLines, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
-        logsStatusBox = buildStatusBox(
-            iconRes = R.drawable.ic_logs,
-            messageOut = { logsStatusMessage = it },
-            iconOut = { logsStatusIcon = it },
-            retryOut = { logsRetryButton = it },
-            onRetry = { lifecycleScope.launch { logsPresenter.load() } },
-        )
+        logsStatusBox = statusBox()
         content.addView(logsStatusBox, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            val m = MarsTheme.dp(this@InsightsActivity, 16)
-            setMargins(m, m, m, m)
-        })
+        ))
         logsScroll.addView(content)
         panel.addView(logsScroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
@@ -365,65 +295,18 @@ class InsightsActivity : ComponentActivity() {
 
     private fun chipsRow(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        val pad = MarsTheme.dp(this@InsightsActivity, 16)
-        updatePadding(left = pad, right = pad, bottom = pad / 2)
+        updatePadding(bottom = MarsTheme.dp(this@InsightsActivity, 8))
     }
 
-    private fun buildStatusBox(
-        iconRes: Int,
-        messageOut: (TextView) -> Unit,
-        iconOut: (ImageView) -> Unit,
-        retryOut: (TextView) -> Unit,
-        onRetry: () -> Unit,
-    ): LinearLayout {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            visibility = View.GONE
-        }
-        val icon = ImageView(this).apply {
-            setImageResource(iconRes)
-            imageTintList = android.content.res.ColorStateList.valueOf(MarsTheme.BORDER_MUTED)
-            alpha = 0.6f
-        }
-        val iconSize = MarsTheme.dp(this, 40)
-        box.addView(icon, LinearLayout.LayoutParams(iconSize, iconSize).apply {
-            bottomMargin = MarsTheme.dp(this@InsightsActivity, 12)
-        })
-        iconOut(icon)
-        val message = TextView(this).apply {
-            textSize = 14f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            gravity = Gravity.CENTER
-        }
-        box.addView(message, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            marginStart = MarsTheme.dp(this@InsightsActivity, 32)
-            marginEnd = MarsTheme.dp(this@InsightsActivity, 32)
-        })
-        messageOut(message)
-        val retry = TextView(this).apply {
-            text = InsightsPolicy.RETRY_LABEL
-            textSize = 13f
-            setTextColor(MarsTheme.TEXT)
-            gravity = Gravity.CENTER
-            background = MarsTheme.button(this@InsightsActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-            val h = MarsTheme.dp(this@InsightsActivity, 16)
-            val v = MarsTheme.dp(this@InsightsActivity, 9)
-            setPadding(h, v, h, v)
-            isClickable = true
-            isFocusable = true
-            visibility = View.GONE
-            setOnClickListener { onRetry() }
-        }
-        box.addView(retry, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = MarsTheme.dp(this@InsightsActivity, 14) })
-        retryOut(retry)
-        return box
+    /**
+     * Контейнер статуса вкладки: заполняется общими [SectionStateViews]
+     * (loading/empty/error+retry/offline для NO_AUTH) или отдельным чипом
+     * «Повторить» при offline-safe stale-данных (см. [renderStatus]).
+     */
+    private fun statusBox(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        visibility = View.GONE
     }
 
     // -------------------------------------------------------------- render
@@ -442,6 +325,8 @@ class InsightsActivity : ComponentActivity() {
         for (index in 0 until tabsContainer.childCount) {
             val chip = tabsContainer.getChildAt(index) as LinearLayout
             val selected = chip.tag == tab
+            // Selected-состояние вкладки — сервисам доступности (TalkBack: «выбрано»).
+            chip.isSelected = selected
             val color = if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED
             chip.background = MarsTheme.pill(
                 this,
@@ -460,15 +345,22 @@ class InsightsActivity : ComponentActivity() {
         // Header (progress/notice) общий — перевыставляем из состояния новой активной вкладки.
         if (showInsights) {
             insightsPresenter.state.let {
-                progressView.visibility = if (it.phase == InsightsPhase.LOADING) View.VISIBLE else View.INVISIBLE
+                scaffold.progress.visibility = if (it.phase == InsightsPhase.LOADING) View.VISIBLE else View.INVISIBLE
                 renderNotice(it.notice)
             }
         } else {
             logsPresenter.state.let {
-                progressView.visibility = if (it.phase == LogsPhase.LOADING) View.VISIBLE else View.INVISIBLE
+                scaffold.progress.visibility = if (it.phase == LogsPhase.LOADING) View.VISIBLE else View.INVISIBLE
                 renderNotice(it.notice)
             }
         }
+        // Retry-focus: при переключении на вкладку с уже показанным «Повторить».
+        maybeFocusRetry(
+            tab,
+            canRetry = if (showInsights) insightsPresenter.state.canRetry else logsPresenter.state.canRetry,
+            retryWasVisible = retryVisibleByTab[tab] == true,
+            tabSwitched = true,
+        )
         if (animate && !isReducedMotion()) {
             shown.alpha = 0f
             shown.animate()
@@ -484,7 +376,7 @@ class InsightsActivity : ComponentActivity() {
     private fun renderInsights(state: InsightsUiState) {
         val active = activeTab == MonitorTab.INSIGHTS
         if (active) {
-            progressView.visibility = if (state.phase == InsightsPhase.LOADING) View.VISIBLE else View.INVISIBLE
+            scaffold.progress.visibility = if (state.phase == InsightsPhase.LOADING) View.VISIBLE else View.INVISIBLE
             renderNotice(state.notice)
         }
         buildPeriodChips(state)
@@ -492,18 +384,26 @@ class InsightsActivity : ComponentActivity() {
         lastInsightsRowCount = state.rows.size
         insightsList.removeAllViews()
         state.rows.forEach { row -> insightsList.addView(buildInsightsRow(row)) }
-        val showStatus = state.message != null || state.canRetry
-        insightsStatusBox.visibility = if (showStatus) View.VISIBLE else View.GONE
-        insightsStatusMessage.text = state.message.orEmpty()
-        insightsStatusMessage.visibility = if (state.message != null) View.VISIBLE else View.GONE
-        insightsRetryButton.visibility = if (state.canRetry) View.VISIBLE else View.GONE
+        renderStatus(
+            tab = MonitorTab.INSIGHTS,
+            screen = InsightsPolicy.statusStateFor(state),
+            loadingMessage = state.message ?: InsightsPolicy.MSG_LOADING,
+            retryLabel = InsightsPolicy.RETRY_LABEL,
+            canRetry = state.canRetry,
+            onRetry = { lifecycleScope.launch { insightsPresenter.load() } },
+        )
         if (reveal) revealAnimated(insightsList)
     }
 
+    /** Notice активной вкладки (offline/stale) — в статус-строку shell (polite live-region). */
     private fun renderNotice(notice: String?) {
-        // Notice общий для обеих вкладок: показываем только активной.
-        noticeView.text = notice.orEmpty()
-        noticeView.visibility = if (notice != null) View.VISIBLE else View.GONE
+        if (notice != null) {
+            scaffold.statusLine.text = notice
+            scaffold.statusLine.setTextColor(MarsTheme.STATUS_WARNING)
+            scaffold.statusLine.visibility = View.VISIBLE
+        } else {
+            scaffold.statusLine.visibility = View.GONE
+        }
     }
 
     private fun buildPeriodChips(state: InsightsUiState) {
@@ -527,7 +427,7 @@ class InsightsActivity : ComponentActivity() {
     private fun renderLogs(state: LogsUiState) {
         val active = activeTab == MonitorTab.LOGS
         if (active) {
-            progressView.visibility = if (state.phase == LogsPhase.LOADING) View.VISIBLE else View.INVISIBLE
+            scaffold.progress.visibility = if (state.phase == LogsPhase.LOADING) View.VISIBLE else View.INVISIBLE
             renderNotice(state.notice)
         }
         buildLogsChips(state)
@@ -537,12 +437,92 @@ class InsightsActivity : ComponentActivity() {
         lastLogsLineCount = state.lines.size
         logsLines.removeAllViews()
         state.lines.forEach { line -> logsLines.addView(buildLogLine(line)) }
-        val showStatus = state.message != null || state.canRetry
-        logsStatusBox.visibility = if (showStatus) View.VISIBLE else View.GONE
-        logsStatusMessage.text = state.message.orEmpty()
-        logsStatusMessage.visibility = if (state.message != null) View.VISIBLE else View.GONE
-        logsRetryButton.visibility = if (state.canRetry) View.VISIBLE else View.GONE
+        renderStatus(
+            tab = MonitorTab.LOGS,
+            screen = LogsPolicy.statusStateFor(state),
+            loadingMessage = state.message ?: LogsPolicy.MSG_LOADING,
+            retryLabel = LogsPolicy.RETRY_LABEL,
+            canRetry = state.canRetry,
+            onRetry = { lifecycleScope.launch { logsPresenter.load() } },
+        )
         if (reveal) revealAnimated(logsLines)
+    }
+
+    /**
+     * Статус вкладки: общие виды [SectionStateViews] (loading/empty/error+retry/
+     * offline для NO_AUTH) или отдельный чип «Повторить» для offline-safe
+     * stale-данных (строки/ряды на экране, центрального сообщения нет).
+     * После рендера — retry-focus ([maybeFocusRetry]).
+     */
+    private fun renderStatus(
+        tab: MonitorTab,
+        screen: SectionScreenState?,
+        loadingMessage: String,
+        retryLabel: String,
+        canRetry: Boolean,
+        onRetry: () -> Unit,
+    ) {
+        val box = if (tab == MonitorTab.INSIGHTS) insightsStatusBox else logsStatusBox
+        val retryWasVisible = retryVisibleByTab[tab] == true
+        box.removeAllViews()
+        box.visibility = if (screen != null || canRetry) View.VISIBLE else View.GONE
+        when (screen) {
+            null -> if (canRetry) {
+                box.addView(
+                    retryChip(retryLabel, onRetry),
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = MarsTheme.dp(this@InsightsActivity, 14) },
+                )
+            }
+            SectionScreenState.Loading -> box.addView(SectionStateViews.loading(this, loadingMessage))
+            is SectionScreenState.Empty -> box.addView(SectionStateViews.empty(this, screen.message))
+            is SectionScreenState.Error -> box.addView(SectionStateViews.error(this, screen.message, onRetry))
+            is SectionScreenState.Offline -> box.addView(SectionStateViews.offline(this, screen.message))
+        }
+        retryVisibleByTab[tab] = canRetry
+        maybeFocusRetry(tab, canRetry, retryWasVisible, tabSwitched = false)
+    }
+
+    /** «Повторить» отдельным чипом: offline-safe stale-данные без центрального сообщения. */
+    private fun retryChip(label: String, onRetry: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        setTextColor(MarsTheme.TEXT)
+        gravity = Gravity.CENTER
+        background = MarsTheme.button(this@InsightsActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+        val h = MarsTheme.dp(this@InsightsActivity, 16)
+        val v = MarsTheme.dp(this@InsightsActivity, 9)
+        setPadding(h, v, h, v)
+        isClickable = true
+        isFocusable = true
+        tag = SectionStateViews.RETRY_TAG
+        contentDescription = "Повторить загрузку"
+        setOnClickListener { onRetry() }
+    }
+
+    /**
+     * Retry-focus: при появлении «Повторить» на активной вкладке и активном
+     * TalkBack (touch exploration) переносим фокус доступности на контрол,
+     * чтобы повтор был доступен сразу после озвученной ошибки. Решение —
+     * чистая [RetryFocusPolicy]; контрол ищем по тегу [SectionStateViews.RETRY_TAG].
+     */
+    private fun maybeFocusRetry(tab: MonitorTab, canRetry: Boolean, retryWasVisible: Boolean, tabSwitched: Boolean) {
+        if (tab != activeTab) return
+        val manager = getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+        if (!RetryFocusPolicy.shouldMoveFocus(
+                accessibilityEnabled = manager?.isEnabled == true,
+                touchExplorationEnabled = manager?.isTouchExplorationEnabled == true,
+                canRetry = canRetry,
+                retryWasVisible = retryWasVisible,
+                tabSwitched = tabSwitched,
+            )
+        ) return
+        val box = if (tab == MonitorTab.INSIGHTS) insightsStatusBox else logsStatusBox
+        val retry = box.findViewWithTag<View>(SectionStateViews.RETRY_TAG) ?: return
+        retry.requestFocus()
+        retry.sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_FOCUSED)
     }
 
     private fun buildLogsChips(state: LogsUiState) {
@@ -594,6 +574,8 @@ class InsightsActivity : ComponentActivity() {
     private fun styleChip(chip: View?, selected: Boolean) {
         chip ?: return
         val textView = chip as? TextView ?: return
+        // Selected-состояние чипа — сервисам доступности (TalkBack: «выбрано»).
+        textView.isSelected = selected
         textView.setTextColor(if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
         textView.background = MarsTheme.pill(
             this,
@@ -624,14 +606,15 @@ class InsightsActivity : ComponentActivity() {
             setTextColor(MarsTheme.TEXT_MUTED)
             setTypeface(typeface, Typeface.BOLD)
             val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad, top = pad, bottom = pad / 2)
+            // Горизонтальные отступы даёт root shell (16dp).
+            updatePadding(top = pad, bottom = pad / 2)
         }
         is InsightsRow.Note -> TextView(this).apply {
             text = row.text
             textSize = 11.5f
             setTextColor(MarsTheme.TEXT_MUTED)
             val pad = MarsTheme.dp(this@InsightsActivity, 16)
-            updatePadding(left = pad, right = pad, bottom = pad / 2)
+            updatePadding(bottom = pad / 2)
         }
         is InsightsRow.Stat -> card(horizontal = true) {
             addView(label(row.label), weightCell())
@@ -726,8 +709,7 @@ class InsightsActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply {
-                marginStart = MarsTheme.dp(this@InsightsActivity, 16)
-                marginEnd = MarsTheme.dp(this@InsightsActivity, 16)
+                // Горизонтальные отступы даёт root shell (16dp).
                 bottomMargin = MarsTheme.dp(this@InsightsActivity, 8)
             }
         }
@@ -768,21 +750,6 @@ class InsightsActivity : ComponentActivity() {
     )
 
     // ------------------------------------------------------------- system
-
-    private fun applyWindowInsets(root: View) {
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            // androidx WindowInsetsCompat: getInsets(Type) работает на всех API,
-            // android.graphics.Insets не трогаем (конструктор package-private).
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.updatePadding(
-                left = bars.left,
-                top = bars.top,
-                right = bars.right,
-                bottom = bars.bottom,
-            )
-            insets
-        }
-    }
 
     private fun isDeviceOffline(): Boolean {
         val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false

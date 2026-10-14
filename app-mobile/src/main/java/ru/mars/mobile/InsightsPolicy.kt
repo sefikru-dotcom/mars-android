@@ -294,6 +294,24 @@ object InsightsPolicy {
         if (max > 0L) (value.toFloat() / max.toFloat()).coerceIn(0f, 1f) else 0f
 
     /**
+     * Сопоставление фазы вкладки с общим состоянием секций [SectionScreenState]
+     * (shell-волна): нет центрального [InsightsUiState.message] — нет и общего
+     * вида (READY, тихий refresh поверх живых строк, offline-safe stale-данные —
+     * «Повторить» отдельно рендерит экран по [InsightsUiState.canRetry]).
+     * NO_AUTH показывается offline-тоном без retry: загрузка до пары невозможна.
+     */
+    fun statusStateFor(state: InsightsUiState): SectionScreenState? {
+        val message = state.message ?: return null
+        return when (state.phase) {
+            InsightsPhase.LOADING -> SectionScreenState.Loading
+            InsightsPhase.READY -> null
+            InsightsPhase.EMPTY -> SectionScreenState.Empty(message)
+            InsightsPhase.ERROR -> SectionScreenState.Error(message)
+            InsightsPhase.NO_AUTH -> SectionScreenState.Offline(message)
+        }
+    }
+
+    /**
      * Текст ошибки для неуспешного [InsightsResult]: у маршрута нет валидационных
      * веток — любой сбой (auth-guard 401/403, неожиданный 500, транспорт) даёт
      * общий текст; серверная деталь остаётся в `Failed.message` для логов.
