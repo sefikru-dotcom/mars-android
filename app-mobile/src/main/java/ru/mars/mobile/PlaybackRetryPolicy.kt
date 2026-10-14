@@ -32,8 +32,10 @@ sealed interface RetryDecision {
 
 /**
  * Pure decision core of playback failure recovery (network resilience) — Android-free and
- * unit-testable on the JVM. [MarsMusicPlayer] owns one instance, feeds it MediaPlayer error
- * codes and applies the verdicts; all counting, backoff and classification live here.
+ * unit-testable on the JVM. [MarsMusicPlayer] owns one instance, feeds it engine error
+ * codes (Media3 `PlaybackException.errorCode` through [media3CodeFor], or the legacy
+ * MediaPlayer code space) and applies the verdicts; all counting, backoff and
+ * classification live here.
  *
  * Failure model per track:
  * 1. [classify] maps the raw `what`/`extra` codes onto a [PlaybackErrorKind].
@@ -154,10 +156,64 @@ class PlaybackRetryPolicy(
             setOf(ERROR_MALFORMED, ERROR_UNSUPPORTED, ERROR_NOT_VALID_FOR_PROGRESSIVE)
 
         /**
-         * Maps an exception thrown by `setDataSource`/`prepareAsync` onto the same code space
-         * as the MediaPlayer error callback, so both failure sources share one decision path.
+         * Media3/ExoPlayer `androidx.media3.common.PlaybackException` error codes, mirrored
+         * as plain ints so this policy stays Android-free (JVM-testable). Parity with the
+         * library constants is pinned by PlaybackRetryMedia3CodeTest — if Media3 ever
+         * renumbers them, the test fails before production does.
          */
-        fun codeFor(error: Throwable): Int = when (error) {
+        const val MEDIA3_ERROR_UNSPECIFIED = 1000
+        const val MEDIA3_ERROR_REMOTE = 1001
+        const val MEDIA3_ERROR_BEHIND_LIVE_WINDOW = 1002
+        const val MEDIA3_ERROR_TIMEOUT = 1003
+        const val MEDIA3_ERROR_FAILED_RUNTIME_CHECK = 1004
+        const val MEDIA3_IO_UNSPECIFIED = 2000
+        const val MEDIA3_IO_NETWORK_CONNECTION_FAILED = 2001
+        const val MEDIA3_IO_NETWORK_CONNECTION_TIMEOUT = 2002
+        const val MEDIA3_IO_INVALID_HTTP_CONTENT_TYPE = 2003
+        const val MEDIA3_IO_BAD_HTTP_STATUS = 2004
+        const val MEDIA3_IO_FILE_NOT_FOUND = 2005
+        const val MEDIA3_IO_NO_PERMISSION = 2006
+        const val MEDIA3_IO_CLEARTEXT_NOT_PERMITTED = 2007
+        const val MEDIA3_IO_READ_POSITION_OUT_OF_RANGE = 2008
+        const val MEDIA3_PARSING_CONTAINER_MALFORMED = 3001
+        const val MEDIA3_PARSING_MANIFEST_MALFORMED = 3002
+        const val MEDIA3_PARSING_CONTAINER_UNSUPPORTED = 3003
+        const val MEDIA3_PARSING_MANIFEST_UNSUPPORTED = 3004
+        const val MEDIA3_DECODER_INIT_FAILED = 4001
+        const val MEDIA3_DECODER_QUERY_FAILED = 4002
+        const val MEDIA3_DECODING_FAILED = 4003
+        const val MEDIA3_DECODING_FORMAT_EXCEEDS_CAPABILITIES = 4004
+        const val MEDIA3_DECODING_FORMAT_UNSUPPORTED = 4005
+        const val MEDIA3_AUDIO_TRACK_INIT_FAILED = 5001
+
+        /**
+         * Maps a Media3 `PlaybackException.errorCode` into the policy's MediaPlayer-shaped
+         * code space, so [classify]/[decide] stay engine-agnostic:
+         * - I/O and network failures (2xxx) → [ERROR_IO]: transient, retry with backoff;
+         * - connection timeouts → [ERROR_TIMED_OUT]: transient, same lane;
+         * - malformed containers/manifests → [ERROR_MALFORMED]: permanent, skip;
+         * - unsupported containers/manifests and undecodable formats → [ERROR_UNSUPPORTED]:
+         *   permanent, skip;
+         * - decoder/audio-track failures and everything else → [ERROR_UNKNOWN]: one retry,
+         *   then skip.
+         */
+        fun media3CodeFor(media3ErrorCode: Int): Int = when (media3ErrorCode) {
+            MEDIA3_ERROR_TIMEOUT, MEDIA3_IO_NETWORK_CONNECTION_TIMEOUT -> ERROR_TIMED_OUT
+            in MEDIA3_IO_UNSPECIFIED..MEDIA3_IO_READ_POSITION_OUT_OF_RANGE -> ERROR_IO
+            MEDIA3_PARSING_CONTAINER_MALFORMED, MEDIA3_PARSING_MANIFEST_MALFORMED -> ERROR_MALFORMED
+            MEDIA3_PARSING_CONTAINER_UNSUPPORTED,
+            MEDIA3_PARSING_MANIFEST_UNSUPPORTED,
+            MEDIA3_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            MEDIA3_DECODING_FORMAT_UNSUPPORTED -> ERROR_UNSUPPORTED
+            else -> ERROR_UNKNOWN
+        }
+
+        /**
+         * Maps an exception thrown by `setDataSource`/`prepareAsync` (or an ExoPlayer
+         * `PlaybackException` cause) onto the same code space as the error callback,
+         * so both failure sources share one decision path.
+         */
+        fun codeFor(cause: Throwable?): Int = when (cause) {
             is IOException -> ERROR_IO
             is IllegalArgumentException, is SecurityException -> ERROR_UNSUPPORTED
             else -> ERROR_UNKNOWN

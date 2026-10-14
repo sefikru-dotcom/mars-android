@@ -114,6 +114,14 @@ dependencies {
     implementation("androidx.media:media:1.6.0")
     implementation(project(":core-network"))
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    // Media3/ExoPlayer вместо android.media.MediaPlayer (app-tv/TvMusicPlayer паттерн):
+    // MediaPlayer на части устройств уводит AAC-стрим в compressed-offload ветку
+    // AudioFlinger, где вывод глохнет; ExoPlayer 1.2.1 offload не имеет вовсе — только
+    // программное декодирование в PCM и обычный AudioTrack через микшер. Версия
+    // зафиксирована: в 1.4+ у DefaultRenderersFactory появился audio-offload режим,
+    // его сюда пускать нельзя. minSdk 28 ≥ требований Media3 (19).
+    implementation("androidx.media3:media3-exoplayer:1.2.1")
+    implementation("androidx.media3:media3-datasource:1.2.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 

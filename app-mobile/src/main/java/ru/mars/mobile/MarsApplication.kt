@@ -22,6 +22,14 @@ import android.app.Application
  */
 class MarsApplication : Application() {
 
+    override fun onCreate() {
+        super.onCreate()
+        // ExoPlayer (Media3) не собирается без Context: процессный плеер получает
+        // application-контекст здесь — раньше любого экрана/сервиса, который может
+        // запустить воспроизведение (MusicActivity, ChatActivity, MarsMusicService).
+        MarsMusicPlayer.attachContext(this)
+    }
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (MemoryTrimPolicy.shouldClearCaches(level)) clearProcessCaches()
