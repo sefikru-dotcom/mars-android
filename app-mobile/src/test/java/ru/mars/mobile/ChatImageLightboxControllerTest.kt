@@ -53,8 +53,8 @@ class ChatImageLightboxControllerTest {
     @Test
     fun `oversized frames halve until both sides fit`() {
         assertEquals(2, ChatImageLightboxController.sampleSizeFor(8192, 4096, 4096))
-        assertEquals(4, ChatImageLightboxController.sampleSizeFor(8192, 8192, 4096))
-        assertEquals(2, ChatImageLightboxController.sampleSizeFor(4096, 9000, 4096))
+        assertEquals(2, ChatImageLightboxController.sampleSizeFor(8192, 8192, 4096))
+        assertEquals(4, ChatImageLightboxController.sampleSizeFor(4096, 9000, 4096))
     }
 
     @Test

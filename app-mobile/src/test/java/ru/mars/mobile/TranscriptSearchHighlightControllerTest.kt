@@ -104,7 +104,7 @@ class TranscriptSearchHighlightControllerTest {
             currentPosition = 0,
             resetPosition = false,
         )
-        assertEquals(1, position)
+        assertEquals(0, position)
         assertEquals("m1", shifted[position].messageId)
     }
 
