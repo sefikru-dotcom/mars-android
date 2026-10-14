@@ -11,7 +11,7 @@ import ru.mars.network.repository.PairingRepository
  * (logout или принудительная реавторизация) обязан:
  *  1. синхронно стереть локальные plaintext-данные ДО finish() — [AuthExitCleanup] поверх
  *     полного набора хранилищ (черновики, история поиска музыки, офлайн-кэш сессий,
- *     очередь неотправленных, офлайн-кэши задач и проектов);
+ *     очередь неотправленных, офлайн-кэши задач, проектов и базы знаний);
  *  2. отозвать credential на сервере best-effort и безусловно очистить локальный
  *     credential — [LogoutFlow].
  *
@@ -37,6 +37,14 @@ object AuthExitStores {
     /** Офлайн-кэш метрик проектов (ProjectsActivity). */
     const val PROJECTS_OFFLINE_PREFS = "mars_projects_offline"
 
+    /**
+     * Офлайн-кэш базы знаний/скиллов ([ru.mars.network.cache.KnowledgeOfflineCache]).
+     * Имя следует конвенции остальных офлайн-кэшей; стирание несозданного файла —
+     * безопасный no-op, зато подключение кэша к экрану не сможет обойти гигиену
+     * auth-exit и очистку кэша в настройках.
+     */
+    const val KNOWLEDGE_OFFLINE_PREFS = "mars_knowledge_offline"
+
     /** Очередь неотправленных сообщений. */
     const val PENDING_QUEUE_PREFS = "mars-pending-messages"
 
@@ -51,6 +59,7 @@ object AuthExitStores {
         OFFLINE_CACHE_PREFS,
         TODOS_OFFLINE_PREFS,
         PROJECTS_OFFLINE_PREFS,
+        KNOWLEDGE_OFFLINE_PREFS,
         PENDING_QUEUE_PREFS,
     )
 
@@ -88,7 +97,13 @@ object AuthExitStores {
         },
     ): LogoutFlow = LogoutFlow(store, revoke)
 
-    private fun defaultStore(context: Context, name: String): ClearableLocalStore {
+    /**
+     * Хранилище приватного prefs-файла по имени из набора фабрики. internal:
+     * «Очистить кэш» в настройках ([SettingsCachePolicy.CACHE_PREFS_FILES]) строит
+     * хранилища через ту же фабрику — контракт очистки очереди (свой ключ, не весь
+     * файл) не дублируется.
+     */
+    internal fun defaultStore(context: Context, name: String): ClearableLocalStore {
         val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
         // Очередь неотправленных чистится своим ключом (контракт PrefsPendingMessageStore),
         // остальные файлы стираются целиком.

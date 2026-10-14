@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -20,11 +21,23 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.http.HttpClients
 import ru.mars.network.repository.ServerHealthRepository
 import java.io.File
 
+/**
+ * Экран настроек приложения: сервер и связь (проба боевого хоста), локальный кэш
+ * (реальная очистка и честный замер объёма), сведения о приложении (факты
+ * устройства/credential/пакета, без захардкоженных имён) и выход из профиля.
+ *
+ * Решения вынесены в чистые политики — [SettingsCachePolicy] (набор кэшей, размер,
+ * формат), [SettingsInfoPolicy] (строки профиль/клиент/сервер) и
+ * [ConnectionStatusPolicy] (тексты вердикта пробы); поведение покрыто JVM-тестами
+ * (`SettingsCachePolicyTest`, `SettingsInfoPolicyTest`, `SettingsSourceContractTest`),
+ * экран только собирает UI и вызывает их.
+ */
 class SettingsActivity : ComponentActivity() {
 
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
@@ -106,13 +119,18 @@ class SettingsActivity : ComponentActivity() {
 
         // SECTION: Сервер и подключение
         content.addView(buildSectionHeader("СЕРВЕР И СВЯЗЬ"))
+        val credential = runCatching { store.read() }.getOrNull()
         val serverCard = buildCard().apply {
-            addView(buildInfoRow("Хост Марса", "https://marscore.ru"))
-            val cred = store.read()
-            val deviceId = cred?.deviceId ?: "Не привязано"
-            addView(buildInfoRow("Идентификатор устройства", deviceId.take(16) + if (deviceId.length > 16) "…" else ""))
+            // Хост — из единого источника MarsApi.BASE_URL, а не из литерала экрана.
+            addView(buildInfoRow("Хост Марса", SettingsInfoPolicy.serverLabel(MarsApi.BASE_URL)))
+            addView(
+                buildInfoRow(
+                    "Идентификатор устройства",
+                    credential?.deviceId?.let { SettingsInfoPolicy.shortId(it) } ?: "—",
+                ),
+            )
             pingStatusText = TextView(this@SettingsActivity).apply {
-                text = "Проверка соединения…"
+                text = ConnectionStatusPolicy.PROBING
                 textSize = 12f
                 setTextColor(MarsTheme.TEXT_MUTED)
                 setPadding(dp(8), dp(8), dp(12), dp(10))
@@ -125,6 +143,20 @@ class SettingsActivity : ComponentActivity() {
                 addView(pingStatusText, LinearLayout.LayoutParams(0, -2, 1f))
             }
             addView(pingRow)
+
+            // Повторная диагностика: проба лёгкая и публичная (health без токена),
+            // перезапуск безопасен и позволяет перепроверить связь без перезахода на экран.
+            val recheckBtn = Button(this@SettingsActivity).apply {
+                text = "Проверить ещё раз"
+                textSize = 13f
+                setTextColor(MarsTheme.ACCENT_TEXT)
+                background = MarsTheme.button(this@SettingsActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                setOnClickListener { checkConnection() }
+            }
+            addView(recheckBtn, LinearLayout.LayoutParams(-1, dp(40)).apply {
+                setMargins(dp(12), dp(8), dp(12), dp(12))
+            })
         }
         content.addView(serverCard)
 
@@ -137,7 +169,7 @@ class SettingsActivity : ComponentActivity() {
                 setPadding(dp(12), dp(10), dp(12), dp(10))
             }
             val cacheLabel = TextView(this@SettingsActivity).apply {
-                text = "Локальный кэш треков и сессий"
+                text = "Офлайн-кэш и временные файлы"
                 textSize = 14f
                 setTextColor(MarsTheme.TEXT_STRONG)
             }
@@ -171,8 +203,15 @@ class SettingsActivity : ComponentActivity() {
         val aboutCard = buildCard().apply {
             addView(buildInfoRow("Версия", appVersionLabel()))
             addView(buildInfoRow("Дизайн-система", "Obsidian Depth"))
-            addView(buildInfoRow("Клиент", "Android / HyperOS (POCO F5)"))
-            addView(buildInfoRow("Профиль", "Stef (Ставрополь)"))
+            // Реальные факты устройства/credential/пакета вместо захардкоженных имён.
+            addView(
+                buildInfoRow(
+                    "Клиент",
+                    SettingsInfoPolicy.clientLabel(Build.VERSION.RELEASE, Build.MANUFACTURER, Build.MODEL),
+                ),
+            )
+            addView(buildInfoRow("Профиль", SettingsInfoPolicy.profileLabel(credential?.deviceId)))
+            addView(buildInfoRow("Пакет", packageName))
         }
         content.addView(aboutCard)
 
@@ -228,22 +267,56 @@ class SettingsActivity : ComponentActivity() {
         addView(valueView)
     }
 
+    /**
+     * Размер локального кэша: файлы cacheDir И prefs-файлы офлайн-кэшей
+     * ([SettingsCachePolicy.CACHE_PREFS_FILES]). Раньше измерялся только cacheDir,
+     * а реальные офлайн-данные живут в SharedPreferences — строка показывала объём,
+     * не связанный с настоящим содержимым кэшей.
+     */
     private fun updateCacheSize() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val cacheBytes = cacheDir.walkTopDown().filter { it.isFile }.map { it.length() }.sum()
-            val sizeMb = String.format(java.util.Locale.US, "%.1f МБ", cacheBytes.toDouble() / (1024 * 1024))
+            val cacheFileSizes = runCatching {
+                cacheDir.walkTopDown().filter { it.isFile }.map { it.length() }.toList()
+            }.getOrDefault(emptyList())
+            val prefsDir = File(applicationInfo.dataDir, SettingsCachePolicy.SHARED_PREFS_DIR)
+            val prefsSizes = SettingsCachePolicy.CACHE_PREFS_FILES.map { name ->
+                val file = File(prefsDir, SettingsCachePolicy.prefsFileName(name))
+                if (file.isFile) runCatching { file.length() }.getOrDefault(0L) else 0L
+            }
+            val label = SettingsCachePolicy.formatSize(
+                SettingsCachePolicy.totalSizeBytes(cacheFileSizes + prefsSizes),
+            )
             withContext(Dispatchers.Main) {
-                cacheSizeText.text = sizeMb
+                cacheSizeText.text = label
             }
         }
     }
 
+    /**
+     * «Очистить кэш» стирает РЕАЛЬНЫЕ кэши приложения:
+     *  - офлайн-копии диалогов/задач/проектов/знаний и очередь неотправленных —
+     *    prefs-хранилища из [SettingsCachePolicy.CACHE_PREFS_FILES], построенные
+     *    единой фабрикой [AuthExitStores.defaultStore] (очередь чистится своим
+     *    ключом по контракту `PrefsPendingMessageStore`);
+     *  - временные файлы cacheDir;
+     *  - process-кэши: битмапы миниатюр [ImageLoader.trimMemoryCache] и разбор
+     *    Markdown [MarkdownFormatter.trimCache] (восстанавливаются лениво).
+     *
+     * Черновики композитора и история поиска музыки — введённый пользователем
+     * текст, а не кэш: они сохраняются. Credential устройства очисткой кэша не
+     * стирается — единственный путь [performLogout]/[LogoutFlow].
+     */
     private fun clearCache() {
         lifecycleScope.launch(Dispatchers.IO) {
+            SettingsCachePolicy.CACHE_PREFS_FILES.forEach { name ->
+                runCatching { AuthExitStores.defaultStore(this@SettingsActivity, name).clearAll() }
+            }
             cacheDir.deleteRecursively()
             cacheDir.mkdirs()
+            ImageLoader.trimMemoryCache()
+            MarkdownFormatter.trimCache()
             withContext(Dispatchers.Main) {
-                Toast.makeText(this@SettingsActivity, "Кэш успешно очищен", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@SettingsActivity, "Кэш очищен успешно", Toast.LENGTH_SHORT).show()
                 updateCacheSize()
             }
         }
@@ -251,6 +324,7 @@ class SettingsActivity : ComponentActivity() {
 
     private fun checkConnection() {
         lifecycleScope.launch {
+            pingStatusText.text = ConnectionStatusPolicy.PROBING
             val report = healthRepository.checkHealth(
                 endpointPath = ConnectionStatusPolicy.PROBE_PATH,
             )
@@ -299,7 +373,7 @@ class SettingsActivity : ComponentActivity() {
     private fun performLogout() {
         authExitCleanup.run()
         lifecycleScope.launch {
-            AuthExitStores.logoutFlow(store, ChatActivity.BASE_URL).logout()
+            AuthExitStores.logoutFlow(store, MarsApi.BASE_URL).logout()
             val intent = Intent(this@SettingsActivity, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             }

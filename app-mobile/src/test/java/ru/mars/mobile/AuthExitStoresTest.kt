@@ -38,6 +38,7 @@ class AuthExitStoresTest {
                 "mars-offline-cache",
                 "mars_todos_offline",
                 "mars_projects_offline",
+                "mars_knowledge_offline",
                 "mars-pending-messages",
             ),
             AuthExitStores.PREFS_FILES.toSet(),
