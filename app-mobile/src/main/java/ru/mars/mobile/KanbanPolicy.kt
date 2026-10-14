@@ -174,6 +174,31 @@ object KanbanPolicy {
     /** Бейдж дочерних задач карточки. */
     fun childrenLabel(count: Int): String = "$count подзадач"
 
+    /**
+     * Маппинг фазы экрана в общее состояние секций ([SectionScreenState]) для
+     * рендера через SectionStateViews (волна 3, единый shell разделов).
+     * Чистая функция — JVM-тестируется вместе с остальной политикой:
+     * - центральное состояние есть только при непустом [KanbanUiState.message];
+     * - тихий refresh (LOADING с живыми колонками, message=null) и READY — null,
+     *   доска остаётся на экране без мигания;
+     * - offline-safe stale-доска (ERROR с кэшем колонок, message=null) — null:
+     *   экран показывает колонки + notice-баннер + «Повторить»;
+     * - NO_AUTH (нет пары) показывается offline-тоном без retry — повтор
+     *   бесполезен до входа;
+     * - ERROR (включая «нет сети» при первой загрузке) — Error-вид: retry
+     *   обязан быть доступен, когда state.canRetry.
+     */
+    fun statusStateFor(state: KanbanUiState): SectionScreenState? {
+        val message = state.message ?: return null
+        return when (state.phase) {
+            KanbanPhase.LOADING -> SectionScreenState.Loading
+            KanbanPhase.READY -> null
+            KanbanPhase.EMPTY -> SectionScreenState.Empty(message)
+            KanbanPhase.ERROR -> SectionScreenState.Error(message)
+            KanbanPhase.NO_AUTH -> SectionScreenState.Offline(message)
+        }
+    }
+
     /** Канонический порядок статусов в статистике (остальные — алфавитно после). */
     private val STATUS_ORDER = listOf("ready", "running", "blocked", "done")
 

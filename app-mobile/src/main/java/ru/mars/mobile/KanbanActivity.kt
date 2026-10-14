@@ -14,12 +14,9 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -41,6 +38,13 @@ import ru.mars.network.repository.KanbanTaskDetailResult
  * `changed:false`, offline-safe) -> [KanbanPolicy] (чистые строки/тексты/тоны,
  * JVM-тесты) -> [KanbanRepository] (сеть, core-network, без правок).
  *
+ * Волна 3: каркас экрана — общий shell разделов [SectionScaffold] (safe-area,
+ * заголовок, «Назад», спиннер, «Обновить»), статусы notice — его статус-строка,
+ * центральные фазовые состояния — общие [SectionStateViews] (loading/empty/
+ * error+retry/offline). Presenter/network/polling-семантика не менялись:
+ * polling стартует в onResume и гаснет в onPause, `changed:false` не мигает,
+ * offline-safe stale-доска сохраняется.
+ *
  * Контракт read-only: экран — витрина. Никаких create/edit/move/delete/
  * dispatch ни в UI, ни в презентере; серверный Bearer allowlist допускает
  * только GET/HEAD /api/kanban/. Диалог задачи — только чтение.
@@ -55,8 +59,7 @@ class KanbanActivity : ComponentActivity() {
     private lateinit var store: AndroidKeyStoreCredentialStore
     private lateinit var presenter: KanbanPresenter
 
-    private lateinit var progress: ProgressBar
-    private lateinit var noticeView: TextView
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var summaryView: TextView
     private lateinit var statsRow: LinearLayout
     private lateinit var boardRow: LinearLayout
@@ -122,45 +125,9 @@ class KanbanActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
-
-        // Header: back / title / progress / refresh (каркас как у SpacesActivity).
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(10))
-        }
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_arrow_back, "Назад", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { finish() } },
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
-        )
-        header.addView(TextView(this).apply {
-            text = KanbanPolicy.SCREEN_TITLE
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-            maxLines = 1
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        progress = ProgressBar(this).apply {
-            visibility = View.GONE
-            isIndeterminate = true
-        }
-        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_refresh, "Обновить", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { lifecycleScope.launch { presenter.load() } } },
-            LinearLayout.LayoutParams(dp(40), dp(40))
-        )
-        root.addView(header)
+        // Волна 3: safe-area, шапка («Назад», заголовок, спиннер, «Обновить») и
+        // статус-строка — общий shell разделов; экран добавляет только контент.
+        scaffold = SectionScaffold.create(this, KanbanPolicy.SCREEN_TITLE, ::load)
 
         // Бейдж «доска только для чтения» (server read_only=true или всегда —
         // мобильный клиент не выполняет мутации kanban по контракту волны).
@@ -172,18 +139,7 @@ class KanbanActivity : ComponentActivity() {
             background = MarsTheme.pill(this@KanbanActivity, MarsTheme.SURFACE_SUBTLE, MarsTheme.BORDER_SUBTLE)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
-        root.addView(readOnlyBadge, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(8) })
-
-        // Offline/notice-плашка (видна только при state.notice).
-        noticeView = TextView(this).apply {
-            visibility = View.GONE
-            textSize = 13f
-            setTextColor(MarsTheme.STATUS_WARNING)
-            background = MarsTheme.pill(this@KanbanActivity, MarsTheme.SURFACE_SUBTLE, MarsTheme.BORDER_MUTED)
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            maxLines = 2
-        }
-        root.addView(noticeView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        scaffold.content.addView(readOnlyBadge, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(8) })
 
         // Статистика: summary + горизонтальная лента чипов by_status/by_assignee.
         summaryView = TextView(this).apply {
@@ -192,9 +148,9 @@ class KanbanActivity : ComponentActivity() {
             setTextColor(MarsTheme.TEXT_EM)
             maxLines = 2
         }
-        root.addView(summaryView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        scaffold.content.addView(summaryView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         statsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(
+        scaffold.content.addView(
             HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(statsRow, ViewGroup.LayoutParams(-2, -2))
@@ -205,7 +161,7 @@ class KanbanActivity : ComponentActivity() {
         // Доска: горизонтальный скролл колонок, каждая колонка — свой
         // вертикальный скролл карточек (мобильный канбан-паттерн).
         boardRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(
+        scaffold.content.addView(
             HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(boardRow, ViewGroup.LayoutParams(-2, -1))
@@ -213,25 +169,30 @@ class KanbanActivity : ComponentActivity() {
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
 
-        // Статус-блок: центральное сообщение фазы + «Повторить».
+        // Статус-блок: центральное сообщение фазы (общие SectionStateViews)
+        // + «Повторить» для offline-safe stale-доски.
         statusBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(24), 0, 0)
         }
-        root.addView(statusBox, LinearLayout.LayoutParams(-1, -2))
-        return root
+        scaffold.content.addView(statusBox, LinearLayout.LayoutParams(-1, -2))
+        return scaffold.root
     }
 
+    /** Полный reload доски: «Обновить» shell, retry ошибки, первая загрузка. */
+    private fun load() { lifecycleScope.launch { presenter.load() } }
+
     private fun render(state: KanbanUiState) {
-        progress.visibility = if (state.phase == KanbanPhase.LOADING) View.VISIBLE else View.GONE
+        scaffold.progress.visibility = if (state.phase == KanbanPhase.LOADING) View.VISIBLE else View.GONE
         readOnlyBadge.visibility = if (state.serverReadOnly) View.VISIBLE else View.GONE
 
-        if (state.notice != null) {
-            noticeView.visibility = View.VISIBLE
-            noticeView.text = state.notice
+        val notice = state.notice
+        if (notice != null) {
+            scaffold.statusLine.visibility = View.VISIBLE
+            scaffold.statusLine.text = notice
+            scaffold.statusLine.setTextColor(MarsTheme.STATUS_WARNING)
         } else {
-            noticeView.visibility = View.GONE
+            scaffold.statusLine.visibility = View.GONE
         }
 
         renderStats(state.stats)
@@ -243,22 +204,18 @@ class KanbanActivity : ComponentActivity() {
         }
 
         statusBox.removeAllViews()
-        state.message?.let { message ->
-            statusBox.addView(TextView(this).apply {
-                text = message
-                textSize = 14f
-                setTextColor(
-                    if (state.phase == KanbanPhase.ERROR || state.phase == KanbanPhase.NO_AUTH) {
-                        MarsTheme.STATUS_WARNING
-                    } else {
-                        MarsTheme.TEXT_MUTED
-                    }
-                )
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(dp(16), 0, dp(16), 0)
-            })
-        }
-        if (state.canRetry) {
+        val screen = KanbanPolicy.statusStateFor(state)
+        if (screen != null) {
+            val view = when (screen) {
+                SectionScreenState.Loading -> SectionStateViews.loading(this, state.message ?: KanbanPolicy.MSG_LOADING)
+                is SectionScreenState.Empty -> SectionStateViews.empty(this, screen.message)
+                is SectionScreenState.Error -> SectionStateViews.error(this, screen.message, ::load)
+                is SectionScreenState.Offline -> SectionStateViews.offline(this, screen.message)
+            }
+            statusBox.addView(view)
+        } else if (state.canRetry) {
+            // Stale-доска offline-safe: колонки из кэша показаны, центрального
+            // сообщения нет — «Повторить» отдельным чипом под доской.
             statusBox.addView(TextView(this).apply {
                 text = KanbanPolicy.RETRY_LABEL
                 textSize = 14f
@@ -268,7 +225,7 @@ class KanbanActivity : ComponentActivity() {
                 setPadding(dp(22), dp(10), dp(22), dp(10))
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { lifecycleScope.launch { presenter.load() } }
+                setOnClickListener { load() }
             }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(14) })
         }
     }
