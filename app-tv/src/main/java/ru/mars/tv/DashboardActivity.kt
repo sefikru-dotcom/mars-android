@@ -51,6 +51,10 @@ class DashboardActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
+        // FCM push (волна 4): регистрация токена на сервере при входе на дашборд
+        // (credential уже прочитан выше) + запрос POST_NOTIFICATIONS на Android 13+.
+        ru.mars.tv.push.TvPushTokenSync.syncNow(this)
+        ru.mars.tv.push.TvPushNotifications.ensurePostPermission(this)
         setContentView(R.layout.activity_dashboard)
         // Resuming the transport from the dashboard toggle needs the application context
         // (audio focus + wake mode live there — same entry the chat/music screens use).

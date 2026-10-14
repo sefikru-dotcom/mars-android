@@ -25,6 +25,15 @@
             android:name=".service.MarsMusicService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <!-- FCM push (волна 4): приём сообщений и ротация токена; регистрация
+             токена на сервере — PushTokenSync (POST /api/push/fcm/register). -->
+        <service
+            android:name=".service.MarsPushMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <activity android:name=".ProjectsActivity" />
         <activity android:name=".MemoryActivity" />
         <activity android:name=".SkillsActivity" />

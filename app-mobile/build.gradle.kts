@@ -3,6 +3,7 @@ import java.io.File
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 // Release signing contract: секреты приходят ТОЛЬКО из переменных окружения CI
@@ -100,6 +101,13 @@ android {
     // connectedAndroidTest → connectedUiTestAndroidTest (изолированный пакет).
     testBuildType = "uiTest"
 
+    // google-services плагин ищет клиента Firebase по applicationId, а вариант
+    // uiTest несёт суффикс ".uitest" (в Firebase не зарегистрирован намеренно:
+    // изолированный тестовый вариант без FCM). Задача плагина для этого варианта
+    // отключается — uiTest собирается без сгенерированных Firebase-ресурсов
+    // (EmulatorOnlyTestRunner в любом случае завершает instrumentation до тестов).
+    tasks.matching { it.name == "processUiTestGoogleServices" }.configureEach { enabled = false }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
         // Инструментальные UI-тесты: системные анимации отключаются на устройстве,
@@ -122,6 +130,11 @@ dependencies {
     // его сюда пускать нельзя. minSdk 28 ≥ требований Media3 (19).
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-datasource:1.2.1")
+    // FCM push-уведомления (волна 4). BoM фиксирует версии артефактов Firebase;
+    // 32.8.1 — линия, совместимая с AGP 8.2.2 / compileSdk 34 / Kotlin 1.9.22
+    // (более новые BoM требуют compileSdk 35+).
+    implementation(platform("com.google.firebase:firebase-bom:32.8.1"))
+    implementation("com.google.firebase:firebase-messaging")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 
