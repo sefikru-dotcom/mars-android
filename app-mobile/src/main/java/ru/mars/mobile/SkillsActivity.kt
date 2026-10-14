@@ -163,28 +163,21 @@ class SkillsActivity : ComponentActivity() {
     private fun renderList() {
         list.removeAllViews()
         if (!loaded) {
-            if (failure != null) statusText(failure!!, MarsTheme.STATUS_WARNING)
-            else if (!loading) statusText("Загрузка каталога…", MarsTheme.TEXT_MUTED)
+            val message = failure
+            list.addView(when {
+                message != null -> SectionStateViews.error(this, message, ::load)
+                else -> SectionStateViews.loading(this, "Загрузка каталога…")
+            })
             return
         }
         val visible = SkillsFilterPolicy.sorted(
             SkillsFilterPolicy.filter(skills, searchInput.text.toString(), selectedCategory)
         )
         if (visible.isEmpty()) {
-            statusText("Ничего не найдено", MarsTheme.TEXT_MUTED)
+            list.addView(SectionStateViews.empty(this, "Ничего не найдено"))
             return
         }
         visible.forEach { skill -> list.addView(skillCard(skill), cardMargin()) }
-    }
-
-    private fun statusText(message: String, color: Int) {
-        list.addView(TextView(this).apply {
-            text = message
-            textSize = 14f
-            setTextColor(color)
-            setPadding(0, dp(24), 0, 0)
-            gravity = Gravity.CENTER_HORIZONTAL
-        })
     }
 
     private fun skillCard(skill: SkillItem): View {
