@@ -43,6 +43,8 @@ jobs:
           set -eu
           python3 scripts/theme-parity-audit.py app-mobile/src/main
           python3 scripts/theme-parity-audit.py app-tv/src/main
+      - name: Unit tests for release-gate scripts (pure python3, no SDK)
+        run: python3 tests/test_apk_contract_check.py
       - name: Assemble TV debug APK
         run: ./gradlew --no-daemon --stacktrace :app-tv:assembleDebug
       - name: Assemble mobile debug APK
@@ -155,6 +157,22 @@ jobs:
               fi
               echo "$m: unsigned release OK (signing secrets not configured)"
             fi
+          done
+      # Контракт раздачи (см. mars-apk-publish.py): R8-минификация всегда;
+      # схема подписи v3-only — только когда APK реально подписан.
+      - name: Release APK contract (R8 minification + v3-only signing)
+        run: |
+          set -eu
+          for m in app-mobile app-tv; do
+            dir="$m/build/outputs/apk/release"
+            if [ "$SIGNING_EXPECTED" = signed ]; then
+              apk="$dir/$m-release.apk"
+              scheme="v3-only"
+            else
+              apk="$dir/$m-release-unsigned.apk"
+              scheme="skip"  # unsigned-ветка проходит, как раньше
+            fi
+            python3 scripts/apk-contract-check.py "$apk" --signing-scheme "$scheme"
           done
       - name: Upload release APKs
         if: always()
