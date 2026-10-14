@@ -31,8 +31,7 @@
         <activity android:name=".TodosActivity" />
         <activity android:name=".CronActivity" />
         <activity android:name=".SettingsActivity" />
-        <activity android:name=".SpacesActivity" />
-        <!-- Read-only доска канбана (GET /api/kanban/*) и мониторинг; запуск из бокового меню (SidebarNavPolicy). -->
+        <!-- Read-only доска канбана (GET /api/kanban/*) и мониторинг; запуск из левого бара (AppNavIntents.sectionIntent). -->
         <activity android:name=".KanbanActivity" />
         <activity android:name=".InsightsActivity" />
         <activity

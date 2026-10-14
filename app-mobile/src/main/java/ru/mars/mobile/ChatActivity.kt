@@ -446,7 +446,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // отложенная перерисовка выполняется немедленно (renderMessages гасит job сам).
         if (streamFlushJob != null) renderMessages()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
-        // Выбор пространства мог измениться на экране SpacesActivity (общее
+        // Выбор пространства мог измениться на другом экране (общее
         // хранилище mars-workspace-choice): перечитываем chip из storage.
         if (::workspaceSelection.isInitialized) {
             workspaceSelection.reloadFromStorage()

@@ -6,10 +6,11 @@ Read-only экран «Мониторинг» с двумя вкладками: 
 `{agent, errors, gateway}` × `{100, 200, 500, 1000}`, произвольные пути логов
 непредставимы типом.
 
-## Запуск из меню (для писателя ChatActivity/SidebarNavPolicy)
+## Запуск из меню
 
-Экран намеренно не подключён к боковому меню: `ChatActivity` и
-`SidebarNavPolicy` в этой волне заморожены. Публичная точка входа:
+Экран подключён к левому бару: раздел `AppDestination.ANALYTICS` запускается
+через `AppNavIntents.sectionIntent` (единственная таблица «раздел → Activity»).
+Публичная точка входа:
 
 ```kotlin
 startActivity(InsightsActivity.newIntent(this))                     // вкладка Инсайты
@@ -19,11 +20,9 @@ startActivity(InsightsActivity.newIntent(this, MonitorTab.LOGS))    // сраз�
 - Activity объявлена в `app-mobile/src/main/AndroidManifest.xml`
   (`.InsightsActivity`, не exported — запуск только изнутри приложения).
 - Кнопка «Назад» и системный back — `finish()`, возврат в вызвавший экран.
-- Рекомендуемое место в меню: `SidebarSection(id = "insights",
-  label = "Мониторинг", iconKey = "ic_insights", target = NavTarget.INSIGHTS)`
-  (иконки `res/drawable/ic_insights.xml` / `ic_logs.xml`, stroke 1.7 — стиль
-  остальных `ic_nav_*`). Порядок в `SidebarNavPolicy.sections` контрактный,
-  поэтому добавление — за волной, владеющей policy.
+- Иконка раздела — `ic_nav_insights` (`res/drawable/ic_nav_insights.xml`,
+  иконки вкладок `ic_insights.xml` / `ic_logs.xml`, stroke 1.7 — стиль
+  остальных `ic_nav_*`); состав и порядок бара — контракт `AppSectionsPolicy`.
 
 ## Слои
 
@@ -54,7 +53,7 @@ startActivity(InsightsActivity.newIntent(this, MonitorTab.LOGS))    // сраз�
 - Репозитории: `InsightsRepository().getInsights(MarsApi.BASE_URL, credential,
   days = …)` и `LogsRepository().getLogs(MarsApi.BASE_URL, credential, file,
   tail)` — device Bearer из `AndroidKeyStoreCredentialStore` (тот же
-  credential-путь, что ChatActivity/SpacesActivity).
+  credential-путь, что ChatActivity).
 - Контракт `GET /api/insights` проверен read-only по деплойд-обработчику
   `/opt/hermes-webui/api/route_insights.py` (`build_insights_response`):
   единственный query-параметр `days` — сервер clamp'ит его в 1..365, при

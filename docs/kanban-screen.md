@@ -6,10 +6,11 @@
 policy нет и не должно появиться dispatch/create/edit/move/delete —
 серверный Bearer allowlist допускает только GET/HEAD `/api/kanban/`.
 
-## Запуск из меню (для писателя ChatActivity/SidebarNavPolicy)
+## Запуск из меню
 
-Экран намеренно не подключён к боковому меню: `ChatActivity` и
-`SidebarNavPolicy` в этой волне заморожены. Публичная точка входа:
+Экран подключён к левому бару: раздел `AppDestination.KANBAN` запускается
+через `AppNavIntents.sectionIntent` (единственная таблица «раздел → Activity»).
+Публичная точка входа:
 
 ```kotlin
 startActivity(KanbanActivity.newIntent(this))   // ru.mars.mobile.KanbanActivity
@@ -18,10 +19,9 @@ startActivity(KanbanActivity.newIntent(this))   // ru.mars.mobile.KanbanActivity
 - Activity объявлена в `app-mobile/src/main/AndroidManifest.xml`
   (`.KanbanActivity`, не exported — запуск только изнутри приложения).
 - Кнопка «Назад» и системный back — `finish()`, возврат в вызвавший экран.
-- Рекомендуемое место в меню: секция с `iconKey = "ic_nav_kanban"`
-  (иконка-доска `res/drawable/ic_nav_kanban.xml`, stroke 1.7 — стиль
-  остальных `ic_nav_*`). Порядок в `SidebarNavPolicy.sections` контрактный,
-  поэтому добавление — за волной, владеющей policy.
+- Иконка раздела — `ic_nav_kanban` (`res/drawable/ic_nav_kanban.xml`,
+  stroke 1.7 — стиль остальных `ic_nav_*`), состав и порядок бара —
+  контракт `AppSectionsPolicy`.
 
 ## Слои
 

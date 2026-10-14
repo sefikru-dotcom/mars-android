@@ -11,7 +11,7 @@ import ru.mars.network.repository.InsightsResult
  * Android-импортов: сеть и детектор офлайна инжектятся, поэтому переходы
  * состояний полностью покрыты unit-тестами.
  *
- * Контракт состояний (зеркалит SpacesPresenter):
+ * Контракт состояний:
  * - нет credential -> [InsightsPhase.NO_AUTH] (загрузка даже не начинается);
  * - [InsightsResult.Snapshot] -> READY (строки [InsightsPolicy.rows]) или EMPTY
  *   ([InsightsPolicy.isEmpty]);

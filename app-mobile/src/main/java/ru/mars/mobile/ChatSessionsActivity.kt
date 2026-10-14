@@ -128,7 +128,7 @@ class ChatSessionsActivity : ComponentActivity() {
      * Клик по разделу левого бара: [AppNavPolicy.selectSection] из корня CHAT.
      * Повторный выбор «Чата» на корневом уровне идемпотентен — остаёмся на месте;
      * остальные разделы — свои Activity через [AppNavIntents.sectionIntent]
-     * (legacy-маршрутизатор NavTarget в навигаторе не используется).
+     * (единственная таблица «раздел → Activity»).
      */
     private fun onSectionSelected(destination: AppDestination) {
         drawer.closeDrawer(GravityCompat.START)

@@ -49,8 +49,8 @@ import ru.mars.network.repository.KanbanTaskDetailResult
  * dispatch ни в UI, ни в презентере; серверный Bearer allowlist допускает
  * только GET/HEAD /api/kanban/. Диалог задачи — только чтение.
  *
- * Переход из меню: намеренно НЕ правит ChatActivity/SidebarNavPolicy (их
- * трогает другая волна). Публичная точка входа для интегратора —
+ * Переход из меню: раздел левого бара ([AppDestination.KANBAN]) через
+ * [AppNavIntents.sectionIntent]. Публичная точка входа для интегратора —
  * [KanbanActivity.newIntent]; документ — docs/kanban-screen.md.
  * Кнопка «Назад»/системный back — finish() и возврат в вызвавший экран.
  */
@@ -503,7 +503,7 @@ class KanbanActivity : ComponentActivity() {
 
     /**
      * Синхронный снимок «нет сети» для offline-safe состояний: нет активного
-     * network или у него нет INTERNET-способности (как в SpacesActivity).
+     * network или у него нет INTERNET-способности.
      */
     private fun isDeviceOffline(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
@@ -522,8 +522,8 @@ class KanbanActivity : ComponentActivity() {
         const val COLUMN_WIDTH_DP = 272
 
         /**
-         * Публичная точка входа для интегратора (например, пункт меню
-         * ChatActivity/SidebarNavPolicy будущей волны):
+         * Публичная точка входа для интегратора (левый бар запускает через
+         * [AppNavIntents.sectionIntent]):
          * `startActivity(KanbanActivity.newIntent(this))`. Back из KanbanActivity
          * возвращает в вызвавший экран.
          */

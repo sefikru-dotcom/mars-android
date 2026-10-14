@@ -80,7 +80,7 @@ class AppDestinationTest {
     }
 
     @Test
-    fun `legacy mapping matches SidebarNavPolicy targets without duplication`() {
+    fun `legacy mapping is a bijection onto NavTarget without duplication`() {
         val expected = mapOf(
             AppDestination.TASKS to NavTarget.TODOS,
             AppDestination.SCHEDULER to NavTarget.CRON,
@@ -94,11 +94,10 @@ class AppDestinationTest {
         )
         expected.forEach { (destination, target) ->
             assertEquals(target, destination.toLegacyNavTarget())
-            // Легаси-цель действительно существует в боковом меню.
-            assertTrue(
-                "легаси-цель $target не покрыта SidebarNavPolicy",
-                SidebarNavPolicy.sectionByTarget(target) != null
-            )
         }
+        // Каждая легаси-цель покрыта ровно одним разделом (без дублей и сирот).
+        val mapped = AppDestination.entries.mapNotNull { it.toLegacyNavTarget() }
+        assertEquals(mapped.size, mapped.toSet().size)
+        assertEquals(NavTarget.entries.toSet(), mapped.toSet())
     }
 }
