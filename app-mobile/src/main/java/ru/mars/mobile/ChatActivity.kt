@@ -73,7 +73,9 @@ import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.CompressionSummary
 import ru.mars.network.repository.ContextCompressionRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
+import ru.mars.network.repository.MessageSearchPolicy
 import ru.mars.network.repository.ModelsRepository
+import ru.mars.network.repository.SearchableMessage
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
@@ -225,14 +227,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drawer: DrawerLayout
 
     // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
-    // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
-    // хост лишь рисует панель, подсвечивает карточку найденного сообщения и скроллит к ней.
+    // Совпадения адресуются чистой MessageSearchPolicy (якорь messageId + ordinalInMessage):
+    // каждое вхождение — отдельный шаг навигации, в том числе несколько в одном сообщении.
+    // Хост рисует панель, подсвечивает СПАН совпадения внутри пузыря и скроллит к нему.
     private lateinit var searchPlate: LinearLayout
     private lateinit var searchInput: EditText
     private lateinit var searchCounter: TextView
-    private var searchMatches: List<TranscriptMatch> = emptyList()
+    private var searchMatches: List<ru.mars.network.repository.TextMatch> = emptyList()
     private var searchPosition: Int = -1
+    /** Якорь текущего совпадения: переживает пересчёт совпадений во время стрима. */
+    private var searchAnchor: ru.mars.network.repository.TextMatch? = null
     private var searchHighlightedCard: View? = null
+    /** Подсвеченный спан совпадения: TextView пузыря + сам спан (снятие при шаге/закрытии). */
+    private var searchHighlightedSpan: Pair<TextView, BackgroundColorSpan>? = null
 
     // --- ANR-устойчивость транскрипта (инкрементальный рендер + троттлинг стрима) ---------------
     // Чистые политики (JVM-тесты): StreamRenderThrottle (кадровый троттлинг SSE-событий),
@@ -2722,56 +2729,160 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         searchInput.setText("")
         searchMatches = emptyList()
         searchPosition = -1
+        searchAnchor = null
         clearSearchHighlight()
         hideKeyboard()
     }
 
     /**
      * Пересчитывает совпадения по текущему транскрипту и обновляет счётчик.
+     * Совпадения адресует чистая [MessageSearchPolicy] (якорь messageId +
+     * ordinalInMessage): каждое вхождение — отдельный шаг, несколько вхождений
+     * в одном пузыре не «съедают» друг друга. Семантика поиска прежняя
+     * (регистронезависимость, MIN_QUERY_LENGTH, потолок совпадений — идентичны
+     * TranscriptSearchPolicy, откуда политика и была перенесена в core-network).
+     * Пузырь транскрипта = одно сообщение (card.tag = индекс), поэтому messageId
+     * синтетический: «m<индекс>» — стабильный в пределах текущего транскрипта.
      * [resetPosition] — сброс на первое совпадение (новый запрос); без него позиция
-     * сохраняется и лишь зажимается в границы (перерисовка во время стрима).
+     * ВОССТАНАВЛИВАЕТСЯ ПО ЯКОРЮ (перерисовка во время стрима: текст растёт,
+     * индексы совпадений смещаются, а текущее совпадение не теряется).
      * [scrollToMatch] — скроллить к совпадению (только явная навигация/новый запрос).
      */
     private fun refreshTranscriptSearch(resetPosition: Boolean, scrollToMatch: Boolean) {
         val query = searchInput.text?.toString().orEmpty()
-        searchMatches = TranscriptSearchPolicy.findMatches(uiState.messages.map { it.text }, query)
+        searchMatches = MessageSearchPolicy.findMatches(
+            uiState.messages.mapIndexed { index, message ->
+                SearchableMessage(messageId = SEARCH_ID_PREFIX + index, text = message.text)
+            },
+            query,
+        )
         searchPosition = when {
             searchMatches.isEmpty() -> -1
-            resetPosition || searchPosition < 0 -> 0
-            else -> searchPosition.coerceAtMost(searchMatches.size - 1)
+            resetPosition -> 0
+            else -> MessageSearchPolicy.positionOf(searchMatches, searchAnchor)
+                .takeIf { it >= 0 }
+                ?: searchPosition.coerceIn(0, searchMatches.size - 1)
         }
-        searchCounter.text = TranscriptSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
+        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
+        searchCounter.text = MessageSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
         applySearchHighlight(scrollTo = scrollToMatch && searchPosition >= 0)
     }
 
     /** Кольцевой шаг «следующее/предыдущее совпадение» + обновление счётчика и подсветки. */
     private fun navigateTranscriptSearch(forward: Boolean) {
-        val next = TranscriptSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
+        val next = MessageSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
         if (next < 0) return
         searchPosition = next
-        searchCounter.text = TranscriptSearchPolicy.counterLabel(
+        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
+        searchCounter.text = MessageSearchPolicy.counterLabel(
             searchInput.text?.toString().orEmpty(), searchPosition, searchMatches.size
         )
         applySearchHighlight(scrollTo = true)
     }
 
-    /** Рубиновая рамка вокруг карточки текущего совпадения и плавный скролл к ней. */
+    /**
+     * Подсветка и скролл к ТОЧНОЙ позиции совпадения (волна C, фича C):
+     * рубиновая рамка вокруг карточки + янтарный спан на самом совпадении внутри
+     * пузыря; скролл — к строке совпадения, а не к верхушке карточки/дня-разделителя.
+     * Позицию совпадения в ОТОБРАЖЁННЫХ строках пузыря находит чистая
+     * [MatchLocationPolicy] (markdown-рендер меняет текст: маркеры списков, заголовки).
+     * Если вхождение в отрисованных строках не найдено (например, текст уехал в
+     * свёрнутый блок) — откат к прежнему поведению: рамка + скролл к карточке.
+     */
     private fun applySearchHighlight(scrollTo: Boolean) {
         clearSearchHighlight()
-        val match = searchMatches.getOrNull(searchPosition) ?: return
-        val card = messages.findViewWithTag<View>(match.messageIndex) ?: return
+        val match = MessageSearchPolicy.anchorAt(searchMatches, searchPosition) ?: return
+        val messageIndex = match.messageId.removePrefix(SEARCH_ID_PREFIX).toIntOrNull() ?: return
+        val card = messages.findViewWithTag<View>(messageIndex) ?: return
         // foreground, а не background: градиент пузыря/карточки остаётся нетронутым.
         card.foreground = GradientDrawable().apply {
             cornerRadius = dp(16).toFloat()
             setStroke(dp(2), MarsTheme.ACCENT)
         }
         searchHighlightedCard = card
-        if (scrollTo) scroll.smoothScrollTo(0, (card.top - dp(64)).coerceAtLeast(0))
+
+        // Точная цель: TextView отрисованной строки + спан совпадения в нём.
+        val query = searchInput.text?.toString().orEmpty()
+        val bubble = cardEntries.getOrNull(messageIndex)?.markdownHost ?: card
+        val textViews = collectTextViews(bubble)
+        val location = MatchLocationPolicy.locate(
+            textViews.map { it.text?.toString().orEmpty() },
+            query,
+            match.ordinalInMessage,
+        )
+        var scrollTargetY: Int? = null
+        if (location != null) {
+            val target = textViews.getOrNull(location.lineIndex)
+            if (target != null) {
+                val spannable = target.text as? android.text.Spannable
+                if (spannable != null && location.end <= spannable.length) {
+                    val span = BackgroundColorSpan(SEARCH_HIGHLIGHT_COLOR)
+                    spannable.setSpan(
+                        span, location.start, location.end,
+                        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                    searchHighlightedSpan = target to span
+                }
+                scrollTargetY = offsetInScroll(target) +
+                    lineTopOffset(target, location.start)
+            }
+        }
+        if (scrollTo) {
+            // К строке совпадения (с отступом-воздухом сверху), фоллбэк — верх карточки.
+            val y = (scrollTargetY ?: offsetInScroll(card)) - dp(72)
+            scroll.smoothScrollTo(0, y.coerceAtLeast(0))
+        }
     }
 
     private fun clearSearchHighlight() {
         searchHighlightedCard?.foreground = null
         searchHighlightedCard = null
+        searchHighlightedSpan?.let { (view, span) ->
+            (view.text as? android.text.Spannable)?.removeSpan(span)
+        }
+        searchHighlightedSpan = null
+    }
+
+    /** Префикс синтетического messageId пузыря («m<индекс>») для [MessageSearchPolicy]. */
+    private val SEARCH_ID_PREFIX = "m"
+
+    /** Янтарная полупрозрачная подсветка самого совпадения (не перекрывает текст). */
+    private val SEARCH_HIGHLIGHT_COLOR = 0x66fbbf24
+
+    /** Все TextView подстава в порядке отрисовки (обход в глубину). */
+    private fun collectTextViews(root: View): List<TextView> {
+        val out = mutableListOf<TextView>()
+        fun walk(view: View) {
+            if (view is TextView) out += view
+            if (view is android.view.ViewGroup) {
+                for (i in 0 until view.childCount) walk(view.getChildAt(i))
+            }
+        }
+        walk(root)
+        return out
+    }
+
+    /**
+     * Вертикальное смещение view внутри контента [scroll]: сумма top по цепочке
+     * родителей. card.top сам по себе — координата ВНУТРИ обёртки с день-разделителем;
+     * без цепочки скролл уезжал к разделителю/верху контейнера (баг волны C).
+     */
+    private fun offsetInScroll(view: View): Int {
+        var y = 0
+        var current: View? = view
+        while (current != null && current !== scroll) {
+            y += current.top
+            current = current.parent as? View
+        }
+        return y
+    }
+
+    /** Верх строки Layout, содержащей символ [offset] (0, если Layout ещё не измерен). */
+    private fun lineTopOffset(view: TextView, offset: Int): Int {
+        val layout = view.layout ?: return 0
+        val textLength = layout.text?.length ?: 0
+        if (offset !in 0..textLength) return 0
+        return layout.getLineTop(layout.getLineForOffset(offset))
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
