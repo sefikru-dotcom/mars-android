@@ -94,3 +94,22 @@ data class ContextStatusUpdate(
     val error: String? = null,
     val compacted: Boolean = false,
 ) : StreamSideEvent
+
+/**
+ * SSE-кадры жизненного цикла субагентов (`subagent.start`/`subagent.progress`/
+ * `subagent.complete`, `delegate.task_spawned`/`task_progress`/`task_completed`/
+ * `task_failed` — hermes-agent tools/delegate_tool_progress.py `_ChildProgressRelay`)
+ * и терминальные кадры самого хода (`cancel`/`error`/`apperror` → [SubagentUpdate.Kind.TurnStopped]).
+ *
+ * Запечатанный поток эти кадры уже отражает как человекочитаемый
+ * [ru.mars.network.model.ChatEvent.Thought]-трейс, но по трейсу нельзя восстановить
+ * состояние конкретного ребёнка — этот носитель доставляет РАЗОБРАННОЕ событие
+ * ([ru.mars.network.repository.StreamEventMapper.subagentUpdate]) для доски субагентов.
+ * Состояние из последовательности событий вычисляет чистый редьюсер
+ * [ru.mars.network.repository.SubagentStatusPolicy]; транспорт ничего не агрегирует.
+ *
+ * `stream_end`/`done` (нормальное завершение) носителя НЕ порождают: при нормальном
+ * исходе дети отчитываются собственными кадрами `subagent.complete`, а сброс доски
+ * на границе хода — решение UI-слоя.
+ */
+data class SubagentStatusUpdate(val update: SubagentUpdate) : StreamSideEvent

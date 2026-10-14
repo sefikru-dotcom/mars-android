@@ -8,7 +8,21 @@ data class ChatAttachment(
     val isImage: Boolean? = null
 )
 
-data class ChatStartResponse(val streamId: String, val sessionId: String? = null)
+/**
+ * Ответ `POST /api/chat/start` (hermes-webui api/routes.py `_chat_start_response_from_run_start`).
+ *
+ * [model]/[provider] — ФАКТИЧЕСКИЕ модель и провайдер начатого хода: серверные ключи
+ * `effective_model`/`effective_model_provider` (WebUI static/messages.js читает те же),
+ * с аддитивным фолбэком на `model`/`model_provider`. Ключи условны: null означает
+ * «сервер не сообщил» — это штатная ситуация, а не ошибка. Подставлять сюда локальный
+ * выбор модели из запроса запрещено: догадка не должна выглядеть как факт.
+ */
+data class ChatStartResponse(
+    val streamId: String,
+    val sessionId: String? = null,
+    val model: String? = null,
+    val provider: String? = null,
+)
 
 /**
  * Structured payload of an `approval` SSE attention event.
@@ -62,7 +76,22 @@ data class ClarifyPayload(
 
 sealed interface ChatEvent {
     data class SessionBound(val sessionId: String) : ChatEvent
-    data class StreamStarted(val streamId: String) : ChatEvent
+
+    /**
+     * Ход начался. [model]/[provider] — ФАКТИЧЕСКИЕ модель и провайдер хода из ответа
+     * `POST /api/chat/start` (ключи `effective_model`/`effective_model_provider` с
+     * фолбэком на `model`/`model_provider`); null означает «сервер не сообщил»
+     * (старый сервер, GET-подключение к чужому ходу) — это штатно, подставлять
+     * локальный выбор модели вместо null запрещено. Поля добавлены к существующему
+     * data-классу аддитивно: одноаргументная конструкция и равенство по дефолтам
+     * сохранены, исчерпывающие `when` потребителей (app-mobile ChatUiState, app-tv)
+     * не ломаются.
+     */
+    data class StreamStarted(
+        val streamId: String,
+        val model: String? = null,
+        val provider: String? = null,
+    ) : ChatEvent
     data class Chunk(val text: String, val eventId: String? = null) : ChatEvent
     data class Thought(val text: String) : ChatEvent
     data class ToolCall(val id: String?, val name: String, val arguments: String) : ChatEvent
