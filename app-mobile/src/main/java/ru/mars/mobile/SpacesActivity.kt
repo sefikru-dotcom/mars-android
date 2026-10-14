@@ -47,7 +47,7 @@ class SpacesActivity : ComponentActivity() {
     private lateinit var storage: PrefsWorkspaceChoiceStorage
     private lateinit var presenter: SpacesPresenter
 
-    private lateinit var progress: ProgressBar
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var noticeView: TextView
     private lateinit var list: LinearLayout
     private lateinit var statusBox: LinearLayout
@@ -74,46 +74,11 @@ class SpacesActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+        scaffold = SectionScaffold.create(this, SpacesPolicy.SCREEN_TITLE) {
+            lifecycleScope.launch { presenter.load() }
         }
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
-
-        // Header: back / title / progress / refresh (каркас как у SkillsActivity).
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_arrow_back, "Назад", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { finish() } },
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
-        )
-        header.addView(TextView(this).apply {
-            text = SpacesPolicy.SCREEN_TITLE
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-            // Узкий экран POCO F5: длинный заголовок усекается, без overflow.
-            maxLines = 1
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        progress = ProgressBar(this).apply {
-            visibility = View.GONE
-            isIndeterminate = true
-        }
-        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_refresh, "Обновить", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { lifecycleScope.launch { presenter.load() } } },
-            LinearLayout.LayoutParams(dp(40), dp(40))
-        )
-        root.addView(header)
+        val root = scaffold.root
+        val content = scaffold.content
 
         // Offline/notice-плашка (видна только при state.notice).
         noticeView = TextView(this).apply {
@@ -124,7 +89,7 @@ class SpacesActivity : ComponentActivity() {
             setPadding(dp(14), dp(8), dp(14), dp(8))
             maxLines = 2
         }
-        root.addView(noticeView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        content.addView(noticeView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Контент: список строк + статус-блок (сообщение фазы / retry).
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -133,15 +98,15 @@ class SpacesActivity : ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(24), 0, 0)
         }
-        val content = LinearLayout(this).apply {
+        val sectionContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(list, LinearLayout.LayoutParams(-1, -2))
             addView(statusBox, LinearLayout.LayoutParams(-1, -2))
         }
-        root.addView(
+        content.addView(
             ScrollView(this).apply {
                 isFillViewport = true
-                addView(content, ViewGroup.LayoutParams(-1, -2))
+                addView(sectionContent, ViewGroup.LayoutParams(-1, -2))
             },
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
@@ -149,7 +114,7 @@ class SpacesActivity : ComponentActivity() {
     }
 
     private fun render(state: SpacesUiState) {
-        progress.visibility = if (state.phase == SpacesPhase.LOADING) View.VISIBLE else View.GONE
+        scaffold.progress.visibility = if (state.phase == SpacesPhase.LOADING) View.VISIBLE else View.GONE
 
         if (state.notice != null) {
             noticeView.visibility = View.VISIBLE
@@ -170,6 +135,7 @@ class SpacesActivity : ComponentActivity() {
                 setTextColor(if (state.phase == SpacesPhase.ERROR || state.phase == SpacesPhase.NO_AUTH) MarsTheme.STATUS_WARNING else MarsTheme.TEXT_MUTED)
                 gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(dp(16), 0, dp(16), 0)
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             })
         }
         if (state.canRetry) {
