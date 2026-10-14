@@ -39,7 +39,7 @@ class SkillsActivity : ComponentActivity() {
     private lateinit var searchInput: EditText
     private lateinit var chipsRow: LinearLayout
     private lateinit var list: LinearLayout
-    private lateinit var progress: ProgressBar
+    private lateinit var scaffold: SectionScaffold.Parts
 
     private var skills: List<SkillItem> = emptyList()
     private var selectedCategory = SkillsFilterPolicy.ALL
@@ -55,45 +55,9 @@ class SkillsActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
-
-        // Header: back / title / progress / refresh
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_arrow_back, "Назад", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { finish() } },
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
-        )
-        header.addView(TextView(this).apply {
-            text = "Скиллы Марса"
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        progress = ProgressBar(this).apply {
-            visibility = View.GONE
-            isIndeterminate = true
-        }
-        header.addView(progress, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
-        header.addView(
-            MarsTheme.circleIconButton(this, R.drawable.ic_refresh, "Обновить", bg = MarsTheme.SURFACE, iconTint = MarsTheme.TEXT)
-                .apply { setOnClickListener { load() } },
-            LinearLayout.LayoutParams(dp(40), dp(40))
-        )
-        root.addView(header)
+        scaffold = SectionScaffold.create(this, "Скиллы Марса", ::load)
+        val root = scaffold.root
+        val content = scaffold.content
 
         // Search box: pill with a leading icon and a borderless field inside.
         val searchBox = LinearLayout(this).apply {
@@ -118,17 +82,17 @@ class SkillsActivity : ComponentActivity() {
             doAfterTextChanged { renderList() }
         }
         searchBox.addView(searchInput, LinearLayout.LayoutParams(0, dp(44), 1f))
-        root.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        content.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Category chips (rebuilt when the catalog loads / category changes).
         chipsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(HorizontalScrollView(this).apply {
+        content.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(chipsRow, ViewGroup.LayoutParams(-2, -2))
         }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
 
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(
+        content.addView(
             ScrollView(this).apply {
                 isFillViewport = true
                 addView(list, ViewGroup.LayoutParams(-1, -2))
@@ -150,11 +114,11 @@ class SkillsActivity : ComponentActivity() {
         }
         loading = true
         failure = null
-        progress.visibility = View.VISIBLE
+        scaffold.progress.visibility = if (loading) View.VISIBLE else View.GONE
         lifecycleScope.launch {
             val result = repository.getSkills(MarsApi.BASE_URL, credential)
             loading = false
-            progress.visibility = View.GONE
+            scaffold.progress.visibility = View.GONE
             if (result.isEmpty()) {
                 failure = "Каталог скиллов пуст или недоступен"
                 skills = emptyList()

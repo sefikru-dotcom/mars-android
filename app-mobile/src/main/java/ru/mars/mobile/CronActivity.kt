@@ -29,8 +29,8 @@ class CronActivity : ComponentActivity() {
     private val cronRepo = CronRepository()
 
     private lateinit var jobList: LinearLayout
-    private lateinit var progressBar: ProgressBar
-    private lateinit var emptyText: TextView
+    private lateinit var scaffold: SectionScaffold.Parts
+    private lateinit var stateContainer: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,98 +39,40 @@ class CronActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(10), dp(16), dp(16))
-        }
+        scaffold = SectionScaffold.create(this, "Планировщик", ::loadJobs)
+        val content = scaffold.content
 
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(16))
-            insets
-        }
+        stateContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(stateContainer, LinearLayout.LayoutParams(-1, -2))
 
-        // Header
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-
-        val backBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_arrow_back,
-            "Назад",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40,
-            strokeColor = MarsTheme.BORDER
-        ).apply {
-            setOnClickListener { finish() }
-        }
-        header.addView(backBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-
-        val title = TextView(this).apply {
-            text = "Планировщик"
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setPadding(dp(12), 0, 0, 0)
-        }
-        header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val refreshBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_refresh,
-            "Обновить",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40,
-            strokeColor = MarsTheme.BORDER
-        ).apply {
-            setOnClickListener { loadJobs() }
-        }
-        header.addView(refreshBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-        root.addView(header)
-
-        // Progress bar
-        progressBar = ProgressBar(this).apply {
-            isIndeterminate = true
-            visibility = View.VISIBLE
-        }
-        root.addView(progressBar, LinearLayout.LayoutParams(-1, dp(4)).apply { bottomMargin = dp(8) })
-
-        // Empty state
-        emptyText = TextView(this).apply {
-            text = "Задачи планировщика отсутствуют"
-            textSize = 14f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            setPadding(0, dp(32), 0, 0)
-        }
-        root.addView(emptyText)
-
-        // List
-        jobList = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val scroll = ScrollView(this).apply {
-            isFillViewport = true
-            addView(jobList, LinearLayout.LayoutParams(-1, -2))
-        }
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        return root
+        jobList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(
+            ScrollView(this).apply {
+                isFillViewport = true
+                addView(jobList, LinearLayout.LayoutParams(-1, -2))
+            },
+            LinearLayout.LayoutParams(-1, 0, 1f),
+        )
+        return scaffold.root
     }
 
     private fun loadJobs() {
-        val cred = store.read() ?: return
-        progressBar.visibility = View.VISIBLE
-        emptyText.visibility = View.GONE
+        val cred = store.read()
+        if (cred == null) {
+            scaffold.progress.visibility = View.GONE
+            scaffold.statusLine.visibility = View.VISIBLE
+            scaffold.statusLine.text = "Нужен вход: откройте приложение и пройдите пару"
+            return
+        }
+        scaffold.progress.visibility = View.VISIBLE
+        scaffold.statusLine.visibility = View.VISIBLE
+        scaffold.statusLine.text = "Загрузка задач…"
+        stateContainer.removeAllViews()
+        stateContainer.addView(SectionStateViews.empty(this, "Задачи планировщика отсутствуют"))
         lifecycleScope.launch {
             val jobs = cronRepo.fetchJobs(ChatActivity.BASE_URL, cred)
-            progressBar.visibility = View.GONE
+            scaffold.progress.visibility = View.GONE
+            scaffold.statusLine.visibility = View.GONE
             renderJobs(jobs)
         }
     }
@@ -138,9 +80,11 @@ class CronActivity : ComponentActivity() {
     private fun renderJobs(jobs: List<CronJob>) {
         jobList.removeAllViews()
         if (jobs.isEmpty()) {
-            emptyText.visibility = View.VISIBLE
+            stateContainer.removeAllViews()
+            stateContainer.addView(SectionStateViews.empty(this, "Задачи планировщика отсутствуют"))
             return
         }
+        stateContainer.removeAllViews()
 
         jobs.forEach { job ->
             val card = LinearLayout(this).apply {
