@@ -299,16 +299,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         offlineQueue = OfflineMessageQueuePolicy(pendingMessageStore)
         // Выход из авторизации (logout/реавторизация) обязан стереть локальные plaintext-данные
         // до finish(), и после этого черновики больше не сохраняются (onPause не пишет назад).
-        authExitCleanup = AuthExitCleanup(
-            listOf(
-                PrefsClearableStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)),
-                PrefsClearableStore(getSharedPreferences(MUSIC_HISTORY_PREFS, MODE_PRIVATE)),
-                PrefsClearableStore(offlineCachePrefs),
-                // Офлайн-кэши задач и метрик проектов — тоже приватные plaintext-данные.
-                PrefsClearableStore(getSharedPreferences("mars_todos_offline", MODE_PRIVATE)),
-                PrefsClearableStore(getSharedPreferences("mars_projects_offline", MODE_PRIVATE)),
-                pendingMessageStore,
-            )
+        // Набор хранилищ — единая фабрика AuthExitStores (P0): живой экземпляр очереди
+        // передаётся override'ом, чтобы cleanup и отправка делили один объект.
+        authExitCleanup = AuthExitStores.cleanup(
+            context = this,
+            overrides = mapOf(AuthExitStores.PENDING_QUEUE_PREFS to pendingMessageStore),
         )
         compressionController = ContextCompressionController(
             host = CompressionHostBridge(),
@@ -4066,9 +4061,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         lifecycleScope.launch {
             // Best-effort server revoke; the local credential is cleared regardless of the
             // outcome so a 401/network failure can never lock the user in a stale auth state.
-            LogoutFlow(store) { deviceId, accessToken ->
-                PairingRepository(BASE_URL).revokeCredential(deviceId, accessToken)
-            }.logout()
+            // Wiring — единая фабрика AuthExitStores (P0), та же, что в SettingsActivity.
+            AuthExitStores.logoutFlow(store, BASE_URL).logout()
             finish()
         }
     }
@@ -4132,16 +4126,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val MAX_VIEWER_IMAGE_DIMENSION = 4096
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         private const val KEY_OPEN_SESSION_ID = "open_session_id"
-        /** Privately-stored plaintext data cleared on every auth-exit path. */
-        internal const val DRAFTS_PREFS = "mars-session-drafts"
-        private const val MUSIC_HISTORY_PREFS = "mars-music-search-history"
+        /** Privately-stored plaintext data cleared on every auth-exit path (набор — [AuthExitStores]). */
+        internal const val DRAFTS_PREFS = AuthExitStores.DRAFTS_PREFS
+        private const val MUSIC_HISTORY_PREFS = AuthExitStores.MUSIC_HISTORY_PREFS
         /**
          * Приватные хранилища офлайн-устойчивости: кэш сессий и очередь неотправленных.
          * internal: уровень списка диалогов ([ChatSessionsActivity]) читает тот же кэш
          * и стирает черновики/очередь удалённых диалогов (ключи не дублируются).
          */
-        internal const val OFFLINE_CACHE_PREFS = "mars-offline-cache"
-        internal const val PENDING_QUEUE_PREFS = "mars-pending-messages"
+        internal const val OFFLINE_CACHE_PREFS = AuthExitStores.OFFLINE_CACHE_PREFS
+        internal const val PENDING_QUEUE_PREFS = AuthExitStores.PENDING_QUEUE_PREFS
         /** Подсказки статуса для офлайн-сценариев (копия из кэша / вложения / лимит очереди). */
         private const val OFFLINE_SESSION_HINT = "Нет связи — показана сохранённая копия диалога"
         private const val OFFLINE_ATTACHMENT_STATUS = "Нет связи — сообщение с вложениями будет отправлено после восстановления"

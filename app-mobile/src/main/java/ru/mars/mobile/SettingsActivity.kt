@@ -30,6 +30,13 @@ class SettingsActivity : ComponentActivity() {
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
 
     /**
+     * Cleanup локальных plaintext-данных (черновики, история музыки, офлайн-кэши
+     * сессий/задач/проектов, очередь неотправленных) — единая фабрика [AuthExitStores],
+     * тот же набор хранилищ, что и на других путях выхода из авторизации.
+     */
+    private val authExitCleanup by lazy { AuthExitStores.cleanup(this) }
+
+    /**
      * Проба лёгкости/задержки боевого хоста Марса. Путь `health` публичный
      * (см. `ConnectionStatusPolicy.PROBE_PATH`), поэтому токен для проверки
      * связи не нужен.
@@ -272,16 +279,33 @@ class SettingsActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setTitle("Выход")
             .setMessage("Действительно выйти из профиля Марса на этом устройстве?")
-            .setPositiveButton("Выйти") { _, _ ->
-                store.clear()
-                val intent = Intent(this, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-                }
-                startActivity(intent)
-                finish()
-            }
+            .setPositiveButton("Выйти") { _, _ -> performLogout() }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    /**
+     * Единственный путь logout (продуктовое правило: выход только из настроек).
+     *
+     * Порядок фиксирован контрактом [AuthExitCleanup]/[LogoutFlow]:
+     *  1. локальный plaintext-cleanup синхронно ДО finish() — следующая авторизация на
+     *     этом устройстве не видит данные предыдущей;
+     *  2. server-side revoke best-effort через существующий контракт
+     *     [ru.mars.network.repository.PairingRepository.revokeCredential]; его исход не
+     *     влияет на выход — [LogoutFlow] чистит локальный credential безусловно
+     *     (401/сеть не могут запереть клиента в сломанном auth-состоянии);
+     *  3. переход на экран авторизации с очисткой стека (прежний контракт intent-флагов).
+     */
+    private fun performLogout() {
+        authExitCleanup.run()
+        lifecycleScope.launch {
+            AuthExitStores.logoutFlow(store, ChatActivity.BASE_URL).logout()
+            val intent = Intent(this@SettingsActivity, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(intent)
+            finish()
+        }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
