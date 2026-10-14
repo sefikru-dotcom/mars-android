@@ -1,7 +1,6 @@
 package ru.mars.mobile
 
 import android.content.Context
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -13,12 +12,9 @@ import android.view.View
 import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import ru.mars.network.cache.SharedPreferencesKeyValueStore
@@ -28,6 +24,19 @@ import ru.mars.network.model.TodoItem
 import ru.mars.network.model.TodoSnapshot
 import ru.mars.network.repository.SessionRepository
 
+/**
+ * Экран плана задач агента (wire-снимок `todo_state` сессии). Строится на общем shell
+ * разделов ([SectionScaffold]: safe-area, заголовок «Задачи агента», «Назад», спиннер,
+ * «Обновить»), пустое состояние и сбой без кэша — общие [SectionStateViews]; экран
+ * рисует только сводку, баннер кэша, фильтр-чипы и карточки задач.
+ *
+ * Офлайн-семантика прежняя: при старте мгновенно показывается последний снимок
+ * ([TodosOfflineCache], бейдж возраста без баннера), сеть обновляет его в фоне и
+ * СОХРАНЯЕТ; сбой сети не затирает показанные задачи — экран остаётся на кэше с
+ * бейджем и ненавязчивым баннером ([OfflineCacheUiPolicy]). И «Обновить» shell, и
+ * retry общего error-состояния повторяют загрузку ТЕКУЩЕЙ сессии (currentSessionId);
+ * no-auth путь (нет credentials) — прежний уход в сбой с той же кэш-логикой.
+ */
 class TodosActivity : ComponentActivity() {
 
     private val store by lazy { AndroidKeyStoreCredentialStore(this) }
@@ -46,11 +55,15 @@ class TodosActivity : ComponentActivity() {
         )
     }
 
+    private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var todoList: LinearLayout
-    private lateinit var summaryText: TextView
-    private lateinit var progressBar: ProgressBar
-    private lateinit var emptyText: TextView
     private lateinit var cacheBanner: TextView
+
+    /** Контейнер общих состояний раздела (пусто/сбой) — между чипами и списком. */
+    private lateinit var stateContainer: LinearLayout
+
+    /** Сводка экрана («Выполнено X из Y…») — общая статус-строка shell. */
+    private val summaryText: TextView get() = scaffold.statusLine
 
     private var currentFilter: TodoFilter = TodoFilter.ALL
 
@@ -64,6 +77,9 @@ class TodosActivity : ComponentActivity() {
 
     /** Слот кэша (sessionId), из которого взят ПОКАЗАННЫЙ снимок; null — снимка нет. */
     private var cacheSlot: String? = null
+
+    /** Guard: «Обновить» shell и retry не должны запускать параллельные загрузки. */
+    private var loading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,55 +102,14 @@ class TodosActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(10), dp(16), dp(16))
-        }
+        // Общий shell разделов: safe-area, заголовок, «Назад», спиннер и «Обновить»
+        // (перезагрузка задач текущей сессии).
+        scaffold = SectionScaffold.create(this, "Задачи агента") { loadTodos(currentSessionId) }
 
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(16))
-            insets
-        }
-
-        // Header
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(10))
-        }
-
-        val backBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_arrow_back,
-            "Назад",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40,
-            strokeColor = MarsTheme.BORDER
-        ).apply {
-            setOnClickListener { finish() }
-        }
-        header.addView(backBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-
-        val title = TextView(this).apply {
-            text = "Задачи агента"
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setPadding(dp(12), 0, 0, 0)
-        }
-        header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        root.addView(header)
-
-        // Summary row
-        summaryText = TextView(this).apply {
-            text = "Загрузка плана задач…"
-            textSize = 13f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(dp(4), 0, 0, dp(10))
-        }
-        root.addView(summaryText)
+        // Сводка сеанса — статус-строка shell (всегда видна: экран показывает статус).
+        summaryText.visibility = View.VISIBLE
+        summaryText.text = "Загрузка плана задач…"
+        summaryText.setTextColor(MarsTheme.TEXT_MUTED)
 
         // Ненавязчивый баннер кэша: бейдж возраста + отметка о сбое обновления.
         cacheBanner = TextView(this).apply {
@@ -144,7 +119,7 @@ class TodosActivity : ComponentActivity() {
             setPadding(dp(10), dp(4), dp(10), dp(4))
             visibility = View.GONE
         }
-        root.addView(cacheBanner, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(10) })
+        scaffold.content.addView(cacheBanner, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(10) })
 
         // Filter chips
         val filterScroll = HorizontalScrollView(this).apply {
@@ -167,25 +142,13 @@ class TodosActivity : ComponentActivity() {
             filterRow.addView(chip, LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) })
         }
         filterScroll.addView(filterRow)
-        root.addView(filterScroll)
+        scaffold.content.addView(filterScroll)
 
-        // Progress bar
-        progressBar = ProgressBar(this).apply {
-            isIndeterminate = true
-            visibility = View.VISIBLE
+        // Общие состояния раздела (пусто/сбой) — вместо самодельного emptyText.
+        stateContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        root.addView(progressBar, LinearLayout.LayoutParams(-1, dp(4)).apply { bottomMargin = dp(8) })
-
-        // Empty state
-        emptyText = TextView(this).apply {
-            text = "Задачи не запланированы"
-            textSize = 14f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            setPadding(0, dp(32), 0, 0)
-        }
-        root.addView(emptyText)
+        scaffold.content.addView(stateContainer, LinearLayout.LayoutParams(-1, -2))
 
         // List
         todoList = LinearLayout(this).apply {
@@ -195,20 +158,22 @@ class TodosActivity : ComponentActivity() {
             isFillViewport = true
             addView(todoList, LinearLayout.LayoutParams(-1, -2))
         }
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        scaffold.content.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        return root
+        return scaffold.root
     }
 
     private fun loadTodos(sessionId: String?) {
+        if (loading || isFinishing) return
         val cred = store.read()
         if (cred == null) {
             onFetchFailure()
             return
         }
 
+        loading = true
         // Кэш уже показан (showCachedSnapshot) — запрос идёт в фоне, не затирая его.
-        progressBar.visibility = if (cacheOnScreen) View.GONE else View.VISIBLE
+        scaffold.progress.visibility = if (cacheOnScreen) View.GONE else View.VISIBLE
         lifecycleScope.launch {
             val snapshot = runCatching {
                 if (!sessionId.isNullOrBlank()) {
@@ -223,7 +188,8 @@ class TodosActivity : ComponentActivity() {
                     } else null
                 }
             }.getOrNull()
-            progressBar.visibility = View.GONE
+            loading = false
+            scaffold.progress.visibility = View.GONE
             if (snapshot != null) onFetchSuccess(currentSessionId, snapshot) else onFetchFailure()
         }
     }
@@ -251,10 +217,17 @@ class TodosActivity : ComponentActivity() {
         if (!decision.showCachedContent) {
             allItems = emptyList()
             renderTodos()
-            emptyText.visibility = View.VISIBLE
-            emptyText.text = "Не удалось загрузить задачи"
+            showFailureState()
             summaryText.text = "Нет сети, а сохранённый снимок отсутствует"
         }
+    }
+
+    /** Общее error-состояние: «Повторить» перезагружает ТЕКУЩУЮ сессию (currentSessionId). */
+    private fun showFailureState() {
+        stateContainer.removeAllViews()
+        stateContainer.addView(
+            SectionStateViews.error(this, "Не удалось загрузить задачи") { loadTodos(currentSessionId) }
+        )
     }
 
     /**
@@ -313,15 +286,16 @@ class TodosActivity : ComponentActivity() {
 
     private fun renderTodos() {
         todoList.removeAllViews()
+        stateContainer.removeAllViews()
 
         val filtered = TodoFilterPolicy.visibleItems(allItems, currentFilter)
 
         if (filtered.isEmpty()) {
-            emptyText.visibility = View.VISIBLE
-            emptyText.text = TodoFilterPolicy.emptyText(allItems.isEmpty())
+            // Общее empty-состояние; текст — прежняя фильтр-семантика
+            // («нет задач вообще» против «фильтр ничего не выбрал»).
+            stateContainer.addView(SectionStateViews.empty(this, TodoFilterPolicy.emptyText(allItems.isEmpty())))
             return
         }
-        emptyText.visibility = View.GONE
 
         filtered.forEach { item ->
             val isDone = item.status == TodoFilterPolicy.STATUS_COMPLETED
