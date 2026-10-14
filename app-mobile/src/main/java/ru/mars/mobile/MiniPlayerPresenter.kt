@@ -28,7 +28,11 @@ data class MiniPlayerUiState(
     val titleText: String,
     /** True → show the pause icon (tap pauses); false → show the play icon. */
     val showPauseIcon: Boolean,
-    /** Playback status announced by the play button («Воспроизведение» / «Пауза»). */
+    /**
+     * ACTION announced by the play button (playing → «Пауза», paused → «Воспроизвести»),
+     * resolved by [MusicA11yPolicy] — the strip speaks with the same voice as the
+     * music screen's main Play/Pause button (MUS-M1 parity).
+     */
     val statusLabel: String,
 ) {
     companion object {
@@ -37,7 +41,7 @@ data class MiniPlayerUiState(
             visible = false,
             titleText = "",
             showPauseIcon = false,
-            statusLabel = MiniPlayerPresenter.STATUS_PAUSED,
+            statusLabel = MusicA11yPolicy.ACTION_PLAY,
         )
     }
 }
@@ -55,9 +59,6 @@ object MiniPlayerPresenter {
     const val SEPARATOR = " · "
     /** Fallback header when both title and artist are blank. */
     const val UNKNOWN_TITLE = "Неизвестный трек"
-
-    const val STATUS_PLAYING = "Воспроизведение"
-    const val STATUS_PAUSED = "Пауза"
 
     /** Slide distance of the reveal/hide fade+slide: small, so the strip never «jumps». */
     const val REVEAL_SLIDE_DP = 6f
@@ -122,7 +123,7 @@ object MiniPlayerPresenter {
             visible = true,
             titleText = formatTitle(track.title, track.artist),
             showPauseIcon = isPlaying,
-            statusLabel = if (isPlaying) STATUS_PLAYING else STATUS_PAUSED,
+            statusLabel = MusicA11yPolicy.playPauseAction(isPlaying),
         )
     }
 

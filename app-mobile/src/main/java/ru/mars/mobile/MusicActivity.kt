@@ -379,13 +379,17 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         root.addView(tabScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
-        // Transient status line (favorites/queue feedback), hidden by default
+        // Transient status line (favorites/queue feedback), hidden by default.
+        // POLITE live region (MUS-M2): TalkBack announces the feedback on its own,
+        // without moving focus to the line — parity with SectionStateViews and the
+        // TV section status views.
         statusText = TextView(this).apply {
             textSize = 12f
             setTextColor(MarsTheme.TEXT_MUTED)
             setPadding(dp(4), 0, dp(4), dp(8))
             isSingleLine = true
             ellipsize = android.text.TextUtils.TruncateAt.END
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             visibility = View.GONE
         }
         root.addView(statusText, LinearLayout.LayoutParams(-1, -2))
@@ -606,7 +610,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         shuffleBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_shuffle,
-            "Перемешать",
+            MusicA11yPolicy.shuffleAction(shuffleOn = false),
             bg = MarsTheme.SURFACE_SUBTLE,
             iconTint = MarsTheme.TEXT_MUTED,
             sizeDp = 38
@@ -630,7 +634,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         playButton = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_play,
-            "Воспроизведение",
+            MusicA11yPolicy.playPauseAction(isPlaying = false),
             bg = MarsTheme.ACCENT,
             iconTint = Color.WHITE,
             sizeDp = 50,
@@ -659,7 +663,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         repeatBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_repeat,
-            "Повтор",
+            MusicA11yPolicy.repeatAction(MusicQueueManager.RepeatMode.OFF),
             bg = MarsTheme.SURFACE_SUBTLE,
             iconTint = MarsTheme.TEXT_MUTED,
             sizeDp = 38
@@ -680,6 +684,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             title.text = track?.title ?: "Ничего не играет"
             artistView.text = track?.artist ?: "Mars Audio"
             setPlayPauseGlyph(playButton, isPlaying)
+            // MUS-M1: the main button's description is the ACTION the tap performs —
+            // «Пауза» while playing, «Воспроизвести» while paused — refreshed on every
+            // transport state change from the shared pure policy.
+            playButton.contentDescription = MusicA11yPolicy.playPauseAction(isPlaying)
             seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
             updateQueueIcons()
             updatePlayerActionStates()
@@ -977,7 +985,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val playTrackBtn = MarsTheme.circleIconButton(
                 this,
                 R.drawable.ic_play,
-                "Воспроизвести",
+                MusicA11yPolicy.ACTION_PLAY,
                 bg = MarsTheme.SURFACE_SUBTLE,
                 iconTint = MarsTheme.ACCENT,
                 sizeDp = 34
@@ -991,7 +999,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val heartBtn = MarsTheme.circleIconButton(
                 this,
                 if (isFav) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
-                "Избранное",
+                MusicA11yPolicy.heartAction(isFav),
                 bg = MarsTheme.SURFACE_SUBTLE,
                 iconTint = if (isFav) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED,
                 sizeDp = 34
@@ -1044,6 +1052,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             } else {
                 MarsTheme.pill(this, MarsTheme.SURFACE)
             }
+            // MUS-M3: TalkBack reads which tab is currently open
+            button.contentDescription = MusicA11yPolicy.tabDescription(button.text.toString(), active)
         }
         style(chartTabButton, currentTab == MusicTab.CHART)
         style(flowTabButton, currentTab == MusicTab.FLOW)
@@ -1452,6 +1462,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         heartButtons[id]?.forEach { button ->
             button.setImageResource(if (filled) R.drawable.ic_favorite else R.drawable.ic_favorite_border)
             button.imageTintList = ColorStateList.valueOf(if (filled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
+            // MUS-M3: the heart announces the ACTION the tap performs on this track
+            button.contentDescription = MusicA11yPolicy.heartAction(filled)
         }
     }
 
@@ -1479,7 +1491,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             "${holder.artist} · ${holder.duration}"
         }
         setPlayPauseGlyph(holder.playButton, state.showPauseIcon)
-        holder.playButton.contentDescription = if (state.showPauseIcon) "Пауза" else "Воспроизвести"
+        holder.playButton.contentDescription = MusicA11yPolicy.playPauseAction(state.showPauseIcon)
     }
 
     /** Re-styles every rendered chart/search row from the current player state (UI thread). */
@@ -1535,11 +1547,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         shuffleBtn.imageTintList = ColorStateList.valueOf(
             if (MarsMusicPlayer.isShuffled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
         )
+        // MUS-M3: the toggles announce the action the tap performs next
+        shuffleBtn.contentDescription = MusicA11yPolicy.shuffleAction(MarsMusicPlayer.isShuffled)
         val repeatOne = MarsMusicPlayer.repeatMode == MusicQueueManager.RepeatMode.ONE
         repeatBtn.setImageResource(if (repeatOne) R.drawable.ic_repeat_one else R.drawable.ic_repeat)
         repeatBtn.imageTintList = ColorStateList.valueOf(
             if (MarsMusicPlayer.repeatMode == MusicQueueManager.RepeatMode.OFF) MarsTheme.TEXT_MUTED else MarsTheme.ACCENT
         )
+        repeatBtn.contentDescription = MusicA11yPolicy.repeatAction(MarsMusicPlayer.repeatMode)
     }
 
     /** Raw body of the `/api/home` fallback; typed parsing lives in [MusicChartLoader]. */

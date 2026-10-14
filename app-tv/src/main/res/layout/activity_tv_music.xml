@@ -225,6 +225,7 @@
         android:text="Загрузка треков…"
         android:textColor="@color/mars_muted"
         android:textSize="24sp"
+        android:accessibilityLiveRegion="polite"
         android:layout_marginTop="@dimen/tv_music_row_gap"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />

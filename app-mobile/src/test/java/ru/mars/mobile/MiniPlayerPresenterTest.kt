@@ -15,7 +15,9 @@ class MiniPlayerPresenterTest {
         assertFalse(s.visible)
         assertEquals("", s.titleText)
         assertFalse(s.showPauseIcon)
-        assertEquals(MiniPlayerPresenter.STATUS_PAUSED, s.statusLabel)
+        // Hidden strip keeps the idle action label («Воспроизвести») — the same voice
+        // the music screen uses, straight from the shared MusicA11yPolicy.
+        assertEquals(MusicA11yPolicy.ACTION_PLAY, s.statusLabel)
     }
 
     @Test fun hiddenStateIsSharedConstant() {
@@ -47,16 +49,22 @@ class MiniPlayerPresenterTest {
         assertEquals("Ночь · Кино", MiniPlayerPresenter.resolve(track(" Ночь ", "\tКино "), false).titleText)
     }
 
-    @Test fun playingTrackShowsPauseIconAndPlayingStatus() {
+    // MUS-M1 parity: the play button's description is the ACTION the tap performs —
+    // while playing it offers «Пауза», while paused «Воспроизвести» — resolved by the
+    // shared MusicA11yPolicy, so the strip and the music screen never diverge.
+
+    @Test fun playingTrackShowsPauseIconAndPauseAction() {
         val s = MiniPlayerPresenter.resolve(track("Ночь", "Кино"), isPlaying = true)
         assertTrue(s.showPauseIcon)
-        assertEquals(MiniPlayerPresenter.STATUS_PLAYING, s.statusLabel)
+        assertEquals("Пауза", s.statusLabel)
+        assertEquals(MusicA11yPolicy.playPauseAction(isPlaying = true), s.statusLabel)
     }
 
-    @Test fun pausedTrackShowsPlayIconAndPausedStatus() {
+    @Test fun pausedTrackShowsPlayIconAndPlayAction() {
         val s = MiniPlayerPresenter.resolve(track("Ночь", "Кино"), isPlaying = false)
         assertFalse(s.showPauseIcon)
-        assertEquals(MiniPlayerPresenter.STATUS_PAUSED, s.statusLabel)
+        assertEquals("Воспроизвести", s.statusLabel)
+        assertEquals(MusicA11yPolicy.playPauseAction(isPlaying = false), s.statusLabel)
     }
 
     @Test fun formatTitleIsPureForRawInputs() {
