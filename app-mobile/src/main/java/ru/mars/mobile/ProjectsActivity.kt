@@ -31,12 +31,18 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Экран «Проекты»: метрики хоста и сервисов. Волна 3 — общий shell разделов
+ * Экран «Проекты»: метрики хостов и сервисов. Волна 3 — общий shell разделов
  * [SectionScaffold] (safe-area, заголовок, «Назад», спиннер, «Обновить»);
  * офлайн-кэш и статусная семантика экрана сохранены без изменений: мгновенный
  * показ свежего снимка (24 ч) с бейджем возраста, сбой сети НЕ затирает
  * показанный кэш (бейдж + ненавязчивый баннер), без годного снимка — честный
  * фолбэк [MarsProjects] с offline-строкой ([OfflineCacheUiPolicy]).
+ *
+ * P0-4 (волна 4): каждый хост показывается ПОД СВОИМ именем — Aeza из блока
+ * «local», прод 45.129.2.36 из «prod.host» (раньше прод-метрики подписывались
+ * чужим именем); мёртвая строка про пинг удалена (сервер поле задержки не
+ * отдаёт никогда), вместо неё реальные restarts/http; статус-строка показывает
+ * возраст ДАННЫХ по «ts» ответа ([MetricsTimestamp]), а не время запроса.
  */
 class ProjectsActivity : ComponentActivity() {
     private lateinit var scaffold: SectionScaffold.Parts
@@ -176,7 +182,7 @@ class ProjectsActivity : ComponentActivity() {
         }
         val parsed = ProjectsMetricsParser.parse(data)
         list.removeAllViews()
-        parsed.host?.let { addHost(it) }
+        parsed.hosts.forEach { addHost(it) }
         parsed.services.forEach { addService(it) }
         cacheShown = list.childCount > 0
         if (!cacheShown) list.removeAllViews()
@@ -207,13 +213,23 @@ class ProjectsActivity : ComponentActivity() {
     private fun render(data: JSONObject) {
         val parsed = ProjectsMetricsParser.parse(data)
         list.removeAllViews()
-        parsed.host?.let { addHost(it) }
+        parsed.hosts.forEach { addHost(it) }
         parsed.services.forEach { addService(it) }
         val summary = ProjectsSummary.of(parsed.services)
-        updated.text = ProjectsSummary.statusLine(summary, clock())
+        updated.text = ProjectsSummary.statusLine(summary, freshnessOf(parsed.timestamp))
         updated.setTextColor(if (summary.hasOffline) MarsTheme.STATUS_WARNING else MarsTheme.TEXT_MUTED)
         if (list.childCount == 0) renderFallback()
     }
+
+    /**
+     * Честная свежесть данных: «ts» ответа (когда метрики сняты) плюс давность
+     * «N мин назад»; время запроса — только фолбэк, когда в ответе нет «ts».
+     */
+    private fun freshnessOf(ts: String): String = ProjectsSummary.freshnessText(
+        dataTs = ts,
+        ageText = MetricsTimestamp.ageText(ts, System.currentTimeMillis()),
+        clock = clock(),
+    )
 
     private fun renderFallback() {
         list.removeAllViews()
@@ -223,12 +239,10 @@ class ProjectsActivity : ComponentActivity() {
     }
 
     private fun addService(s: ParsedService) {
-        val details = listOf(
-            if (s.uptime.isNotBlank()) "Аптайм: ${s.uptime}" else "",
-            if (s.latency.isNotBlank()) "Пинг: ${s.latency} ms" else ""
-        ).filter { it.isNotBlank() }.joinToString("   ")
-
-        val desc = listOf(s.description, details).filter { it.isNotBlank() }.joinToString("\n")
+        // Детали — только из реально отданных сервером полей (чистая ProjectsSummary):
+        // аптайм/рестарты/HTTP-код проверки; мёртвой ветки про пинг больше нет.
+        val desc = listOf(s.description, ProjectsSummary.serviceDetails(s))
+            .filter { it.isNotBlank() }.joinToString("\n")
         addCard(s.title, desc, s.url, s.state, s.active)
     }
 
@@ -240,7 +254,9 @@ class ProjectsActivity : ComponentActivity() {
         }
         val titleRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         titleRow.addView(TextView(this).apply {
-            text = "Хост Aeza Mars"
+            // Честное имя хоста из парсера: Aeza — из блока local, прод — из prod.host
+            // (P0-4: прод-данные больше не подписываются чужим именем).
+            text = h.title
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(MarsTheme.TEXT_STRONG)
@@ -249,14 +265,17 @@ class ProjectsActivity : ComponentActivity() {
         titleRow.addView(statusBadge("Онлайн", MarsTheme.STATUS_ONLINE))
         card.addView(titleRow)
 
-        val metricsText = TextView(this).apply {
-            text = "RAM: ${h.ram}    CPU: ${h.cpu}    Диск: ${h.disk}\nАптайм: ${h.uptime}"
-            textSize = 13f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setLineSpacing(dp(3).toFloat(), 1f)
-            setPadding(0, dp(8), 0, 0)
+        val lines = ProjectsSummary.hostLines(h)
+        if (lines.isNotBlank()) {
+            val metricsText = TextView(this).apply {
+                text = lines
+                textSize = 13f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setPadding(0, dp(8), 0, 0)
+            }
+            card.addView(metricsText)
         }
-        card.addView(metricsText)
 
         list.addView(card, margin())
     }

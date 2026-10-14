@@ -123,9 +123,18 @@ class ProjectsShellContractTest {
 
     @Test
     fun `status line keeps cache badge and warning colors semantics`() {
+        val render = projects.substringAfter("private fun render(").substringBefore("private fun renderFallback")
         assertTrue(
-            "LIVE-рендер пишет сводную статус-строку",
-            projects.contains("ProjectsSummary.statusLine(summary, clock())")
+            "LIVE-рендер строит статус-строку из ts ОТВЕТА (момент снятия метрик), а не из времени запроса",
+            render.contains("ProjectsSummary.statusLine(summary, freshnessOf(parsed.timestamp))")
+        )
+        assertTrue(
+            "Давность «N мин назад» считается от ts ответа через MetricsTimestamp",
+            projects.contains("MetricsTimestamp.ageText(ts, System.currentTimeMillis())")
+        )
+        assertFalse(
+            "Время запроса — только фолбэк внутри freshnessOf, когда в ответе нет ts",
+            render.contains("statusLine(summary, clock())")
         )
         assertTrue(
             "Offline/сбой подсвечиваются STATUS_WARNING",
@@ -137,6 +146,36 @@ class ProjectsShellContractTest {
             "Кэш-бейдж на старте — TEXT_MUTED",
             projects.substringAfter("private fun showCachedMetrics").substringBefore("private fun renderCachedContent")
                 .contains("MarsTheme.TEXT_MUTED")
+        )
+    }
+
+    // --- P0-4: честные хосты и никаких мёртвых полей ---------------------------------------
+
+    @Test
+    fun `host cards are titled from parsed blocks, not a hardcoded mislabel`() {
+        assertFalse(
+            "Прод-данные запрещено подписывать именем Aeza",
+            projects.contains("Хост Aeza Mars")
+        )
+        assertTrue(
+            "Экран рендерит все распарсенные хосты: Aeza из local, прод из prod.host",
+            projects.contains("parsed.hosts.forEach { addHost(it) }")
+        )
+        assertTrue(
+            "Заголовок карточки — честное имя хоста из парсера",
+            projects.contains("text = h.title")
+        )
+    }
+
+    @Test
+    fun `service card has no dead ping branch`() {
+        assertFalse(
+            "Сервер не отдаёт latency — ветка «Пинг: N ms» мертва и запрещена",
+            projects.contains("Пинг:") || projects.contains(".latency")
+        )
+        assertTrue(
+            "Строка деталей (аптайм/рестарты/HTTP-код) строится чистым ProjectsSummary.serviceDetails",
+            projects.contains("ProjectsSummary.serviceDetails(s)")
         )
     }
 
