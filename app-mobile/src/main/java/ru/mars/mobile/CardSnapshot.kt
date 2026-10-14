@@ -1,5 +1,7 @@
 package ru.mars.mobile
 
+import ru.mars.network.model.SubagentStatus
+
 /**
  * Снимок ВСЕХ входных данных рендера ОДНОЙ карточки транскрипта — чистая JVM-модель
  * (data class, структурное равенство). Инкрементальный рендер сравнивает снимки
@@ -35,6 +37,12 @@ data class CardSnapshot(
     val thoughtsFingerprint: Long,
     val toolsFingerprint: Long,
     val timestamp: Long,
+    /** Фактическая модель хода ([ChatMessage.model], волна C) — подпись карточки ответа. */
+    val model: String? = null,
+    /** Провайдер фактической модели хода ([ChatMessage.modelProvider]). */
+    val modelProvider: String? = null,
+    /** Отпечаток доски субагентов хода ([ChatMessage.subagents], волна C). */
+    val subagentsFingerprint: Long = CardSnapshotPolicy.EMPTY_SUBAGENTS_FINGERPRINT,
 ) {
     /** Всё, кроме текста пузыря: «окружение» карточки идентично — менять нужно только markdown-секцию. */
     fun sameChrome(other: CardSnapshot): Boolean =
@@ -43,6 +51,9 @@ data class CardSnapshot(
 
 /** Построение снимков карточек из [ChatMessage] — без Android, тестируется на JVM. */
 object CardSnapshotPolicy {
+
+    /** Затравка Fold (простое) — чтобы пустой список не давал 0 и не сливался с «одним пустым элементом». */
+    private const val SEEDED_PRIME = 1125899906842597L
 
     fun of(
         message: ChatMessage,
@@ -67,6 +78,9 @@ object CardSnapshotPolicy {
         thoughtsFingerprint = thoughtsFingerprint(message.thoughts),
         toolsFingerprint = toolsFingerprint(message.tools),
         timestamp = message.timestamp,
+        model = message.model,
+        modelProvider = message.modelProvider,
+        subagentsFingerprint = subagentsFingerprint(message.subagents),
     )
 
     /** Отпечаток списка мыслей: размер + содержимое (мысли дописываются во время стрима). */
@@ -84,6 +98,24 @@ object CardSnapshotPolicy {
             hash
         }
 
-    /** Затравка Fold (простое) — чтобы пустой список не давал 0 и не сливался с «одним пустым элементом». */
-    private const val SEEDED_PRIME = 1125899906842597L
+    /** Пустая доска субагентов: отпечаток «детей нет» ([ChatMessage.subagents] пуст). */
+    const val EMPTY_SUBAGENTS_FINGERPRINT: Long = SEEDED_PRIME
+
+    /**
+     * Отпечаток доски субагентов хода (волна C, фича B): любое изменение ребёнка —
+     * старт, шаг, переход статуса, причина провала — делает снимок «грязным» и
+     * пересобирает ровно эту карточку. Порядок обхода карты детерминирован
+     * (LinkedHashMap-вставка [SubagentStatusPolicy]), поэтому равные доски дают
+     * равные отпечатки.
+     */
+    fun subagentsFingerprint(subagents: Map<String, SubagentStatus>): Long =
+        subagents.entries.fold(SEEDED_PRIME) { acc, entry ->
+            var hash = acc * 31 + entry.key.hashCode()
+            hash = hash * 31 + entry.value.state.ordinal
+            hash = hash * 31 + (entry.value.displayName?.hashCode() ?: 0)
+            hash = hash * 31 + (entry.value.model?.hashCode() ?: 0)
+            hash = hash * 31 + (entry.value.phase?.hashCode() ?: 0)
+            hash = hash * 31 + (entry.value.failureReason?.hashCode() ?: 0)
+            hash
+        }
 }

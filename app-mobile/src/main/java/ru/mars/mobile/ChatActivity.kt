@@ -67,12 +67,15 @@ import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.ApprovalPayload
+import ru.mars.network.model.SubagentStatusUpdate
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.CompressionSummary
 import ru.mars.network.repository.ContextCompressionRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
+import ru.mars.network.repository.MessageSearchPolicy
 import ru.mars.network.repository.ModelsRepository
+import ru.mars.network.repository.SearchableMessage
 import ru.mars.network.repository.PairingRepository
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
@@ -224,14 +227,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var drawer: DrawerLayout
 
     // --- Поиск по текущему диалогу (transcript search) -----------------------------------------
-    // Совпадения, кольцевая навигация и подпись счётчика — чистая TranscriptSearchPolicy;
-    // хост лишь рисует панель, подсвечивает карточку найденного сообщения и скроллит к ней.
+    // Совпадения адресуются чистой MessageSearchPolicy (якорь messageId + ordinalInMessage):
+    // каждое вхождение — отдельный шаг навигации, в том числе несколько в одном сообщении.
+    // Хост рисует панель, подсвечивает СПАН совпадения внутри пузыря и скроллит к нему.
     private lateinit var searchPlate: LinearLayout
     private lateinit var searchInput: EditText
     private lateinit var searchCounter: TextView
-    private var searchMatches: List<TranscriptMatch> = emptyList()
+    private var searchMatches: List<ru.mars.network.repository.TextMatch> = emptyList()
     private var searchPosition: Int = -1
+    /** Якорь текущего совпадения: переживает пересчёт совпадений во время стрима. */
+    private var searchAnchor: ru.mars.network.repository.TextMatch? = null
     private var searchHighlightedCard: View? = null
+    /** Подсвеченный спан совпадения: TextView пузыря + сам спан (снятие при шаге/закрытии). */
+    private var searchHighlightedSpan: Pair<TextView, BackgroundColorSpan>? = null
 
     // --- ANR-устойчивость транскрипта (инкрементальный рендер + троттлинг стрима) ---------------
     // Чистые политики (JVM-тесты): StreamRenderThrottle (кадровый троттлинг SSE-событий),
@@ -1809,6 +1817,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     onContextStatus(event)
                 }
             }
+        } else if (event is SubagentStatusUpdate) {
+            // Доска живых статусов субагентов (волна C, фича B): кадр проходит
+            // через редьюсер SubagentStatusPolicy в состоянии хода; изменилась
+            // доска — внеочередная перерисовка карточки родителя (дети читаются
+            // без открытия дочернего экрана).
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    if (uiState.applySubagentUpdate(event.update)) scheduleStreamRender()
+                }
+            }
         }
     }
 
@@ -1819,6 +1837,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * показывать нечего (`not_configured`/чужая сессия), гасит строку сразу.
      */
     private fun onContextStatus(update: ContextStatusUpdate) {
+        // Turn-start model attribution (волна C, фича A): открывающий кадр несёт
+        // фактическую модель хода — штамп на текущем пузыре важнее статус-строки и
+        // не зависит от неё (кадр «чужой» сессии штамп не ставит). Изменилась
+        // подпись — внеочередная перерисовка карточки через общий троттлинг стрима.
+        if (update.sessionId == null || update.sessionId == currentSessionId) {
+            if (uiState.stampTurnModel(update.model, update.modelProvider)) scheduleStreamRender()
+        }
         contextStatusJob?.cancel()
         val line = ContextStatusPresenter.statusLine(update, currentSessionId)
         if (line == null) {
@@ -2272,9 +2297,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         labelRow.addView(label)
 
         if (!isUser) {
-            modelSelection.buttonLabel()?.let { modelName ->
+            // Фактическая модель хода (волна C, фича A): приоритет — серверный штамп
+            // пузыря (открывающий кадр context_status, фоллбэк — effective_model из
+            // chat/start, подпись — TurnModelPolicy); локальный выбор пикера остаётся
+            // фоллбэком ТОЛЬКО до прихода серверного значения, чужая устаревшая
+            // модель в шапке ответа больше не висит.
+            val modelName = TurnModelPolicy.label(message.model, message.modelProvider)
+                ?.let { ChatParamRowPresenter.safeLabel(it) }
+                ?: modelSelection.buttonLabel()
+            modelName?.let { pillLabel ->
                 val modelPill = TextView(this).apply {
-                    text = modelName
+                    text = pillLabel
                     textSize = 9.5f
                     setTextColor(MarsTheme.ACCENT_TEXT)
                     background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
@@ -2587,6 +2620,75 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         }
 
+        // Доска живых статусов субагентов (волна C, фича B): дети текущего хода
+        // читаются ПРЯМО на родительской карточке — без открытия дочернего
+        // экрана. Активные — с пульсирующим индикатором, терминальные — со
+        // знаком результата (бейдж статуса); у Failed — причина, если сервер
+        // её прислал. Данные — редьюсер SubagentStatusPolicy в ChatUiState.
+        if (message.subagents.isNotEmpty()) {
+            val board = SubagentBoardPresenter.present(message.subagents)
+            if (board.visible) {
+                val boardBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = MarsTheme.toolCallCard(this@ChatActivity)
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                }
+                val boardHeader = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                if (board.activeCount > 0) {
+                    val liveDot = ImageView(this).apply {
+                        setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_status))
+                        imageTintList = ColorStateList.valueOf(MarsGradients.Status.RUNNING.badge.dot)
+                        contentDescription = null
+                    }
+                    boardHeader.addView(liveDot, LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(6) })
+                }
+                boardHeader.addView(TextView(this).apply {
+                    text = board.headerLabel
+                    textSize = 10.5f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                boardBox.addView(boardHeader)
+                board.rows.forEach { row ->
+                    val rowLine = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(0, dp(4), 0, 0)
+                    }
+                    val titleLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                    titleLine.addView(TextView(this@ChatActivity).apply {
+                        text = row.title
+                        textSize = 11.5f
+                        setTextColor(if (row.active) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
+                        isSingleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                    val statusBadge = TextView(this).apply {
+                        text = row.statusLabel
+                        textSize = 9.5f
+                        val gradientStatus = MarsGradients.Status.valueOf(row.badge.name)
+                        setTextColor(gradientStatus.badge.text)
+                        background = MarsTheme.statusBadge(this@ChatActivity, gradientStatus)
+                        setPadding(dp(8), dp(3), dp(8), dp(3))
+                    }
+                    titleLine.addView(statusBadge)
+                    rowLine.addView(titleLine)
+                    val details = mutableListOf<String>()
+                    row.detail?.let { details += it }
+                    row.failureReason?.let { details += "причина: $it" }
+                    if (details.isNotEmpty()) {
+                        rowLine.addView(TextView(this).apply {
+                            text = details.joinToString(" · ")
+                            textSize = 10f
+                            setTextColor(if (row.failureReason != null) MarsGradients.Status.ERROR.badge.text else MarsTheme.TEXT_MUTED)
+                            setPadding(0, dp(1), 0, 0)
+                        })
+                    }
+                    boardBox.addView(rowLine)
+                }
+                card.addView(boardBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
+        }
+
         if (message.text.isNotBlank()) {
             // Long-press anywhere on the bubble opens the message-actions sheet.
             card.setOnLongClickListener { view ->
@@ -2627,56 +2729,160 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         searchInput.setText("")
         searchMatches = emptyList()
         searchPosition = -1
+        searchAnchor = null
         clearSearchHighlight()
         hideKeyboard()
     }
 
     /**
      * Пересчитывает совпадения по текущему транскрипту и обновляет счётчик.
+     * Совпадения адресует чистая [MessageSearchPolicy] (якорь messageId +
+     * ordinalInMessage): каждое вхождение — отдельный шаг, несколько вхождений
+     * в одном пузыре не «съедают» друг друга. Семантика поиска прежняя
+     * (регистронезависимость, MIN_QUERY_LENGTH, потолок совпадений — идентичны
+     * TranscriptSearchPolicy, откуда политика и была перенесена в core-network).
+     * Пузырь транскрипта = одно сообщение (card.tag = индекс), поэтому messageId
+     * синтетический: «m<индекс>» — стабильный в пределах текущего транскрипта.
      * [resetPosition] — сброс на первое совпадение (новый запрос); без него позиция
-     * сохраняется и лишь зажимается в границы (перерисовка во время стрима).
+     * ВОССТАНАВЛИВАЕТСЯ ПО ЯКОРЮ (перерисовка во время стрима: текст растёт,
+     * индексы совпадений смещаются, а текущее совпадение не теряется).
      * [scrollToMatch] — скроллить к совпадению (только явная навигация/новый запрос).
      */
     private fun refreshTranscriptSearch(resetPosition: Boolean, scrollToMatch: Boolean) {
         val query = searchInput.text?.toString().orEmpty()
-        searchMatches = TranscriptSearchPolicy.findMatches(uiState.messages.map { it.text }, query)
+        searchMatches = MessageSearchPolicy.findMatches(
+            uiState.messages.mapIndexed { index, message ->
+                SearchableMessage(messageId = SEARCH_ID_PREFIX + index, text = message.text)
+            },
+            query,
+        )
         searchPosition = when {
             searchMatches.isEmpty() -> -1
-            resetPosition || searchPosition < 0 -> 0
-            else -> searchPosition.coerceAtMost(searchMatches.size - 1)
+            resetPosition -> 0
+            else -> MessageSearchPolicy.positionOf(searchMatches, searchAnchor)
+                .takeIf { it >= 0 }
+                ?: searchPosition.coerceIn(0, searchMatches.size - 1)
         }
-        searchCounter.text = TranscriptSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
+        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
+        searchCounter.text = MessageSearchPolicy.counterLabel(query, searchPosition, searchMatches.size)
         applySearchHighlight(scrollTo = scrollToMatch && searchPosition >= 0)
     }
 
     /** Кольцевой шаг «следующее/предыдущее совпадение» + обновление счётчика и подсветки. */
     private fun navigateTranscriptSearch(forward: Boolean) {
-        val next = TranscriptSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
+        val next = MessageSearchPolicy.navigate(searchMatches.size, searchPosition, forward)
         if (next < 0) return
         searchPosition = next
-        searchCounter.text = TranscriptSearchPolicy.counterLabel(
+        searchAnchor = MessageSearchPolicy.anchorAt(searchMatches, searchPosition)
+        searchCounter.text = MessageSearchPolicy.counterLabel(
             searchInput.text?.toString().orEmpty(), searchPosition, searchMatches.size
         )
         applySearchHighlight(scrollTo = true)
     }
 
-    /** Рубиновая рамка вокруг карточки текущего совпадения и плавный скролл к ней. */
+    /**
+     * Подсветка и скролл к ТОЧНОЙ позиции совпадения (волна C, фича C):
+     * рубиновая рамка вокруг карточки + янтарный спан на самом совпадении внутри
+     * пузыря; скролл — к строке совпадения, а не к верхушке карточки/дня-разделителя.
+     * Позицию совпадения в ОТОБРАЖЁННЫХ строках пузыря находит чистая
+     * [MatchLocationPolicy] (markdown-рендер меняет текст: маркеры списков, заголовки).
+     * Если вхождение в отрисованных строках не найдено (например, текст уехал в
+     * свёрнутый блок) — откат к прежнему поведению: рамка + скролл к карточке.
+     */
     private fun applySearchHighlight(scrollTo: Boolean) {
         clearSearchHighlight()
-        val match = searchMatches.getOrNull(searchPosition) ?: return
-        val card = messages.findViewWithTag<View>(match.messageIndex) ?: return
+        val match = MessageSearchPolicy.anchorAt(searchMatches, searchPosition) ?: return
+        val messageIndex = match.messageId.removePrefix(SEARCH_ID_PREFIX).toIntOrNull() ?: return
+        val card = messages.findViewWithTag<View>(messageIndex) ?: return
         // foreground, а не background: градиент пузыря/карточки остаётся нетронутым.
         card.foreground = GradientDrawable().apply {
             cornerRadius = dp(16).toFloat()
             setStroke(dp(2), MarsTheme.ACCENT)
         }
         searchHighlightedCard = card
-        if (scrollTo) scroll.smoothScrollTo(0, (card.top - dp(64)).coerceAtLeast(0))
+
+        // Точная цель: TextView отрисованной строки + спан совпадения в нём.
+        val query = searchInput.text?.toString().orEmpty()
+        val bubble = cardEntries.getOrNull(messageIndex)?.markdownHost ?: card
+        val textViews = collectTextViews(bubble)
+        val location = MatchLocationPolicy.locate(
+            textViews.map { it.text?.toString().orEmpty() },
+            query,
+            match.ordinalInMessage,
+        )
+        var scrollTargetY: Int? = null
+        if (location != null) {
+            val target = textViews.getOrNull(location.lineIndex)
+            if (target != null) {
+                val spannable = target.text as? android.text.Spannable
+                if (spannable != null && location.end <= spannable.length) {
+                    val span = BackgroundColorSpan(SEARCH_HIGHLIGHT_COLOR)
+                    spannable.setSpan(
+                        span, location.start, location.end,
+                        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                    searchHighlightedSpan = target to span
+                }
+                scrollTargetY = offsetInScroll(target) +
+                    lineTopOffset(target, location.start)
+            }
+        }
+        if (scrollTo) {
+            // К строке совпадения (с отступом-воздухом сверху), фоллбэк — верх карточки.
+            val y = (scrollTargetY ?: offsetInScroll(card)) - dp(72)
+            scroll.smoothScrollTo(0, y.coerceAtLeast(0))
+        }
     }
 
     private fun clearSearchHighlight() {
         searchHighlightedCard?.foreground = null
         searchHighlightedCard = null
+        searchHighlightedSpan?.let { (view, span) ->
+            (view.text as? android.text.Spannable)?.removeSpan(span)
+        }
+        searchHighlightedSpan = null
+    }
+
+    /** Префикс синтетического messageId пузыря («m<индекс>») для [MessageSearchPolicy]. */
+    private val SEARCH_ID_PREFIX = "m"
+
+    /** Янтарная полупрозрачная подсветка самого совпадения (не перекрывает текст). */
+    private val SEARCH_HIGHLIGHT_COLOR = 0x66fbbf24
+
+    /** Все TextView подстава в порядке отрисовки (обход в глубину). */
+    private fun collectTextViews(root: View): List<TextView> {
+        val out = mutableListOf<TextView>()
+        fun walk(view: View) {
+            if (view is TextView) out += view
+            if (view is android.view.ViewGroup) {
+                for (i in 0 until view.childCount) walk(view.getChildAt(i))
+            }
+        }
+        walk(root)
+        return out
+    }
+
+    /**
+     * Вертикальное смещение view внутри контента [scroll]: сумма top по цепочке
+     * родителей. card.top сам по себе — координата ВНУТРИ обёртки с день-разделителем;
+     * без цепочки скролл уезжал к разделителю/верху контейнера (баг волны C).
+     */
+    private fun offsetInScroll(view: View): Int {
+        var y = 0
+        var current: View? = view
+        while (current != null && current !== scroll) {
+            y += current.top
+            current = current.parent as? View
+        }
+        return y
+    }
+
+    /** Верх строки Layout, содержащей символ [offset] (0, если Layout ещё не измерен). */
+    private fun lineTopOffset(view: TextView, offset: Int): Int {
+        val layout = view.layout ?: return 0
+        val textLength = layout.text?.length ?: 0
+        if (offset !in 0..textLength) return 0
+        return layout.getLineTop(layout.getLineForOffset(offset))
     }
 
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {

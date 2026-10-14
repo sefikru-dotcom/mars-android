@@ -336,6 +336,11 @@ object StreamEventMapper {
             messageCount = intField(prefill, "message_count") ?: 0,
             error = stringField(prefill, "error"),
             compacted = prefill["compacted"] == true,
+            // Turn-start model attribution (волна C, фича A): аддитивные ключи кадра
+            // `model`/`model_provider` — фактическая модель хода. Отсутствуют/пусты →
+            // null («сервер не сообщил»); запрошенная клиентом модель НЕ подставляется.
+            model = stringField(obj, "model"),
+            modelProvider = stringField(obj, "model_provider"),
         )
     }
 

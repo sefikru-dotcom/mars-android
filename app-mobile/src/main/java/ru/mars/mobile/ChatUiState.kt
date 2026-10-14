@@ -6,8 +6,11 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.SubagentStatus
+import ru.mars.network.model.SubagentUpdate
 import ru.mars.network.model.TodoSnapshot
 import ru.mars.network.repository.StreamBufferGuard
+import ru.mars.network.repository.SubagentStatusPolicy
 
 /** UI model for the rich chat transcript. Kept platform independent for unit tests. */
 enum class ChatStatus { IDLE, TYPING, RECEIVED, ERROR }
@@ -37,6 +40,23 @@ data class ChatMessage(
     val isTrimAnchor: Boolean = false,
     /** Сколько сообщений скрыто над якорем — для его подписи. */
     val trimmedCount: Int = 0,
+    /**
+     * Фактическая модель хода (turn-start attribution, волна C): серверное значение —
+     * ранний кадр `context_status` (`model`), фоллбэк — `effective_model` HTTP-ответа
+     * chat/start. null = сервер не сообщил; локальный выбор пикера сюда не пишется
+     * никогда (подпись — [TurnModelPolicy]). Живёт на пузыре СВОЕГО хода: новый ход
+     * открывает чистый пузырь, прежний штамп в него не протекает.
+     */
+    val model: String? = null,
+    /** Провайдер фактической модели хода (`model_provider`); null = сервер не сообщил. */
+    val modelProvider: String? = null,
+    /**
+     * Доска живых статусов субагентов хода (волна C, фича B): результат редьюсера
+     * [ru.mars.network.repository.SubagentStatusPolicy] — childId -> состояние.
+     * Пустая карта = детей не было. Живёт на пузыре СВОЕГО хода (новый ход
+     * открывает чистую доску); презентация — [SubagentBoardPresenter].
+     */
+    val subagents: Map<String, SubagentStatus> = emptyMap(),
 )
 
 class ChatUiState(
@@ -130,6 +150,7 @@ class ChatUiState(
         status = ChatStatus.TYPING
         reattachedTurn = true
         streamDroppedChars = 0
+        clearSubagentBoard()
         messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
         return true
     }
@@ -185,6 +206,7 @@ class ChatUiState(
         if (message.isBlank() && attachmentNames.isEmpty() || status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
         streamDroppedChars = 0
+        clearSubagentBoard()
         messages += ChatMessage("user", message, attachments = attachmentNames, status = MessageStatus.COMPLETE)
         messages += ChatMessage("assistant", status = MessageStatus.STREAMING)
         return true
@@ -213,6 +235,7 @@ class ChatUiState(
         if (text.isBlank() || status == ChatStatus.TYPING) return false
         status = ChatStatus.TYPING
         streamDroppedChars = 0
+        clearSubagentBoard()
         val echoIndex = messages.indexOfLast {
             it.role == "user" && it.status == MessageStatus.PENDING && it.text == text
         }
@@ -240,7 +263,17 @@ class ChatUiState(
         val current = messages[index]
         messages[index] = when (event) {
             is ChatEvent.SessionBound -> { activeSessionId = event.sessionId; current }
-            is ChatEvent.StreamStarted -> current
+            is ChatEvent.StreamStarted -> {
+                // Фоллбэк turn-start attribution: `effective_model` присутствует в
+                // HTTP-ответе chat/start только если сервер нормализовал модель —
+                // основной источник (кадр context_status) штампует хост через
+                // [stampTurnModel]. Запрошенная клиентом модель НЕ подставляется.
+                if (!event.model.isNullOrBlank()) {
+                    current.copy(model = event.model, modelProvider = event.provider)
+                } else {
+                    current
+                }
+            }
             // OOM/ANR guard: streamed text is accumulated through StreamBufferGuard, so a
             // runaway frame is clamped and the transcript keeps only the freshest tail
             // (prefixed with exactly one truncation marker) instead of growing unbounded.
@@ -286,9 +319,60 @@ class ChatUiState(
     }
 
     fun complete() { status = ChatStatus.RECEIVED; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
+
+    /**
+     * Фактическая модель хода из открывающего кадра `context_status` (волна C,
+     * фича A) — ОСНОВНОЙ источник подписи карточки ответа: сервер сообщает
+     * resolved_model/resolved_provider, с которыми конструируется агент. Штамп
+     * ложится на ТЕКУЩИЙ assistant-пузырь; новый ход открывает чистый пузырь,
+     * прежняя модель в него не протекает. Пустое/пробельное значение = «сервер
+     * не сообщил» — штамп не ставится и прежний не затирается.
+     *
+     * @return true — штамп изменил состояние (хост перерисовывает карточку).
+     */
+    fun stampTurnModel(model: String?, provider: String?): Boolean {
+        val name = model?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val vendor = provider?.trim()?.takeIf { it.isNotEmpty() }
+        val index = messages.indexOfLast { it.role == "assistant" }
+        if (index < 0) return false
+        val current = messages[index]
+        if (current.model == name && current.modelProvider == vendor) return false
+        messages[index] = current.copy(model = name, modelProvider = vendor)
+        return true
+    }
+
+    /**
+     * Доска живых статусов субагентов ТЕКУЩЕГО хода (волна C, фича B): редьюсер
+     * [SubagentStatusPolicy] — единственная правда о состояниях детей; каждый
+     * кадр `subagent_*`/`delegate.*` проходит через него, а результат штампует
+     * ся на текущий assistant-пузырь (карточка родителя показывает доску без
+     * открытия дочернего экрана). Доска живёт в рамках хода: [begin]/
+     * [beginQueuedSend]/[startNewSession] открывают чистую.
+     */
+    private var subagentBoard: Map<String, SubagentStatus> = emptyMap()
+
+    /**
+     * Применяет кадр статуса субагента к доске хода.
+     *
+     * @return true — доска изменилась (хост перерисовывает карточку).
+     */
+    fun applySubagentUpdate(update: SubagentUpdate): Boolean {
+        val next = SubagentStatusPolicy.apply(subagentBoard, update)
+        if (next == subagentBoard) return false
+        subagentBoard = next
+        val index = messages.indexOfLast { it.role == "assistant" }
+        if (index >= 0 && messages[index].subagents != next) {
+            messages[index] = messages[index].copy(subagents = next)
+        }
+        return true
+    }
+
+    /** Сброс доски субагентов на границе хода/сессии (новый ход — чистая доска). */
+    private fun clearSubagentBoard() { subagentBoard = emptyMap() }
+
     fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
 
     /**
@@ -334,7 +418,7 @@ class ChatUiState(
         return result
     }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 

@@ -84,6 +84,13 @@ data class GoalContinuation(
  * в контекст; [error] — текст серверной ошибки (присутствует только при
  * `status == "error"`); [compacted] — контекст был сжат под символьный бюджет.
  * Бюджетные поля кадра (`original_*`, `max_chars`) в контракт не входят.
+ *
+ * Turn-start model attribution (волна C, фича A): открывающий кадр аддитивно
+ * несёт фактическую модель хода в ключах `model` / `model_provider` (hermes-webui
+ * api/streaming.py + api/gateway_chat.py — resolved_model и запрошенная идентичность
+ * провайдера; те же имена, что у финального session payload). Значения доставляются
+ * дословно; отсутствие/пустота → null («сервер не сообщил») — транспорт НИКОГДА не
+ * подставляет запрошенную клиентом модель.
  */
 data class ContextStatusUpdate(
     val sessionId: String?,
@@ -93,6 +100,10 @@ data class ContextStatusUpdate(
     val messageCount: Int = 0,
     val error: String? = null,
     val compacted: Boolean = false,
+    /** Фактическая модель хода из открывающего кадра context_status; null = сервер не сообщил. */
+    val model: String? = null,
+    /** Провайдер модели из открывающего кадра context_status; null = сервер не сообщил. */
+    val modelProvider: String? = null,
 ) : StreamSideEvent
 
 /**
