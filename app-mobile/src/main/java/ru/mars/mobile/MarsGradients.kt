@@ -69,6 +69,8 @@ object MarsGradients {
     const val BADGE_BG_ALPHA = 0x1a
     /** Alpha of translucent badge strokes. */
     const val BADGE_STROKE_ALPHA = 0x33
+    /** Alpha of the translucent text-match highlight in chat search (amber, over text). */
+    const val SEARCH_HIGHLIGHT_ALPHA = 0x66
 
     /** Direction of a two-stop linear gradient. */
     enum class Angle { TOP_BOTTOM, TL_BR, LEFT_RIGHT }

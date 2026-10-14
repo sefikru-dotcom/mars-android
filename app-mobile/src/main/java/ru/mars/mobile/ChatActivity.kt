@@ -2851,8 +2851,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Префикс синтетического messageId пузыря («m<индекс>») для [MessageSearchPolicy]. */
     private val SEARCH_ID_PREFIX = "m"
 
-    /** Янтарная полупрозрачная подсветка самого совпадения (не перекрывает текст). */
-    private val SEARCH_HIGHLIGHT_COLOR = 0x66fbbf24
+    /**
+     * Янтарная полупрозрачная подсветка самого совпадения (не перекрывает текст).
+     * Цвет берётся из палитры (STATUS_WARNING) и приглушается альфой: хардкод-hex вне
+     * файла палитры запрещён гейтом дизайн-системы (scripts/theme-parity-audit.py).
+     */
+    private val SEARCH_HIGHLIGHT_COLOR =
+        MarsGradients.withAlpha(MarsGradients.STATUS_WARNING, SEARCH_HIGHLIGHT_ALPHA)
 
     /** Все TextView подстава в порядке отрисовки (обход в глубину). */
     private fun collectTextViews(root: View): List<TextView> {
