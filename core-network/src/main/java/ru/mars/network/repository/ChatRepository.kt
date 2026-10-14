@@ -118,9 +118,11 @@ class ChatRepository(
      *
      * [onSideEvent] — optional NON-SEALED transport callback (same delivery
      * pattern as [onTodoState]) for SSE metadata frames without a sealed
-     * [ChatEvent] carrier: `title` text, `goal`, `goal_continue` and
-     * `context_status` ([ru.mars.network.model.StreamSideEvent]). Delivered in
-     * stream order on
+     * [ChatEvent] carrier: `title` text, `goal`, `goal_continue`, `context_status`
+     * and the subagent lifecycle / turn-ended frames
+     * ([ru.mars.network.model.SubagentStatusUpdate] — board state is reduced by
+     * [ru.mars.network.repository.SubagentStatusPolicy] at the receiving layer).
+     * Delivered in stream order on
      * this flow's IO context, ALONGSIDE the [ChatEvent] flow (a `title` frame
      * still emits [ChatEvent.SessionBound]). Delivery only: receivers must not
      * auto-send a goal continuation — that is an explicit UI decision. Default
@@ -178,7 +180,9 @@ class ChatRepository(
                 extractStartResponse(body)
                     ?: run { emit(ChatEvent.Error("Missing stream_id")); return@flow }
             }
-            startResp.streamId.let { emit(ChatEvent.StreamStarted(it)) }
+            // Фактическая модель/провайдер хода из кадра начала хода; null = сервер
+            // не сообщил (локальный выбор сюда подставлять запрещено — см. ChatStartResponse).
+            emit(ChatEvent.StreamStarted(startResp.streamId, startResp.model, startResp.provider))
             startResp.sessionId?.let { emit(ChatEvent.SessionBound(it)) }
 
             val streamUrl = base.newBuilder().addPathSegments("api/chat/stream")
@@ -224,7 +228,7 @@ class ChatRepository(
      * (the journaled replay of a reattached stream can contain `todo_state` frames too);
      * see its KDoc for the delivery contract.
      *
-     * [onSideEvent] — same `title`/`goal`/`goal_continue`/`context_status`
+     * [onSideEvent] — same `title`/`goal`/`goal_continue`/`context_status`/subagent-lifecycle
      * side-channel callback as in
      * [sendMessage] (a reattached stream replays these frames from the journal too).
      *
@@ -410,7 +414,7 @@ class ChatRepository(
      * which returns null for them. When null, behaviour is unchanged (frames are dropped).
      *
      * [onSideEvent]: when non-null, `title`/`goal`/`goal_continue`/`context_status`
-     * frames are ALSO
+     * and subagent lifecycle / turn-ended frames are ALSO
      * parsed by [StreamEventMapper.sideEvent] and handed to it (typed
      * [StreamSideEvent] side channel). Unlike `todo_state` this does NOT divert
      * the frame from [StreamEventMapper.map] — a `title` frame still emits
@@ -507,11 +511,7 @@ class ChatRepository(
         }
     }
 
-    private fun extractStartResponse(json: String): ChatStartResponse? {
-        val obj = StreamEventMapper.parseObject(json) ?: return null
-        val streamId = obj["stream_id"]?.toString()?.takeIf { it.isNotBlank() } ?: return null
-        return ChatStartResponse(streamId, obj["session_id"]?.toString()?.takeIf { it.isNotBlank() })
-    }
+    private fun extractStartResponse(json: String): ChatStartResponse? = StreamEventMapper.startResponse(json)
 
     private fun bearer(credential: ConsumedDeviceCredential) = "Bearer ${credential.accessToken}"
 

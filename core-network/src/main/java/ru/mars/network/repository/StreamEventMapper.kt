@@ -4,6 +4,7 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ClarifyPayload
 import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.ErrorOrigin
@@ -11,6 +12,8 @@ import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
 import ru.mars.network.model.SessionTitleUpdate
 import ru.mars.network.model.StreamSideEvent
+import ru.mars.network.model.SubagentStatusUpdate
+import ru.mars.network.model.SubagentUpdate
 import ru.mars.network.model.TodoSnapshot
 
 /**
@@ -163,15 +166,119 @@ object StreamEventMapper {
      */
     fun sideEvent(eventName: String?, payload: String): StreamSideEvent? {
         val name = eventName?.trim()
-        if (name != "title" && name != "goal" && name != "goal_continue" && name != "context_status") return null
-        val obj = parseObject(payload) ?: return null
-        return when (name) {
-            "title" -> stringField(obj, "title")
-                ?.let { SessionTitleUpdate(sessionId(obj, payload), it) }
-            "goal" -> goalUpdate(obj, payload)
-            "goal_continue" -> goalContinuation(obj, payload)
-            else -> contextStatusUpdate(obj, payload)
+        if (name == "title" || name == "goal" || name == "goal_continue" || name == "context_status") {
+            val obj = parseObject(payload) ?: return null
+            return when (name) {
+                "title" -> stringField(obj, "title")
+                    ?.let { SessionTitleUpdate(sessionId(obj, payload), it) }
+                "goal" -> goalUpdate(obj, payload)
+                "goal_continue" -> goalContinuation(obj, payload)
+                else -> contextStatusUpdate(obj, payload)
+            }
         }
+        // Жизненный цикл субагентов + терминальные кадры хода — сайд-канал доски
+        // субагентов ([SubagentStatusUpdate]); запечатанный поток продолжает получать
+        // Thought-трейс через [map] (оба канала независимы, как у `title`).
+        return subagentUpdate(name, payload)?.let { SubagentStatusUpdate(it) }
+    }
+
+    /**
+     * Кадр начала хода (`POST /api/chat/start` response body) → [ChatStartResponse].
+     *
+     * `stream_id` обязателен (без него хода нет). [ChatStartResponse.model]/
+     * [ChatStartResponse.provider] читаются из `effective_model`/`effective_model_provider`
+     * (фактическая модель хода, WebUI static/messages.js parity) с фолбэком на
+     * `model`/`model_provider`; ключи аддитивны и условны — absent/blank/структурные
+     * значения дают null («сервер не сообщил»), это не ошибка.
+     */
+    fun startResponse(json: String): ChatStartResponse? {
+        val obj = parseObject(json) ?: return null
+        val streamId = idField(obj, "stream_id") ?: return null
+        return ChatStartResponse(
+            streamId = streamId,
+            sessionId = idField(obj, "session_id"),
+            model = stringOnly(obj, "effective_model") ?: stringOnly(obj, "model"),
+            provider = stringOnly(obj, "effective_model_provider") ?: stringOnly(obj, "model_provider"),
+        )
+    }
+
+    /** Терминальные кадры хода: после них активный ребёнок продолжить не может. */
+    private val TURN_ENDED_FRAMES = setOf("cancel", "error", "apperror")
+
+    /** Статусы ожидания в wire-кадрах субагентов (классификация — у [SubagentStatusPolicy]). */
+    private val SUBAGENT_WAITING_STATUSES = setOf("waiting", "awaiting", "blocked", "paused", "pending_approval")
+
+    /** Потолок длины фазы ребёнка: `preview` прогресс-кадра может содержать аргументы инструмента. */
+    private const val MAX_SUBAGENT_PHASE_CHARS = 200
+
+    /**
+     * Кадр жизненного цикла субагента → [SubagentUpdate] для доски субагентов (P0-2).
+     *
+     * Wire-контракт (hermes-agent tools/delegate_tool_progress.py `_ChildProgressRelay`
+     * + gateway/platforms/api_server_runs.py `_SUBAGENT_EVENT_KEYS`): каждый кадр несёт
+     * идентичность `{task_index, task_count, goal, subagent_id, child_session_id?,
+     * delegation_id?, parent_id, depth, model?}`; `subagent.progress` — человекочитаемый
+     * `preview` (фаза), `subagent.complete` — `status`/`failure_reason`/`summary`.
+     *
+     * Правила разбора:
+     * - `cancel`/`error`/`apperror` (ход умер/остановлен) → [SubagentUpdate.Kind.TurnStopped]
+     *   даже с мусорным payload — остановка хода важнее его содержимого;
+     * - childId: `subagent_id` → `child_session_id` → `delegation_id`; все отсутствуют →
+     *   событие без адреса (политика его игнорирует, но доставка сохраняется);
+     * - displayName: `goal` → `preview` → «Субагент N/M» (ТОЛЬКО у старта; preview
+     *   прогресс-кадра — это фаза, именем ребёнка он не становится);
+     * - шумовые кадры (`subagent.text`/`thinking`/`tool`, `delegate.task_thinking`,
+     *   `delegate.tool_started`/`tool_completed`) и нерелевантные имена → null:
+     *   запечатанный поток их уже отбрасывает, и факта состояния они не несут;
+     * - непроходимый payload у кадров субагента → null (доставлять нечего);
+     * - `status` передаётся дословно в [SubagentUpdate.rawStatus] — классификация
+     *   делается в [SubagentStatusPolicy], не здесь; `delegate.task_failed` без
+     *   `status` получает rawStatus «failed» (имя кадра — сам факт провала).
+     */
+    fun subagentUpdate(eventName: String?, payload: String): SubagentUpdate? {
+        val name = eventName?.trim().orEmpty()
+        if (name in TURN_ENDED_FRAMES) return SubagentUpdate(SubagentUpdate.Kind.TurnStopped, childId = null)
+        if (!name.startsWith("subagent.") && !name.startsWith("subagent_") && !name.startsWith("delegate.")) return null
+        val baseKind = when (name) {
+            "subagent.start", "delegate.task_spawned" -> SubagentUpdate.Kind.Start
+            "subagent.progress", "subagent_progress", "delegate.task_progress" -> SubagentUpdate.Kind.Progress
+            "subagent.complete", "delegate.task_completed", "delegate.task_failed" -> SubagentUpdate.Kind.Complete
+            else -> return null
+        }
+        val obj = parseObject(payload) ?: return null
+        val childId = idField(obj, "subagent_id") ?: idField(obj, "child_session_id") ?: idField(obj, "delegation_id")
+        val rawStatus = stringOnly(obj, "status")
+            ?: if (name == "delegate.task_failed") "failed" else null
+        val kind = if (baseKind == SubagentUpdate.Kind.Progress &&
+            rawStatus != null && rawStatus.lowercase() in SUBAGENT_WAITING_STATUSES
+        ) {
+            SubagentUpdate.Kind.Waiting
+        } else {
+            baseKind
+        }
+        val goal = stringOnly(obj, "goal")
+        val preview = stringOnly(obj, "preview")
+        val displayName = if (baseKind == SubagentUpdate.Kind.Start) {
+            goal ?: preview ?: taskLabel(obj)
+        } else {
+            goal
+        }
+        return SubagentUpdate(
+            kind = kind,
+            childId = childId,
+            displayName = displayName,
+            model = stringOnly(obj, "model"),
+            phase = if (baseKind == SubagentUpdate.Kind.Progress) preview?.take(MAX_SUBAGENT_PHASE_CHARS) else null,
+            rawStatus = rawStatus,
+            failureReason = stringOnly(obj, "failure_reason"),
+        )
+    }
+
+    /** «Субагент N/M» по `task_index`/`task_count` (тот же формат, что у [subagentTrace]). */
+    private fun taskLabel(obj: Map<String, Any?>): String? {
+        val index = positiveInt(obj["task_index"])
+        val count = positiveInt(obj["task_count"])
+        return if (index != null && count != null && index <= count) "Субагент $index/$count" else null
     }
 
     /**
