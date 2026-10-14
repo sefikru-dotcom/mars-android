@@ -67,6 +67,7 @@ import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.ApprovalPayload
+import ru.mars.network.model.SubagentStatusUpdate
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.CompressionSummary
@@ -1809,6 +1810,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     onContextStatus(event)
                 }
             }
+        } else if (event is SubagentStatusUpdate) {
+            // Доска живых статусов субагентов (волна C, фича B): кадр проходит
+            // через редьюсер SubagentStatusPolicy в состоянии хода; изменилась
+            // доска — внеочередная перерисовка карточки родителя (дети читаются
+            // без открытия дочернего экрана).
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    if (uiState.applySubagentUpdate(event.update)) scheduleStreamRender()
+                }
+            }
         }
     }
 
@@ -1819,6 +1830,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * показывать нечего (`not_configured`/чужая сессия), гасит строку сразу.
      */
     private fun onContextStatus(update: ContextStatusUpdate) {
+        // Turn-start model attribution (волна C, фича A): открывающий кадр несёт
+        // фактическую модель хода — штамп на текущем пузыре важнее статус-строки и
+        // не зависит от неё (кадр «чужой» сессии штамп не ставит). Изменилась
+        // подпись — внеочередная перерисовка карточки через общий троттлинг стрима.
+        if (update.sessionId == null || update.sessionId == currentSessionId) {
+            if (uiState.stampTurnModel(update.model, update.modelProvider)) scheduleStreamRender()
+        }
         contextStatusJob?.cancel()
         val line = ContextStatusPresenter.statusLine(update, currentSessionId)
         if (line == null) {
@@ -2272,9 +2290,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         labelRow.addView(label)
 
         if (!isUser) {
-            modelSelection.buttonLabel()?.let { modelName ->
+            // Фактическая модель хода (волна C, фича A): приоритет — серверный штамп
+            // пузыря (открывающий кадр context_status, фоллбэк — effective_model из
+            // chat/start, подпись — TurnModelPolicy); локальный выбор пикера остаётся
+            // фоллбэком ТОЛЬКО до прихода серверного значения, чужая устаревшая
+            // модель в шапке ответа больше не висит.
+            val modelName = TurnModelPolicy.label(message.model, message.modelProvider)
+                ?.let { ChatParamRowPresenter.safeLabel(it) }
+                ?: modelSelection.buttonLabel()
+            modelName?.let { pillLabel ->
                 val modelPill = TextView(this).apply {
-                    text = modelName
+                    text = pillLabel
                     textSize = 9.5f
                     setTextColor(MarsTheme.ACCENT_TEXT)
                     background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
@@ -2585,6 +2611,75 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             }
             card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        }
+
+        // Доска живых статусов субагентов (волна C, фича B): дети текущего хода
+        // читаются ПРЯМО на родительской карточке — без открытия дочернего
+        // экрана. Активные — с пульсирующим индикатором, терминальные — со
+        // знаком результата (бейдж статуса); у Failed — причина, если сервер
+        // её прислал. Данные — редьюсер SubagentStatusPolicy в ChatUiState.
+        if (message.subagents.isNotEmpty()) {
+            val board = SubagentBoardPresenter.present(message.subagents)
+            if (board.visible) {
+                val boardBox = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = MarsTheme.toolCallCard(this@ChatActivity)
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                }
+                val boardHeader = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                if (board.activeCount > 0) {
+                    val liveDot = ImageView(this).apply {
+                        setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_status))
+                        imageTintList = ColorStateList.valueOf(MarsGradients.Status.RUNNING.badge.dot)
+                        contentDescription = null
+                    }
+                    boardHeader.addView(liveDot, LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(6) })
+                }
+                boardHeader.addView(TextView(this).apply {
+                    text = board.headerLabel
+                    textSize = 10.5f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                boardBox.addView(boardHeader)
+                board.rows.forEach { row ->
+                    val rowLine = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(0, dp(4), 0, 0)
+                    }
+                    val titleLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                    titleLine.addView(TextView(this@ChatActivity).apply {
+                        text = row.title
+                        textSize = 11.5f
+                        setTextColor(if (row.active) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
+                        isSingleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                    val statusBadge = TextView(this).apply {
+                        text = row.statusLabel
+                        textSize = 9.5f
+                        val gradientStatus = MarsGradients.Status.valueOf(row.badge.name)
+                        setTextColor(gradientStatus.badge.text)
+                        background = MarsTheme.statusBadge(this@ChatActivity, gradientStatus)
+                        setPadding(dp(8), dp(3), dp(8), dp(3))
+                    }
+                    titleLine.addView(statusBadge)
+                    rowLine.addView(titleLine)
+                    val details = mutableListOf<String>()
+                    row.detail?.let { details += it }
+                    row.failureReason?.let { details += "причина: $it" }
+                    if (details.isNotEmpty()) {
+                        rowLine.addView(TextView(this).apply {
+                            text = details.joinToString(" · ")
+                            textSize = 10f
+                            setTextColor(if (row.failureReason != null) MarsGradients.Status.ERROR.badge.text else MarsTheme.TEXT_MUTED)
+                            setPadding(0, dp(1), 0, 0)
+                        })
+                    }
+                    boardBox.addView(rowLine)
+                }
+                card.addView(boardBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
         }
 
         if (message.text.isNotBlank()) {
