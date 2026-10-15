@@ -262,6 +262,10 @@ class SessionOfflineCache(
         "parent_session_id" to item.parentSessionId,
         "model" to item.model,
         "model_provider" to item.modelProvider,
+        // Состояние pin/archive переживает обрыв связи: без этих полей офлайн-снимок
+        // показывал бы откреплённый диалог как закреплённый (и наоборот).
+        "pinned" to item.pinned,
+        "archived" to item.archived,
     )
 
     /** Строка без id не восстанавливается в [SessionItem] и отбрасывается. */
@@ -284,6 +288,8 @@ class SessionOfflineCache(
             parentSessionId = map.stringOrNull("parent_session_id"),
             model = map.stringOrNull("model"),
             modelProvider = map.stringOrNull("model_provider"),
+            pinned = map["pinned"] as? Boolean ?: false,
+            archived = map["archived"] as? Boolean ?: false,
         )
     }
 

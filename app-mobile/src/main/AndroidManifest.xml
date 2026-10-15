@@ -43,6 +43,18 @@
         <!-- Read-only доска канбана (GET /api/kanban/*) и мониторинг; запуск из левого бара (AppNavIntents.sectionIntent). -->
         <activity android:name=".KanbanActivity" />
         <activity android:name=".InsightsActivity" />
+        <!-- Экспорт диалога в Markdown: файл лежит в cacheDir/session-exports и
+             отдаётся наружу через FileProvider (content://), т.к. file:// URI
+             запрещён на targetSdk ≥ 24 (FileUriExposedException). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.sessionexports"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <activity
             android:name=".MainActivity"
             android:exported="true">

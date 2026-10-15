@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Пути, которые FileProvider отдаёт наружу для экспорта диалога: только подкаталог
+     exports/ в кэше приложения. Никакие другие файлы кэша/данных наружу не видны. -->
+<paths>
+    <cache-path
+        name="session-exports"
+        path="session-exports/" />
+</paths>

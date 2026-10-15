@@ -23,14 +23,20 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.export.SessionMarkdownExporter
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
+import ru.mars.network.repository.SessionExportOutcome
+import ru.mars.network.repository.SessionMutationOutcome
 import ru.mars.network.repository.SessionRepository
+import java.io.File
 
 /**
  * Уровень списка диалогов — корень раздела [AppDestination.CHAT] в живом
@@ -67,6 +73,17 @@ class ChatSessionsActivity : ComponentActivity() {
     /** Плоский список диалогов (сеть, при сбое — снимок офлайн-кэша). */
     private var sessions: List<SessionItem> = emptyList()
     private var filterQuery: String = ""
+
+    /**
+     * Серверные совпадения (`GET /api/sessions/search`) — ДОПОЛНЕНИЕ к локальному
+     * фильтру, а не его замена: локальный даёт мгновенный отзыв по загруженному
+     * списку, серверный находит диалоги вне него. Живут отдельной секцией под
+     * локальным деревом ([SessionSearchPolicy]).
+     */
+    private var remoteMatches: List<SessionItem> = emptyList()
+
+    /** Джоб отложенного серверного поиска: новый ввод отменяет предыдущий. */
+    private var searchJob: Job? = null
 
     /** Id раскрытых родительских карточек: дочерние сессии живут внутри родителя. */
     private val expandedParents: MutableSet<String> = mutableSetOf()
@@ -193,6 +210,43 @@ class ChatSessionsActivity : ComponentActivity() {
             // Пустой ответ (сбой сети или диалогов действительно нет) сверяется с
             // офлайн-кэшем: на сбое уровень показывает последний сохранённый снимок.
             sessions = withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) }
+            // Обновлённый список может уже содержать серверные совпадения —
+            // секция серверного поиска пересчитывается от нового списка.
+            if (remoteMatches.isNotEmpty()) remoteMatches = emptyList()
+            renderSessionList()
+        }
+    }
+
+    // --- Глобальный поиск (A2) --------------------------------------------------------------------
+
+    /**
+     * Отложенный серверный поиск по вводу в строке фильтра.
+     *
+     * Локальный фильтр ([SessionTreePolicy]) отрабатывает синхронно в том же
+     * `onTextChanged` — ввод остаётся мгновенным. Серверный запрос уходит с
+     * задержкой [SEARCH_DEBOUNCE_MS], чтобы не дёргать `GET /api/sessions/search`
+     * на каждую букву; новый ввод отменяет предыдущий Джоб, поэтому ответ
+     * устаревшего запроса на экран не попадает.
+     */
+    private fun scheduleServerSearch(query: String) {
+        searchJob?.cancel()
+        val q = query.trim()
+        if (!SessionSearchPolicy.shouldQueryServer(q)) {
+            // Запрос короче порога: серверная секция гаснет, локальный фильтр живёт.
+            if (remoteMatches.isNotEmpty()) {
+                remoteMatches = emptyList()
+                renderSessionList()
+            }
+            return
+        }
+        val c = store.read() ?: return
+        searchJob = lifecycleScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            val found = SessionRepository().searchSessionsGlobal(ChatActivity.BASE_URL, c, q)
+            // Пока запрос летел, пользователь мог набрать другое — тогда ответ
+            // относится к прошлому запросу и на экран не попадает.
+            if (query.trim() != q) return@launch
+            remoteMatches = found
             renderSessionList()
         }
     }
@@ -211,7 +265,11 @@ class ChatSessionsActivity : ComponentActivity() {
             expandedParents = expandedParents,
         )
         val filtered = SessionTreePolicy.visibleRows(tree)
-        if (filtered.isEmpty()) {
+        // Локальное дерево непусто — значит есть что показать; пусто — но серверная
+        // секция может ещё содержать совпадения (см. ниже), поэтому «Ничего не
+        // найдено» показывается только когда пусто И там.
+        val serverOnly = SessionSearchPolicy.serverOnly(remoteMatches, filtered.map { it.session.id }.toSet())
+        if (filtered.isEmpty() && serverOnly.isEmpty()) {
             sessionList.addView(TextView(this).apply {
                 text = if (filterQuery.isNotBlank()) {
                     "Ничего не найдено"
@@ -302,6 +360,22 @@ class ChatSessionsActivity : ComponentActivity() {
                     setOnClickListener { deleteSession(session) }
                 }
                 row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+
+                // Контекстное меню карточки: pin / archive / export (A3). Состав
+                // меню — чистая SessionManagementPolicy; подписи зависят от
+                // текущего состояния строки («Закрепить» / «Открепить»).
+                val moreBtn = MarsTheme.circleIconButton(
+                    this,
+                    R.drawable.ic_more_vert,
+                    "Действия с диалогом",
+                    bg = Color.TRANSPARENT,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 32,
+                    strokeColor = 0
+                ).apply {
+                    setOnClickListener { showSessionMenu(session) }
+                }
+                row.addView(moreBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
             }
             card.addView(row)
 
@@ -350,6 +424,23 @@ class ChatSessionsActivity : ComponentActivity() {
                 })
             }
 
+            // Pin/archive state from the server row (A3): the flags are server-owned,
+            // so the card states them instead of inferring anything locally.
+            if (session.pinned || session.archived) {
+                card.addView(TextView(this).apply {
+                    text = buildString {
+                        if (session.pinned) append("Закреплён")
+                        if (session.pinned && session.archived) append(" · ")
+                        if (session.archived) append(SessionManagementPolicy.archivedNote(session))
+                    }
+                    textSize = 11f
+                    setTextColor(if (session.pinned) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(40), 0)
+                })
+            }
+
             // Active-turn/attention badge: which sessions are live or waiting for the user.
             val turn = session.activeTurn
             val turnAttention = turn.attention
@@ -371,6 +462,249 @@ class ChatSessionsActivity : ComponentActivity() {
                 })
             }
             sessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        }
+
+        // Секция серверного поиска (A2): совпадения вне локального списка —
+        // другие профили, глубокая история, попадание по содержимому сообщений.
+        // Пустая — не рисуется вовсе, поэтому обычный список ничем не затронут.
+        if (serverOnly.isNotEmpty()) {
+            sessionList.addView(TextView(this).apply {
+                text = SessionSearchPolicy.sectionLabel(serverOnly.size)
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                setPadding(dp(4), dp(10), dp(4), dp(4))
+            })
+            serverOnly.forEach { session -> sessionList.addView(remoteCard(session)) }
+        }
+    }
+
+    /**
+     * Карточка серверного совпадения — та же семантика клика, что у локальной
+     * строки ([openSession]), но без узла дерева: серверные результаты не
+     * раскладываются по родителям (их lineage вне локального списка).
+     */
+    private fun remoteCard(session: SessionItem): View {
+        val note = SessionSearchPolicy.matchNote(session, filterQuery)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.card(
+                this@ChatSessionsActivity,
+                MarsTheme.SURFACE,
+                radiusDp = 12,
+                strokeColor = MarsTheme.BORDER_SUBTLE
+            )
+            setPadding(dp(12), dp(8), dp(8), dp(8))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { openSession(session.id) }
+        }
+        card.addView(TextView(this).apply {
+            text = session.title ?: "Новый диалог"
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        if (note != null) {
+            card.addView(TextView(this).apply {
+                text = note
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+                setPadding(dp(4), 0, dp(40), 0)
+            })
+        }
+        val meta = SessionMetaPolicy.metaLine(
+            updatedAtMillis = MessageTimePolicy.parseServerTimestamp(session.updatedAt ?: session.createdAt),
+            messageCount = session.messageCount,
+            nowMillis = System.currentTimeMillis(),
+        )
+        if (meta != null) {
+            card.addView(TextView(this).apply {
+                text = meta
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+                setPadding(dp(4), 0, dp(40), dp(2))
+            })
+        }
+        return card
+    }
+
+    /**
+     * Контекстное меню карточки диалога (A3): pin / archive / export.
+     *
+     * Состав меню — чистая [SessionManagementPolicy.menu]; подписи берутся оттуда
+     * же, чтобы состояние строки читалось однозначно («Закрепить» против
+     * «Открепить»). Пункт «поделиться» вынесен в отдельную кнопку, которая честно
+     * сообщает о недоступности: публичный share-эндпоинт сервера на device-токене
+     * отвечает 401, а обходить авторизацию клиент не должен. Вместо него экспорт
+     * уходит в системный share-sheet Android ([exportSession]) и работает офлайн.
+     */
+    private fun showSessionMenu(session: SessionItem) {
+        val kinds = SessionManagementPolicy.menu(session)
+        if (kinds.isEmpty()) return
+        val labels = kinds.map { kind ->
+            when (kind) {
+                SessionActionKind.PIN -> SessionManagementPolicy.pinLabel(session)
+                SessionActionKind.ARCHIVE -> SessionManagementPolicy.archiveLabel(session)
+                SessionActionKind.EXPORT -> "Экспорт в Markdown"
+            }
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(session.title?.takeIf { it.isNotBlank() } ?: "Диалог")
+            .setItems(labels.toTypedArray()) { _, index ->
+                when (kinds[index]) {
+                    SessionActionKind.PIN -> togglePinned(session)
+                    SessionActionKind.ARCHIVE -> toggleArchived(session)
+                    SessionActionKind.EXPORT -> exportSession(session)
+                }
+            }
+            .setNeutralButton("Поделиться (недоступно)") { _, _ ->
+                // Честный отказ вместо обхода 401: share-ссылка сервера требует
+                // session-cookie WebUI, на device-токене её нет.
+                android.widget.Toast.makeText(
+                    this,
+                    SessionManagementPolicy.SHARE_UNAVAILABLE_NOTE,
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /**
+     * Pin/Unpin: `POST /api/session/pin`. Строка обновляется по ОТВЕТУ сервера
+     * ([SessionMutationOutcome.Success] несёт подтверждённую строку), а не
+     * оптимистично: у сервера есть квота закреплённых, и показать закрепление,
+     * которое сервер не принял, значило бы соврать в UI.
+     */
+    private fun togglePinned(session: SessionItem) {
+        mutateSession(session, pinned = SessionManagementPolicy.nextPinned(session)) { confirmed ->
+            loadSessions()
+            android.widget.Toast.makeText(
+                this,
+                if (confirmed.pinned) "Диалог закреплён" else "Диалог откреплён",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    /**
+     * Archive/Unarchive: `POST /api/session/archive`. Архивная строка уходит из
+     * активного списка сервера только после подтверждения — поэтому список
+     * перезагружается, а не фильтруется локально.
+     */
+    private fun toggleArchived(session: SessionItem) {
+        mutateSession(session, archived = SessionManagementPolicy.nextArchived(session)) { confirmed ->
+            loadSessions()
+            android.widget.Toast.makeText(
+                this,
+                if (confirmed.archived) "Диалог в архиве" else "Диалог возвращён из архива",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    /** Общий путь pin/archive: одна мутация на сервере → перерисовка списка. */
+    private fun mutateSession(
+        session: SessionItem,
+        pinned: Boolean? = null,
+        archived: Boolean? = null,
+        onSuccess: (SessionItem) -> Unit,
+    ) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val repo = SessionRepository()
+            val outcome = when {
+                pinned != null -> repo.setSessionPinned(ChatActivity.BASE_URL, c, session.id, pinned)
+                archived != null -> repo.setSessionArchived(ChatActivity.BASE_URL, c, session.id, archived)
+                else -> null
+            } ?: return@launch
+            when (outcome) {
+                is SessionMutationOutcome.Success -> {
+                    // Сервер не всегда возвращает строку в ответе: тогда состояние
+                    // берём из локального списка с применённым флагом.
+                    val confirmed = outcome.session
+                        ?: session.copy(pinned = pinned ?: session.pinned, archived = archived ?: session.archived)
+                    sessions = sessions.map { if (it.id == confirmed.id) confirmed else it }
+                    withContext(Dispatchers.IO) { offlineCache.saveSessions(sessions) }
+                    onSuccess(confirmed)
+                }
+                is SessionMutationOutcome.Failure ->
+                    android.widget.Toast.makeText(this@ChatSessionsActivity, outcome.message, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * Экспорт диалога в Markdown (A3).
+     *
+     * Источник — `GET /api/session/export?session_id=` (полный JSON сессии), который
+     * разбирается в тот же [ru.mars.network.model.SessionDetail], что и детальный
+     * эндпоинт; Markdown пишет уже готовый
+     * [ru.mars.network.export.SessionMarkdownExporter] — своей разметки клиент не
+     * изобретает. Файл кладётся в `cacheDir/session-exports` и уходит наружу через
+     * FileProvider (`content://`), после чего открывается системный share-sheet:
+     * так экспорт доступен офлайн и не требует серверного share-токена.
+     */
+    private fun exportSession(session: SessionItem) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val outcome = SessionRepository().exportSession(ChatActivity.BASE_URL, c, session.id)
+            when (outcome) {
+                is SessionExportOutcome.Failure ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionExportSharePolicy.failureMessage(outcome.message),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                is SessionExportOutcome.Success -> {
+                    val markdown = SessionMarkdownExporter().export(outcome.detail)
+                    val fileName = SessionManagementPolicy.exportFileName(session)
+                    // Запись файла — на IO-диспетчере: транскрипт может быть большим.
+                    val uri = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val dir = File(cacheDir, SessionExportSharePolicy.EXPORT_DIR).apply { mkdirs() }
+                            val file = File(dir, fileName).apply { writeText(markdown) }
+                            androidx.core.content.FileProvider.getUriForFile(
+                                this@ChatSessionsActivity,
+                                SessionExportSharePolicy.authority(packageName),
+                                file
+                            )
+                        }.getOrNull()
+                    }
+                    if (uri == null) {
+                        android.widget.Toast.makeText(
+                            this@ChatSessionsActivity,
+                            SessionExportSharePolicy.failureMessage("не удалось сохранить файл"),
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                        return@launch
+                    }
+                    val share = Intent(Intent.ACTION_SEND).apply {
+                        type = SessionExportSharePolicy.MIME_TYPE
+                        putExtra(Intent.EXTRA_SUBJECT, SessionExportSharePolicy.subject(session))
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    val chooser = Intent.createChooser(share, SessionExportSharePolicy.CHOOSER_TITLE)
+                    runCatching {
+                        startActivity(chooser)
+                        android.widget.Toast.makeText(
+                            this@ChatSessionsActivity,
+                            SessionExportSharePolicy.successMessage(),
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }.onFailure {
+                        android.widget.Toast.makeText(
+                            this@ChatSessionsActivity,
+                            "Некому открыть файл для отправки",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
         }
     }
 
@@ -518,6 +852,9 @@ class ChatSessionsActivity : ComponentActivity() {
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     filterQuery = s?.toString().orEmpty()
                     renderSessionList()
+                    // Локальный фильтр уже отработал строкой выше — серверный поиск
+                    // идёт следом, отложенно (A2), и не блокирует ввод.
+                    scheduleServerSearch(filterQuery)
                 }
 
                 override fun afterTextChanged(s: Editable?) = Unit
@@ -583,4 +920,13 @@ class ChatSessionsActivity : ComponentActivity() {
     }
 
     private fun dp(value: Int) = MarsTheme.dp(this, value)
+
+    private companion object {
+        /**
+         * Задержка серверного поиска. Ввод обрабатывается немедленно локальным
+         * фильтром, а `GET /api/sessions/search` уходит только после паузы — иначе
+         * набор слова порождал бы запрос на каждую букву.
+         */
+        const val SEARCH_DEBOUNCE_MS = 300L
+    }
 }
