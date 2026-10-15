@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 import ru.mars.network.model.AssigneeStat
 import ru.mars.network.model.BoardSummary
 import ru.mars.network.model.KanbanBoard
+import ru.mars.network.model.KanbanConfig
 import ru.mars.network.model.KanbanStats
 import ru.mars.network.model.KanbanTaskDetail
 import ru.mars.network.repository.KanbanStreamFrame
@@ -26,7 +27,9 @@ import ru.mars.network.repository.KanbanStreamFrame
  *   [isOffline]); если уже был кэш колонок — ERROR со stale-колонками и
  *   notice «нет сети» (offline-safe, экран не пустует);
  * - пустая доска (changed:true, нет колонок) -> [KanbanPhase.EMPTY];
- * - успех -> [KanbanPhase.READY] с колонками в серверном порядке.
+ * - успех -> [KanbanPhase.READY]; порядок и скелет колонок — по
+ *   `GET /api/kanban/config` (порт [fetchConfig], best-effort), без него —
+ *   серверный порядок.
  *
  * Polling-конверт (docs/API-CONTRACT.md «Канбан»): ответ с `changed:false`
  * НЕ содержит колонок — рендерить его как пустую доску нельзя. [refresh]
@@ -40,7 +43,13 @@ import ru.mars.network.repository.KanbanStreamFrame
  */
 class KanbanPresenter(
     private val hasCredential: () -> Boolean,
-    private val fetchBoard: suspend (since: Long?, board: String?, assignee: String?) -> KanbanBoard?,
+    /**
+     * `GET /api/kanban/board`. [includeArchived] — серверный дефолт фильтра
+     * архива из конфига (`include_archived_by_default`, паритет с WebUI):
+     * true добавляет к запросу `include_archived=1`, и бридж дописывает lane
+     * `archived` к колонкам доски.
+     */
+    private val fetchBoard: suspend (since: Long?, board: String?, assignee: String?, includeArchived: Boolean) -> KanbanBoard?,
     private val fetchStats: suspend () -> KanbanStats?,
     private val fetchTaskDetail: suspend (taskId: String) -> KanbanTaskDetail?,
     private val isOffline: () -> Boolean = { false },
@@ -55,6 +64,13 @@ class KanbanPresenter(
      * только когда сама доска их не перечислила; best-effort, как и [fetchStats].
      */
     private val fetchAssignees: suspend () -> List<AssigneeStat> = { emptyList() },
+    /**
+     * `GET /api/kanban/config` — конфигурация отображения доски: канонический
+     * порядок дорожек (`columns`) и серверный дефолт `include_archived_by_default`.
+     * Best-effort, как [fetchStats]: отказ (старый бридж без эндпоинта, сеть)
+     * оставляет доску в серверном порядке и без lane архива — экран не ломается.
+     */
+    private val fetchConfig: suspend (board: String?) -> KanbanConfig? = { _ -> null },
     /**
      * Живой поток событий канбана. Каждое событие — повод перечитать доску через
      * [refresh] (события несут только идентификаторы, не содержимое карточек),
@@ -76,6 +92,9 @@ class KanbanPresenter(
     private var cachedStats: KanbanStats? = null
     private var cachedBoards: List<BoardSummary> = emptyList()
     private var cachedAssignees: List<AssigneeStat> = emptyList()
+
+    /** Конфиг доски `/api/kanban/config`; null — бридж без конфига или отказ (best-effort). */
+    private var cachedConfig: KanbanConfig? = null
 
     /**
      * Выбранная доска. null = «как решит сервер»: параметр `board` в запрос не
@@ -126,7 +145,8 @@ class KanbanPresenter(
             )
         )
         loadBoards()
-        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee) }.getOrNull())
+        loadConfig(selectedBoard)
+        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee, includeArchived()) }.getOrNull())
         // Stats — best-effort: отдельный try, отказ не меняет фазу доски.
         val stats = runCatching { fetchStats() }.getOrNull()
         if (stats != null) {
@@ -139,6 +159,25 @@ class KanbanPresenter(
         // доска уже могла перечислить своих, и тогда внешний список не нужен.
         ensureAssignees()
     }
+
+    /**
+     * Конфиг доски `GET /api/kanban/config` — best-effort, как [loadBoards].
+     * Перечитывается на полной загрузке и на переключении доски/исполнителя
+     * (конфиг board-scoped); polling-[refresh] пользуется кэшем — `columns` и
+     * `include_archived_by_default` меняются только правкой серверной конфигурации,
+     * для которой достаточно ручного обновления. Отказ сохраняет предыдущее
+     * значение: разовый сбой запроса не переставляет колонки и не гасит архив.
+     */
+    private suspend fun loadConfig(board: String?) {
+        val config = runCatching { fetchConfig(board) }.getOrNull() ?: return
+        cachedConfig = config
+    }
+
+    /** Просить ли у доски архивные задачи: серверный дефолт фильтра из конфига. */
+    private fun includeArchived(): Boolean = cachedConfig?.includeArchivedByDefault == true
+
+    /** Канонический порядок дорожек из конфига; без конфига — пустой (серверный порядок). */
+    private fun configColumns(): List<String> = cachedConfig?.columns.orEmpty()
 
     /**
      * Переключатель досок: `GET /api/kanban/boards`. Best-effort — пустой ответ
@@ -190,7 +229,7 @@ class KanbanPresenter(
         if (!hasCredential()) return
         if (state.phase == KanbanPhase.LOADING) return // load() уже в полёте
         val since = state.latestEventId.takeIf { it > 0L }
-        val board = runCatching { fetchBoard(since, selectedBoard, selectedAssignee) }.getOrNull()
+        val board = runCatching { fetchBoard(since, selectedBoard, selectedAssignee, includeArchived()) }.getOrNull()
         if (board == null) {
             publish(staleOrErrorState())
             return
@@ -252,7 +291,8 @@ class KanbanPresenter(
 
     /** Перечитать доску заново, не трогая список досок (он не зависит от фильтра). */
     private suspend fun reload() {
-        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee) }.getOrNull())
+        loadConfig(selectedBoard)
+        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee, includeArchived()) }.getOrNull())
     }
 
     /**
@@ -325,7 +365,7 @@ class KanbanPresenter(
             return
         }
         cachedBoard = board
-        val columns = KanbanPolicy.columnsFor(board)
+        val columns = KanbanPolicy.columnsFor(board, configColumns())
         val taskCount = columns.sumOf { it.count }
         val boardOwnAssignees = board.assignees.isNotEmpty()
         val assignees = KanbanPolicy.assigneeChips(
@@ -397,7 +437,7 @@ class KanbanPresenter(
      */
     private fun staleOrErrorState(): KanbanUiState {
         val offline = isOffline()
-        val staleColumns = cachedBoard?.let { KanbanPolicy.columnsFor(it) } ?: emptyList()
+        val staleColumns = cachedBoard?.let { KanbanPolicy.columnsFor(it, configColumns()) } ?: emptyList()
         if (staleColumns.isEmpty()) return initialFailureState()
         return KanbanUiState(
             phase = KanbanPhase.ERROR,

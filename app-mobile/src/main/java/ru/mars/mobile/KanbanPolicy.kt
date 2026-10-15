@@ -210,6 +210,12 @@ object KanbanPolicy {
     const val LIVE_BADGE = "в эфире"
     const val MSG_LIVE_LOST = "Поток событий прерван"
 
+    /** Заголовки блоков read-only диалога задачи (связи и хвост ленты событий). */
+    const val LINKS_LABEL = "Связи"
+    const val LINK_PARENTS_LABEL = "Родители"
+    const val LINK_CHILDREN_LABEL = "Подзадачи"
+    const val EVENTS_LABEL = "Последние события"
+
     /** «12 задач» в плашке доски/исполнителя; пустой счётчик не рисуем. */
     fun taskCountLabel(count: Int): String? = when {
         count <= 0 -> null
@@ -357,12 +363,27 @@ object KanbanPolicy {
     )
 
     /**
-     * Колонки доски в серверном порядке; пустые колонки НЕ прячем (структура
-     * доски — тоже информация). changed:false сюда не попадает: короткий
-     * polling-конверт отсеивает [KanbanPresenter] до построения UI.
+     * Колонки доски. Без конфига ([configColumns] пуст) — серверный порядок; пустые
+     * колонки НЕ прячем (структура доски — тоже информация).
+     *
+     * С конфигом `GET /api/kanban/config` (паритет с WebUI, `panels.js`):
+     * - `columns` конфига — канонический порядок дорожек: колонки доски
+     *   выстраиваются по нему (сравнение регистронезависимое, имена lanes на
+     *   сервере lowercase);
+     * - колонки, которых конфиг не знает (например lane `archived` при
+     *   `include_archived=1`), сохраняются в конце серверным порядком — задачи
+     *   не теряются;
+     * - дорожка из конфига, отсутствующая в board-конверте, НЕ выдумывается:
+     *   бридж всегда отдаёт полный набор lanes, а пустая колонка-призрак
+     *   означала бы рассинхрон версий;
+     * - доска БЕЗ колонок вообще получает пустой скелет из имён конфига —
+     *   экран показывает настроенную структуру вместо «нет колонок».
+     *
+     * changed:false сюда не попадает: короткий polling-конверт отсеивает
+     * [KanbanPresenter] до построения UI.
      */
-    fun columnsFor(board: KanbanBoard): List<KanbanColumnUi> =
-        board.columns.map { column ->
+    fun columnsFor(board: KanbanBoard, configColumns: List<String> = emptyList()): List<KanbanColumnUi> {
+        val ui = board.columns.map { column ->
             val cards = column.tasks.map { cardFor(it) }
             KanbanColumnUi(
                 name = column.name.ifBlank { "(колонка)" },
@@ -370,6 +391,14 @@ object KanbanPolicy {
                 cards = cards,
             )
         }
+        val order = configColumns.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        if (order.isEmpty()) return ui
+        if (ui.isEmpty()) return order.map { KanbanColumnUi(name = it, count = 0, cards = emptyList()) }
+        val orderLower = order.map { it.lowercase() }
+        val known = orderLower.mapNotNull { name -> ui.firstOrNull { it.name.lowercase() == name } }
+        val extras = ui.filterNot { column -> column.name.lowercase() in orderLower }
+        return known + extras
+    }
 
     /**
      * Чипы статистики: канонические статусы первыми (даже с нулём — структура

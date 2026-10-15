@@ -141,6 +141,44 @@ class KanbanPolicyTest {
     }
 
     @Test
+    fun `config columns define the canonical lane order and unknown lanes go last`() {
+        val board = KanbanBoard(
+            columns = listOf(
+                KanbanColumn(name = "new", tasks = listOf(task(id = "k-1"))),
+                KanbanColumn(name = "running", tasks = listOf(task(id = "k-2"))),
+                KanbanColumn(name = "done", tasks = emptyList()),
+                KanbanColumn(name = "archived", tasks = listOf(task(id = "k-9"))),
+            )
+        )
+        val columns = KanbanPolicy.columnsFor(board, listOf("done", "new", "waiting"))
+        // Порядок по конфигу; отсутствующая в доске `waiting` не выдумывается;
+        // неизвестные конфигу `running`/`archived` — хвостом в серверном порядке.
+        assertEquals(listOf("done", "new", "running", "archived"), columns.map { it.name })
+        assertEquals(listOf(0, 1, 1, 1), columns.map { it.count })
+    }
+
+    @Test
+    fun `config lane matching is case and whitespace tolerant and dedupes names`() {
+        val board = KanbanBoard(
+            columns = listOf(
+                KanbanColumn(name = "Ready", tasks = listOf(task(id = "k-1"))),
+                KanbanColumn(name = "done", tasks = emptyList()),
+            )
+        )
+        val columns = KanbanPolicy.columnsFor(board, listOf(" DONE ", "done", "ready", "  "))
+        assertEquals(listOf("done", "Ready"), columns.map { it.name })
+    }
+
+    @Test
+    fun `a board without columns gets an empty skeleton from the config lanes`() {
+        val columns = KanbanPolicy.columnsFor(KanbanBoard(columns = emptyList()), listOf("new", "done"))
+        assertEquals(listOf("new", "done"), columns.map { it.name })
+        assertTrue(columns.all { it.count == 0 && it.cards.isEmpty() })
+        // Без конфига пустая доска так и остаётся пустой — фазу EMPTY решает презентер.
+        assertTrue(KanbanPolicy.columnsFor(KanbanBoard(columns = emptyList())).isEmpty())
+    }
+
+    @Test
     fun `stats chips put canonical statuses first then unknown alphabetically`() {
         val stats = KanbanStats(
             byStatus = linkedMapOf("weird" to 1, "done" to 10, "ready" to 3, "running" to 2, "blocked" to 1),

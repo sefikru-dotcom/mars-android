@@ -12,6 +12,7 @@ import ru.mars.network.model.AssigneeStat
 import ru.mars.network.model.BoardSummary
 import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanColumn
+import ru.mars.network.model.KanbanConfig
 import ru.mars.network.model.KanbanStats
 import ru.mars.network.model.KanbanTask
 import ru.mars.network.model.KanbanTaskDetail
@@ -45,14 +46,33 @@ class KanbanPresenterTest {
         val sinceCalls = mutableListOf<Long?>()
         val boardCalls = mutableListOf<String?>()
         val assigneeCalls = mutableListOf<String?>()
-        suspend fun next(since: Long?, board: String? = null, assignee: String? = null): KanbanBoard? {
+        val includeArchivedCalls = mutableListOf<Boolean>()
+        suspend fun next(
+            since: Long?,
+            board: String? = null,
+            assignee: String? = null,
+            includeArchived: Boolean = false,
+        ): KanbanBoard? {
             sinceCalls += since
             boardCalls += board
             assigneeCalls += assignee
+            includeArchivedCalls += includeArchived
             if (responses.isEmpty()) return null
             val head = responses.first()
             if (responses.size > 1) responses = responses.drop(1)
             return head
+        }
+    }
+
+    /** Записывающий fake конфига `/api/kanban/config`: фиксированный ответ + история board-аргументов. */
+    private class ConfigFake(var response: KanbanConfig?) {
+        val boardCalls = mutableListOf<String?>()
+        var calls = 0
+            private set
+        suspend fun next(board: String?): KanbanConfig? {
+            calls += 1
+            boardCalls += board
+            return response
         }
     }
 
@@ -65,15 +85,19 @@ class KanbanPresenterTest {
         boards: List<BoardSummary> = emptyList(),
         assignees: List<AssigneeStat> = emptyList(),
         frames: List<KanbanStreamFrame> = emptyList(),
+        configFake: ConfigFake = ConfigFake(null),
     ) = KanbanPresenter(
         hasCredential = { hasCredential },
-        fetchBoard = { since, board, assignee -> boardFake.next(since, board, assignee) },
+        fetchBoard = { since, board, assignee, includeArchived ->
+            boardFake.next(since, board, assignee, includeArchived)
+        },
         fetchStats = { statsResponse },
         fetchTaskDetail = { detailResponse },
         isOffline = { offline },
         nowEpochSeconds = { 2000L },
         fetchBoards = { boards },
         fetchAssignees = { assignees },
+        fetchConfig = { board -> configFake.next(board) },
         events = { _, _ -> frames.asFlow() },
     )
 
@@ -218,6 +242,86 @@ class KanbanPresenterTest {
         val p = presenter(BoardFake(listOf(board())), assignees = listOf(twoAssignees.first()))
         p.load()
         assertTrue(p.state.assignees.isEmpty())
+        Unit
+    }
+
+    // ── Конфиг доски: GET /api/kanban/config ──
+
+    @Test
+    fun `include_archived_by_default flows into every board request`() = runBlocking {
+        val fake = BoardFake(listOf(board(), board()))
+        val config = ConfigFake(KanbanConfig(includeArchivedByDefault = true))
+        val p = presenter(fake, configFake = config)
+        p.load()
+        assertEquals(listOf(true), fake.includeArchivedCalls)
+        // Polling-refresh идёт с тем же флагом из кэша конфига.
+        p.refresh()
+        assertEquals(listOf(true, true), fake.includeArchivedCalls)
+        Unit
+    }
+
+    @Test
+    fun `without config the board is requested unarchived and stays in server order`() = runBlocking {
+        val fake = BoardFake(listOf(board()))
+        val p = presenter(fake) // ConfigFake(null) — старый бридж или отказ
+        p.load()
+        assertEquals(listOf(false), fake.includeArchivedCalls)
+        assertEquals(listOf("Ready"), p.state.columns.map { it.name })
+        assertEquals(KanbanPhase.READY, p.state.phase)
+        Unit
+    }
+
+    @Test
+    fun `polling refresh reuses the cached config without refetching it`() = runBlocking {
+        val fake = BoardFake(listOf(board(), board()))
+        val config = ConfigFake(KanbanConfig(columns = listOf("ready")))
+        val p = presenter(fake, configFake = config)
+        p.load()
+        assertEquals(1, config.calls)
+        p.refresh()
+        assertEquals("Конфиг перечитывается только полной загрузкой/переключением", 1, config.calls)
+        Unit
+    }
+
+    @Test
+    fun `board switch refetches the config for the new board`() = runBlocking {
+        val config = ConfigFake(KanbanConfig(columns = listOf("ready")))
+        val p = presenter(BoardFake(listOf(board(), board())), boards = twoBoards, configFake = config)
+        p.load()
+        p.selectBoard("work")
+        assertEquals(listOf(null, "work"), config.boardCalls)
+        Unit
+    }
+
+    @Test
+    fun `config columns reorder board columns and unknown lanes go last`() = runBlocking {
+        val lanes = KanbanBoard(
+            columns = listOf(
+                KanbanColumn("new", tasks = listOf(task("k-1"))),
+                KanbanColumn("running", tasks = listOf(task("k-2"))),
+                KanbanColumn("done", tasks = listOf(task("k-3"))),
+                KanbanColumn("archived", tasks = listOf(task("k-4"))),
+            )
+        )
+        val config = ConfigFake(KanbanConfig(columns = listOf("done", "new")))
+        val p = presenter(BoardFake(listOf(lanes)), configFake = config)
+        p.load()
+        // Канонический порядок конфига; неизвестные ему lanes — хвостом в серверном порядке.
+        assertEquals(listOf("done", "new", "running", "archived"), p.state.columns.map { it.name })
+        assertEquals(4, p.state.taskCount)
+        Unit
+    }
+
+    @Test
+    fun `a board without columns gets the configured skeleton instead of EMPTY`() = runBlocking {
+        // Паритет с WebUI: пустой board-конверт + config.columns → пустые lane-колонки.
+        val config = ConfigFake(KanbanConfig(columns = listOf("new", "waiting", "done")))
+        val p = presenter(BoardFake(listOf(board(columns = emptyList()))), configFake = config)
+        p.load()
+        assertEquals(KanbanPhase.READY, p.state.phase)
+        assertEquals(listOf("new", "waiting", "done"), p.state.columns.map { it.name })
+        assertTrue(p.state.columns.all { it.count == 0 && it.cards.isEmpty() })
+        assertEquals(0, p.state.taskCount)
         Unit
     }
 
