@@ -1,6 +1,9 @@
 package ru.mars.network.repository
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -43,8 +46,13 @@ class KanbanRepositoryTest {
 
     private fun baseUrl() = server.url("/").toString()
 
-    private fun enqueue(code: Int = 200, body: String) {
-        server.enqueue(MockResponse().setResponseCode(code).setBody(body))
+    private fun enqueue(code: Int = 200, body: String, contentType: String = "application/json") {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(code)
+                .addHeader("Content-Type", contentType)
+                .setBody(body)
+        )
     }
 
     // ── GET /api/kanban/board ──
@@ -372,6 +380,122 @@ class KanbanRepositoryTest {
             KanbanDispatchResult.Failed("kanban unavailable: boom"),
             repository.dispatch(baseUrl(), credential),
         )
+        Unit
+    }
+
+    // ── GET /api/kanban/boards ──
+
+    @Test
+    fun `getBoards maps the fixture payload and the current board`() = runBlocking {
+        enqueue(body = """
+            {"boards":[{"slug":"default","name":"Default","description":"","icon":"","color":"",
+            "archived":false,"is_current":true,"counts":{"done":2},"total":2}],
+            "current":"default","read_only":false}
+        """.trimIndent())
+        val result = repository.getBoards(baseUrl(), credential)
+        val boards = (result as KanbanBoardsResult.Boards).boards
+        assertEquals("default", boards.current)
+        assertFalse(boards.readOnly)
+        assertEquals(1, boards.boards.size)
+        val row = boards.boards.single()
+        assertEquals("default", row.slug)
+        assertEquals("Default", row.name)
+        assertTrue(row.isCurrent)
+        assertEquals(2, row.counts["done"])
+        assertEquals(2, row.total)
+        Unit
+    }
+
+    @Test
+    fun `getBoards drops rows without a slug and defaults a blank name to the slug`() = runBlocking {
+        enqueue(body = """
+            {"boards":[{"name":"no slug"},{"slug":"work","name":""}],"current":null,"read_only":true}
+        """.trimIndent())
+        val boards = (repository.getBoards(baseUrl(), credential) as KanbanBoardsResult.Boards).boards
+        assertEquals(1, boards.boards.size)
+        // Blank name falls back to the slug — an unlabelled switch target is unusable in UI.
+        assertEquals("work", boards.boards.single().name)
+        assertTrue(boards.readOnly)
+        assertEquals(null, boards.current)
+        Unit
+    }
+
+    @Test
+    fun `getBoards surfaces a bridge error as Failed`() = runBlocking {
+        enqueue(code = 503, body = """{"error":"kanban unavailable: no hermes"}""")
+        val result = repository.getBoards(baseUrl(), credential)
+        assertEquals(
+            KanbanBoardsResult.Failed("kanban unavailable: no hermes"),
+            result,
+        )
+        Unit
+    }
+
+    // ── GET /api/kanban/assignees ──
+
+    @Test
+    fun `getAssignees maps the fixture payload and drops nameless rows`() = runBlocking {
+        enqueue(body = """
+            {"assignees":[{"name":"default","on_disk":true,"counts":{"done":2}},
+            {"name":"office","on_disk":true,"counts":{}},
+            {"on_disk":true},{"name":"  ","on_disk":false}]}
+        """.trimIndent())
+        val result = repository.getAssignees(baseUrl(), credential)
+        val assignees = (result as KanbanAssigneesResult.Assignees).assignees.assignees
+        assertEquals(listOf("default", "office"), assignees.map { it.name })
+        assertEquals(2, assignees.first().counts["done"])
+        assertTrue(assignees.first().onDisk)
+        Unit
+    }
+
+    @Test
+    fun `getAssignees hits the whitelisted path with bearer auth`() = runBlocking {
+        enqueue(body = """{"assignees":[]}""")
+        repository.getAssignees(baseUrl(), credential)
+        val request = server.takeRequest()
+        assertEquals("/api/kanban/assignees", request.path)
+        assertEquals("Bearer native-token", request.getHeader("Authorization"))
+        Unit
+    }
+
+    // ── GET /api/kanban/events/stream ──
+
+    @Test
+    fun `streamEvents yields hello then an events batch carrying the resume cursor`() = runBlocking {
+        enqueue(
+            body = "event: hello\ndata: {\"cursor\":5,\"board\":\"default\"}\n\n" +
+                "id: 9\nevent: events\ndata: {\"events\":[{\"id\":9,\"task_id\":\"t1\",\"kind\":\"updated\"}],\"cursor\":9}\n\n",
+            contentType = "text/event-stream",
+        )
+        val frames = repository.streamEvents(baseUrl(), credential).take(2).toList()
+        assertEquals(KanbanStreamFrame.Hello(cursor = 5L, board = "default"), frames[0])
+        val events = frames[1] as KanbanStreamFrame.Events
+        assertEquals(9L, events.cursor)
+        assertEquals("t1", events.events.single().taskId)
+        assertEquals("updated", events.events.single().kind)
+        Unit
+    }
+
+    @Test
+    fun `streamEvents prefers the frame id over the body cursor for resume`() = runBlocking {
+        // The `id:` field is what a browser would echo back as Last-Event-ID, so manual
+        // and automatic resume must agree on it even when the body disagrees.
+        enqueue(
+            body = "id: 41\nevent: events\ndata: {\"events\":[],\"cursor\":40}\n\n",
+            contentType = "text/event-stream",
+        )
+        val frame = repository.streamEvents(baseUrl(), credential).first()
+        assertEquals(41L, (frame as KanbanStreamFrame.Events).cursor)
+        Unit
+    }
+
+    @Test
+    fun `streamEvents sends since and board as whitelisted query params`() = runBlocking {
+        enqueue(body = "event: hello\ndata: {\"cursor\":1}\n\n", contentType = "text/event-stream")
+        repository.streamEvents(baseUrl(), credential, board = "work", since = 12L).first()
+        val request = server.takeRequest()
+        assertEquals("/api/kanban/events/stream?board=work&since=12", request.path)
+        assertEquals("text/event-stream", request.getHeader("Accept"))
         Unit
     }
 }

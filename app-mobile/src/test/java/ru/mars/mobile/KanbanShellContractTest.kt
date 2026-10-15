@@ -143,8 +143,8 @@ class KanbanShellContractTest {
     fun `screen stays a read-only showcase`() {
         val repoCalls = Regex("(?<![.\\w])repository\\.(\\w+)").findAll(kanban).map { it.groupValues[1] }.toSet()
         assertEquals(
-            "Допустимы только GET-вызовы доски/статистики/карточки",
-            setOf("getBoard", "getStats", "getTaskDetail"),
+            "Допустимы только GET-вызовы доски/статистики/карточки/досок/исполнителей",
+            setOf("getBoard", "getStats", "getTaskDetail", "getBoards", "getAssignees", "streamEvents"),
             repoCalls
         )
         assertFalse(
@@ -156,6 +156,14 @@ class KanbanShellContractTest {
             kanban.contains("KanbanPolicy.CLOSE_LABEL") && kanban.contains("MarsDialog.quietButton")
         )
         assertFalse("Диалог задачи не содержит кнопок действия", kanban.contains("MarsDialog.primaryButton"))
+    }
+
+    @Test
+    fun `live stream is torn down with the screen like polling`() {
+        // Живой SSE-поток — сетевой ресурс: если его не снимать в onPause,
+        // соединение переживёт уход экрана и будет тянуть трафик в фоне.
+        assertTrue("Поток гасится в onPause", kanban.contains("liveJob?.cancel()"))
+        assertTrue("Поток поднимается при возврате на экран", kanban.contains("liveJob = presenter.bindLiveStream"))
     }
 
     // --- Поведенческая часть: сопоставление фазы с общим SectionScreenState ---------------

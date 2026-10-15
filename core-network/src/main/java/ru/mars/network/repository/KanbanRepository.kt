@@ -1,6 +1,10 @@
 package ru.mars.network.repository
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -9,10 +13,14 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import ru.mars.network.http.HttpClients
+import ru.mars.network.model.AssigneeStat
+import ru.mars.network.model.BoardSummary
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.KanbanAssigneeStats
+import ru.mars.network.model.KanbanAssignees
 import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanBoardFilters
+import ru.mars.network.model.KanbanBoards
 import ru.mars.network.model.KanbanColumn
 import ru.mars.network.model.KanbanComment
 import ru.mars.network.model.KanbanDispatchOutcomePayload
@@ -24,6 +32,7 @@ import ru.mars.network.model.KanbanTaskDetail
 import ru.mars.network.model.KanbanTaskEvent
 import ru.mars.network.model.KanbanTaskLinks
 import java.io.IOException
+import java.io.InputStreamReader
 
 /** Outcome of `GET /api/kanban/board`. */
 sealed interface KanbanBoardResult {
@@ -53,10 +62,39 @@ sealed interface KanbanStatsResult {
     data class Failed(val message: String) : KanbanStatsResult
 }
 
+/** Outcome of `GET /api/kanban/boards`. */
+sealed interface KanbanBoardsResult {
+    data class Boards(val boards: KanbanBoards) : KanbanBoardsResult
+    data class Failed(val message: String) : KanbanBoardsResult
+}
+
+/** Outcome of `GET /api/kanban/assignees`. */
+sealed interface KanbanAssigneesResult {
+    data class Assignees(val assignees: KanbanAssignees) : KanbanAssigneesResult
+    data class Failed(val message: String) : KanbanAssigneesResult
+}
+
 /** Outcome of `POST /api/kanban/dispatch`. */
 sealed interface KanbanDispatchResult {
     data class Dispatched(val outcome: KanbanDispatchOutcomePayload) : KanbanDispatchResult
     data class Failed(val message: String) : KanbanDispatchResult
+}
+
+/**
+ * One decoded frame of the kanban event stream, as delivered by [KanbanRepository.streamEvents].
+ * The raw SSE vocabulary is kept (`hello` / `events`) instead of being folded into a single
+ * "event" type: the first frame tells the client which board the server bound it to and where
+ * the cursor starts, and the two carry different payloads.
+ */
+sealed interface KanbanStreamFrame {
+    /** Opening frame: the stream is live, bound to [board], cursor starts at [cursor]. */
+    data class Hello(val cursor: Long, val board: String?) : KanbanStreamFrame
+
+    /** Event batch: [events] to apply, [cursor] to send back as `Last-Event-ID`. */
+    data class Events(val events: List<KanbanTaskEvent>, val cursor: Long) : KanbanStreamFrame
+
+    /** A frame whose shape is not part of the contract; ignored by callers. */
+    data class Unknown(val name: String?) : KanbanStreamFrame
 }
 
 /**
@@ -167,6 +205,113 @@ class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
                 root == null -> KanbanStatsResult.Failed(unparseable(code))
                 code in 200..299 -> KanbanStatsResult.Stats(parseStats(root))
                 else -> KanbanStatsResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * `GET /api/kanban/boards` — every board the operator can switch between.
+     *
+     * Read-only: device-Bearer is allowlisted for GET/HEAD on `/api/kanban/...` only,
+     * so listing boards is permitted while board creation is not (and is not exposed).
+     */
+    suspend fun getBoards(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+    ): KanbanBoardsResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/boards")
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanBoardsResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanBoardsResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanBoardsResult.Boards(parseBoards(root))
+                else -> KanbanBoardsResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * `GET /api/kanban/assignees` — assignee names known to the bridge, with their
+     * tallies. Used by the screen as a filter source; the list is advisory and never
+     * a client-side authority on whether a name may be assigned.
+     */
+    suspend fun getAssignees(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+    ): KanbanAssigneesResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/assignees")
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanAssigneesResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanAssigneesResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanAssigneesResult.Assignees(parseAssignees(root))
+                else -> KanbanAssigneesResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * `GET /api/kanban/events/stream` — live board events over SSE.
+     *
+     * Read-only GET, so it clears the device-Bearer allowlist. Frames decodable by
+     * the shared [SseChunkParser] are mapped through [KanbanStreamParser] (which
+     * drops comments such as `: keepalive` that carry no `data` line).
+     *
+     * The flow completes when the server closes the stream; cancellation of the
+     * collecting coroutine tears the call down immediately (the screen cancels it in
+     * `onPause`, so a backgrounded board holds no connection).
+     *
+     * [since] is the resume cursor: pass [KanbanStreamFrame.Hello.cursor] or the last
+     * known `latest_event_id` to continue where the previous stream stopped.
+     */
+    fun streamEvents(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        board: String? = null,
+        since: Long? = null,
+    ): Flow<KanbanStreamFrame> = flow {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/events/stream")
+            .boardParam(board)
+            .queryParam("since", since?.toString())
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .authHeader(credential)
+            .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            val body = response.body ?: throw IOException("HTTP ${response.code}: empty body")
+            if (!response.isSuccessful) {
+                val text = runCatching { body.string() }.getOrNull().orEmpty()
+                val message = TolerantJson.parseMap(text)?.let { errorMessage(it, response.code) }
+                    ?: "HTTP ${response.code}"
+                throw IOException(message)
+            }
+            val parser = SseChunkParser()
+            body.byteStream().use { stream ->
+                val reader = InputStreamReader(stream, Charsets.UTF_8)
+                val chars = CharArray(8 * 1024)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val read = reader.read(chars)
+                    if (read < 0) break
+                    if (read > 0) {
+                        KanbanStreamParser.frames(parser.feed(String(chars, 0, read)))
+                            .forEach { emit(it) }
+                    }
+                }
+                KanbanStreamParser.frames(parser.end()).forEach { emit(it) }
             }
         }
     }
@@ -407,6 +552,52 @@ class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
         is Number -> KanbanAssigneeStats(total = value.toInt())
         else -> null
     }
+
+    /**
+     * `GET /api/kanban/boards`: `{boards: [...], current: "default", read_only: false}`.
+     * A row missing `slug` is dropped — a board with no slug cannot be addressed by the
+     * rest of the API, so surfacing it would produce a switch target that 404s.
+     */
+    internal fun parseBoards(root: Map<String, Any?>): KanbanBoards =
+        KanbanBoards(
+            boards = TolerantJson.listField(root, "boards").mapNotNull { entry ->
+                val map = entry as? Map<*, *> ?: return@mapNotNull null
+                val slug = TolerantJson.string(map, "slug").orEmpty()
+                if (slug.isBlank()) return@mapNotNull null
+                BoardSummary(
+                    slug = slug,
+                    name = TolerantJson.string(map, "name").orEmpty().ifBlank { slug },
+                    description = TolerantJson.string(map, "description").orEmpty(),
+                    icon = TolerantJson.string(map, "icon").orEmpty(),
+                    color = TolerantJson.string(map, "color").orEmpty(),
+                    archived = TolerantJson.bool(map, "archived"),
+                    isCurrent = TolerantJson.bool(map, "is_current"),
+                    counts = TolerantJson.intCounts(map, "counts"),
+                    total = TolerantJson.int(map, "total"),
+                )
+            },
+            current = TolerantJson.string(root, "current"),
+            readOnly = TolerantJson.bool(root, "read_only"),
+        )
+
+    /**
+     * `GET /api/kanban/assignees`: `{assignees: [{name, on_disk, counts: {status: n}}]}`.
+     * Rows without a name are dropped; the list feeds a filter, and an empty filter row
+     * would be unselectable.
+     */
+    internal fun parseAssignees(root: Map<String, Any?>): KanbanAssignees =
+        KanbanAssignees(
+            assignees = TolerantJson.listField(root, "assignees").mapNotNull { entry ->
+                val map = entry as? Map<*, *> ?: return@mapNotNull null
+                val name = TolerantJson.string(map, "name").orEmpty()
+                if (name.isBlank()) return@mapNotNull null
+                AssigneeStat(
+                    name = name,
+                    onDisk = TolerantJson.bool(map, "on_disk"),
+                    counts = TolerantJson.intCounts(map, "counts"),
+                )
+            },
+        )
 
     internal fun parseDispatch(root: Map<String, Any?>): KanbanDispatchOutcomePayload =
         KanbanDispatchOutcomePayload(

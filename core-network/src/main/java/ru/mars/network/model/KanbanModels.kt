@@ -167,7 +167,60 @@ data class KanbanStats(
     val now: Long? = null,
 )
 
-/** One `spawned` triple of a dispatch pass: `(task_id, assignee, workspace_path)`. */
+/**
+ * One row of `GET /api/kanban/boards` — a board the operator can switch to.
+ *
+ * [counts] is the per-status tally (`{done: 2}`) and [total] its sum; both may be
+ * absent in older bridges, in which case they degrade to an empty map / zero and the
+ * UI must not draw a "0 задач" badge out of a missing field — see [hasCounts].
+ * [isCurrent] marks the board the server treats as default ([KanbanBoards.current]).
+ */
+data class BoardSummary(
+    val slug: String = "",
+    val name: String = "",
+    val description: String = "",
+    val icon: String = "",
+    val color: String = "",
+    val archived: Boolean = false,
+    val isCurrent: Boolean = false,
+    val counts: Map<String, Int> = emptyMap(),
+    val total: Int = 0,
+) {
+    /** True when the server actually reported a tally (absent counts are not "0"). */
+    val hasCounts: Boolean get() = counts.isNotEmpty() || total > 0
+}
+
+/** `GET /api/kanban/boards` payload. */
+data class KanbanBoards(
+    val boards: List<BoardSummary> = emptyList(),
+    /** Slug of the active board, or null when the server did not name one. */
+    val current: String? = null,
+    val readOnly: Boolean = false,
+)
+
+/**
+ * One row of `GET /api/kanban/assignees` — an assignee known to the bridge.
+ *
+ * [onDisk] mirrors the bridge's `on_disk` flag: a name with no workspace/profile
+ * directory yet. It is reported as a hint, NOT as a filter — the server still
+ * accepts the assignment.
+ */
+data class AssigneeStat(
+    val name: String = "",
+    val onDisk: Boolean = false,
+    val counts: Map<String, Int> = emptyMap(),
+) {
+    val total: Int get() = counts.values.sum()
+}
+
+/** `GET /api/kanban/assignees` payload. */
+data class KanbanAssignees(
+    val assignees: List<AssigneeStat> = emptyList(),
+)
+
+/**
+ * One `spawned` triple of a dispatch pass: `(task_id, assignee, workspace_path)`.
+ */
 data class KanbanDispatchSpawn(
     val taskId: String = "",
     val assignee: String = "",

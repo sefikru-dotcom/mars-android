@@ -1,8 +1,16 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
+import ru.mars.network.model.AssigneeStat
+import ru.mars.network.model.BoardSummary
 import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanStats
 import ru.mars.network.model.KanbanTaskDetail
+import ru.mars.network.repository.KanbanStreamFrame
 
 /**
  * Презентер read-only экрана «Канбан»: оркестрирует загрузку доски
@@ -32,11 +40,29 @@ import ru.mars.network.model.KanbanTaskDetail
  */
 class KanbanPresenter(
     private val hasCredential: () -> Boolean,
-    private val fetchBoard: suspend (since: Long?) -> KanbanBoard?,
+    private val fetchBoard: suspend (since: Long?, board: String?, assignee: String?) -> KanbanBoard?,
     private val fetchStats: suspend () -> KanbanStats?,
     private val fetchTaskDetail: suspend (taskId: String) -> KanbanTaskDetail?,
     private val isOffline: () -> Boolean = { false },
     private val nowEpochSeconds: () -> Long? = { null },
+    /**
+     * `GET /api/kanban/boards` — список досок для переключателя. Отказ или пустой
+     * ответ не ломает экран: строка переключателя просто не рисуется.
+     */
+    private val fetchBoards: suspend () -> List<BoardSummary> = { emptyList() },
+    /**
+     * `GET /api/kanban/assignees` — подробный справочник исполнителей. Нужен
+     * только когда сама доска их не перечислила; best-effort, как и [fetchStats].
+     */
+    private val fetchAssignees: suspend () -> List<AssigneeStat> = { emptyList() },
+    /**
+     * Живой поток событий канбана. Каждое событие — повод перечитать доску через
+     * [refresh] (события несут только идентификаторы, не содержимое карточек),
+     * поэтому подписка не парсит payload, а дёргает поллинг-контур. Отсутствие
+     * потока не ошибка: экран продолжает жить на polling-таймере Activity.
+     */
+    private val events: suspend (since: Long?, board: String?) -> Flow<KanbanStreamFrame> =
+        { _, _ -> emptyFlow() },
 ) {
 
     var state: KanbanUiState = KanbanUiState(
@@ -48,6 +74,18 @@ class KanbanPresenter(
     /** Последний полный (changed:true) board-конверт — основа offline-safe и polling. */
     private var cachedBoard: KanbanBoard? = null
     private var cachedStats: KanbanStats? = null
+    private var cachedBoards: List<BoardSummary> = emptyList()
+    private var cachedAssignees: List<AssigneeStat> = emptyList()
+
+    /**
+     * Выбранная доска. null = «как решит сервер»: параметр `board` в запрос не
+     * уходит, и сервер отвечает текущей доской. Явный выбор оператора всегда
+     * перекрывает серверный.
+     */
+    private var selectedBoard: String? = null
+
+    /** Фильтр исполнителя. null = все задачи доски (без параметра `assignee`). */
+    private var selectedAssignee: String? = null
     private var onChanged: (KanbanUiState) -> Unit = {}
 
     /** Подписка на состояния; сразу реплеит текущее. Одна подписка на экран. */
@@ -79,10 +117,16 @@ class KanbanPresenter(
                 columns = state.columns,
                 stats = state.stats,
                 latestEventId = state.latestEventId,
+                boards = state.boards,
+                currentBoardSlug = state.currentBoardSlug,
+                assignees = state.assignees,
+                selectedAssignee = state.selectedAssignee,
+                live = state.live,
                 message = if (hadColumns) null else KanbanPolicy.MSG_LOADING,
             )
         )
-        applyBoard(runCatching { fetchBoard(null) }.getOrNull())
+        loadBoards()
+        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee) }.getOrNull())
         // Stats — best-effort: отдельный try, отказ не меняет фазу доски.
         val stats = runCatching { fetchStats() }.getOrNull()
         if (stats != null) {
@@ -91,6 +135,48 @@ class KanbanPresenter(
                 publish(state.copy(stats = KanbanPolicy.statsFor(stats)))
             }
         }
+        // Справочник исполнителей — тоже best-effort и только как дополнение:
+        // доска уже могла перечислить своих, и тогда внешний список не нужен.
+        ensureAssignees()
+    }
+
+    /**
+     * Переключатель досок: `GET /api/kanban/boards`. Best-effort — пустой ответ
+     * или отказ оставляют строку скрытой, доска при этом грузится как обычно.
+     * Названия досок не меняют адресацию задачи: она живёт на своей доске.
+     */
+    private suspend fun loadBoards() {
+        val boards = runCatching { fetchBoards() }.getOrNull() ?: return
+        if (boards.isEmpty()) return
+        cachedBoards = boards
+        publish(
+            state.copy(
+                boards = KanbanPolicy.boardChips(boards, selectedBoard),
+                currentBoardSlug = selectedBoard,
+            )
+        )
+    }
+
+    /**
+     * Справочник `/api/kanban/assignees` догружается только если доска не
+     * перечислила исполнителей сама: два источника одного списка дали бы
+     * расхождение в плашках. [cachedAssignees] кэшируется между переключениями.
+     */
+    private suspend fun ensureAssignees() {
+        val board = cachedBoard ?: return
+        if (board.assignees.isNotEmpty()) return
+        if (cachedAssignees.isEmpty()) {
+            cachedAssignees = runCatching { fetchAssignees() }.getOrNull() ?: emptyList()
+        }
+        if (cachedAssignees.isEmpty()) return
+        val chips = KanbanPolicy.assigneeChips(
+            names = cachedAssignees.map { it.name },
+            selected = selectedAssignee,
+            counts = cachedAssignees.associate { it.name to it.total },
+        )
+        // Тот же порог, что в `applyBoard`: один исполнитель — не фильтр.
+        if (chips.size <= 2) return
+        publish(state.copy(assignees = chips))
     }
 
     /**
@@ -104,7 +190,7 @@ class KanbanPresenter(
         if (!hasCredential()) return
         if (state.phase == KanbanPhase.LOADING) return // load() уже в полёте
         val since = state.latestEventId.takeIf { it > 0L }
-        val board = runCatching { fetchBoard(since) }.getOrNull()
+        val board = runCatching { fetchBoard(since, selectedBoard, selectedAssignee) }.getOrNull()
         if (board == null) {
             publish(staleOrErrorState())
             return
@@ -117,6 +203,91 @@ class KanbanPresenter(
             return
         }
         applyBoard(board)
+    }
+
+    /**
+     * Переключение доски: выбор оператора перекрывает серверный `current`.
+     * Кэш доски сбрасывается, курсор обнуляется — события одной доски не имеют
+     * смысла для другой, и `since` из прошлой доски дал бы вечный `changed:false`.
+     * Статистика тоже перечитывается: она у каждой доски своя.
+     */
+    suspend fun selectBoard(slug: String?) {
+        if (slug == selectedBoard) return
+        selectedBoard = slug
+        cachedBoard = null
+        cachedStats = null
+        publish(
+            state.copy(
+                columns = emptyList(),
+                stats = null,
+                latestEventId = 0L,
+                message = KanbanPolicy.MSG_LOADING,
+                phase = KanbanPhase.LOADING,
+                boards = KanbanPolicy.boardChips(cachedBoards, selectedBoard),
+                currentBoardSlug = selectedBoard,
+            )
+        )
+        reload()
+    }
+
+    /**
+     * Фильтр исполнителя: null — «Все». Доска перечитывается целиком, потому что
+     * фильтрует её сервер, а не клиент: без перезапроса список остался бы полным.
+     */
+    suspend fun selectAssignee(name: String?) {
+        if (name == selectedAssignee) return
+        selectedAssignee = name
+        publish(state.copy(assignees = assigneesForCurrentBoard(), selectedAssignee = name))
+        reload()
+    }
+
+    /** Список имён текущей доски, если сервер его отдал (иначе — из справочника). */
+    private fun assigneesForCurrentBoard(): List<KanbanAssigneeChipUi> {
+        val boardNames = cachedBoard?.assignees.orEmpty()
+        val names = if (boardNames.isNotEmpty()) boardNames else cachedAssignees.map { it.name }
+        val counts = if (boardNames.isNotEmpty()) emptyMap()
+        else cachedAssignees.associate { it.name to it.total }
+        return KanbanPolicy.assigneeChips(names = names, selected = selectedAssignee, counts = counts)
+    }
+
+    /** Перечитать доску заново, не трогая список досок (он не зависит от фильтра). */
+    private suspend fun reload() {
+        applyBoard(runCatching { fetchBoard(null, selectedBoard, selectedAssignee) }.getOrNull())
+    }
+
+    /**
+     * Живой поток событий: каждое событие — сигнал «доска изменилась», после
+     * которого выполняется обычный [refresh]. Поток может оборваться (сеть,
+     * перезапуск WebUI) — это нормальная деградация до поллинга, поэтому отказ
+     * снимает флаг [KanbanUiState.live] и НЕ переводит экран в ERROR: данные
+     * пользователя остаются на экране.
+     */
+    fun bindLiveStream(scope: CoroutineScope): Job {
+        return scope.launch {
+            val since = state.latestEventId.takeIf { it > 0L }
+            runCatching {
+                events(since, selectedBoard).collect { frame -> applyStreamFrame(frame) }
+            }
+            // Поток закрылся или упал: экран живёт на поллинге Activity.
+            if (state.live) publish(state.copy(live = false))
+        }
+    }
+
+    /**
+     * Один кадр живого потока. Вынесено из `collect` ради синхронных JVM-тестов:
+     * [KanbanStreamFrame.Hello] поднимает индикатор «в эфире», [KanbanStreamFrame.Events]
+     * перечитывает доску только при непустом батче (пустой батч — это keep-alive пула,
+     * перечитывать нечего).
+     */
+    internal suspend fun applyStreamFrame(frame: KanbanStreamFrame) {
+        when (frame) {
+            is KanbanStreamFrame.Hello -> if (!state.live) publish(state.copy(live = true))
+            is KanbanStreamFrame.Events -> {
+                if (frame.events.isNotEmpty()) refresh()
+                if (!state.live) publish(state.copy(live = true))
+            }
+            is KanbanStreamFrame.Unknown -> Unit
+        }
     }
 
     /**
@@ -156,6 +327,25 @@ class KanbanPresenter(
         cachedBoard = board
         val columns = KanbanPolicy.columnsFor(board)
         val taskCount = columns.sumOf { it.count }
+        val boardOwnAssignees = board.assignees.isNotEmpty()
+        val assignees = KanbanPolicy.assigneeChips(
+            names = board.assignees.ifEmpty { cachedAssignees.map { it.name } },
+            selected = selectedAssignee,
+            counts = if (boardOwnAssignees) {
+                emptyMap()
+            } else {
+                cachedAssignees.associate { it.name to it.total }
+            },
+        ).let { chips ->
+            // Отданная доской строка показывается всегда: она описывает саму доску.
+            // А резервный справочник с единственным именем — это не фильтр, а
+            // занятая строка ради одной опции, поэтому он скрывается.
+            if (boardOwnAssignees || chips.size > 2) chips else emptyList()
+        }
+        // Серверная доска без явного выбора оператора: показываем её как текущую
+        // (или серверную) — переключатель обязан подсветить то, что реально открыто.
+        val boards = if (cachedBoards.isEmpty()) emptyList()
+        else KanbanPolicy.boardChips(cachedBoards, selectedBoard)
         if (columns.isEmpty()) {
             publish(
                 KanbanUiState(
@@ -164,6 +354,11 @@ class KanbanPresenter(
                     serverReadOnly = board.readOnly,
                     latestEventId = board.latestEventId,
                     taskCount = taskCount,
+                    boards = boards,
+                    currentBoardSlug = selectedBoard,
+                    assignees = assignees,
+                    selectedAssignee = selectedAssignee,
+                    live = state.live,
                 )
             )
             return
@@ -176,6 +371,11 @@ class KanbanPresenter(
                 serverReadOnly = board.readOnly,
                 latestEventId = board.latestEventId,
                 taskCount = taskCount,
+                boards = boards,
+                currentBoardSlug = selectedBoard,
+                assignees = assignees,
+                selectedAssignee = selectedAssignee,
+                live = state.live,
             )
         )
     }
