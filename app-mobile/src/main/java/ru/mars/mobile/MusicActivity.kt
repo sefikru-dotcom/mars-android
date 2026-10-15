@@ -34,12 +34,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.service.MarsMusicService
 import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.MusicPlayerState
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.Playlist
 import ru.mars.network.repository.MusicRepository
@@ -69,9 +71,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var searchHistory: MusicSearchHistory
     /** Monotonic id of the in-flight search run; stale runs are dropped by [SearchRunGuard]. */
     private var searchRunId = 0
+    /** Живые подсказки поиска (GET /api/suggestions); правила запроса/панели в [SearchSuggestionsPolicy]. */
+    private var searchSuggestions = emptyList<String>()
+    private var suggestionsJob: Job? = null
+    /** Монотонный id запуска подсказок; устаревшие ответы отбрасывает [SearchRunGuard]. */
+    private var suggestionsRunId = 0
 
-    /** Which pill tab is active: chart, flow, favorites, queue, server playlists, server history. */
-    private enum class MusicTab { CHART, FLOW, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
+    /** Which pill tab is active: chart, flow, home feed, favorites, queue, server playlists, server history. */
+    private enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
     private var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
@@ -90,6 +97,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
     private lateinit var chartTabButton: TextView
     private lateinit var flowTabButton: TextView
+    private lateinit var forYouTabButton: TextView
     private lateinit var favoritesTabButton: TextView
     private lateinit var queueTabButton: TextView
     private lateinit var playlistsTabButton: TextView
@@ -408,12 +416,16 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         chartTabButton = tabButton("Чарт") { selectTab(MusicTab.CHART) }
         flowTabButton = tabButton("Волна") { selectTab(MusicTab.FLOW) }
+        forYouTabButton = tabButton(getString(R.string.music_tab_for_you)) { selectTab(MusicTab.FOR_YOU) }
         favoritesTabButton = tabButton("Избранное") { selectTab(MusicTab.FAVORITES) }
         playlistsTabButton = tabButton("Плейлисты") { selectTab(MusicTab.PLAYLISTS) }
         historyTabButton = tabButton("История") { selectTab(MusicTab.HISTORY) }
         queueTabButton = tabButton("Очередь") { selectTab(MusicTab.QUEUE) }
         tabRow.addView(chartTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(flowTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        // «Для тебя» — персональная лента /api/home: в общем ряду вкладок, на узком
+        // экране ряд листается горизонтально (перенос ломал бы быструю навигацию).
+        tabRow.addView(forYouTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(playlistsTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(historyTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
@@ -495,6 +507,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 clearSearchBtn.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
+                // Живые подсказки: дебаунс-запрос /api/suggestions на каждую паузу ввода.
+                scheduleSuggestions(s?.toString())
                 updateSearchHistoryOverlay()
             }
             override fun afterTextChanged(s: Editable?) {}
@@ -839,6 +853,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun search(rawQuery: String) {
         val q = MusicSearchHistoryPolicy.normalize(rawQuery) ?: return
         job?.cancel()
+        // Подсказки больше не нужны: запрос отправлен, панель скрывается.
+        suggestionsJob?.cancel()
+        searchSuggestions = emptyList()
+        updateSearchHistoryOverlay()
         val runId = ++searchRunId
         showSearchLoading(q)
         job = lifecycleScope.launch {
@@ -880,20 +898,99 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * Re-evaluates overlay visibility (pure [SearchHistoryPanelPolicy]): shown
-     * only while the search field is empty and focused and the history is not
-     * empty; the overlay floats above the list, so tab content and the player
-     * stay untouched underneath.
+     * Re-evaluates the search overlay: it shows the stored history while the field is
+     * empty and focused (pure [SearchHistoryPanelPolicy]) and live suggestions while
+     * the user types (pure [SearchSuggestionsPolicy]) — the two are mutually exclusive
+     * by the field text. The overlay floats above the list, so tab content and the
+     * player stay untouched underneath.
      */
     private fun updateSearchHistoryOverlay() {
         if (!::historyOverlay.isInitialized || !::searchHistory.isInitialized) return
-        val visible = SearchHistoryPanelPolicy.isVisible(
-            fieldText = searchInput.text?.toString(),
-            fieldFocused = searchInput.hasFocus(),
+        val fieldText = searchInput.text?.toString()
+        val focused = searchInput.hasFocus()
+        val historyVisible = SearchHistoryPanelPolicy.isVisible(
+            fieldText = fieldText,
+            fieldFocused = focused,
             historyEmpty = searchHistory.entries.isEmpty(),
         )
-        if (visible) renderSearchHistory()
-        historyOverlay.visibility = if (visible) View.VISIBLE else View.GONE
+        val suggestionsVisible = SearchSuggestionsPolicy.isPanelVisible(
+            fieldText = fieldText,
+            fieldFocused = focused,
+            suggestionsEmpty = searchSuggestions.isEmpty(),
+        )
+        when {
+            suggestionsVisible -> renderSearchSuggestions()
+            historyVisible -> renderSearchHistory()
+        }
+        historyOverlay.visibility = if (historyVisible || suggestionsVisible) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Живые подсказки поиска: после паузы ввода ([SearchSuggestionsPolicy.DEBOUNCE_MS])
+     * запрашивает GET /api/suggestions. Каждый новый символ отменяет предыдущий запуск
+     * (дебаунс), устаревший ответ не попадает в панель ([SearchRunGuard]). Сбой сети —
+     * это «подсказок нет» (тихо), а не ошибка поиска: подсказки вспомогательный UX.
+     */
+    private fun scheduleSuggestions(raw: String?) {
+        suggestionsJob?.cancel()
+        if (!SearchSuggestionsPolicy.shouldFetch(raw)) {
+            searchSuggestions = emptyList()
+            return
+        }
+        val q = SearchSuggestionsPolicy.normalize(raw) ?: return
+        val runId = ++suggestionsRunId
+        suggestionsJob = lifecycleScope.launch {
+            delay(SearchSuggestionsPolicy.DEBOUNCE_MS)
+            val fetched = runCatching {
+                withContext(Dispatchers.IO) { repository.getSuggestions(q) }
+            }
+            if (!SearchRunGuard.mayApplyResult(runId, suggestionsRunId, !isActive)) return@launch
+            searchSuggestions = SearchSuggestionsPolicy.visibleSuggestions(
+                fetched.getOrDefault(emptyList()),
+                q,
+            )
+            updateSearchHistoryOverlay()
+        }
+    }
+
+    /** Fills the overlay with live suggestions: one tappable row per suggestion. */
+    private fun renderSearchSuggestions() {
+        historyPanel.removeAllViews()
+        historyPanel.addView(TextView(this).apply {
+            text = getString(R.string.music_suggestions_header)
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }, LinearLayout.LayoutParams(-1, -2))
+        searchSuggestions.forEach { suggestion ->
+            val row = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(4), dp(6), dp(4))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onSuggestionClicked(suggestion) }
+            }
+            row.addView(ImageView(this).apply {
+                setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_ui_search))
+                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(10) })
+            row.addView(TextView(this).apply {
+                text = suggestion
+                textSize = 14f
+                setTextColor(MarsTheme.TEXT_STRONG)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            historyPanel.addView(row, LinearLayout.LayoutParams(-1, -2))
+        }
+    }
+
+    /** Тап по подсказке: текст в поле и сразу поиск (как по строке истории). */
+    private fun onSuggestionClicked(suggestion: String) {
+        searchInput.setText(suggestion) // watcher обновит кнопку очистки; поиск ниже гасит панель
+        hideKeyboard()
+        search(suggestion)
     }
 
     /** Fills the overlay: header with «Очистить» plus one tappable row per stored query. */
@@ -1000,112 +1097,122 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
 
         items.forEachIndexed { i, t ->
-            val row = LinearLayout(this).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(8), dp(8), dp(8))
-                background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
-                setOnClickListener { onTrackRowClicked(i) }
-                setOnLongClickListener {
-                    if (action == null) promptAddToPlaylist(t)
-                    true
-                }
-            }
+            results.addView(trackRow(t, i, action), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        }
+    }
 
-            val image = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
-                clipToOutline = true
+    /**
+     * Одна строка трека (карточка списка: обложка, play, избранное, очередь).
+     * [index] — позиция трека в списке [tracks]: тап по строке запускает
+     * воспроизведение очереди именно с неё. [action] добавляет одну дополнительную
+     * кнопку (drill-down плейлиста). Долгий тап предлагает «Добавить в плейлист».
+     * Строка регистрируется в [trackRows], чтобы состояние плеера перекрашивало её живьём.
+     */
+    private fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(8), dp(8))
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
+            setOnClickListener { onTrackRowClicked(index) }
+            setOnLongClickListener {
+                if (action == null) promptAddToPlaylist(t)
+                true
             }
-            val thumb = t.thumbnail
-            if (!thumb.isNullOrBlank()) {
-                ImageLoader.load(thumb, image)
-            }
-            row.addView(image, LinearLayout.LayoutParams(dp(44), dp(44)))
+        }
 
-            val trackInfo = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, dp(8), 0)
-            }
-            val titleView = TextView(this).apply {
-                text = t.title
-                textSize = 15f
-                setTextColor(MarsTheme.TEXT_STRONG)
-                isSingleLine = true
-                ellipsize = android.text.TextUtils.TruncateAt.END
-            }
-            trackInfo.addView(titleView)
-            val subTitleView = TextView(this).apply {
-                text = "${t.artist} · ${t.duration}"
-                textSize = 12f
-                setTextColor(MarsTheme.TEXT_MUTED)
-                isSingleLine = true
-                ellipsize = android.text.TextUtils.TruncateAt.END
-            }
-            trackInfo.addView(subTitleView)
-            row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
+            clipToOutline = true
+        }
+        val thumb = t.thumbnail
+        if (!thumb.isNullOrBlank()) {
+            ImageLoader.load(thumb, image)
+        }
+        row.addView(image, LinearLayout.LayoutParams(dp(44), dp(44)))
 
-            val playTrackBtn = MarsTheme.circleIconButton(
+        val trackInfo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(8), 0)
+        }
+        val titleView = TextView(this).apply {
+            text = t.title
+            textSize = 15f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        trackInfo.addView(titleView)
+        val subTitleView = TextView(this).apply {
+            text = "${t.artist} · ${t.duration}"
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        trackInfo.addView(subTitleView)
+        row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val playTrackBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_play,
+            MusicA11yPolicy.ACTION_PLAY,
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.ACCENT,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onTrackRowClicked(index) }
+        }
+        row.addView(playTrackBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+        // Favorite heart: filled+accent when the track is already in favorites
+        val isFav = favoriteIds.contains(t.id)
+        val heartBtn = MarsTheme.circleIconButton(
+            this,
+            if (isFav) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
+            MusicA11yPolicy.heartAction(isFav),
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = if (isFav) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onHeartClicked(t, this) }
+        }
+        heartButtons.getOrPut(t.id) { mutableListOf() }.add(heartBtn)
+        row.addView(heartBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
+        // Quick add to the playback queue
+        val enqueueBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_playlist_add,
+            "В очередь",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { onQueueAddClicked(t) }
+        }
+        row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
+        // Playlist drill-down only: «убрать из плейлиста» next to the usual actions.
+        action?.let { extra ->
+            val extraBtn = MarsTheme.circleIconButton(
                 this,
-                R.drawable.ic_play,
-                MusicA11yPolicy.ACTION_PLAY,
-                bg = MarsTheme.SURFACE_SUBTLE,
-                iconTint = MarsTheme.ACCENT,
-                sizeDp = 34
-            ).apply {
-                setOnClickListener { onTrackRowClicked(i) }
-            }
-            row.addView(playTrackBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-
-            // Favorite heart: filled+accent when the track is already in favorites
-            val isFav = favoriteIds.contains(t.id)
-            val heartBtn = MarsTheme.circleIconButton(
-                this,
-                if (isFav) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
-                MusicA11yPolicy.heartAction(isFav),
-                bg = MarsTheme.SURFACE_SUBTLE,
-                iconTint = if (isFav) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED,
-                sizeDp = 34
-            ).apply {
-                setOnClickListener { onHeartClicked(t, this) }
-            }
-            heartButtons.getOrPut(t.id) { mutableListOf() }.add(heartBtn)
-            row.addView(heartBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-            // Quick add to the playback queue
-            val enqueueBtn = MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_playlist_add,
-                "В очередь",
+                extra.iconRes,
+                extra.description,
                 bg = MarsTheme.SURFACE_SUBTLE,
                 iconTint = MarsTheme.TEXT_MUTED,
                 sizeDp = 34
             ).apply {
-                setOnClickListener { onQueueAddClicked(t) }
+                setOnClickListener { extra.onTap(t) }
             }
-            row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-            // Playlist drill-down only: «убрать из плейлиста» next to the usual actions.
-            action?.let { extra ->
-                val extraBtn = MarsTheme.circleIconButton(
-                    this,
-                    extra.iconRes,
-                    extra.description,
-                    bg = MarsTheme.SURFACE_SUBTLE,
-                    iconTint = MarsTheme.TEXT_MUTED,
-                    sizeDp = 34
-                ).apply {
-                    setOnClickListener { extra.onTap(t) }
-                }
-                row.addView(extraBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-            }
-
-            results.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
-
-            // Register the row so player state changes can highlight the current track live.
-            val holder = TrackRowHolder(t.id, t.artist, t.duration, row, titleView, subTitleView, playTrackBtn)
-            trackRows.getOrPut(t.id) { mutableListOf() }.add(holder)
-            applyTrackRowState(holder)
+            row.addView(extraBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
         }
+
+        // Register the row so player state changes can highlight the current track live.
+        val holder = TrackRowHolder(t.id, t.artist, t.duration, row, titleView, subTitleView, playTrackBtn)
+        trackRows.getOrPut(t.id) { mutableListOf() }.add(holder)
+        applyTrackRowState(holder)
+        return row
     }
 
     private fun tabButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
@@ -1134,6 +1241,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         style(chartTabButton, currentTab == MusicTab.CHART)
         style(flowTabButton, currentTab == MusicTab.FLOW)
+        style(forYouTabButton, currentTab == MusicTab.FOR_YOU)
         style(favoritesTabButton, currentTab == MusicTab.FAVORITES)
         style(playlistsTabButton, currentTab == MusicTab.PLAYLISTS)
         style(historyTabButton, currentTab == MusicTab.HISTORY)
@@ -1150,6 +1258,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         when (tab) {
             MusicTab.CHART -> loadHome()
             MusicTab.FLOW -> loadFlow()
+            MusicTab.FOR_YOU -> loadForYou()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
             MusicTab.PLAYLISTS -> loadPlaylists()
@@ -1165,6 +1274,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         when (currentTab) {
             MusicTab.CHART -> loadHome()
             MusicTab.FLOW -> loadFlow()
+            MusicTab.FOR_YOU -> loadForYou()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
             MusicTab.PLAYLISTS -> loadPlaylists()
@@ -1845,6 +1955,60 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     message = "Волна недоступна — проверьте сеть",
                     retryDescription = "Повторить загрузку волны",
                     onRetry = { loadFlow() },
+                )
+            }
+        }
+    }
+
+    /**
+     * «Для тебя»: персональная лента GET /api/home — полки «Продолжить слушать»,
+     * «Новинки», «Для тебя», «Похожие на …» (server.py build_personal_shelf).
+     * Пустая полка — нормальное состояние сервера и просто не рендерится
+     * ([MusicHomePolicy]); полностью пустая лента получает понятную заглушку,
+     * сбой сети — ошибку с повтором. Загрузка идёт в [libraryJob], как у остальных
+     * библиотечных вкладок, и не пересекается с чартовым [job].
+     */
+    private fun loadForYou() {
+        libraryJob?.cancel()
+        openPlaylist = null
+        renderLibrary(LibraryUiState.Loading, { loadForYou() }) {}
+        libraryJob = lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getHome() } }
+            fetched.onSuccess { shelves ->
+                val visible = MusicHomePolicy.visibleShelves(shelves)
+                if (visible.isEmpty()) {
+                    // Все полки пусты — это не ошибка: подсказываем, чем лента наполняется.
+                    tracks = emptyList()
+                    resetList()
+                    results.addView(libraryPlaceholder(getString(R.string.music_for_you_empty)))
+                    return@onSuccess
+                }
+                renderForYouShelves(visible)
+            }.onFailure {
+                renderLibrary(
+                    LibraryUiState.Error(getString(R.string.music_for_you_error)),
+                    { loadForYou() },
+                ) {}
+            }
+        }
+    }
+
+    /**
+     * Рендер полок ленты: заголовок-карточка + вертикальный список строк на каждую полку.
+     * Все треки видимых полок складываются в [tracks] одной очередью в порядке рендера
+     * ([MusicHomePolicy.playbackQueue]), поэтому сквозной индекс строки совпадает с
+     * позицией в очереди и тап запускает воспроизведение ленты с этого трека.
+     */
+    private fun renderForYouShelves(shelves: List<MusicShelf>) {
+        tracks = MusicHomePolicy.playbackQueue(shelves)
+        resetList()
+        var index = 0
+        shelves.forEach { shelf ->
+            headerCard(title = shelf.title)?.let { results.addView(it) }
+            shelf.items.forEach { t ->
+                results.addView(
+                    trackRow(t, index++),
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
                 )
             }
         }

@@ -63,6 +63,20 @@ data class Playlist(
 )
 
 /**
+ * Одна полка персональной ленты из GET /api/home → shelf.sections[].
+ *
+ * [id] — машинный ключ полки (`continue`, `new`, `for_you`, `similar`);
+ * [title] — человекочитаемый заголовок («Продолжить слушать», «Новинки», …);
+ * [items] — треки внутри полки (пустой список допустим и означает «нет данных»,
+ * а не ошибку — UI такую полку пропускает).
+ */
+data class MusicShelf(
+    val id: String,
+    val title: String,
+    val items: List<MusicTrack>,
+)
+
+/**
  * One row of the server listening history from GET /api/history.
  *
  * [id] is the VIDEO id (the payload key is `id`, not `video_id`), so an entry can be
