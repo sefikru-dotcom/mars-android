@@ -261,10 +261,66 @@
             android:layout_height="wrap_content">
 
             <LinearLayout
-                android:id="@+id/quickChipsRow"
-                android:orientation="horizontal"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+                <!-- Параметры хода (модель, уровень размышлений): левая группа той же D-pad-строки. -->
+                <LinearLayout
+                    android:id="@+id/turnParamsRow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginEnd="28dp">
+                    <Button
+                        android:id="@+id/modelButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:maxWidth="340dp"
+                        android:paddingStart="20dp"
+                        android:paddingEnd="20dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
+                        android:background="@drawable/bg_focus_card"
+                        android:textColor="@color/mars_text"
+                        android:textSize="18sp"
+                        android:textAllCaps="false"
+                        android:singleLine="true"
+                        android:ellipsize="middle"
+                        android:focusable="true"
+                        android:clickable="true"
+                        android:text="@string/tv_chip_model"
+                        android:contentDescription="@string/tv_chip_model_desc" />
+                    <Button
+                        android:id="@+id/reasoningButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:maxWidth="300dp"
+                        android:paddingStart="20dp"
+                        android:paddingEnd="20dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
+                        android:background="@drawable/bg_focus_card"
+                        android:textColor="@color/mars_text"
+                        android:textSize="18sp"
+                        android:textAllCaps="false"
+                        android:singleLine="true"
+                        android:ellipsize="end"
+                        android:focusable="true"
+                        android:clickable="true"
+                        android:visibility="gone"
+                        android:contentDescription="@string/tv_chip_reasoning_desc" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/quickChipsRow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal" />
+            </LinearLayout>
         </HorizontalScrollView>
 
         <LinearLayout
@@ -371,6 +427,75 @@
             <Button
                 android:id="@+id/closeSessionsButton"
                 android:text="Закрыть"
+                android:textSize="18sp"
+                android:textColor="@color/mars_text"
+                android:background="@drawable/bg_focus_card"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:paddingStart="26dp"
+                android:paddingEnd="26dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
+                android:focusable="true"
+                android:layout_gravity="end"
+                android:layout_marginTop="16dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Пикер параметров хода (модель / уровень размышлений): тот же модальный слой,
+         что у браузера диалогов. Строки рендерятся программно в paramsList; решения
+         (какие строки, начальный фокус, D-pad-шаг) — в TvTurnParamsPolicy. BACK
+         закрывает пикер и возвращает фокус на вызвавший чип. -->
+    <FrameLayout
+        android:id="@+id/paramsOverlay"
+        android:background="@color/mars_scrim"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:orientation="vertical"
+            android:background="@drawable/bg_session_panel"
+            android:padding="28dp"
+            android:layout_gravity="center"
+            android:layout_marginStart="170dp"
+            android:layout_marginEnd="170dp"
+            android:layout_marginTop="28dp"
+            android:layout_marginBottom="28dp"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <TextView
+                android:id="@+id/paramsTitle"
+                android:textColor="@color/mars_text_strong"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <ScrollView
+                android:id="@+id/paramsScroll"
+                android:scrollbars="none"
+                android:fillViewport="true"
+                android:layout_marginTop="14dp"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+
+                <LinearLayout
+                    android:id="@+id/paramsList"
+                    android:orientation="vertical"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+            </ScrollView>
+
+            <Button
+                android:id="@+id/closeParamsButton"
+                android:text="@string/tv_picker_close"
                 android:textSize="18sp"
                 android:textColor="@color/mars_text"
                 android:background="@drawable/bg_focus_card"
