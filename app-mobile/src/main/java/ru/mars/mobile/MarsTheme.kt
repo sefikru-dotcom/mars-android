@@ -18,6 +18,12 @@ import androidx.core.content.ContextCompat
  * Mars WebUI Design System Parity.
  * Pure Obsidian Dark Theme (#07080B) with Ruby Mars (#EF4444) accents,
  * subtle micro-borders (#1E2433), floating glass capsules and zero emojis.
+ *
+ * Пульсирует ТОЛЬКО альфа ореол-слоя. У пульсирующих точек ореол строится из
+ * НЕПРОЗРАЧНОГО тона, а его альфу несёт сам drawable (`GradientDrawable.alpha`):
+ * `LayerDrawable.setLayerAlpha` — скрытый API платформы (в API 34 его нет), и
+ * альфа самого слоя — единственный публичный путь. Непульсирующие тона идут
+ * прежним путём ([MarsGradients.glowRing]) — их вид не меняется ни на байт.
  */
 object MarsTheme {
     // Primary palette
@@ -324,6 +330,13 @@ object MarsTheme {
      * Status dot with an ambient glow ring: solid core + translucent halo of the
      * same hue (vector shapes only — no glyphs). Size the host view 12–14 dp;
      * the core occupies the inner ~55%.
+     *
+     * Индикаторы живого состояния («выполняется», «онлайн») мягко пульсируют
+     * альфой ореола — паритет с WebUI `mars-neon-pulse`. Период и амплитуда
+     * берутся из [MarsPulsePolicy], анимация — из [StatusDotPulse]. Сигнатура и
+     * габариты вьюхи не меняются; ядро всегда непрозрачно, геометрия и текст не
+     * затрагиваются. При выключенных анимациях/экономии батареи/`reduce motion`
+     * точка возвращается к прежнему статичному виду.
      */
     fun glowingStatusDot(context: Context, color: Int): View {
         // Овалы — из кэша шаблонов (копии независимы). LayerDrawable сознательно
@@ -331,12 +344,26 @@ object MarsTheme {
         // callback у Drawable принадлежат одной View — общий экземпляр дал бы
         // пересекающиеся bounds между точками. Сборка LayerDrawable из двух
         // готовых копий дешёвая (массив + insets).
-        val glow = ovalDrawable(context, MarsGradients.glowRing(color))
+        val role = MarsPulsePolicy.roleForColor(color)
+        // У пульсирующей точки ореол — непрозрачный тон, а альфу несёт сам
+        // Drawable (публичный `setAlpha`); у остальных — прежний полупрозрачный
+        // glowRing, то есть вид непульсирующих точек не меняется.
+        // mutate() поверх копии из cachedGradient: копия уже независима, но явный
+        // mutate — страховка от общего ConstantState, иначе альфа одного индикатора
+        // утекла бы на все точки списка (включая статичные).
+        val glow = if (role != null) {
+            ovalDrawable(context, color).mutate()
+        } else {
+            ovalDrawable(context, MarsGradients.glowRing(color))
+        }
         val core = ovalDrawable(context, color)
         val inset = dp(context, 3)
         val layers = LayerDrawable(arrayOf(glow, core))
         layers.setLayerInset(1, inset, inset, inset, inset)
-        return View(context).apply { background = layers }
+        val dot = View(context).apply { background = layers }
+        // Пульсируют только живые состояния; остальные тона остаются статичными.
+        if (role != null) StatusDotPulse.attach(context, dot, layers, role)
+        return dot
     }
 
     /**

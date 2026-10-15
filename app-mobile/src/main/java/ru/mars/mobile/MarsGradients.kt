@@ -63,7 +63,12 @@ object MarsGradients {
     const val STATUS_RUNNING = 0xff3b82f6.toInt()
     const val STATUS_DONE = 0xff22c55e.toInt()
 
-    /** Alpha of the ambient glow ring around a status dot. */
+    /**
+     * Alpha of the ambient glow ring around a status dot — the RESTING shade.
+     * Live-state dots (running / online) additionally breathe between
+     * [MarsPulsePolicy.MIN_ALPHA] and [MarsPulsePolicy.MAX_ALPHA]; when animations are
+     * off they keep exactly this value, so the static look is unchanged.
+     */
     const val GLOW_RING_ALPHA = 0x33
     /** Alpha of translucent badge backgrounds. */
     const val BADGE_BG_ALPHA = 0x1a
