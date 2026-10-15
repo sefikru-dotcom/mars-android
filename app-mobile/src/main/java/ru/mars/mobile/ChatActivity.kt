@@ -199,6 +199,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // TextToSpeech is isolated behind AndroidSpeechEngine — ChatActivity only wires both.
     private lateinit var speechEngine: AndroidSpeechEngine
     private lateinit var voiceOutput: VoiceOutputController
+    /** Серверный TTS (POST /api/tts) с фолбэком на [speechEngine] — движок контроллера. */
+    private lateinit var serverTtsEngine: ServerTtsSpeechEngine
+    private lateinit var serverTtsPlayback: AndroidServerTtsPlayback
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     private var speechEngineInitResult: Boolean? = null
     private lateinit var voiceSession: VoiceSessionController
@@ -338,8 +341,24 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (::voiceOutput.isInitialized) voiceOutput.onEngineReady(available)
             else speechEngineInitResult = available
         }
+        // Серверный TTS с прозрачным фолбэком на системный: контроллер видит один движок
+        // (serverTtsEngine), платформенный speechEngine остаётся путём деградации. 401 на
+        // device-Bearer — известный серверный блокер, клиент обходить его не должен: при
+        // недоступности сервера голос уходит в системный TTS молча.
+        serverTtsPlayback = AndroidServerTtsPlayback(this)
+        serverTtsEngine = ServerTtsSpeechEngine(
+            fallback = speechEngine,
+            client = RepositoryServerTtsClient(
+                baseUrl = BASE_URL,
+                credentialProvider = { store.read() },
+            ),
+            playback = serverTtsPlayback,
+            scope = lifecycleScope,
+            // Платформенного TTS нет, а серверное аудио зазвучало — вывод снова возможен.
+            onServerAudioAvailable = { runOnUiThread { voiceOutput.onEngineReady(true) } },
+        )
         voiceOutput = VoiceOutputController(
-            engine = speechEngine,
+            engine = serverTtsEngine,
             autoSpeakInitially = voiceOutputPrefs.getBoolean(KEY_AUTO_SPEAK, false),
             onAutoSpeakChanged = { enabled -> voiceOutputPrefs.edit().putBoolean(KEY_AUTO_SPEAK, enabled).apply() },
         )
