@@ -41,6 +41,8 @@
         <activity android:name=".TodosActivity" />
         <activity android:name=".CronActivity" />
         <activity android:name=".SettingsActivity" />
+        <!-- Read-only список профилей сервера (GET /api/profiles): вход из Настройки. -->
+        <activity android:name=".ProfilesActivity" />
         <!-- Read-only доска канбана (GET /api/kanban/*) и мониторинг; запуск из левого бара (AppNavIntents.sectionIntent). -->
         <activity android:name=".KanbanActivity" />
         <activity android:name=".InsightsActivity" />
