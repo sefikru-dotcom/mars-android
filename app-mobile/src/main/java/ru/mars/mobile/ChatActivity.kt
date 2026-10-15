@@ -73,6 +73,8 @@ import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
 import ru.mars.network.repository.ReasoningRepository
 import ru.mars.network.repository.ReasoningStatusResult
+import ru.mars.network.repository.ProviderQuotaOutcome
+import ru.mars.network.repository.SessionToolsetsOutcome
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.SessionAutonomyRepository
 import ru.mars.network.repository.AutonomyLookup
@@ -148,6 +150,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var stream: Job? = null
     private var currentSessionId: String? = null
     private var currentSessionReadOnly = false
+    /** A13: субагентские диалоги view-only — серверные операции над ходом запрещены. */
+    private var currentSessionIsSubagent = false
     private var currentStreamId: String? = null
     /** Черновики несент-сообщений по диалогам: чистая политика [SessionDraftController]. */
     private lateinit var drafts: SessionDraftController
@@ -183,6 +187,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var usageIndicator: TextView? = null
     /** Последний измеренный расход сессии; null — ещё не запрошен или недоступен. */
     private var sessionUsage: SessionUsage? = null
+    /** A9: чип набора инструментов сессии и его презентер (состояние выбора/записи). */
+    private var toolsetsChip: Button? = null
+    private val toolsetsPresenter = SessionToolsetsPresenter()
+    /** A10: чип квоты провайдера и его презентер (состояние читается из полей ответа). */
+    private var quotaChip: TextView? = null
+    private val quotaPresenter = ProviderQuotaPresenter()
     /** Дебаунс серверной записи черновика composer (A15) — чистая политика. */
     private val serverDraftSync = ServerDraftSyncPolicy()
     private var serverDraftJob: Job? = null
@@ -1259,6 +1269,36 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         chipsRow.addView(usageIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
+        // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
+        // tap открывает множественный выбор из справочника тулсетов.
+        toolsetsChip = Button(this).apply {
+            text = toolsetsPresenter.chipLabel()
+            textSize = 10.5f
+            contentDescription = toolsetsPresenter.chipDescription()
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), 0, dp(8), 0)
+            minimumHeight = 0
+            minHeight = 0
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            visibility = View.GONE
+            setOnClickListener { showToolsetsDialog() }
+        }
+        chipsRow.addView(toolsetsChip, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(4) })
+
+        // A10: чип квоты провайдера. Провайдер без квоты показывает это словами, а не пустотой:
+        // состояние берётся из полей ответа (supported/status), а не из HTTP-кода.
+        quotaChip = TextView(this).apply {
+            textSize = 9.5f
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(7), dp(2), dp(7), dp(2))
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+            setOnClickListener { showQuotaDetails() }
+        }
+        chipsRow.addView(quotaChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
+
         chipsScroll.addView(chipsRow)
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
 
@@ -1791,6 +1831,63 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 info.className = Button::class.java.name
             }
         })
+    }
+
+    /**
+     * A16: строка-сводка свёрнутого набора вызовов инструментов. Одна строка вместо
+     * простыни карточек: иконка, «N инструментов · Готово» и шеврон. Тап переключает
+     * ручное переопределение группы ([ChatUiState.toggleToolGroup]) и перерисовывает
+     * транскрипт. Иконки — монохромные векторы темы, счётчик ASCII.
+     */
+    private fun buildToolGroupSummary(messageIndex: Int, group: ToolGroupModel): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = MarsTheme.toolCallCard(this@ChatActivity)
+            setPadding(dp(10), dp(6), dp(8), dp(6))
+            isClickable = true
+        }
+        val iconRes = when (group.iconToolName?.let { ToolCardPresenter.present(ToolExecution("", it, "")).kind }) {
+            ToolKind.TERMINAL -> R.drawable.ic_chip
+            ToolKind.FILESYSTEM -> R.drawable.ic_plan
+            ToolKind.WEB -> R.drawable.ic_search
+            ToolKind.MCP -> R.drawable.ic_refresh
+            else -> R.drawable.ic_status
+        }
+        box.addView(ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
+            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+        box.addView(TextView(this).apply {
+            text = group.summary
+            textSize = 11.5f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        box.addView(ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(
+                this@ChatActivity,
+                if (group.chevronExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+            ))
+            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
+
+        applyExpandableHeaderA11y(
+            box,
+            group.summaryDescription,
+            if (group.chevronExpanded) "развёрнуто" else "свёрнуто"
+        )
+        box.setOnClickListener {
+            uiState.toggleToolGroup(messageIndex, group.chevronExpanded)
+            renderMessages()
+        }
+        return box
     }
 
     /**
@@ -2444,7 +2541,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 sizeDp = 30,
                 strokeColor = 0
             ).apply {
-                setOnClickListener { showMessageActions(uiState.messages.getOrNull(index) ?: message) }
+                setOnClickListener { showMessageActions(uiState.messages.getOrNull(index) ?: message, index) }
             }
             actionsRow.addView(moreBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
             if (!isUser) {
@@ -2550,7 +2647,26 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
 
+        // A16: набор вызовов инструментов одного сообщения сворачивается в одну
+        // строку-сводку («N инструментов · Готово» с шевроном). Режим активности
+        // даёт лишь НАЧАЛЬНОЕ состояние; ручной тап переопределяет его и держится
+        // до смены сессии. При COLLAPSED карточки ниже не создаются вообще —
+        // именно поэтому сначала считается модель, а цикл получает guard.
+        val toolGroup = ToolGroupPresenter.model(
+            tools = message.tools,
+            mode = uiState.activityMode,
+            manualExpanded = uiState.isToolGroupExpanded(index),
+        )
+        if (toolGroup.showsSummary) {
+            card.addView(
+                buildToolGroupSummary(index, toolGroup),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+            )
+        }
+
         message.tools.forEachIndexed { toolIndex, tool ->
+            // Свёрнутая группа: дочерние карточки не инфлейтятся впустую.
+            if (!toolGroup.showsCards) return@forEachIndexed
             val toolView = ToolCardPresenter.present(tool)
             val toolBox = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -2765,7 +2881,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             card.setOnLongClickListener { view ->
                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                 // Резолвим в момент клика: захваченная при сборке копия устаревает за кадры стрима.
-                showMessageActions(uiState.messages.getOrNull(index) ?: message)
+                showMessageActions(uiState.messages.getOrNull(index) ?: message, index)
                 true
             }
         }
@@ -2912,7 +3028,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 drafts.onSessionSwitch(currentSessionId, detail.id, input.text.toString())
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 modelSelection.setSessionModel(detail.model, detail.modelProvider)
+                // A9: набор инструментов приходит вместе с деталью сессии — привязываем
+                // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
+                toolsetsPresenter.bind(detail.enabledToolsets)
+                uiState.applyEnabledToolsets(detail.enabledToolsets)
+                refreshComposerChips()
+                refreshProviderQuota()
                 currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == detail.id }?.readOnly == true
+                currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == detail.id }?.isSubagent == true
                 modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 // Active-turn/attention banner state from the freshly loaded detail.
                 uiState.setActiveTurn(detail.activeTurn)
@@ -2957,6 +3080,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
         drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
         currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
+        currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == sessionId }?.isSubagent == true
         modelSelection.setSessionModel(
             uiState.sessions.firstOrNull { it.id == sessionId }?.model,
             uiState.sessions.firstOrNull { it.id == sessionId }?.modelProvider,
@@ -3198,7 +3322,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (detail != null && currentSessionId == id) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
                 modelSelection.setSessionModel(detail.model, detail.modelProvider)
+                // A9: набор инструментов приходит вместе с деталью сессии — привязываем
+                // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
+                toolsetsPresenter.bind(detail.enabledToolsets)
+                uiState.applyEnabledToolsets(detail.enabledToolsets)
+                refreshComposerChips()
+                refreshProviderQuota()
                 currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == detail.id }?.readOnly == true
+                currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == detail.id }?.isSubagent == true
                 modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 uiState.setActiveTurn(detail.activeTurn)
                 uiState.setTodoState(detail.todoState)
@@ -3310,13 +3441,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * Message-actions sheet (WebUI parity): copy / quote / share for one message.
+     * Message-actions sheet (WebUI parity): copy / quote / share for one message,
+     * плюс серверные операции над ходом (A13): откат/ответвление/повтор.
      * Opened by the «⋮» button and by a long-press anywhere on the bubble.
      * Labels, quote formatting and the empty-text guard live in [MessageActionPolicy].
+     * Доступность серверных операций решает [TurnOpsPolicy] — по индексу сообщения,
+     * роли и признакам read-only/субагента.
      */
-    private fun showMessageActions(message: ChatMessage) {
+    private fun showMessageActions(message: ChatMessage, index: Int) {
         val actions = MessageActionPolicy.actionsFor(message.text)
-        if (actions.isEmpty()) return
+        val turnOps = TurnOpsPolicy.messageOps(
+            messageIndex = index,
+            messageCount = uiState.messages.size,
+            role = message.role,
+            readOnly = currentSessionReadOnly,
+            subagent = currentSessionIsSubagent,
+        )
+        if (actions.isEmpty() && turnOps.isEmpty()) return
         var dialog: Dialog? = null
         dialog = MarsDialog.show(this) { root ->
             root.addView(MarsDialog.header(this, "Действия с сообщением", null))
@@ -3327,9 +3468,80 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             })
             root.addView(stack)
+            // Серверные операции отдельным блоком: они меняют историю диалога,
+            // а не работают с текстом сообщения, поэтому визуально не смешиваются.
+            if (turnOps.isNotEmpty()) {
+                val opsStack = MarsDialog.pillStack(this, turnOps.map { kind ->
+                    kind.label to {
+                        dialog?.dismiss()
+                        confirmTurnOp(kind, index)
+                    }
+                })
+                root.addView(opsStack)
+            }
             listOf(stack)
         }
         dialog?.window?.setDimAmount(0.8f)
+    }
+
+    /**
+     * A13: серверная операция над ходом. Разрушительные проходят через подтверждение —
+     * «откат истории» нельзя выполнить одним случайным тапом.
+     */
+    private fun confirmTurnOp(kind: TurnOpKind, messageIndex: Int) {
+        val sessionId = currentSessionId ?: run {
+            Toast.makeText(this, TurnOpsRunner.NO_SESSION, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val keepCount = TurnOpsPolicy.keepCountForTruncate(messageIndex)
+        if (!TurnOpsPolicy.needsConfirmation(kind)) {
+            runTurnOp(kind, sessionId, keepCount)
+            return
+        }
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, TurnOpsPresenter.confirmTitle(kind), null))
+            root.addView(MarsDialog.paragraph(this, TurnOpsPresenter.confirmBody(kind, keepCount)))
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, "Отмена") { dialog?.dismiss() },
+                    MarsDialog.primaryButton(this, "Выполнить") {
+                        dialog?.dismiss()
+                        runTurnOp(kind, sessionId, keepCount)
+                    },
+                ),
+            )
+            emptyList()
+        }
+    }
+
+    /** A13: выполняет операцию и применяет [TurnOpOutcome] к экрану. */
+    private fun runTurnOp(kind: TurnOpKind, sessionId: String, keepCount: Int?) {
+        val credential = store.read() ?: run {
+            Toast.makeText(this, TurnOpsRunner.NO_CREDENTIAL, Toast.LENGTH_SHORT).show()
+            return
+        }
+        lifecycleScope.launch {
+            val outcome = TurnOpsRunner.run(
+                kind = kind,
+                sessionId = sessionId,
+                credential = credential,
+                baseUrl = BASE_URL,
+                keepCount = keepCount,
+            )
+            Toast.makeText(this@ChatActivity, outcome.message, Toast.LENGTH_SHORT).show()
+            if (!outcome.ok) return@launch
+            // Порядок важен: ветка/копия создаёт НОВЫЙ диалог, поэтому переключение
+            // на него отменяет перезагрузку исходного (его транскрипт не изменился).
+            val target = outcome.newSessionId
+            if (target != null) {
+                loadSessionById(target)
+                outcome.newTitle?.let { uiState.sessionTitle = it }
+            } else {
+                (outcome.reloadSessionId ?: sessionId).let { reloadCurrentSession() }
+            }
+        }
     }
 
     private fun performMessageAction(kind: MessageActionKind, message: ChatMessage) {
@@ -3918,7 +4130,122 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         view.setTextColor(MarsTheme.TEXT_MUTED)
     }
 
-    /** Диалог расхода: разбивка токенов (запрос/ответ) и стоимость. Только чтение. */
+    // --- A9/A10: чипы композера ---------------------------------------------------------------
+
+    /** Обновляет подписи и видимость чипов A9 (набор инструментов) и A10 (квота). */
+    private fun refreshComposerChips() {
+        toolsetsChip?.apply {
+            text = toolsetsPresenter.chipLabel()
+            contentDescription = toolsetsPresenter.chipDescription()
+            visibility = if (currentSessionId == null) View.GONE else View.VISIBLE
+        }
+        quotaChip?.apply {
+            val model = quotaPresenter.model()
+            text = model.label
+            contentDescription = model.contentDescription
+            visibility = if (model.visible) View.VISIBLE else View.GONE
+        }
+    }
+
+    /**
+     * A10: тянет квоту активного провайдера. Экран открытого диалога — единственное
+     * место, где чип имеет смысл: без сессии провайдер неизвестен, а числа квоты
+     * относятся к аккаунту, а не к диалогу.
+     */
+    private fun refreshProviderQuota() {
+        val credential = store.read() ?: run { quotaPresenter.reset(); refreshComposerChips(); return }
+        quotaPresenter.onLoading()
+        refreshComposerChips()
+        lifecycleScope.launch {
+            val outcome = runCatching { SessionRepository().getProviderQuota(BASE_URL, credential) }
+                .getOrElse { ProviderQuotaOutcome.Failure(it.message ?: "Network error") }
+            quotaPresenter.apply(outcome)
+            refreshComposerChips()
+        }
+    }
+
+    /**
+     * A9: множественный выбор набора инструментов сессии. Справочник статический
+     * ([SessionToolsetsPresenter.dialogEntries]), поэтому список не «прыгает» между
+     * открытиями. Пустой выбор трактуется как сброс на набор по умолчанию — сервер
+     * отвергает пустой список, и пользователь не должен заходить в тупик.
+     */
+    private fun showToolsetsDialog() {
+        val sessionId = currentSessionId ?: return
+        val initial = toolsetsPresenter.selection
+        val checked = initial.toMutableSet()
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Инструменты сессии", null))
+            root.addView(
+                MarsDialog.paragraph(
+                    this,
+                    "Отметьте, что разрешено в этом диалоге. Ничего не отмечено — набор по умолчанию.",
+                ),
+            )
+            val entries = SessionToolsetsPresenter.dialogEntries()
+            val boxes = entries.map { option ->
+                CheckBox(this).apply {
+                    text = option.title
+                    isChecked = option.name in checked
+                    setTextColor(MarsTheme.TEXT)
+                    setOnCheckedChangeListener { _, value ->
+                        if (value) checked += option.name else checked -= option.name
+                    }
+                }
+            }
+            boxes.forEach { root.addView(it) }
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, "Отмена") { dialog?.dismiss() },
+                    MarsDialog.primaryButton(this, "Сохранить") {
+                        dialog?.dismiss()
+                        saveToolsets(sessionId, checked)
+                    },
+                ),
+            )
+            emptyList()
+        }
+    }
+
+    /** A9: отправляет выбор на сервер; чип показывает только ПОДТВЕРЖДЁННОЕ значение. */
+    private fun saveToolsets(sessionId: String, selected: Set<String>) {
+        val credential = store.read() ?: return
+        toolsetsPresenter.onSaving()
+        refreshComposerChips()
+        lifecycleScope.launch {
+            val payload = SessionToolsetsPolicy.payloadFor(selected)
+            val outcome = runCatching {
+                SessionRepository().updateSessionToolsets(BASE_URL, credential, sessionId, payload)
+            }.getOrElse { SessionToolsetsOutcome.Failure(it.message ?: "Network error") }
+            toolsetsPresenter.apply(outcome)
+            uiState.applyEnabledToolsets(toolsetsPresenter.enabledToolsets)
+            refreshComposerChips()
+            toolsetsPresenter.statusText()?.let { Toast.makeText(this@ChatActivity, it, Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    /** A10: пояснение к чипу квоты — что за числа и почему их нет. */
+    private fun showQuotaDetails() {
+        val model = quotaPresenter.model()
+        val body = TextView(this).apply {
+            text = listOfNotNull(model.label, model.detail.ifBlank { null }).joinToString("\n\n")
+            setTextColor(MarsTheme.TEXT)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = dp(20)
+            setPadding(pad, pad, pad, dp(8))
+            addView(body)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Квота провайдера")
+            .setView(container)
+            .setPositiveButton("Закрыть", null)
+            .show()
+    }
+
     private fun showSessionUsageDetails() {
         val body = TextView(this).apply {
             text = SessionUsagePolicy.detailsText(sessionUsage)
@@ -4047,6 +4374,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         uiState.startNewSession()
         currentSessionId = null
         currentSessionReadOnly = false
+        currentSessionIsSubagent = false
         modelSelection.clearSessionModel()
         explicitStatus = when {
             report == null -> "Сессия завершена"

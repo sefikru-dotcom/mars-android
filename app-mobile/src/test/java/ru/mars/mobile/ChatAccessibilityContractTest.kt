@@ -118,8 +118,15 @@ class ChatAccessibilityContractTest {
             "Todo-заголовок обязан получать доступную подпись из ChatA11yPolicy",
             chat.contains("ChatA11yPolicy.expandableHeaderDescription(todoWidgetExpanded, card.title)")
         )
+        // Заголовков со сворачиванием четыре: thinking / tool / todo / группа инструментов.
+        // Группа — тоже раскрываемый заголовок, поэтому обязана идти через тот же хелпер;
+        // считаем вызовы, чтобы новый сворачиваемый заголовок не проскочил без подписи.
         val calls = Regex("applyExpandableHeaderA11y\\(").findAll(chat).count()
-        assertEquals("Хелпер обязан вызываться ровно в 3 заголовках (+1 объявление)", 4, calls)
+        assertEquals(
+            "Хелпер обязан вызываться в 4 заголовках (+1 объявление)",
+            5,
+            calls
+        )
     }
 
     // --- errorStrip в approval/clarify ----------------------------------------------------------
