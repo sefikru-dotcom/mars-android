@@ -13,8 +13,14 @@ import ru.mars.network.model.SubagentStatus
  */
 class CardSnapshotTurnMetaTest {
 
-    private fun snapshot(message: ChatMessage): CardSnapshot =
-        CardSnapshotPolicy.of(message, previousTimestamp = 0L, chromeEpoch = 1L, streamingFlag = true)
+    /**
+     * Снимок с ФИКСИРОВАННОЙ меткой времени: [ChatMessage.timestamp] по умолчанию
+     * берётся из `System.currentTimeMillis()`, поэтому два «одинаковых» сообщения,
+     * созданные в разные миллисекунды, давали разные снимки (flaky на CI). Тест про
+     * turn-meta поля, а не про время — время здесь константа.
+     */
+    private fun snapshot(message: ChatMessage, timestamp: Long = 1_700_000_000_000L): CardSnapshot =
+        CardSnapshotPolicy.of(message.copy(timestamp = timestamp), previousTimestamp = 0L, chromeEpoch = 1L, streamingFlag = true)
 
     @Test
     fun `turn model stamp dirties the snapshot`() {
