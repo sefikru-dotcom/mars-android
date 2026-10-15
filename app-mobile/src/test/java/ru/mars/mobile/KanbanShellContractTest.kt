@@ -143,8 +143,8 @@ class KanbanShellContractTest {
     fun `screen stays a read-only showcase`() {
         val repoCalls = Regex("(?<![.\\w])repository\\.(\\w+)").findAll(kanban).map { it.groupValues[1] }.toSet()
         assertEquals(
-            "Допустимы только GET-вызовы доски/статистики/карточки/досок/исполнителей",
-            setOf("getBoard", "getStats", "getTaskDetail", "getBoards", "getAssignees", "streamEvents"),
+            "Допустимы только GET-вызовы доски/статистики/конфига/карточки/досок/исполнителей",
+            setOf("getBoard", "getStats", "getConfig", "getTaskDetail", "getBoards", "getAssignees", "streamEvents"),
             repoCalls
         )
         assertFalse(

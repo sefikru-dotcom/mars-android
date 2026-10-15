@@ -28,6 +28,7 @@ import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.repository.KanbanAssigneesResult
 import ru.mars.network.repository.KanbanBoardResult
 import ru.mars.network.repository.KanbanBoardsResult
+import ru.mars.network.repository.KanbanConfigResult
 import ru.mars.network.repository.KanbanRepository
 import ru.mars.network.repository.KanbanStatsResult
 import ru.mars.network.repository.KanbanTaskDetailResult
@@ -86,7 +87,7 @@ class KanbanActivity : ComponentActivity() {
         val repository = KanbanRepository()
         presenter = KanbanPresenter(
             hasCredential = { store.read() != null },
-            fetchBoard = { since, board, assignee ->
+            fetchBoard = { since, board, assignee, includeArchived ->
                 val credential = store.read()
                 if (credential == null) null
                 else when (
@@ -96,9 +97,18 @@ class KanbanActivity : ComponentActivity() {
                         since = since,
                         board = board,
                         assignee = assignee,
+                        includeArchived = includeArchived,
                     )
                 ) {
                     is KanbanBoardResult.Board -> result.board
+                    else -> null
+                }
+            },
+            fetchConfig = { board ->
+                val credential = store.read()
+                if (credential == null) null
+                else when (val result = repository.getConfig(MarsApi.BASE_URL, credential, board = board)) {
+                    is KanbanConfigResult.Config -> result.config
                     else -> null
                 }
             },
@@ -564,15 +574,24 @@ class KanbanActivity : ComponentActivity() {
 
     /**
      * Read-only диалог задачи (тап по карточке): заголовок, статус, тело,
-     * факты, комментарии, хвост ленты событий, связи. Единственное действие —
+     * факты, комментарии, связи, хвост ленты событий. Единственное действие —
      * «Закрыть»: мутации kanban мобильным клиентом не выполняются.
      */
-    private fun showTaskDetail(card: KanbanTaskCardUi) {
+    private fun showTaskDetail(card: KanbanTaskCardUi) = openTaskDetail(card.id, card.title)
+
+    /**
+     * Диалог задачи по id (`GET /api/kanban/tasks/{id}`). [fallbackTitle] —
+     * заголовок на случай, когда сервер не ответил (карточка исчезла из доски).
+     * Связи задачи (`links {parents, children}`) показаны реальными id:
+     * тап/фокус по пилюле открывает диалог связанной задачи — навигация только
+     * на чтение, как и весь экран.
+     */
+    private fun openTaskDetail(taskId: String, fallbackTitle: String) {
         lifecycleScope.launch {
-            val detail = presenter.loadTaskDetail(card.id)
+            val detail = presenter.loadTaskDetail(taskId)
             if (detail == null) {
                 MarsDialog.show(this@KanbanActivity) { root ->
-                    root.addView(MarsDialog.header(this@KanbanActivity, card.title, null))
+                    root.addView(MarsDialog.header(this@KanbanActivity, fallbackTitle, null))
                     root.addView(MarsDialog.paragraph(this@KanbanActivity, KanbanPolicy.MSG_DETAIL_ERROR))
                     listOf(MarsDialog.quietButton(this@KanbanActivity, KanbanPolicy.CLOSE_LABEL) {})
                 }
@@ -593,13 +612,22 @@ class KanbanActivity : ComponentActivity() {
                     }
                 }
                 if (detail.parentIds.isNotEmpty() || detail.childIds.isNotEmpty()) {
-                    root.addView(MarsDialog.caption(this@KanbanActivity, "Связи"))
-                    root.addView(detailValue(
-                        "родители: ${detail.parentIds.size}, подзадачи: ${detail.childIds.size}"
-                    ))
+                    root.addView(MarsDialog.caption(this@KanbanActivity, KanbanPolicy.LINKS_LABEL))
+                    if (detail.parentIds.isNotEmpty()) {
+                        root.addView(MarsDialog.caption(this@KanbanActivity, KanbanPolicy.LINK_PARENTS_LABEL))
+                        root.addView(MarsDialog.pillRow(this@KanbanActivity, detail.parentIds) { id ->
+                            openTaskDetail(id, id)
+                        })
+                    }
+                    if (detail.childIds.isNotEmpty()) {
+                        root.addView(MarsDialog.caption(this@KanbanActivity, KanbanPolicy.LINK_CHILDREN_LABEL))
+                        root.addView(MarsDialog.pillRow(this@KanbanActivity, detail.childIds) { id ->
+                            openTaskDetail(id, id)
+                        })
+                    }
                 }
                 if (detail.eventLabels.isNotEmpty()) {
-                    root.addView(MarsDialog.caption(this@KanbanActivity, "Последние события"))
+                    root.addView(MarsDialog.caption(this@KanbanActivity, KanbanPolicy.EVENTS_LABEL))
                     root.addView(MarsDialog.pillRow(this@KanbanActivity, detail.eventLabels))
                 }
                 listOf(MarsDialog.quietButton(this@KanbanActivity, KanbanPolicy.CLOSE_LABEL) {})

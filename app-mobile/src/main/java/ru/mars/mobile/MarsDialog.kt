@@ -201,6 +201,30 @@ object MarsDialog {
         }, 14)
     }
 
+    /**
+     * Та же строка монospace-пилюль, но каждая кликабельна: [onClick] получает
+     * текст пилюли. Пилюли focusable (ripple + D-pad/тач), горизонтальный скролл
+     * строки сохраняется — навигация как у остального экрана.
+     */
+    fun pillRow(context: Context, items: List<String>, onClick: (String) -> Unit): View {
+        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        items.forEachIndexed { index, item ->
+            row.addView(
+                pill(
+                    context, item, monospace = true, fg = MarsTheme.TEXT_MUTED, border = MarsTheme.BORDER,
+                    onClick = { onClick(item) },
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { if (index > 0) marginStart = MarsTheme.dp(context, 8) }
+            )
+        }
+        return withBottomMargin(context, HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(row)
+        }, 14)
+    }
+
     /** Vertical stack of full-width choice pills (clarify presets). */
     fun pillStack(context: Context, items: List<Pair<String, () -> Unit>>, accentLast: Boolean = false): View {
         val stack = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
