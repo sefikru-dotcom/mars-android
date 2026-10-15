@@ -10,6 +10,8 @@ package ru.mars.network.model
  *   `{changed:false, latest_event_id, read_only}` (no columns) — [KanbanBoard.changed].
  * - `GET /api/kanban/tasks/{id}?board=` → `{task, comments[], events[], links, runs[], read_only}`.
  * - `GET /api/kanban/stats?board=` → `{by_status, by_assignee, oldest_ready_age_seconds?, now?}`.
+ * - `GET /api/kanban/config?board=` → `{columns[], assignees[], default_tenant,
+ *   lane_by_profile, include_archived_by_default, render_markdown, read_only}` — [KanbanConfig].
  * - `POST /api/kanban/dispatch?board=&dry_run=&max=` → `DispatchResult` asdict.
  *
  * Every field is parsed tolerantly: the task row is a dataclass `asdict` whose optional
@@ -165,6 +167,30 @@ data class KanbanStats(
     val oldestReadyAgeSeconds: Long? = null,
     /** Server clock, epoch seconds (absent in the SQL-fallback shape). */
     val now: Long? = null,
+)
+
+/**
+ * `GET /api/kanban/config` payload — display configuration of the board, read by the
+ * bridge from `dashboard.kanban` in hermes_cli.config.
+ *
+ * [columns] is the ORDERED list of display-lane names (the server's `DISPLAY_COLUMNS`,
+ * e.g. new/waiting/running/fault/done) — plain strings, NOT the object columns of the
+ * board envelope. WebUI parity (`panels.js`): the list is the canonical lane order and
+ * the skeleton of a board that returned no columns at all.
+ *
+ * Defaults mirror the SERVER's (`lane_by_profile`/`render_markdown` true,
+ * `include_archived_by_default` false — `_config_payload` in `kanban_bridge.py`), so a
+ * truncated payload degrades to unconfigured-bridge behaviour instead of inventing one.
+ */
+data class KanbanConfig(
+    val columns: List<String> = emptyList(),
+    val assignees: List<String> = emptyList(),
+    val defaultTenant: String = "",
+    val laneByProfile: Boolean = true,
+    /** Server-side default of the board's `include_archived` filter (WebUI checks the box). */
+    val includeArchivedByDefault: Boolean = false,
+    val renderMarkdown: Boolean = true,
+    val readOnly: Boolean = false,
 )
 
 /**

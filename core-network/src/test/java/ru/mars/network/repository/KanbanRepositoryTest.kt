@@ -325,6 +325,93 @@ class KanbanRepositoryTest {
         Unit
     }
 
+    // ── GET /api/kanban/config ──
+
+    @Test
+    fun `getConfig sends bearer auth and parses a full config payload`() = runBlocking {
+        enqueue(
+            body = """{
+                "columns":["new","waiting","running","fault","done"],
+                "assignees":["mars","sage"],
+                "default_tenant":"ops",
+                "lane_by_profile":true,
+                "include_archived_by_default":false,
+                "render_markdown":true,
+                "read_only":false}"""
+        )
+        val result = repository.getConfig(baseUrl(), credential, board = "ops")
+        val recorded = server.takeRequest()
+        assertEquals("GET", recorded.method)
+        assertEquals("/api/kanban/config?board=ops", recorded.path)
+        assertEquals("Bearer native-token", recorded.getHeader("Authorization"))
+        val cfg = (result as KanbanConfigResult.Config).config
+        assertEquals(listOf("new", "waiting", "running", "fault", "done"), cfg.columns)
+        assertEquals(listOf("mars", "sage"), cfg.assignees)
+        assertEquals("ops", cfg.defaultTenant)
+        assertTrue(cfg.laneByProfile)
+        assertFalse(cfg.includeArchivedByDefault)
+        assertTrue(cfg.renderMarkdown)
+        assertFalse(cfg.readOnly)
+        Unit
+    }
+
+    @Test
+    fun `getConfig falls back to server defaults on a truncated payload`() = runBlocking {
+        // Старый бридж или обрезанный ответ: только columns и assignees.
+        enqueue(body = """{"columns":["ready"],"assignees":["me"]}""")
+        val cfg = (repository.getConfig(baseUrl(), credential) as KanbanConfigResult.Config).config
+        assertEquals("/api/kanban/config", server.takeRequest().path)
+        assertEquals(listOf("ready"), cfg.columns)
+        assertEquals(listOf("me"), cfg.assignees)
+        assertEquals("", cfg.defaultTenant)
+        assertTrue(cfg.laneByProfile)
+        assertFalse(cfg.includeArchivedByDefault)
+        assertTrue(cfg.renderMarkdown)
+        assertFalse(cfg.readOnly)
+        Unit
+    }
+
+    @Test
+    fun `getConfig tolerates mis-typed booleans and numbers`() = runBlocking {
+        enqueue(
+            body = """{
+                "columns":[],
+                "assignees":[],
+                "default_tenant":null,
+                "lane_by_profile":"1",
+                "include_archived_by_default":0,
+                "render_markdown":"TRUE",
+                "read_only":1}"""
+        )
+        val cfg = (repository.getConfig(baseUrl(), credential) as KanbanConfigResult.Config).config
+        assertTrue(cfg.laneByProfile)
+        assertFalse(cfg.includeArchivedByDefault)
+        assertTrue(cfg.renderMarkdown)
+        assertTrue(cfg.readOnly)
+        Unit
+    }
+
+    @Test
+    fun `getConfig maps 404 onto Failed for older bridges without the endpoint`() = runBlocking {
+        enqueue(404, """{"error":"unknown kanban endpoint"}""")
+        assertEquals(
+            KanbanConfigResult.Failed("unknown kanban endpoint"),
+            repository.getConfig(baseUrl(), credential),
+        )
+        Unit
+    }
+
+    @Test
+    fun `getConfig drops nulls and blanks but renders numeric ids as strings`() = runBlocking {
+        // Контракт TolerantJson.renderString: null/пробелы отбрасываются, число
+        // рендерится строкой без «.0» (kanban id `3` обязан стать «3»).
+        enqueue(body = """{"columns":["ready",null,"  ",3],"assignees":["a",""]}""")
+        val cfg = (repository.getConfig(baseUrl(), credential) as KanbanConfigResult.Config).config
+        assertEquals(listOf("ready", "3"), cfg.columns)
+        assertEquals(listOf("a"), cfg.assignees)
+        Unit
+    }
+
     // ── POST /api/kanban/dispatch ──
 
     @Test

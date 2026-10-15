@@ -23,6 +23,7 @@ import ru.mars.network.model.KanbanBoardFilters
 import ru.mars.network.model.KanbanBoards
 import ru.mars.network.model.KanbanColumn
 import ru.mars.network.model.KanbanComment
+import ru.mars.network.model.KanbanConfig
 import ru.mars.network.model.KanbanDispatchOutcomePayload
 import ru.mars.network.model.KanbanDispatchSpawn
 import ru.mars.network.model.KanbanRun
@@ -60,6 +61,16 @@ sealed interface KanbanTaskDetailResult {
 sealed interface KanbanStatsResult {
     data class Stats(val stats: KanbanStats) : KanbanStatsResult
     data class Failed(val message: String) : KanbanStatsResult
+}
+
+/**
+ * Outcome of `GET /api/kanban/config`. No NotFound case: an older bridge answers the
+ * unknown endpoint with the shared 404 `{"error": …}` envelope, and for the screen a
+ * missing config is just [Failed] — best-effort, board falls back to server order.
+ */
+sealed interface KanbanConfigResult {
+    data class Config(val config: KanbanConfig) : KanbanConfigResult
+    data class Failed(val message: String) : KanbanConfigResult
 }
 
 /** Outcome of `GET /api/kanban/boards`. */
@@ -106,6 +117,7 @@ sealed interface KanbanStreamFrame {
  * - `GET  /api/kanban/board?board=&tenant=&assignee=&include_archived=&only_mine=&since=`
  * - `GET  /api/kanban/tasks/{id}?board=`
  * - `GET  /api/kanban/stats?board=`
+ * - `GET  /api/kanban/config?board=`
  * - `POST /api/kanban/dispatch?board=&dry_run=&max=`
  *
  * SAFETY of the mutating surface: [dispatch] is the ONLY write here and it never
@@ -205,6 +217,38 @@ class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
                 root == null -> KanbanStatsResult.Failed(unparseable(code))
                 code in 200..299 -> KanbanStatsResult.Stats(parseStats(root))
                 else -> KanbanStatsResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * `GET /api/kanban/config` — display configuration of the board: the ordered
+     * lane-name list (`columns`), known assignees and the display flags of
+     * `dashboard.kanban` (`include_archived_by_default`, `render_markdown`, …).
+     *
+     * Read-only GET, so it clears the device-Bearer allowlist like the rest of the
+     * kanban surface here. Best-effort for the caller: an older bridge without the
+     * endpoint answers the shared 404 error envelope, which maps to
+     * [KanbanConfigResult.Failed] — the screen then keeps the server column order
+     * and never requests archived tasks by default.
+     */
+    suspend fun getConfig(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        board: String? = null,
+    ): KanbanConfigResult = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/config")
+            .boardParam(board)
+            .build()
+        execute(
+            request = get(url, credential),
+            networkFailure = { KanbanConfigResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanConfigResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanConfigResult.Config(parseConfig(root))
+                else -> KanbanConfigResult.Failed(errorMessage(root, code))
             }
         }
     }
@@ -534,6 +578,23 @@ class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
             now = TolerantJson.longOrNull(root, "now"),
         )
     }
+
+    /**
+     * `GET /api/kanban/config`: `{columns, assignees, default_tenant, lane_by_profile,
+     * include_archived_by_default, render_markdown, read_only}` (`_config_payload` in
+     * `kanban_bridge.py`). Absent/mis-typed fields fall back to the SERVER's defaults —
+     * `lane_by_profile` and `render_markdown` are true there, everything else false —
+     * so a truncated payload behaves exactly like an unconfigured bridge.
+     */
+    internal fun parseConfig(root: Map<String, Any?>): KanbanConfig = KanbanConfig(
+        columns = TolerantJson.stringListOrEmpty(root, "columns"),
+        assignees = TolerantJson.stringListOrEmpty(root, "assignees"),
+        defaultTenant = TolerantJson.string(root, "default_tenant").orEmpty(),
+        laneByProfile = TolerantJson.bool(root, "lane_by_profile", default = true),
+        includeArchivedByDefault = TolerantJson.bool(root, "include_archived_by_default"),
+        renderMarkdown = TolerantJson.bool(root, "render_markdown", default = true),
+        readOnly = TolerantJson.bool(root, "read_only"),
+    )
 
     /**
      * One `by_assignee` value: the kanban_db.board_stats shape is `{status: n}` (nested),
