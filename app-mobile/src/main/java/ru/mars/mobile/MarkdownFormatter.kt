@@ -45,6 +45,29 @@ object MarkdownFormatter {
     private val OPEN_CODE_BLOCK_REGEX = Regex("```(\\w*)\\r?\\n([\\s\\S]*)$")
     private val LINK_REGEX = Regex("\\[([^\\]]+)\\]\\((https?://[^\\s)]+)\\)")
     private val IMAGE_REGEX = Regex("!\\[([^\\]]*)\\]\\((https?://[^\\s)]+)\\)")
+
+    /**
+     * Символы, которые не могут быть частью голого URL при разборе сообщения:
+     * маркеры разметки (`` ` `` `*`), кавычки, угловые скобки и `|`/`[]`
+     * (ссылка не должна «съедать» соседние ячейки таблицы или скобки ссылок).
+     */
+    private const val URL_BODY_EXCLUDE = "\\s<>\"'`*|\\[\\]"
+
+    /**
+     * Голые URL. Схема http(s) — любой хост (в т.ч. `localhost` и IP);
+     * «голый домен» — только известные зоны, иначе `файл.pdf` или `версия 1.5.4`
+     * в обычном тексте стали бы ссылками. Левый lookbehind не даёт линковать
+     * URL, приклеенный к слову или к `@` (адрес почты).
+     */
+    private val SCHEME_URL_REGEX = Regex("(?<![\\p{L}\\p{N}@])https?://[^$URL_BODY_EXCLUDE]+")
+    private val BARE_DOMAIN_REGEX = Regex(
+        "(?<![\\p{L}\\p{N}@./-])(?:[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]{0,61}[\\p{L}\\p{N}])?\\.)+" +
+            "(?:ru|com|net|org|io|dev|me|ai|su|рф)(?![\\p{L}\\p{N}_-])(?:/[^$URL_BODY_EXCLUDE]*)?"
+    )
+    private val URL_REGEXES = listOf(SCHEME_URL_REGEX, BARE_DOMAIN_REGEX)
+
+    /** Хвостовая пунктуация прозы не является частью URL (`см. https://x.ru.`). */
+    private const val URL_TAIL_PUNCTUATION = ".,;:!?«»\"'"
     private val BOLD_REGEX = Regex("\\*\\*(.+?)\\*\\*")
     private val CODE_INLINE_REGEX = Regex("`([^`]+)`")
     private val STRIKE_REGEX = Regex("~~(.+?)~~")
@@ -177,10 +200,26 @@ object MarkdownFormatter {
         return false
     }
 
-    /** Маркеры только inline-синтаксиса: код, bold/italic, ссылки/картинки, strike. */
+    /**
+     * Маркеры только inline-синтаксиса: код, bold/italic, ссылки/картинки, strike —
+     * плюс признаки, по которым может сработать автолинк голых URL.
+     *
+     * URL-признаки намеренно узкие, иначе медленный путь включался бы почти на
+     * каждой строке: `версия 1.5.4` (точка перед цифрой) и `итого: 5` (одиночное
+     * двоеточие) остаются быстрыми — регексы по ним ничего не найдут.
+     */
     internal fun hasInlineMarkers(raw: String): Boolean {
-        for (c in raw) {
-            if (c == '`' || c == '*' || c == '[' || c == '~') return true
+        var i = 0
+        while (i < raw.length) {
+            when (raw[i]) {
+                '`', '*', '[', '~' -> return true
+                // Схема URL: только "://" — одиночное ":" это обычная пунктуация.
+                ':' -> if (raw.startsWith("://", i)) return true
+                // Начало «голого» домена: точка, сразу за которой буква
+                // (`marscore.ru`). Точка перед пробелом/цифрой — не кандидат.
+                '.' -> if (i + 1 < raw.length && raw[i + 1].isLetter()) return true
+            }
+            i++
         }
         return false
     }
@@ -362,6 +401,17 @@ object MarkdownFormatter {
                 tokens.add(Token(stripped.first, InlineSpan.Italic(stripped.second)))
             }
         }
+        // Голые URL — после кода и акцентов: диапазоны `` `code` ``/`**bold**`
+        // уже заняты, поэтому URL внутри них не рвёт разметку (в коде ссылки быть
+        // не должно вообще), а URL в обычной прозе становится кликабельным.
+        // title = url: TalkBack и выделение видят сам адрес.
+        for (regex in URL_REGEXES) {
+            regex.findAll(raw).forEach { match ->
+                val link = urlLinkOrNull(regex, match) ?: return@forEach
+                val range = match.range.first until (match.range.first + link.url.length)
+                if (!overlaps(range)) tokens.add(Token(range, link))
+            }
+        }
 
         tokens.sortBy { it.range.first }
 
@@ -402,5 +452,43 @@ object MarkdownFormatter {
         if (text.isEmpty()) return null
         if (text.first().isWhitespace() || text.last().isWhitespace()) return null
         return Pair(first..last, text)
+    }
+
+    /**
+     * Превращает совпадение URL-регекса в ссылку, отрезая хвост прозы.
+     * Возвращает null, если после срезания остаток перестал быть URL
+     * (например, матч целиком состоял из пунктуации).
+     *
+     * Для «голого домена» видимый текст остаётся как в сообщении
+     * (`marscore.ru/foo`), а в [InlineSpan.Link.url] подставляется схема:
+     * `Intent.ACTION_VIEW` по адресу без схемы не открывает браузер.
+     */
+    private fun urlLinkOrNull(regex: Regex, match: MatchResult): InlineSpan.Link? {
+        val shown = trimUrlTail(match.value)
+        if (shown.isEmpty()) return null
+        // Хвост обязан остаться валидным URL того же вида: проверка полным
+        // совпадением отсекает вырожденные остатки вроде `https://` или `..ru`.
+        if (!regex.matches(shown)) return null
+        val target = if (shown.startsWith("http://") || shown.startsWith("https://")) shown else "https://$shown"
+        return InlineSpan.Link(shown, target)
+    }
+
+    /**
+     * Отрезает хвост, принадлежащий прозе, а не ссылке: конечную пунктуацию
+     * (`См. https://x.ru.`) и закрывающие скобки без пары (`(см. https://x.ru)`).
+     * Скобки внутри URL сохраняются целиком — `…/wiki/Foo_(bar)` не рвётся.
+     */
+    private fun trimUrlTail(raw: String): String {
+        var url = raw
+        while (true) {
+            val before = url
+            while (url.isNotEmpty() && url.last() in URL_TAIL_PUNCTUATION) {
+                url = url.dropLast(1)
+            }
+            val opens = url.count { it == '(' }
+            val closes = url.count { it == ')' }
+            if (closes > opens && url.endsWith(')')) url = url.dropLast(1)
+            if (url == before) return url
+        }
     }
 }
