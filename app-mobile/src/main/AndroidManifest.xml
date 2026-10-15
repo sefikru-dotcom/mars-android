@@ -16,7 +16,8 @@
         android:fullBackupContent="false"
         android:theme="@style/AppTheme"
         android:label="Марс"
-        android:icon="@drawable/ic_mars">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
         <activity android:name=".ChatActivity" />
         <!-- Уровень списка диалогов — корень раздела CHAT двухуровневого навигатора (волна 2). -->
         <activity android:name=".ChatSessionsActivity" />

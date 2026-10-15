@@ -36,7 +36,7 @@ class AppSectionsBar(
             val selected = currentSection() == destination
             val iconRes = context.resources
                 .getIdentifier(AppSectionsPolicy.iconKeyFor(destination), "drawable", context.packageName)
-                .takeIf { it != 0 } ?: R.drawable.ic_mars
+                .takeIf { it != 0 } ?: R.drawable.mars_planet
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL

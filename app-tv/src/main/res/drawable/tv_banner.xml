@@ -1,1 +1,3 @@
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android"><item android:drawable="@color/mars_background"/><item android:drawable="@drawable/ic_mars" android:gravity="center"/></layer-list>
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV-баннер (320×180): рендер Марса вместо плоской векторной схемы из ic_mars. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android"><item android:drawable="@color/mars_background"/><item android:drawable="@drawable/tv_banner_render" android:gravity="center"/></layer-list>

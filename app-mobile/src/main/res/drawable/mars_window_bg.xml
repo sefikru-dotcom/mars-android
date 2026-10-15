@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Фон окна: фирменный рендер Марса поверх обсидианового #07080B.
+     Приглушён до alpha 0.40, чтобы текст и карточки (они непрозрачны) читались. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/mars_background" />
+    <item android:alpha="0.40">
+        <bitmap
+            android:src="@drawable/mars_bg"
+            android:gravity="center"
+            android:filter="true" />
+    </item>
+</layer-list>

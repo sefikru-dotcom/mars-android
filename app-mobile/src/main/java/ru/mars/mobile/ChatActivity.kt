@@ -749,7 +749,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setPadding(dp(12), 0, dp(8), 0)
         }
         val logoDot = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_mars))
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.mars_planet))
         }
         titleBox.addView(logoDot, LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(6) })
         titleBox.addView(TextView(this).apply {
