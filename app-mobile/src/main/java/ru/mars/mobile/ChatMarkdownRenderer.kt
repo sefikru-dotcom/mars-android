@@ -243,6 +243,9 @@ object ChatMarkdownRenderer {
                 }
                 is InlineSpan.Link -> {
                     builder.append(span.title)
+                    // Голые URL линкуются с title = url, поэтому сам адрес остаётся
+                    // в tv.text — TalkBack читает его как обычный текст.
+                    val style = LinkRenderPolicy.drawState(MarsTheme.ACCENT_TEXT)
                     builder.setSpan(object : ClickableSpan() {
                         override fun onClick(widget: View) {
                             // Image links open in the fullscreen lightbox, everything else in a browser.
@@ -251,6 +254,11 @@ object ChatMarkdownRenderer {
                             } else {
                                 openUrl(span.url)
                             }
+                        }
+                        override fun updateDrawState(ds: TextPaint) {
+                            ds.color = style.color
+                            ds.isUnderlineText = style.underline
+                            ds.bgColor = style.background
                         }
                     }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
@@ -261,11 +269,13 @@ object ChatMarkdownRenderer {
                 is InlineSpan.Image -> {
                     // Markdown image: a clickable accent label — tap opens the fullscreen viewer.
                     builder.append(ImageLightboxPolicy.inlineLabel(span.alt))
+                    val style = LinkRenderPolicy.drawState(MarsTheme.ACCENT_TEXT)
                     builder.setSpan(object : ClickableSpan() {
                         override fun onClick(widget: View) = openImage(span.url)
                         override fun updateDrawState(ds: TextPaint) {
-                            ds.color = MarsTheme.ACCENT_TEXT
-                            ds.isUnderlineText = true
+                            ds.color = style.color
+                            ds.isUnderlineText = style.underline
+                            ds.bgColor = style.background
                         }
                     }, start, builder.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
