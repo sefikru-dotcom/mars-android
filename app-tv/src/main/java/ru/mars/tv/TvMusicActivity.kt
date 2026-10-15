@@ -4,6 +4,7 @@ import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.Rect
 import android.os.Bundle
+import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -182,6 +183,18 @@ class TvMusicActivity : AppCompatActivity() {
 
     private val trackRows = mutableListOf<TrackRow>()
 
+    /**
+     * Системная настройка «уменьшить движение», прочитанная ОДИН раз на экран и переданная
+     * в политику движения ([TvMotionPolicy]): подъём под фокусом и кроссфейд фона
+     * схлопываются в мгновенную смену состояния, когда она включена
+     * (Settings.Global.ANIMATOR_DURATION_SCALE).
+     */
+    private val reducedMotion: Boolean by lazy {
+        TvMotionPolicy.isReducedMotion(
+            Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_music)
@@ -291,15 +304,15 @@ class TvMusicActivity : AppCompatActivity() {
                 }
             }
         })
-        TvFocusLift.attach(backButton)
-        TvFocusLift.attach(retryButton)
-        TvFocusLift.attach(stopButton)
-        TvFocusLift.attach(playPauseButton)
-        TvFocusLift.attach(repeatButton)
-        TvFocusLift.attach(lyricsButton)
-        TvFocusLift.attach(searchInput)
-        TvFocusLift.attach(searchButton)
-        TvFocusLift.attach(chartsButton)
+        TvFocusLift.attach(backButton, reducedMotion)
+        TvFocusLift.attach(retryButton, reducedMotion)
+        TvFocusLift.attach(stopButton, reducedMotion)
+        TvFocusLift.attach(playPauseButton, reducedMotion)
+        TvFocusLift.attach(repeatButton, reducedMotion)
+        TvFocusLift.attach(lyricsButton, reducedMotion)
+        TvFocusLift.attach(searchInput, reducedMotion)
+        TvFocusLift.attach(searchButton, reducedMotion)
+        TvFocusLift.attach(chartsButton, reducedMotion)
         controller.onStateChanged = ::render
         lyricsFlow.onStateChanged = ::renderLyricsPanel
         TvMusicPlayer.onTransportChanged = ::renderTransportState
@@ -433,7 +446,7 @@ class TvMusicActivity : AppCompatActivity() {
                     marginStart = dp(12)
                 },
             )
-            TvFocusLift.attach(row)
+            TvFocusLift.attach(row, reducedMotion)
             val trackRow = TrackRow(track.id, label, marker)
             applyRowState(trackRow)
             trackRows += trackRow
@@ -604,7 +617,7 @@ class TvMusicActivity : AppCompatActivity() {
         dialog.findViewById<TextView>(R.id.lyricsBodyText).text = TvLyricsViewPolicy.LOADING_TEXT
         val closeButton = dialog.findViewById<Button>(R.id.lyricsCloseButton)
         closeButton.setOnClickListener { dialog.dismiss() }
-        TvFocusLift.attach(closeButton)
+        TvFocusLift.attach(closeButton, reducedMotion)
         dialog.setOnDismissListener { lyricsFlow.close() }
         dialog.window?.apply {
             setLayout(dp(680), dp(620))
