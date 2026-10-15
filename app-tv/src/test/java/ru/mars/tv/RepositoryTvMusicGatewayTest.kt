@@ -3,6 +3,7 @@ package ru.mars.tv
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -226,6 +227,60 @@ class RepositoryTvMusicGatewayTest {
             val result = gatewayFor(server).fetchLyrics(MusicTrack(id = "x", title = "T", artist = "A"))
             assertTrue("expected Failed, got $result", result is TvLyricsResult.Failed)
             assertTrue((result as TvLyricsResult.Failed).message.isNotBlank())
+        }
+    }
+
+    // ------------------------------------------- перевод текста (POST api/lyrics/translate)
+
+    @Test
+    fun translatePostsTextBodyAndMapsTranslatedAnswer() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":true,"translated":"Warm place"}"""))
+            val result = gatewayFor(server).translate("Тёплое место")
+            assertEquals(TvLyricsTranslationResult.Translated("Warm place"), result)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/music/api/lyrics/translate", request.path)
+            assertEquals("Тёплое место", JSONObject(request.body.readUtf8()).getString("text"))
+        }
+    }
+
+    @Test
+    fun translateEmptyAnswerStaysTranslatedForTheFlowToJudge() {
+        // Сервис на пустой ввод отвечает translated:"" — шов не судит: ветка EMPTY_ANSWER во flow.
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"translated":""}"""))
+            assertEquals(TvLyricsTranslationResult.Translated(""), gatewayFor(server).translate(""))
+        }
+    }
+
+    @Test
+    fun translateServiceFailureMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":false,"error":"upstream down"}"""))
+            val result = gatewayFor(server).translate("текст")
+            assertTrue("expected Failed, got $result", result is TvLyricsTranslationResult.Failed)
+            assertTrue((result as TvLyricsTranslationResult.Failed).message.isNotBlank())
+        }
+    }
+
+    @Test
+    fun translateHttpErrorMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503))
+            val result = gatewayFor(server).translate("текст")
+            assertTrue("expected Failed, got $result", result is TvLyricsTranslationResult.Failed)
+        }
+    }
+
+    @Test
+    fun translateIoFailureMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            val url = server.url("/music").toString().removeSuffix("/")
+            server.shutdown()
+            val result = RepositoryTvMusicGateway(MusicRepository(url)).translate("текст")
+            assertTrue("expected Failed, got $result", result is TvLyricsTranslationResult.Failed)
+            assertTrue((result as TvLyricsTranslationResult.Failed).message.isNotBlank())
         }
     }
 }

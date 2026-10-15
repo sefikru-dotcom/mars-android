@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Панель «Текст песни»: переключатель «Перевод»/«Оригинал». Смысл подписи/заметки выбирает
+     чистая policy (TvLyricsTranslationPolicy), текст живёт только здесь (R.string.*).
+     Формулировки — паритет с mobile LyricsTranslationPolicy. Отдельный файл (не strings.xml):
+     параллельные ветки добавляют свои ключи без add/add-конфликта при слиянии. -->
+<resources>
+    <string name="tv_lyrics_action_translate">Перевод</string>
+    <string name="tv_lyrics_action_original">Оригинал</string>
+    <string name="tv_lyrics_label_translating">Переводим…</string>
+    <string name="tv_lyrics_translation_empty">Перевод не получен — сервис вернул пустой ответ</string>
+    <string name="tv_lyrics_translation_failed">Перевод недоступен — проверьте сеть</string>
+</resources>

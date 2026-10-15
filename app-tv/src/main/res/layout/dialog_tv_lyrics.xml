@@ -55,17 +55,42 @@
             android:layout_height="wrap_content" />
     </ScrollView>
 
-    <Button
-        android:id="@+id/lyricsCloseButton"
-        android:text="Закрыть"
-        android:textSize="18sp"
-        android:textColor="@color/mars_text"
-        android:background="@drawable/bg_focus_card"
-        android:paddingStart="28dp"
-        android:paddingEnd="28dp"
-        android:gravity="center"
-        android:focusable="true"
+    <!-- Нижний ряд: «Перевод»/«Оригинал» (видим только при настоящем тексте) и «Закрыть».
+         Цепочку LEFT/RIGHT переподключает код по видимости (TvMusicActivity.renderTranslateButton). -->
+    <LinearLayout
+        android:id="@+id/lyricsButtonRow"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:layout_marginTop="16dp"
-        android:layout_width="wrap_content"
-        android:layout_height="64dp" />
+        android:layout_width="match_parent"
+        android:layout_height="64dp">
+
+        <Button
+            android:id="@+id/lyricsTranslateButton"
+            android:text="@string/tv_lyrics_action_translate"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="28dp"
+            android:paddingEnd="28dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:visibility="gone"
+            android:layout_marginEnd="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent" />
+
+        <Button
+            android:id="@+id/lyricsCloseButton"
+            android:text="Закрыть"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="28dp"
+            android:paddingEnd="28dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent" />
+    </LinearLayout>
 </LinearLayout>
