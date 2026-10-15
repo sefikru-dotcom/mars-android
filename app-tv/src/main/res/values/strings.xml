@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Параметры хода в ТВ-чате: модель и уровень размышлений (паритет с мобильным чатом). -->
+    <string name="tv_chip_model">Модель</string>
+    <string name="tv_chip_model_desc">Выбор модели Марса</string>
+    <string name="tv_chip_reasoning">Мысли: %1$s</string>
+    <string name="tv_chip_reasoning_desc">Уровень размышлений</string>
+
+    <!-- Пикер параметров хода (модальные списки D-pad). -->
+    <string name="tv_picker_model_title">Модель Марса</string>
+    <string name="tv_picker_reasoning_title">Уровень размышлений</string>
+    <string name="tv_picker_close">Закрыть</string>
+    <string name="tv_picker_current">текущий выбор</string>
+
+    <!-- Строки статуса для загрузки/применения параметров хода. -->
+    <string name="tv_status_models_loading">Загружаю модели…</string>
+    <string name="tv_status_models_unavailable">Каталог моделей недоступен</string>
+    <string name="tv_status_models_no_auth">Модели недоступны: нет авторизации</string>
+    <string name="tv_status_model_picked">Модель: %1$s</string>
+    <string name="tv_status_reasoning_loading">Загружаю уровни размышлений…</string>
+    <string name="tv_status_reasoning_no_auth">Уровень размышлений недоступен: нет авторизации</string>
+    <string name="tv_status_reasoning_unavailable">Уровень размышлений недоступен: %1$s</string>
+    <string name="tv_status_reasoning_no_ladder">У этой модели нет уровней размышлений</string>
+    <string name="tv_status_reasoning_saving">Сохраняю уровень размышлений…</string>
+    <string name="tv_status_reasoning_saved">Уровень размышлений: %1$s</string>
+    <string name="tv_status_reasoning_save_failed">Не удалось изменить уровень размышлений: %1$s</string>
+</resources>
