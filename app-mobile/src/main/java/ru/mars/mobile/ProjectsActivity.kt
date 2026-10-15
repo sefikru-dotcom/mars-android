@@ -182,8 +182,7 @@ class ProjectsActivity : ComponentActivity() {
         }
         val parsed = ProjectsMetricsParser.parse(data)
         list.removeAllViews()
-        parsed.hosts.forEach { addHost(it) }
-        parsed.services.forEach { addService(it) }
+        renderSections(parsed)
         cacheShown = list.childCount > 0
         if (!cacheShown) list.removeAllViews()
     }
@@ -213,12 +212,23 @@ class ProjectsActivity : ComponentActivity() {
     private fun render(data: JSONObject) {
         val parsed = ProjectsMetricsParser.parse(data)
         list.removeAllViews()
-        parsed.hosts.forEach { addHost(it) }
-        parsed.services.forEach { addService(it) }
+        renderSections(parsed)
         val summary = ProjectsSummary.of(parsed.services)
         updated.text = ProjectsSummary.statusLine(summary, freshnessOf(parsed.timestamp))
         updated.setTextColor(if (summary.hasOffline) MarsTheme.STATUS_WARNING else MarsTheme.TEXT_MUTED)
         if (list.childCount == 0) renderFallback()
+    }
+
+    /** A12: секции полного дашборда в порядке показа; пустые секции не рисуются. */
+    private fun renderSections(parsed: ParsedMetrics) {
+        parsed.hosts.forEach { addHost(it) }
+        parsed.services.forEach { addService(it) }
+        addVpnSection(parsed.vpn)
+        addTunnelsSection(parsed.tunnels)
+        addHostServicesSection(parsed.hostServices, parsed.radarProducts)
+        addAlertsSection(parsed.alerts)
+        addBackupsSection(parsed.backups)
+        addRestartsSection(parsed.restartLog)
     }
 
     /**
@@ -279,6 +289,137 @@ class ProjectsActivity : ComponentActivity() {
 
         list.addView(card, margin())
     }
+
+    // --- A12: секции полного дашборда (VPN, туннели, службы хоста, алерты, бэкапы, рестарты) ---
+
+    /**
+     * Компоненты VPN-узла. Метрики его железа (vpn.host) уже рисуются отдельной
+     * карточкой хоста в parsed.hosts. Вердикт «В сети» — по эталонному /dashboard/:
+     * xray И caddy активны. Пустая/отсутствующая секция — карточки нет.
+     */
+    private fun addVpnSection(vpn: ParsedVpn?) {
+        if (vpn == null || vpn.states.isEmpty()) return
+        val online = ProjectsSummary.vpnOnline(vpn.states)
+        addSectionCard(
+            title = "VPN-узел STV",
+            body = ProjectsSummary.stateLines(vpn.states),
+            badge = if (online) "В сети" to MarsTheme.STATUS_ONLINE else "Сбой" to MarsTheme.STATUS_ERROR,
+        )
+    }
+
+    /** Туннели связи: честный бейдж каждому — «Ожидание» (warning) вместо «Онлайн» для offline. */
+    private fun addTunnelsSection(tunnels: List<ParsedTunnel>) {
+        if (tunnels.isEmpty()) return
+        val card = newSectionCard()
+        val online = tunnels.count { it.online }
+        card.addView(sectionHeader(
+            "Туннели связи",
+            "$online из ${tunnels.size}",
+            if (online == tunnels.size) MarsTheme.STATUS_ONLINE else MarsTheme.STATUS_WARNING,
+        ))
+        tunnels.forEach { t ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(10), 0, 0)
+            }
+            val line = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            line.addView(TextView(this).apply {
+                text = t.name
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(MarsTheme.TEXT_STRONG)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            line.addView(statusBadge(
+                if (t.online) "Подключен" else "Ожидание",
+                if (t.online) MarsTheme.STATUS_ONLINE else MarsTheme.STATUS_WARNING,
+            ))
+            row.addView(line)
+            val details = ProjectsSummary.tunnelDetails(t)
+            if (details.isNotBlank()) row.addView(sectionBody(details, topPadDp = 2))
+            card.addView(row)
+        }
+        list.addView(card, margin())
+    }
+
+    /** Службы хоста Aeza (local.services) + число товаров прайс-радара (local.radar_products). */
+    private fun addHostServicesSection(states: List<ParsedStateEntry>, radarProducts: Int?) {
+        val body = listOf(
+            ProjectsSummary.stateLines(states).takeIf { it.isNotBlank() },
+            ProjectsSummary.radarLine(radarProducts),
+        ).filterNotNull().joinToString("\n")
+        if (body.isBlank()) return
+        val badge = when {
+            states.isEmpty() -> null
+            states.all { it.active } -> "Онлайн" to MarsTheme.STATUS_ONLINE
+            else -> "${states.count { it.active }} из ${states.size}" to MarsTheme.STATUS_WARNING
+        }
+        addSectionCard("Службы хоста Aeza", body, badge)
+    }
+
+    /** Алерты: пустой список — карточки нет; текст подсвечен предупреждением. */
+    private fun addAlertsSection(alerts: List<String>) {
+        if (alerts.isEmpty()) return
+        addSectionCard(
+            title = "Алерты",
+            body = alerts.joinToString("\n"),
+            badge = alerts.size.toString() to MarsTheme.STATUS_WARNING,
+            bodyColor = MarsTheme.STATUS_WARNING,
+        )
+    }
+
+    /** Бэкапы prod-сервера (prod.backups): свежие сверху, не больше четырёх. */
+    private fun addBackupsSection(backups: List<ParsedBackup>) {
+        val body = ProjectsSummary.backupLines(backups)
+        if (body.isBlank()) return
+        addSectionCard("Бэкапы (прод)", body)
+    }
+
+    /** Журнал рестартов прод-сервисов (prod.restart_log), дубли схлопнуты в «xN». */
+    private fun addRestartsSection(log: List<ParsedRestart>) {
+        val body = ProjectsSummary.restartLines(log)
+        if (body.isBlank()) return
+        addSectionCard("Журнал рестартов (прод)", body)
+    }
+
+    /** Универсальная карточка секции: заголовок с бейджем + многострочный текст. */
+    private fun addSectionCard(
+        title: String,
+        body: String,
+        badge: Pair<String, Int>? = null,
+        bodyColor: Int = MarsTheme.TEXT_MUTED,
+    ) {
+        val card = newSectionCard()
+        card.addView(sectionHeader(title, badge?.first, badge?.second ?: MarsTheme.TEXT_MUTED))
+        if (body.isNotBlank()) card.addView(sectionBody(body, topPadDp = 8, color = bodyColor))
+        list.addView(card, margin())
+    }
+
+    private fun newSectionCard(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        background = MarsTheme.card(this@ProjectsActivity, MarsTheme.SURFACE_CARD, radiusDp = 14)
+    }
+
+    private fun sectionHeader(title: String, badgeLabel: String? = null, badgeColor: Int = MarsTheme.TEXT_MUTED): LinearLayout =
+        LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@ProjectsActivity).apply {
+                text = title
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(MarsTheme.TEXT_STRONG)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            if (badgeLabel != null) addView(statusBadge(badgeLabel, badgeColor))
+        }
+
+    private fun sectionBody(text: String, topPadDp: Int, color: Int = MarsTheme.TEXT_MUTED): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(color)
+            setLineSpacing(dp(3).toFloat(), 1f)
+            setPadding(0, dp(topPadDp), 0, 0)
+        }
 
     private fun addCard(title: String, desc: String, url: String, status: String, active: Boolean?) {
         val card = LinearLayout(this).apply {

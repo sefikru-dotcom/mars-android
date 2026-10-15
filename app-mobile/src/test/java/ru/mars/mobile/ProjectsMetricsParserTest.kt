@@ -219,4 +219,212 @@ class ProjectsMetricsParserTest {
         assertTrue(result.hosts.isEmpty())
         assertEquals("", result.timestamp)
     }
+
+    // --- A12: секции полного дашборда (живая фикстура 15.10.2026) ------------------------------
+
+    /**
+     * Живой снимок GET /dashboard/api/metrics (15.10.2026 14:26 МСК) — фикстура
+     * оркестратора, скопирована в test-ресурсы без изменений: все 6 верхнеуровневых
+     * секций (ts/prod/vpn/local/tunnels/alerts), vpn со своим host, tunnels-ОБЪЕКТ,
+     * prod.backups и prod.restart_log (внутри prod, с буквальными дублями).
+     */
+    private fun liveJson(): JSONObject {
+        val stream = checkNotNull(javaClass.classLoader?.getResourceAsStream("dashboard-metrics.json")) {
+            "нет фикстуры dashboard-metrics.json в test-ресурсах"
+        }
+        return JSONObject(stream.bufferedReader().use { it.readText() })
+    }
+
+    private fun parseLive() = ProjectsMetricsParser.parse(liveJson())
+
+    @Test fun liveFixtureVpnFlatStatesAndOwnHostParsed() {
+        val vpn = parseLive().vpn
+        assertNotNull("vpn — объект, обязан парситься", vpn)
+        // Плоский объект состояний: ключи итерируются динамически, вложенный «host» не входит.
+        assertEquals(listOf("caddy", "http", "hysteria", "sub", "xray"), vpn!!.states.map { it.key })
+        assertEquals("active", vpn.states.first { it.key == "xray" }.state)
+        assertTrue(vpn.states.first { it.key == "xray" }.active)
+        // http-проверка «404» — честное состояние, не активное.
+        val http = vpn.states.first { it.key == "http" }
+        assertEquals("404", http.state)
+        assertFalse(http.active)
+        assertFalse("вложенный «host» не строка состояния", vpn.states.any { it.key == "host" })
+        // У VPN-узла собственный железный блок — отдельный parseHost со своим заголовком.
+        val host = vpn.host
+        assertNotNull(host)
+        assertEquals(ProjectsMetricsParser.VPN_HOST_TITLE, host!!.title)
+        assertEquals("0.4 ГБ из 0.9 ГБ (38%)", host.ram)
+        assertEquals("Занято 6.3G из 9.8G (69%), свободно 3.0G", host.disk)
+        assertEquals("0.09 (1 мин), 0.12 (5 мин)", host.cpu)
+    }
+
+    @Test fun liveFixtureHostsOrderIncludesVpnNodeAfterProd() {
+        assertEquals(
+            listOf(
+                ProjectsMetricsParser.AEZA_HOST_TITLE,
+                ProjectsMetricsParser.PROD_HOST_TITLE,
+                ProjectsMetricsParser.VPN_HOST_TITLE,
+            ),
+            parseLive().hosts.map { it.title },
+        )
+    }
+
+    @Test fun vpnWithoutHostBlockStillParsesStates() {
+        // REAL_DASHBOARD_JSON: у vpn нет «host» — host=null, состояния на месте.
+        val vpn = parseReal().vpn
+        assertNotNull(vpn)
+        assertEquals(5, vpn!!.states.size)
+        assertNull(vpn.host)
+    }
+
+    @Test fun liveFixtureTunnelsIsObjectWithDynamicKeys() {
+        val tunnels = parseLive().tunnels
+        assertEquals(3, tunnels.size)
+        val poco = tunnels.first { it.key == "poco" }
+        assertEquals("Смартфон POCO F5", poco.name)
+        assertEquals("HyperOS / Android (Личный телефон)", poco.description)
+        assertEquals("2223", poco.port)
+        assertFalse("POCO сейчас offline — честно", poco.online)
+        assertTrue(tunnels.first { it.key == "office" }.online)
+        assertTrue(tunnels.first { it.key == "pclite" }.online)
+    }
+
+    @Test fun tunnelKeysNotHardcodedAndSortedForStableUi() {
+        val result = ProjectsMetricsParser.parse(JSONObject(
+            """{"tunnels":{"zbox":{"name":"Новый туннель","desc":"d","port":9999,"online":true},"abox":{"online":false}}}"""
+        ))
+        // Ключи могут появляться/исчезать — имена не хардкодятся; JSONObject не хранит
+        // порядок, поэтому сортировка для стабильного показа.
+        assertEquals(listOf("abox", "zbox"), result.tunnels.map { it.key })
+        val z = result.tunnels.first { it.key == "zbox" }
+        assertEquals("Новый туннель", z.name)
+        assertEquals("9999", z.port)
+        assertTrue(z.online)
+        // Без name — честный фолбэк на ключ; без port — пустая строка, не «null».
+        val a = result.tunnels.first { it.key == "abox" }
+        assertEquals("abox", a.name)
+        assertEquals("", a.port)
+        assertFalse(a.online)
+    }
+
+    @Test fun liveFixtureLocalServicesAndRadarProductsWithoutBreakingAezaHost() {
+        val result = parseLive()
+        assertEquals(
+            listOf("caddy", "gateway", "office", "neighbor", "socks", "webui"),
+            result.hostServices.map { it.key },
+        )
+        assertTrue(result.hostServices.all { it.active })
+        assertEquals(Integer.valueOf(287), result.radarProducts)
+        // Существующий разбор хоста Aeza не сломан:
+        assertEquals(ProjectsMetricsParser.AEZA_HOST_TITLE, result.aezaHost!!.title)
+        assertEquals("7.9 ГБ из 15.6 ГБ (50%)", result.aezaHost!!.ram)
+    }
+
+    @Test fun liveFixtureBackupsInsideProdParsed() {
+        val backups = parseLive().backups
+        assertEquals(4, backups.size)
+        val latest = backups.last()
+        assertEquals("2026-10-15 01:30:01", latest.time)
+        assertEquals("kvartal-data-2026-10-15-013001.tar.gz", latest.archive)
+        assertEquals("2.8M", latest.size)
+        assertEquals("35", latest.profiles)
+        assertEquals("Успешно", latest.status)
+    }
+
+    @Test fun liveFixtureRestartLogInsideProdParsed() {
+        val log = parseLive().restartLog
+        assertEquals(15, log.size)
+        assertEquals("2026-09-29T07:42:54+03:00", log.first().time)
+        assertEquals("kvartal restart triggered by root pid 234739", log.first().text)
+    }
+
+    @Test fun restartEntryWithoutSpaceStaysWholeText() {
+        val log = ProjectsMetricsParser.parse(JSONObject("""{"prod":{"restart_log":["boom"]}}""")).restartLog
+        assertEquals(ParsedRestart(time = "", text = "boom"), log.single())
+    }
+
+    @Test fun restartLogSkipsNonStringGarbage() {
+        val log = ProjectsMetricsParser.parse(JSONObject(
+            """{"prod":{"restart_log":["a b", null, {"x":1}, [], 42]}}"""
+        )).restartLog
+        assertEquals(listOf(ParsedRestart("a", "b"), ParsedRestart("", "42")), log)
+    }
+
+    @Test fun liveFixtureAlertsEmptyList() {
+        assertTrue(parseLive().alerts.isEmpty())
+    }
+
+    @Test fun alertsParsedFromStringsGarbageSkipped() {
+        val result = ProjectsMetricsParser.parse(JSONObject(
+            """{"alerts":["диск полон", {"text":"форма объекта не стабилизирована"}, null, 42]}"""
+        ))
+        // Контракт эталона /dashboard/ — список строк (alerts.map(esc)); объекты пропускаем.
+        assertEquals(listOf("диск полон", "42"), result.alerts)
+        assertFalse("сериализованный JSON не попадает в алерты", result.alerts.any { it.contains("{") })
+    }
+
+    /** Перезапуск сборщика: усечённый ответ без новых секций — разбор выживает, секции пусты. */
+    @Test fun truncatedResponseSurvivesWithEmptyNewSections() {
+        val result = ProjectsMetricsParser.parse(JSONObject("""{"ts":"x","prod":{"services":[]}}"""))
+        assertNull(result.vpn)
+        assertTrue(result.tunnels.isEmpty())
+        assertTrue(result.hostServices.isEmpty())
+        assertNull(result.radarProducts)
+        assertTrue(result.backups.isEmpty())
+        assertTrue(result.restartLog.isEmpty())
+        assertTrue(result.alerts.isEmpty())
+        assertTrue(result.hosts.isEmpty())
+    }
+
+    @Test fun nullNewSectionsSurvive() {
+        val result = ProjectsMetricsParser.parse(JSONObject(
+            """{"vpn":null,"tunnels":null,"alerts":null,"local":null,"prod":null}"""
+        ))
+        assertNull(result.vpn)
+        assertTrue(result.tunnels.isEmpty())
+        assertTrue(result.alerts.isEmpty())
+        assertTrue(result.hostServices.isEmpty())
+        assertNull(result.radarProducts)
+    }
+
+    /**
+     * СТАРЫЙ офлайн-кэш (сырой JSON, сохранённый прежней версией экрана): новых ключей
+     * нет, vpn/tunnels — пустые массивы вместо объектов. Краша нет, новые секции пусты,
+     * старые (сервисы, prod.host) парсятся как раньше.
+     */
+    @Test fun oldCacheWithoutNewKeysSurvivesWithEmptySections() {
+        val result = ProjectsMetricsParser.parse(JSONObject(
+            """{"ts":"t","prod":{"services":[{"title":"Q","state":"active"}],"host":{"load":"1"}},
+                "vpn":[],"local":[],"tunnels":[],"alerts":[]}"""
+        ))
+        assertNull(result.vpn)
+        assertTrue(result.tunnels.isEmpty())
+        assertTrue(result.hostServices.isEmpty())
+        assertNull(result.radarProducts)
+        assertTrue(result.backups.isEmpty())
+        assertTrue(result.restartLog.isEmpty())
+        assertNull(result.aezaHost)
+        assertNotNull(result.prodHost)
+        assertEquals(1, result.services.size)
+    }
+
+    @Test fun newFieldsNeverEmitSerializedJson() {
+        val result = parseLive()
+        val texts = buildList {
+            result.vpn?.let { vpn ->
+                vpn.states.forEach { add(it.key); add(it.state) }
+                vpn.host?.let { add(it.title); add(it.ram); add(it.cpu); add(it.disk); add(it.uptime) }
+            }
+            result.tunnels.forEach { add(it.key); add(it.name); add(it.description); add(it.port) }
+            result.hostServices.forEach { add(it.key); add(it.state) }
+            result.backups.forEach { add(it.time); add(it.archive); add(it.size); add(it.profiles); add(it.status) }
+            result.restartLog.forEach { add(it.time); add(it.text) }
+            addAll(result.alerts)
+        }
+        assertTrue("фикстура обязана наполнить новые секции", texts.size > 20)
+        texts.forEach {
+            assertFalse("поле не должно содержать сериализованный JSON: $it", it.contains("{"))
+            assertFalse("поле не должно содержать сериализованный JSON: $it", it.contains("\""))
+        }
+    }
 }
