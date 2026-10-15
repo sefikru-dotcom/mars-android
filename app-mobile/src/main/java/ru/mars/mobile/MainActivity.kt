@@ -76,7 +76,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val logoIcon = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@MainActivity, R.drawable.ic_mars))
+            setImageDrawable(ContextCompat.getDrawable(this@MainActivity, R.drawable.mars_planet))
             setPadding(0, dp(48), 0, dp(16))
         }
         content.addView(logoIcon, LinearLayout.LayoutParams(dp(72), dp(136)))

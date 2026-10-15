@@ -4,7 +4,7 @@
         <item name="android:colorAccent">@color/mars_accent</item>
         <item name="android:navigationBarColor">@color/mars_background</item>
         <item name="android:statusBarColor">@color/mars_background</item>
-        <item name="android:windowBackground">@color/mars_background</item>
+        <item name="android:windowBackground">@drawable/mars_window_bg</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>
