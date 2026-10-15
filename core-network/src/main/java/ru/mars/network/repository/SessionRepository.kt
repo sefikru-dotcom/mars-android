@@ -13,10 +13,15 @@ import okhttp3.RequestBody
 import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.model.ProviderQuota
+import ru.mars.network.model.ProviderQuotaAmounts
 import ru.mars.network.model.SessionAttention
+import ru.mars.network.model.SessionBranchResult
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
+import ru.mars.network.model.SessionTitleRegenerateResult
+import ru.mars.network.model.SessionTurnOpResult
 import ru.mars.network.model.SessionUsage
 import ru.mars.network.model.WorkspacePrefix
 
@@ -57,6 +62,62 @@ sealed interface SessionMutationOutcome {
 sealed interface SessionExportOutcome {
     data class Success(val detail: SessionDetail) : SessionExportOutcome
     data class Failure(val message: String) : SessionExportOutcome
+}
+
+/**
+ * Outcome of the turn-scoped operations `POST /api/session/undo` /
+ * `POST /api/session/retry`.
+ *
+ * The server distinguishes a REFUSAL from a transport error with an unusual HTTP
+ * shape: both success and "nothing to undo" answer 200, and the refusal arrives as
+ * `{"error": "Nothing to undo."}` with no `ok` flag. Failure deliberately covers
+ * both a real HTTP failure and that in-band error so the caller shows one message
+ * path instead of mistaking a refusal for a network problem.
+ */
+sealed interface SessionTurnOpOutcome {
+    data class Success(val result: SessionTurnOpResult) : SessionTurnOpOutcome
+    /** Server in-band error, HTTP error, malformed body, or transport failure. */
+    data class Failure(val message: String) : SessionTurnOpOutcome
+}
+
+/** Outcome of `POST /api/session/branch` — a fork carries its own three-field envelope. */
+sealed interface SessionBranchOutcome {
+    data class Success(val branch: SessionBranchResult) : SessionBranchOutcome
+    data class Failure(val message: String) : SessionBranchOutcome
+}
+
+/**
+ * Outcome of `POST /api/session/title/regenerate`.
+ *
+ * Unlike undo/retry this endpoint reports a refusal as a real HTTP error (422 when
+ * no better title could be generated, 403 for a read-only import), so [Failure]
+ * carries the server text.
+ */
+sealed interface SessionTitleRegenerateOutcome {
+    data class Success(val result: SessionTitleRegenerateResult) : SessionTitleRegenerateOutcome
+    data class Failure(val message: String) : SessionTitleRegenerateOutcome
+}
+
+/**
+ * Outcome of `POST /api/session/toolsets`.
+ *
+ * Success carries the server's settled `enabled_toolsets` (the client renders what
+ * the server confirmed; `null` means the override was cleared). The server rejects
+ * an empty list with 400, so [Failure] also covers a shape the UI must not offer.
+ */
+sealed interface SessionToolsetsOutcome {
+    data class Success(val enabledToolsets: List<String>?) : SessionToolsetsOutcome
+    data class Failure(val message: String) : SessionToolsetsOutcome
+}
+
+/**
+ * Outcome of `GET /api/provider/quota`. The endpoint always answers 200, so a
+ * transport-level [Failure] means the request never landed — an unsupported
+ * provider is [Success] whose payload carries `supported=false`.
+ */
+sealed interface ProviderQuotaOutcome {
+    data class Success(val quota: ProviderQuota) : ProviderQuotaOutcome
+    data class Failure(val message: String) : ProviderQuotaOutcome
 }
 
 /**
@@ -323,6 +384,10 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
         // Server draft read path: the field lives on the DETAIL payload because
         // `GET /api/session/draft` is not routed on the server (POST only).
         composerDraft = composerDraft(s["composer_draft"]),
+        // Per-session toolset override. Absent key and an explicit `null` both mean
+        // "no override" — the composer pill then shows the server default rather
+        // than a phantom empty selection.
+        enabledToolsets = toolsetNames(s["enabled_toolsets"]),
     )
 
     suspend fun renameSession(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String, newTitle: String): Boolean =
@@ -344,6 +409,326 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
                     .execute().use { it.isSuccessful }
             } catch (_: Exception) { false }
         }
+
+    /**
+     * Откат последнего обмена: `POST /api/session/undo` body `{"session_id"}`.
+     *
+     * Сервер снимает последний пользовательский ход вместе с ответом ассистента и
+     * отвечает либо `200 {"ok": true, "removed_count": N, "removed_preview": "…"}`,
+     * либо — если откатывать нечего — `200 {"error": "Nothing to undo."}` БЕЗ флага
+     * `ok`. Обе формы разбирает [sessionOp] в [SessionTurnOpOutcome]: отказ сервера
+     * идёт как [SessionTurnOpOutcome.Failure] с его собственным текстом, поэтому
+     * вызывающий показывает одно сообщение и не путает отказ с сетевой ошибкой.
+     */
+    suspend fun undoSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionTurnOpOutcome = when (val wire = sessionOp(baseUrl, credential, "api/session/undo", mapOf("session_id" to sessionId))) {
+        is WireBody -> SessionTurnOpOutcome.Success(turnOpResult(wire.body))
+        is WireError -> SessionTurnOpOutcome.Failure(wire.message)
+    }
+
+    /**
+     * Повтор последнего хода: `POST /api/session/retry` body `{"session_id"}`.
+     *
+     * Сервер отрезает транскрипт до последнего пользовательского сообщения и
+     * возвращает `{"ok": true, "last_user_text": "…", "removed_count": N}` — текст
+     * ожидается обратно в композер ([SessionTurnOpResult.lastUserText]), а сам
+     * перезапуск делает вызывающий обычным `send`. Отказ («No previous message to
+     * retry.») приходит так же 200-м с полем `error`.
+     */
+    suspend fun retrySession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionTurnOpOutcome = when (val wire = sessionOp(baseUrl, credential, "api/session/retry", mapOf("session_id" to sessionId))) {
+        is WireBody -> SessionTurnOpOutcome.Success(turnOpResult(wire.body))
+        is WireError -> SessionTurnOpOutcome.Failure(wire.message)
+    }
+
+    /**
+     * Ветка от текущего диалога: `POST /api/session/branch` body
+     * `{"session_id", "keep_count"?, "title"?}`.
+     *
+     * [keepCount] — сколько сообщений скопировать: `0` даёт пустую ветку, `null`
+     * (поле не отправляется вовсе) копирует всю историю. [title] `null` отдаёт
+     * серверу вывод имени: `<исходное название> (fork)`. Ответ —
+     * `200 {"session_id", "title", "parent_session_id"}`; это НОВАЯ сессия, её id
+     * вызывающий обязан открыть сам.
+     */
+    suspend fun branchSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        keepCount: Int? = null,
+        title: String? = null,
+    ): SessionBranchOutcome {
+        val fields = mutableMapOf<String, Any?>("session_id" to sessionId)
+        // Optional fields are OMITTED (not sent as null): the server reads "field
+        // absent" as "copy the whole history" / "derive the title".
+        if (keepCount != null) fields["keep_count"] = keepCount
+        title?.trim()?.takeIf { it.isNotEmpty() }?.let { fields["title"] = it }
+        return when (val wire = sessionOp(baseUrl, credential, "api/session/branch", fields)) {
+            is WireBody -> {
+                val newId = string(wire.body, "session_id", "id")
+                if (newId == null) SessionBranchOutcome.Failure("Ответ сервера без session_id ветки")
+                else SessionBranchOutcome.Success(
+                    SessionBranchResult(newId, string(wire.body, "title"), string(wire.body, "parent_session_id"))
+                )
+            }
+            is WireError -> SessionBranchOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Копия диалога: `POST /api/session/duplicate` body `{"session_id"}`.
+     *
+     * Ответ — `200 {"session": {…}}` с полным дубликатом. Сервер отвечает 404 для
+     * неизвестной сессии и 400 для субагентской, поэтому обе причины приходят как
+     * [SessionMutationOutcome.Failure] с его текстом.
+     */
+    suspend fun duplicateSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionMutationOutcome = sessionRowOp(baseUrl, credential, "api/session/duplicate", mapOf("session_id" to sessionId))
+
+    /**
+     * Обрезка истории до [keepCount] сообщений: `POST /api/session/truncate` body
+     * `{"session_id", "keep_count"}`. ОПЕРАЦИЯ РАЗРУШИТЕЛЬНАЯ и необратимая —
+     * вызывающий обязан получить подтверждение пользователя до вызова.
+     *
+     * [keepCount] обязателен по контракту: без него сервер отвечает 400, поэтому
+     * параметр не имеет значения по умолчанию и принимает только неотрицательное
+     * число (отрицательное отсекается здесь, а не отправляется впустую).
+     */
+    suspend fun truncateSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        keepCount: Int,
+    ): SessionMutationOutcome {
+        if (keepCount < 0) return SessionMutationOutcome.Failure("keep_count не может быть отрицательным")
+        return sessionRowOp(baseUrl, credential, "api/session/truncate", mapOf("session_id" to sessionId, "keep_count" to keepCount))
+    }
+
+    /**
+     * Полная очистка истории сессии: `POST /api/session/clear` body `{"session_id"}`.
+     * ОПЕРАЦИЯ РАЗРУШИТЕЛЬНАЯ: сервер обнуляет транскрипт, попутно снимает ручное
+     * название (сессия заново получит автоимя) — подтверждение в UI обязательно.
+     */
+    suspend fun clearSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionMutationOutcome = sessionRowOp(baseUrl, credential, "api/session/clear", mapOf("session_id" to sessionId))
+
+    /**
+     * Перегенерация названия диалога: `POST /api/session/title/regenerate` body
+     * `{"session_id", "prefer_latest"?}`.
+     *
+     * [preferLatest] подсказывает серверу брать последние сообщения вместо первых.
+     * Ответ — `200 {"title": "…", "status": "…", "raw_preview": "…"}`; отказ здесь
+     * НАСТОЯЩАЯ HTTP-ошибка (422 «не удалось придумать лучше», 403 для read-only
+     * импорта), поэтому текст ошибки берётся из [SessionTitleRegenerateOutcome.Failure].
+     */
+    suspend fun regenerateSessionTitle(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        preferLatest: Boolean = false,
+    ): SessionTitleRegenerateOutcome {
+        val fields = mutableMapOf<String, Any?>("session_id" to sessionId)
+        if (preferLatest) fields["prefer_latest"] = true
+        return when (val wire = sessionOp(baseUrl, credential, "api/session/title/regenerate", fields)) {
+            is WireBody -> {
+                val title = string(wire.body, "title")
+                if (title == null) SessionTitleRegenerateOutcome.Failure("Ответ сервера без названия")
+                else SessionTitleRegenerateOutcome.Success(
+                    SessionTitleRegenerateResult(title, string(wire.body, "status"), string(wire.body, "raw_preview"))
+                )
+            }
+            is WireError -> SessionTitleRegenerateOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Перенос диалога в проект: `POST /api/session/move` body
+     * `{"session_id", "project_id"}`; `project_id = null` вынимает сессию из проекта.
+     *
+     * Сервер отвечает `200 {"ok": true, "session": {…}}`, а 404 — если проекта нет
+     * или он принадлежит другому профилю, 503 — если сессия сейчас стримит. Обе
+     * причины доходят как [SessionMutationOutcome.Failure] и показываются как есть.
+     */
+    suspend fun moveSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        projectId: String?,
+    ): SessionMutationOutcome = sessionRowOp(
+        baseUrl,
+        credential,
+        "api/session/move",
+        mapOf("session_id" to sessionId, "project_id" to projectId?.trim()?.takeIf { it.isNotEmpty() }),
+    )
+
+    /**
+     * Набор инструментов сессии: `POST /api/session/toolsets` body
+     * `{"session_id", "toolsets"}`.
+     *
+     * [toolsets] `null` СБРАСЫВАЕТ переопределение (сессия возвращается к общему
+     * набору), непустой список — ограничивает сессию им. Пустой список сервер
+     * отвергает 400, поэтому такой вызов не отправляется: вызывающий получает
+     * [SessionToolsetsOutcome.Failure] с понятным текстом, не сетевым отказом.
+     * Ответ — `{"ok": true, "enabled_toolsets": [...] | null}`, и берётся именно
+     * серверное значение, а не отправленное клиентом.
+     */
+    suspend fun updateSessionToolsets(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        toolsets: List<String>?,
+    ): SessionToolsetsOutcome {
+        val cleaned = toolsets?.map { it.trim() }?.filter { it.isNotEmpty() }
+        if (cleaned != null && cleaned.isEmpty()) {
+            return SessionToolsetsOutcome.Failure("Нужен хотя бы один инструмент или сброс")
+        }
+        // `null` is a MEANINGFUL value here (reset), so the key is always present —
+        // unlike branch/move where an absent field is the neutral form.
+        val fields = mapOf<String, Any?>("session_id" to sessionId, "toolsets" to cleaned?.sorted())
+        return when (val wire = sessionOp(baseUrl, credential, "api/session/toolsets", fields)) {
+            is WireBody -> SessionToolsetsOutcome.Success(toolsetNames(wire.body["enabled_toolsets"]))
+            is WireError -> SessionToolsetsOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Квота активного провайдера: `GET /api/provider/quota`.
+     *
+     * Путь разрешён device-Bearer на GET и ВСЕГДА отвечает 200, поэтому
+     * «квоты нет» — это не ошибка запроса, а поле ответа: разбор отдаёт
+     * [ProviderQuota] как есть, включая `supported=false`/`status=unsupported`
+     * (живой случай для `custom:plusvibe-api`). [ProviderQuotaOutcome.Failure]
+     * означает только то, что запрос не дошёл или тело не разобралось.
+     */
+    suspend fun getProviderQuota(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+    ): ProviderQuotaOutcome = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/provider/quota").build().toString()
+        try {
+            client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).get().build())
+                .execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val serverMessage = parseMap(text)?.get("error")?.toString()?.takeIf { it.isNotBlank() }
+                        return@use ProviderQuotaOutcome.Failure(serverMessage ?: "HTTP ${response.code}")
+                    }
+                    val root = parseMap(text) ?: return@use ProviderQuotaOutcome.Failure("Пустой ответ квоты")
+                    ProviderQuotaOutcome.Success(providerQuota(root))
+                }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            ProviderQuotaOutcome.Failure(error.message ?: "Network error")
+        }
+    }
+
+    /** Разобранное тело сессионной ручки: либо конверт с данными, либо серверная ошибка. */
+    private sealed interface Wire {
+        val message: String
+    }
+
+    private data class WireBody(val body: Map<String, Any?>) : Wire {
+        override val message: String get() = ""
+    }
+
+    private data class WireError(override val message: String) : Wire
+
+    /**
+     * Общий путь всех сессионных POST-ручек: одно место отправки, один разбор
+     * конверта и ОДНА трактовка отказа.
+     *
+     * Три отказовых формы сводятся к [WireError]: неразобранное тело, не-2xx
+     * (`{"error": "Session not found"}`, 400 «Subagent sessions are view-only…»,
+     * 503 «Session is busy» — текст сервера важнее кода) и ВНУТРИКОНВЕРТНЫЙ
+     * `{"error": …}` при 200-м коде (у undo/retry отказ так и приходит, без `ok`).
+     * Именно поэтому вызывающие не смотрят на HTTP-код сами.
+     */
+    private suspend fun sessionOp(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        path: String,
+        fields: Map<String, Any?>,
+    ): Wire = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder().addPathSegments(path).build()
+        try {
+            client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).post(jsonBodyAny(fields)).build())
+                .execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    val root = parseMap(text)
+                    val inBand = root?.get("error")?.toString()?.takeIf { it.isNotBlank() }
+                    if (inBand != null) return@use WireError(inBand)
+                    if (!response.isSuccessful) return@use WireError("HTTP ${response.code}")
+                    if (root == null) return@use WireError("Пустой ответ сервера")
+                    WireBody(root)
+                }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            WireError(error.message ?: "Network error")
+        }
+    }
+
+    /** Сессионная ручка, отвечающая строкой сессии в конверте (`truncate`/`clear`/`move`/`duplicate`). */
+    private suspend fun sessionRowOp(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        path: String,
+        fields: Map<String, Any?>,
+    ): SessionMutationOutcome = when (val wire = sessionOp(baseUrl, credential, path, fields)) {
+        is WireBody -> SessionMutationOutcome.Success((wire.body["session"] as? Map<*, *>)?.let(::sessionItem))
+        is WireError -> SessionMutationOutcome.Failure(wire.message)
+    }
+
+    /** Общий разбор ответа undo/retry: счётчики плюс текст, который сервер отдал клиенту. */
+    private fun turnOpResult(body: Map<String, Any?>): SessionTurnOpResult = SessionTurnOpResult(
+        ok = body["ok"] != false,
+        removedCount = (body["removed_count"] as? Number)?.toInt() ?: 0,
+        lastUserText = body["last_user_text"]?.toString()?.takeIf { it.isNotBlank() },
+        removedPreview = body["removed_preview"]?.toString()?.takeIf { it.isNotBlank() },
+        error = body["error"]?.toString()?.takeIf { it.isNotBlank() },
+    )
+
+    /**
+     * Имена тулсетов из `enabled_toolsets`. Пустой список приводится к `null`:
+     * сервер трактует «нет переопределения» как `null`, и отдельного состояния
+     * «включено ноль инструментов» в контракте не существует.
+     */
+    private fun toolsetNames(raw: Any?): List<String>? =
+        (raw as? List<*>)?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }?.takeIf { it.isNotEmpty() }
+
+    /** Разбор `GET /api/provider/quota` — плоский объект, поля читаются как есть. */
+    private fun providerQuota(o: Map<*, *>): ProviderQuota = ProviderQuota(
+        ok = o["ok"] == true,
+        provider = string(o, "provider"),
+        displayName = string(o, "display_name"),
+        supported = o["supported"] == true,
+        status = string(o, "status"),
+        label = string(o, "label"),
+        quota = (o["quota"] as? Map<*, *>)?.let { q ->
+            ProviderQuotaAmounts(
+                limitRemaining = number(q["limit_remaining"]),
+                usage = number(q["usage"]),
+                limit = number(q["limit"]),
+            )
+        },
+        message = string(o, "message"),
+    )
+
+    private fun number(raw: Any?): Double? = (raw as? Number)?.toDouble()
+
 
     /**
      * Token usage and estimated cost of one session
@@ -415,6 +800,16 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
         }
         return RequestBody.create(jsonMediaType, json)
     }
+
+    /**
+     * Тело запроса с НЕстроковыми значениями (`Boolean`, `Int`, вложенные списки) и
+     * с осмысленным JSON `null`. Строится тем же адаптером, что и `createSession`,
+     * поэтому `null` доезжает до сервера именно как `null`, а не пропадает: для
+     * `toolsets`/`project_id` это разные команды («сбросить» против «не трогать»),
+     * и потеря поля переключила бы смысл запроса.
+     */
+    private fun jsonBodyAny(fields: Map<String, Any?>): RequestBody =
+        RequestBody.create(jsonMediaType, moshi.adapter<Map<String, Any?>>(mapType).toJson(fields))
 
     private fun execute(url: String, c: ConsumedDeviceCredential): String? =
         try { client.newCall(Request.Builder().url(url).header("Authorization", bearer(c)).get().build()).execute().use { if (it.isSuccessful) it.body?.string() else null } } catch (_: Exception) { null }

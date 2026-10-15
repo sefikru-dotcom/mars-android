@@ -181,6 +181,106 @@ data class SessionMessage(
     val toolCallId: String? = null,
 )
 
+/**
+ * Result of the turn-scoped server operations `POST /api/session/undo` and
+ * `POST /api/session/retry`.
+ *
+ * Both endpoints answer `200 {"ok": true, "removed_count": N, ...}` on success and
+ * `200 {"error": "..."}` on a refusal (the server deliberately avoids 4xx here so
+ * the client can show a toast instead of a transport error). Failure cases carry
+ * the server's own Russian-agnostic English text — `"Nothing to undo."` for an
+ * empty exchange, `"No previous message to retry."` when the transcript has no
+ * user turn left. That message is surfaced verbatim: it is server state, not a
+ * client guess.
+ *
+ * [lastUserText] is the text the server pulled out of the transcript and, for
+ * retry, expects the client to put back into the composer. [removedPreview] is a
+ * server-truncated 40-char preview of the removed user message (undo only).
+ */
+data class SessionTurnOpResult(
+    val ok: Boolean,
+    val removedCount: Int = 0,
+    val lastUserText: String? = null,
+    val removedPreview: String? = null,
+    val error: String? = null,
+)
+
+/**
+ * Result of `POST /api/session/branch` — a new fork of an existing session.
+ *
+ * Body `{session_id, keep_count?, title?}`; `keep_count` is the number of
+ * messages copied (`0` yields an empty branch, an absent field copies the whole
+ * history) and an absent/blank `title` makes the server derive
+ * `"<original title> (fork)"`. Answer: `200 {"session_id", "title",
+ * "parent_session_id"}`.
+ */
+data class SessionBranchResult(
+    val sessionId: String,
+    val title: String? = null,
+    val parentSessionId: String? = null,
+)
+
+/**
+ * Result of `POST /api/session/title/regenerate` —
+ * `200 {"session": {...}, "title": "...", "status": "...", "raw_preview": "..."}`.
+ *
+ * A refusal is a real HTTP error here (422 `"Could not generate a better title"`,
+ * 403 for read-only imports), so [SessionTitleRegenerateOutcome.Failure] carries
+ * that text instead of an `error` field.
+ */
+data class SessionTitleRegenerateResult(
+    val title: String,
+    val status: String? = null,
+    val rawPreview: String? = null,
+)
+
+/**
+ * Quota / rate-limit status of the ACTIVE provider — `GET /api/provider/quota`.
+ *
+ * The endpoint is in the device-Bearer allow-list for GET and ALWAYS answers 200,
+ * so availability is read from the PAYLOAD, never from the HTTP code:
+ * - `supported=false, status="unsupported"` — the provider exposes no quota at all
+ *   (the live case for `custom:plusvibe-api`); [message] explains why.
+ * - `supported=true, status="available"` — [label] + [quota] carry numbers.
+ * - `status="no_key" | "invalid_key" | "unavailable"` — supported provider whose
+ *   quota could not be read right now; retryable, and distinct from "unsupported".
+ *
+ * This is the PROVIDER account quota (credits / token windows). It has nothing to
+ * do with the local context budget the composer's context pill shows
+ * (`ContextBudgetPolicy`) — the two are separate sources that never share state.
+ */
+data class ProviderQuota(
+    val ok: Boolean,
+    val provider: String? = null,
+    val displayName: String? = null,
+    val supported: Boolean = false,
+    val status: String? = null,
+    val label: String? = null,
+    val quota: ProviderQuotaAmounts? = null,
+    val message: String? = null,
+) {
+    /**
+     * True when the provider simply has no quota concept — a settled state, not an
+     * error, and not worth a retry button.
+     */
+    val isUnsupported: Boolean get() = !supported || status.equals("unsupported", ignoreCase = true)
+
+    /** True when quota exists but this read failed — a retry may help. */
+    val isUnavailable: Boolean
+        get() = supported && status in setOf("unavailable", "no_key", "invalid_key")
+}
+
+/**
+ * Numeric block of a supported provider's quota (OpenRouter credits shape:
+ * `{"limit_remaining", "usage", "limit"}`). Every field is nullable because the
+ * wire omits what the provider did not report — the UI must not invent zeros.
+ */
+data class ProviderQuotaAmounts(
+    val limitRemaining: Double? = null,
+    val usage: Double? = null,
+    val limit: Double? = null,
+)
+
 /** Full session returned by the session detail endpoint. */
 data class SessionDetail(
     val id: String,
@@ -222,4 +322,12 @@ data class SessionDetail(
      * never enters the transcript.
      */
     val composerDraft: String? = null,
+    /**
+     * Per-session toolset override (`session.enabled_toolsets` of `GET /api/session`,
+     * written by `POST /api/session/toolsets`). `null` means "no override" — the
+     * session runs with the server's default toolset set, which is NOT the same as
+     * an empty list (the server rejects an empty list outright). Non-null holds the
+     * names the session is restricted to.
+     */
+    val enabledToolsets: List<String>? = null,
 )

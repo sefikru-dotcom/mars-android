@@ -194,6 +194,26 @@ class ChatUiState(
     }
 
     /**
+     * Ручные переопределения разворота ГРУППЫ инструментов, ключ — индекс сообщения.
+     *
+     * Наличие ключа означает «пользователь сам решил»: `true` держит группу
+     * развёрнутой, `false` — свёрнутой, независимо от режима активности (паритет с
+     * `data-mars-turn-manual` в WebUI). Отсутствие ключа отдаёт начальное состояние
+     * режиму ([ToolGroupPresenter]). Чистится при смене сессии, чтобы индексы не
+     * переезжали на другой транскрипт.
+     */
+    private val expandedToolGroups = mutableMapOf<Int, Boolean>()
+
+    fun isToolGroupExpanded(messageIndex: Int): Boolean? = expandedToolGroups[messageIndex]
+
+    fun hasToolGroupOverride(messageIndex: Int): Boolean = expandedToolGroups.containsKey(messageIndex)
+
+    /** Переключает группу: первое нажатие задаёт противоположное текущему состоянию. */
+    fun toggleToolGroup(messageIndex: Int, currentlyExpanded: Boolean) {
+        expandedToolGroups[messageIndex] = !currentlyExpanded
+    }
+
+    /**
      * Switches the display mode and re-applies the expansion policy to the whole
      * transcript so the change is immediately visible.
      */
@@ -372,7 +392,7 @@ class ChatUiState(
 
     fun fail() { status = ChatStatus.ERROR; phase = null; reattachedTurn = false; clearActiveTurnFlags(); clearPendingInteractive(); markAssistant(MessageStatus.ERROR) }
     fun cancel() { status = ChatStatus.IDLE; phase = null; reattachedTurn = false; clearPendingInteractive(); markAssistant(MessageStatus.COMPLETE) }
-    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
+    fun startNewSession() { activeSessionId = null; sessionTitle = null; messages.clear(); status = ChatStatus.IDLE; phase = null; contextUsage = null; todoState = null; expandedCodeBlocks.clear(); expandedToolGroups.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
     fun setSessions(value: List<SessionItem>) { sessions = value }
 
     /**
@@ -418,7 +438,7 @@ class ChatUiState(
         return result
     }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); expandedToolGroups.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 
