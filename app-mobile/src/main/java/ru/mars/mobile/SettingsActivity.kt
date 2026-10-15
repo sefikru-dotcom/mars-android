@@ -157,6 +157,12 @@ class SettingsActivity : ComponentActivity() {
             addView(recheckBtn, LinearLayout.LayoutParams(-1, dp(40)).apply {
                 setMargins(dp(12), dp(8), dp(12), dp(12))
             })
+
+            // Профили сервера — единственный вход в read-only экран профилей
+            // (паритет с панелью профилей WebUI; переключение профиля не выполняется).
+            addView(buildNavRow(getString(R.string.settings_profiles_open), getString(R.string.settings_profiles_hint)) {
+                startActivity(Intent(this@SettingsActivity, ProfilesActivity::class.java))
+            }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
         }
         content.addView(serverCard)
 
@@ -265,6 +271,34 @@ class SettingsActivity : ComponentActivity() {
             setTypeface(null, Typeface.BOLD)
         }
         addView(valueView)
+    }
+
+    /**
+     * Строка-переход: подпись слева, действие справа, кликабельна вся строка.
+     * Раньше в настройках переходы делались кнопками во всю ширину — здесь
+     * строка, чтобы вход в экран профилей не выглядел основным действием.
+     */
+    private fun buildNavRow(label: String, hint: String, onClick: () -> Unit): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        isClickable = true
+        isFocusable = true
+        contentDescription = "$label. $hint"
+        setOnClickListener { onClick() }
+
+        addView(TextView(this@SettingsActivity).apply {
+            text = label
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        addView(TextView(this@SettingsActivity).apply {
+            text = hint
+            textSize = 13f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            setTypeface(null, Typeface.BOLD)
+        })
     }
 
     /**

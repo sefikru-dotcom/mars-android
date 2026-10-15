@@ -21,4 +21,33 @@
     <string name="music_for_you_empty">Лента пока пуста — включите пару треков, и она наполнится</string>
     <string name="music_for_you_error">Лента недоступна — проверьте сеть</string>
     <string name="music_suggestions_header">Подсказки</string>
+    <!-- Профили: read-only экран (GET /api/profiles). Тексты подписей —
+         паритет с русской локалью WebUI (profile_active, profile_default_label,
+         profile_no_configuration, profiles_no_profiles, profile_gateway_*). -->
+    <string name="profiles_screen_title">Профили</string>
+    <string name="profiles_loading">Загрузка профилей…</string>
+    <string name="profiles_stale">Не удалось обновить список профилей</string>
+    <string name="profiles_active_line">Активный профиль: %1$s</string>
+    <string name="profiles_active_unknown">Активный профиль не определён</string>
+    <string name="profiles_active_badge">АКТИВЕН</string>
+    <string name="profiles_default_badge">по умолчанию</string>
+    <string name="profiles_hidden_badge">Скрыт из чата</string>
+    <string name="profiles_no_configuration">Нет конфигурации</string>
+    <string name="profiles_empty">Профили не найдены.</string>
+    <string name="profiles_gateway_running">Gateway запущен</string>
+    <string name="profiles_gateway_stopped">Gateway остановлен</string>
+    <string name="profiles_notice_concept">Профили отвечают за то, как работает агент; рабочие пространства — за то, с какими файлами он работает.</string>
+    <string name="profiles_notice_single_mode">Режим одного профиля: сервер отдаёт единственный профиль, переключение недоступно.</string>
+    <string name="profiles_readonly_note">Только просмотр: переключение профиля меняет состояние сервера и выполняется из WebUI владельцем.</string>
+    <string name="profiles_failure_network">Не удалось загрузить профили</string>
+    <string name="profiles_failure_no_auth">Нужен вход: откройте приложение и пройдите пару</string>
+    <string name="profiles_meta_separator"> · </string>
+    <plurals name="profiles_skills">
+        <item quantity="one">%1$d / %2$d навык</item>
+        <item quantity="few">%1$d / %2$d навыка</item>
+        <item quantity="many">%1$d / %2$d навыков</item>
+        <item quantity="other">%1$d / %2$d навыков</item>
+    </plurals>
+    <string name="settings_profiles_open">Профили сервера</string>
+    <string name="settings_profiles_hint">Смотреть</string>
 </resources>
