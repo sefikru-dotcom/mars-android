@@ -136,12 +136,26 @@ object SessionTreePolicy {
         val cycleRoots = roots.filter {
             !it.parentSessionId.isNullOrBlank() && !isOrphan(it, byId)
         }
-        val ordered = trueRoots.filterNot { it.isSubagent }.sortedByDescending { recencyKey(it) } +
-            trueRoots.filter { it.isSubagent }.sortedByDescending { recencyKey(it) } +
-            orphanRoots.sortedByDescending { recencyKey(it) } +
-            cycleRoots.sortedByDescending { recencyKey(it) }
+        val ordered = pinnedFirst(trueRoots.filterNot { it.isSubagent }) +
+            pinnedFirst(trueRoots.filter { it.isSubagent }) +
+            pinnedFirst(orphanRoots) +
+            pinnedFirst(cycleRoots)
         return ordered.map { node(it, 0, mutableSetOf(it.id)) }
     }
+
+    /**
+     * Свежие сначала, но закреплённые — выше незакреплённых (A3).
+     *
+     * Закрепление иначе было бы невидимым: флаг строки приезжает от сервера
+     * (`pinned`), а список сортировался только по свежести, и закреплённый диалог
+     * мог остаться внизу. Порядок внутри каждой группы сохраняется неизменным
+     * (сортировка устойчива), поэтому строки без флага `pinned` — а это весь
+     * существующий список, пока пользователь ничего не закрепил — идут ровно так
+     * же, как раньше.
+     */
+    private fun pinnedFirst(items: List<SessionItem>): List<SessionItem> =
+        items.filter { it.pinned }.sortedByDescending { recencyKey(it) } +
+            items.filterNot { it.pinned }.sortedByDescending { recencyKey(it) }
 
     /**
      * Композиция «поиск -> дерево»: [filterForSearch] ДО построения, при

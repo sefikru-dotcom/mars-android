@@ -130,6 +130,19 @@ data class SessionItem(
     /** Effective model identity returned by the server for this session. */
     val model: String? = null,
     val modelProvider: String? = null,
+    /**
+     * Server-side pin flag (`pinned` in `Session.compact()`). Toggled through
+     * `POST /api/session/pin`; pinned rows are what the pin quota counts, so the
+     * UI never computes this locally.
+     */
+    val pinned: Boolean = false,
+    /**
+     * Server-side archive flag (`archived` in `Session.compact()`). Toggled through
+     * `POST /api/session/archive`; the server keeps archived rows in a separate
+     * bucket of `GET /api/sessions`, so an archived row only disappears from the
+     * list after the server confirms the mutation.
+     */
+    val archived: Boolean = false,
 ) {
     /**
      * True for delegated subagent children (WebUI parity #5244/#5305): the

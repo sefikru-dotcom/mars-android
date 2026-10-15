@@ -32,6 +32,33 @@ sealed interface CreateSessionOutcome {
 }
 
 /**
+ * Outcome of a session mutation that returns the settled row
+ * (`POST /api/session/pin` и `/api/session/archive` оба отвечают
+ * `{"ok": true, "session": {...}}`).
+ *
+ * The payload is surfaced instead of a bare Boolean because the mutation result IS
+ * server state: after pin the row may carry a different quota-driven flag set, and
+ * the UI must render what the server confirmed, not what it optimistically assumed.
+ */
+sealed interface SessionMutationOutcome {
+    /** 200 `{"ok": true, "session": {...}}`; [session] is null when the server sent no row. */
+    data class Success(val session: SessionItem?) : SessionMutationOutcome
+    /** HTTP error (with the server `error` message when present), malformed body, or transport failure. */
+    data class Failure(val message: String) : SessionMutationOutcome
+}
+
+/**
+ * Outcome of `GET /api/session/export?session_id=` — a full session document
+ * (session_id, title, workspace, created_workspace, model, model_provider, messages…)
+ * parsed into the same [SessionDetail] the detail endpoint produces, so the Markdown
+ * exporter consumes either source identically.
+ */
+sealed interface SessionExportOutcome {
+    data class Success(val detail: SessionDetail) : SessionExportOutcome
+    data class Failure(val message: String) : SessionExportOutcome
+}
+
+/**
  * Port for minting a fresh server session. ChatActivity depends on this abstraction
  * (via FirstSessionFlow) so the first-message flow is unit-testable without HTTP.
  */
@@ -71,22 +98,7 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session").addQueryParameter("session_id", sessionId).build().toString()
             val root = parseMap(execute(url, credential) ?: return@withContext null) ?: return@withContext null
             val s = (root["session"] as? Map<*, *>) ?: root
-            SessionDetail(
-                string(s, "id") ?: string(s, "session_id") ?: sessionId,
-                string(s, "title"),
-                string(s, "created_at", "createdAt"),
-                string(s, "updated_at", "updatedAt"),
-                (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty(),
-                activeTurn(s),
-                // Cold `todo_state`: parsing lives in ONE place shared with the
-                // live SSE path (TodoStateParser; contract documented there).
-                TodoStateParser.parse(s["todo_state"] as? Map<*, *>),
-                // Live workspace path (Session.compact() `workspace`); absent on
-                // older payloads → null ("server default"), backward compatible.
-                workspace = string(s, "workspace"),
-                model = string(s, "model"),
-                modelProvider = string(s, "model_provider", "provider"),
-            )
+            detail(s, sessionId)
         }
 
     /**
@@ -147,6 +159,168 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             item.title?.contains(query, ignoreCase = true) == true || item.preview?.contains(query, ignoreCase = true) == true
         }
 
+    /**
+     * Глобальный серверный поиск: `GET /api/sessions/search?q=<query>`.
+     *
+     * Контракт (проверен живым запросом, device Bearer принимается):
+     * `200 {"sessions": [...], "query": "…", "count": N, "all_profiles": bool,
+     * "active_profile": "…"}` — форма строки сессии та же, что у `GET /api/sessions`,
+     * поэтому разбор идёт тем же [sessionItem].
+     *
+     * Отличие от [searchSessions]: тот фильтрует УЖЕ загруженный локальный список
+     * (работает офлайн, видит только открытые строки); этот спрашивает сервер и
+     * находит диалоги, которых в локальном списке нет вовсе. Оба метода
+     * сосуществуют: локальный фильтр остаётся мгновенным отзывом на ввод, а
+     * серверный подмешивает результаты по всей базе.
+     *
+     * [allProfiles] добавляет `&all_profiles=1` — поиск по всем профилям, не только
+     * по активному. Пустой/пробельный запрос серверу не отправляется: возвращаем
+     * пустой список (поиск без запроса не имеет смысла и не должен тянуть весь список).
+     * Сбой сети/HTTP/разбора — пустой список, никогда не исключение.
+     */
+    suspend fun searchSessionsGlobal(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        query: String,
+        allProfiles: Boolean = false,
+    ): List<SessionItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/sessions/search")
+            .addQueryParameter("q", q)
+            .apply { if (allProfiles) addQueryParameter("all_profiles", "1") }
+            .build()
+        val root = parseMap(execute(url.toString(), credential) ?: return@withContext emptyList())
+        val items = (root?.get("sessions") ?: root?.get("items")) as? List<*> ?: return@withContext emptyList()
+        items.mapNotNull { (it as? Map<*, *>)?.let(::sessionItem) }
+    }
+
+    /**
+     * Закрепление диалога: `POST /api/session/pin` body
+     * `{"session_id": "...", "pinned": true|false}` → `200 {"ok": true, "session": {...}}`.
+     *
+     * Ответ разбирается в [SessionMutationOutcome.Success] с серверной строкой сессии:
+     * флаг «закреплён» — серверное состояние (у сервера есть квота закреплённых),
+     * поэтому UI обязан показывать подтверждённое значение, а не своё предположение.
+     */
+    suspend fun setSessionPinned(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        pinned: Boolean,
+    ): SessionMutationOutcome = mutateSession(baseUrl, credential, "api/session/pin", sessionId, "pinned", pinned)
+
+    /**
+     * Архивация диалога: `POST /api/session/archive` body
+     * `{"session_id": "...", "archived": true|false}` → `200 {"ok": true, "session": {...}}`
+     * (симметрично [setSessionPinned]).
+     *
+     * Архивные строки сервер держит в отдельном ведре `GET /api/sessions`, поэтому
+     * строка исчезает из активного списка только после подтверждения сервером.
+     */
+    suspend fun setSessionArchived(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        archived: Boolean,
+    ): SessionMutationOutcome = mutateSession(baseUrl, credential, "api/session/archive", sessionId, "archived", archived)
+
+    /**
+     * Полный JSON сессии: `GET /api/session/export?session_id=<id>` → объект сессии
+     * (`session_id`, `title`, `workspace`, `created_workspace`, `model`,
+     * `model_provider`, `messages`…). Форма плоская — сам объект сессии, без
+     * обёртки `{"session": …}` (в отличие от [getSessionDetail]), поэтому корень
+     * берётся как есть, с фолбэком на вложенный `session` для устойчивости.
+     *
+     * Источник для офлайн-экспорта в Markdown ([ru.mars.network.export.SessionMarkdownExporter]);
+     * серверные ручки `/api/share/create` и `/api/share/revoke` на device-токене отдают 401
+     * (серверный блокер), поэтому шаринг делается локально из этого документа.
+     */
+    suspend fun exportSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionExportOutcome = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/session/export")
+            .addQueryParameter("session_id", sessionId)
+            .build()
+        try {
+            client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).get().build())
+                .execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val serverMessage = parseMap(text)?.get("error")?.toString()?.takeIf { it.isNotBlank() }
+                        return@use SessionExportOutcome.Failure(serverMessage ?: "HTTP ${response.code}")
+                    }
+                    val root = parseMap(text)
+                    val s = (root?.get("session") as? Map<*, *>) ?: root
+                    if (s == null) return@use SessionExportOutcome.Failure("Empty session document")
+                    SessionExportOutcome.Success(detail(s, sessionId))
+                }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            SessionExportOutcome.Failure(error.message ?: "Network error")
+        }
+    }
+
+    /** Общий путь pin/archive: один и тот же конверт ответа и разбор строки сессии. */
+    private suspend fun mutateSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        path: String,
+        sessionId: String,
+        field: String,
+        value: Boolean,
+    ): SessionMutationOutcome = withContext(Dispatchers.IO) {
+        val url = baseUrl.toHttpUrl().newBuilder().addPathSegments(path).build()
+        val body = RequestBody.create(
+            jsonMediaType,
+            moshi.adapter<Map<String, Any?>>(mapType).toJson(mapOf("session_id" to sessionId, field to value)),
+        )
+        try {
+            client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).post(body).build())
+                .execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val serverMessage = parseMap(text)?.get("error")?.toString()?.takeIf { it.isNotBlank() }
+                        return@use SessionMutationOutcome.Failure(serverMessage ?: "HTTP ${response.code}")
+                    }
+                    val root = parseMap(text)
+                    val row = root?.get("session") as? Map<*, *>
+                    SessionMutationOutcome.Success(row?.let(::sessionItem))
+                }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            SessionMutationOutcome.Failure(error.message ?: "Network error")
+        }
+    }
+
+    /**
+     * Объект сессии wire → [SessionDetail]. Единая точка разбора для
+     * `GET /api/session` и `GET /api/session/export` (у них одна форма сессии);
+     * [fallbackId] подставляется, когда сервер не назвал id.
+     */
+    private fun detail(s: Map<*, *>, fallbackId: String): SessionDetail = SessionDetail(
+        string(s, "id") ?: string(s, "session_id") ?: fallbackId,
+        string(s, "title"),
+        string(s, "created_at", "createdAt"),
+        string(s, "updated_at", "updatedAt"),
+        (s["messages"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.let(::message) }.orEmpty(),
+        activeTurn(s),
+        // Cold `todo_state`: parsing lives in ONE place shared with the
+        // live SSE path (TodoStateParser; contract documented there).
+        TodoStateParser.parse(s["todo_state"] as? Map<*, *>),
+        // Live workspace path (Session.compact() `workspace`); absent on
+        // older payloads → null ("server default"), backward compatible.
+        workspace = string(s, "workspace"),
+        model = string(s, "model"),
+        modelProvider = string(s, "model_provider", "provider"),
+    )
+
     suspend fun renameSession(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String, newTitle: String): Boolean =
         withContext(Dispatchers.IO) {
             val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session/rename").build()
@@ -204,6 +378,8 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             parentSessionId = string(o, "parent_session_id"),
             model = string(o, "model"),
             modelProvider = string(o, "model_provider", "provider"),
+            pinned = o["pinned"] as? Boolean ?: false,
+            archived = o["archived"] as? Boolean ?: false,
         )
     }
 

@@ -17,6 +17,8 @@ class SessionTreePolicyTest {
         readOnly: Boolean = false,
         createdAt: String? = null,
         updatedAt: String? = null,
+        pinned: Boolean = false,
+        archived: Boolean = false,
     ) = SessionItem(
         id = id,
         title = title,
@@ -26,6 +28,8 @@ class SessionTreePolicyTest {
         sourceTag = if (subagent) "subagent" else null,
         readOnly = readOnly,
         parentSessionId = parent,
+        pinned = pinned,
+        archived = archived,
     )
 
     private fun ids(nodes: List<SessionTreeNode>): List<String> = nodes.map { it.session.id }
@@ -298,5 +302,43 @@ class SessionTreePolicyTest {
             session("s1", "Субагент", parent = "w1", subagent = true),
         )
         assertEquals(SessionTreePolicy.build(sessions), SessionTreePolicy.build(sessions, currentSessionId = "nope"))
+    }
+
+    // ---- pin ordering (A3) ----
+
+    @Test
+    fun pinnedRootRisesAboveFresherUnpinnedRoot() {
+        // Без этого закрепление было бы невидимым: закреплённый диалог уезжал бы
+        // вниз под более свежие незакреплённые.
+        val roots = SessionTreePolicy.build(
+            listOf(
+                session("fresh", "Свежая", updatedAt = "2026-10-09"),
+                session("pinned", "Закреплённая", updatedAt = "2026-01-01", pinned = true),
+            )
+        )
+        assertEquals(listOf("pinned", "fresh"), ids(roots))
+    }
+
+    @Test
+    fun pinnedGroupItselfStaysRecencyOrdered() {
+        val roots = SessionTreePolicy.build(
+            listOf(
+                session("p-old", "Старая", updatedAt = "2026-01-01", pinned = true),
+                session("p-new", "Новая", updatedAt = "2026-09-01", pinned = true),
+                session("plain", "Обычная", updatedAt = "2026-10-01"),
+            )
+        )
+        assertEquals(listOf("p-new", "p-old", "plain"), ids(roots))
+    }
+
+    @Test
+    fun unpinnedOrderIsUnchangedWhenNothingIsPinned() {
+        // Весь существующий список: ни одного флага pinned — порядок как раньше.
+        val sessions = listOf(
+            session("old", "Старая", updatedAt = "2026-01-01"),
+            session("mid", "Средняя", createdAt = "2026-05-01"),
+            session("new", "Свежая", updatedAt = "2026-09-01"),
+        )
+        assertEquals(listOf("new", "mid", "old"), ids(SessionTreePolicy.build(sessions)))
     }
 }
