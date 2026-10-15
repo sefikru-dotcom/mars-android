@@ -15,7 +15,7 @@ import ru.mars.network.repository.MusicRepository
  */
 class RepositoryTvMusicGateway(
     private val repository: MusicRepository,
-) : TvMusicGateway, TvLyricsGateway {
+) : TvMusicGateway, TvLyricsGateway, TvLyricsTranslationGateway {
 
     override fun fetchCharts(): TvMusicChartsResult = fetch { repository.getCharts() }
 
@@ -32,6 +32,17 @@ class RepositoryTvMusicGateway(
         )
     } catch (error: Throwable) {
         TvLyricsResult.Failed(error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName)
+    }
+
+    /**
+     * `POST {baseUrl}/api/lyrics/translate` с телом `{"text": …}`: ответ
+     * `{"success": bool, "translated": "…"}` (при пустом text — `{"translated": ""}`).
+     * Пустоту ответа трактует не шов, а [TvLyricsTranslationFlow] (policy-ветка EMPTY_ANSWER).
+     */
+    override fun translate(text: String): TvLyricsTranslationResult = try {
+        TvLyricsTranslationResult.Translated(runBlocking { repository.translateLyrics(text) })
+    } catch (error: Throwable) {
+        TvLyricsTranslationResult.Failed(error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName)
     }
 
     /** Suspend-to-blocking bridge; contains every failure as [TvMusicChartsResult.Failed]. */
