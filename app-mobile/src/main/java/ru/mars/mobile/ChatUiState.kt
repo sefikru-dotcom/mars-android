@@ -76,7 +76,6 @@ class ChatUiState(
     var activeSessionId: String? = null
         private set
     var sessionTitle: String? = null
-        private set
     var sessions: List<SessionItem> = emptyList()
         private set
     var phase: String? = null
@@ -125,7 +124,16 @@ class ChatUiState(
 
     /** True while the transcript streams a REATTACHED turn (vs one started from this device). */
     var reattachedTurn: Boolean = false
-        private set
+
+    /**
+     * A9: серверный набор инструментов открытого диалога (`enabled_toolsets`).
+     * `null` — набор по умолчанию, это НЕ пустой набор: пустой список сервер отвергает.
+     * Источник истины — ответ сервера, локальный выбор до подтверждения не показывается.
+     */
+    var enabledToolsets: List<String>? = null
+
+    /** A9: применяет серверное значение набора инструментов. */
+    fun applyEnabledToolsets(value: List<String>?) { enabledToolsets = value }
 
     /**
      * Telemetry for the current turn: how many streamed characters were dropped by
