@@ -20,11 +20,14 @@ import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.repository.KanbanAssigneesResult
 import ru.mars.network.repository.KanbanBoardResult
+import ru.mars.network.repository.KanbanBoardsResult
 import ru.mars.network.repository.KanbanRepository
 import ru.mars.network.repository.KanbanStatsResult
 import ru.mars.network.repository.KanbanTaskDetailResult
@@ -65,8 +68,17 @@ class KanbanActivity : ComponentActivity() {
     private lateinit var boardRow: LinearLayout
     private lateinit var statusBox: LinearLayout
     private lateinit var readOnlyBadge: TextView
+    private lateinit var liveBadge: TextView
+    private lateinit var headerBadges: LinearLayout
+    private lateinit var boardsLabel: TextView
+    private lateinit var boardsRow: LinearLayout
+    private lateinit var boardsScroll: HorizontalScrollView
+    private lateinit var assigneesLabel: TextView
+    private lateinit var assigneesRow: LinearLayout
+    private lateinit var assigneesScroll: HorizontalScrollView
 
     private var pollJob: Job? = null
+    private var liveJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,10 +86,18 @@ class KanbanActivity : ComponentActivity() {
         val repository = KanbanRepository()
         presenter = KanbanPresenter(
             hasCredential = { store.read() != null },
-            fetchBoard = { since ->
+            fetchBoard = { since, board, assignee ->
                 val credential = store.read()
                 if (credential == null) null
-                else when (val result = repository.getBoard(MarsApi.BASE_URL, credential, since = since)) {
+                else when (
+                    val result = repository.getBoard(
+                        MarsApi.BASE_URL,
+                        credential,
+                        since = since,
+                        board = board,
+                        assignee = assignee,
+                    )
+                ) {
                     is KanbanBoardResult.Board -> result.board
                     else -> null
                 }
@@ -100,10 +120,33 @@ class KanbanActivity : ComponentActivity() {
             },
             isOffline = ::isDeviceOffline,
             nowEpochSeconds = { System.currentTimeMillis() / 1000L },
+            fetchBoards = {
+                val credential = store.read()
+                if (credential == null) emptyList()
+                else when (val result = repository.getBoards(MarsApi.BASE_URL, credential)) {
+                    is KanbanBoardsResult.Boards -> result.boards.boards
+                    else -> emptyList()
+                }
+            },
+            fetchAssignees = {
+                val credential = store.read()
+                if (credential == null) emptyList()
+                else when (val result = repository.getAssignees(MarsApi.BASE_URL, credential)) {
+                    is KanbanAssigneesResult.Assignees -> result.assignees.assignees
+                    else -> emptyList()
+                }
+            },
+            events = { since, board ->
+                val credential = store.read()
+                if (credential == null) emptyFlow()
+                else repository.streamEvents(MarsApi.BASE_URL, credential, board = board, since = since)
+            },
         )
         setContentView(buildView())
         presenter.subscribe { render(it) }
         lifecycleScope.launch { presenter.load() }
+        // Живой поток — поверх поллинга: события лишь ускоряют перечитку доски,
+        // а пока он молчит или оборван, экран обновляется по таймеру onResume.
     }
 
     /** Лёгкий polling доски: пока экран видим, `since=<курсор>` раз в интервал. */
@@ -116,11 +159,17 @@ class KanbanActivity : ComponentActivity() {
                 presenter.refresh()
             }
         }
+        // Поток живёт ровно столько, сколько экран на переднем плане: при уходе
+        // в фон он снимается вместе с поллингом, при возврате — поднимается снова.
+        liveJob?.cancel()
+        liveJob = presenter.bindLiveStream(lifecycleScope)
     }
 
     override fun onPause() {
         pollJob?.cancel()
         pollJob = null
+        liveJob?.cancel()
+        liveJob = null
         super.onPause()
     }
 
@@ -139,7 +188,46 @@ class KanbanActivity : ComponentActivity() {
             background = MarsTheme.pill(this@KanbanActivity, MarsTheme.SURFACE_SUBTLE, MarsTheme.BORDER_SUBTLE)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
-        scaffold.content.addView(readOnlyBadge, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(8) })
+        // Индикатор живого потока: показывается, пока SSE-канал канбана открыт.
+        // При обрыве экран не ломается — просто гаснет индикатор и работает поллинг.
+        liveBadge = TextView(this).apply {
+            visibility = View.GONE
+            text = KanbanPolicy.LIVE_BADGE
+            textSize = 11f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            background = MarsTheme.pill(this@KanbanActivity, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_BORDER)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        headerBadges = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(readOnlyBadge, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+            addView(liveBadge, LinearLayout.LayoutParams(-2, -2))
+        }
+        scaffold.content.addView(headerBadges, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+
+        // Переключатель досок. Строка скрыта целиком, пока сервер не отдал список:
+        // пустая «Доски» на старом мосте была бы шумом на экране.
+        boardsLabel = sectionLabel(KanbanPolicy.BOARDS_LABEL)
+        scaffold.content.addView(boardsLabel, LinearLayout.LayoutParams(-1, -2))
+        boardsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        boardsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+            addView(boardsRow, ViewGroup.LayoutParams(-2, -2))
+        }
+        scaffold.content.addView(boardsScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        // Фильтр исполнителей. Как и доски, скрыт, когда сервер их не перечислил.
+        assigneesLabel = sectionLabel(KanbanPolicy.ASSIGNEES_LABEL)
+        scaffold.content.addView(assigneesLabel, LinearLayout.LayoutParams(-1, -2))
+        assigneesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        assigneesScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+            addView(assigneesRow, ViewGroup.LayoutParams(-2, -2))
+        }
+        scaffold.content.addView(assigneesScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Статистика: summary + горизонтальная лента чипов by_status/by_assignee.
         summaryView = TextView(this).apply {
@@ -185,6 +273,9 @@ class KanbanActivity : ComponentActivity() {
     private fun render(state: KanbanUiState) {
         scaffold.progress.visibility = if (state.phase == KanbanPhase.LOADING) View.VISIBLE else View.GONE
         readOnlyBadge.visibility = if (state.serverReadOnly) View.VISIBLE else View.GONE
+        liveBadge.visibility = if (state.live) View.VISIBLE else View.GONE
+        headerBadges.visibility =
+            if (state.serverReadOnly || state.live) View.VISIBLE else View.GONE
 
         val notice = state.notice
         if (notice != null) {
@@ -196,6 +287,7 @@ class KanbanActivity : ComponentActivity() {
         }
 
         renderStats(state.stats)
+        renderSelectors(state)
 
         val revealed = state.columns.isNotEmpty() && boardRow.childCount == 0
         boardRow.removeAllViews()
@@ -241,6 +333,80 @@ class KanbanActivity : ComponentActivity() {
         stats.chips.forEach { chip ->
             statsRow.addView(chipView(chip), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         }
+    }
+
+    /** Мелкий заголовок секции над лентой плашек («Доски», «Исполнители»). */
+    private fun sectionLabel(text: String): TextView = TextView(this).apply {
+        visibility = View.GONE
+        this.text = text
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setPadding(dp(2), 0, 0, dp(4))
+    }
+
+    /**
+     * Переключатель досок и фильтр исполнителей. Обе строки целиком скрыты, когда
+     * сервер их не отдал: на старом мосте их нет, и подпись над пустой лентой
+     * выглядела бы поломкой. Клик по плашке доски переключает доску, по плашке
+     * имени — фильтрует задачи; «Все» снимает фильтр.
+     */
+    private fun renderSelectors(state: KanbanUiState) {
+        boardsRow.removeAllViews()
+        val showBoards = state.boards.size > 1
+        boardsScroll.visibility = if (showBoards) View.VISIBLE else View.GONE
+        boardsLabel.visibility = if (showBoards) View.VISIBLE else View.GONE
+        if (showBoards) {
+            state.boards.forEach { board ->
+                boardsRow.addView(
+                    selectorChip(
+                        label = board.label,
+                        count = board.countLabel,
+                        selected = board.isCurrent,
+                    ) { lifecycleScope.launch { presenter.selectBoard(board.slug) } },
+                    LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) }
+                )
+            }
+        }
+
+        assigneesRow.removeAllViews()
+        val showAssignees = state.assignees.size > 1
+        assigneesScroll.visibility = if (showAssignees) View.VISIBLE else View.GONE
+        assigneesLabel.visibility = if (showAssignees) View.VISIBLE else View.GONE
+        if (showAssignees) {
+            state.assignees.forEach { assignee ->
+                assigneesRow.addView(
+                    selectorChip(
+                        label = assignee.label,
+                        count = assignee.countLabel,
+                        selected = assignee.isSelected,
+                    ) {
+                        val next = assignee.name.takeIf { it != KanbanPolicy.ALL_ASSIGNEES_TOKEN }
+                        lifecycleScope.launch { presenter.selectAssignee(next) }
+                    },
+                    LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) }
+                )
+            }
+        }
+    }
+
+    /** Плашка выбора: акцентная рамка у активной, серое — у остальных. */
+    private fun selectorChip(
+        label: String,
+        count: String?,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ): View = TextView(this).apply {
+        text = if (count != null) "$label · $count" else label
+        textSize = 12f
+        maxLines = 1
+        setTextColor(if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_EM)
+        background = if (selected) {
+            MarsTheme.pill(this@KanbanActivity, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_BORDER)
+        } else {
+            MarsTheme.pill(this@KanbanActivity, MarsTheme.SURFACE_SUBTLE, MarsTheme.BORDER)
+        }
+        setPadding(dp(12), dp(6), dp(12), dp(6))
+        setOnClickListener { onClick() }
     }
 
     /** Чип статистики: цветной dot + «N · label» в тон статуса. */

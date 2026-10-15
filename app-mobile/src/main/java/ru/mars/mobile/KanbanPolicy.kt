@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import ru.mars.network.model.BoardSummary
 import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanStats
 import ru.mars.network.model.KanbanTask
@@ -110,6 +111,40 @@ data class KanbanUiState(
     val serverReadOnly: Boolean = false,
     val latestEventId: Long = 0L,
     val taskCount: Int = 0,
+    /** Переключатель досок: пустой список скрывает строку (старый мост их не отдаёт). */
+    val boards: List<KanbanBoardChipUi> = emptyList(),
+    /** Slug выбранной доски; null = доска по умолчанию (сервер решает, какая). */
+    val currentBoardSlug: String? = null,
+    /** Фильтр исполнителей; пустой список — строка фильтра не рисуется. */
+    val assignees: List<KanbanAssigneeChipUi> = emptyList(),
+    /** Выбранный исполнитель; null = без фильтра (все задачи доски). */
+    val selectedAssignee: String? = null,
+    /** Есть ли живой SSE-поток канбана прямо сейчас (индикатор в шапке). */
+    val live: Boolean = false,
+)
+
+/**
+ * Одна плашка в переключателе досок. [label] уже готов к показу: имя, а при
+ * пустом имени — slug (доска без подписи не должна стать некликабельной
+ * «пустышкой», но и выдумывать ей имя нельзя).
+ */
+data class KanbanBoardChipUi(
+    val slug: String,
+    val label: String,
+    val isCurrent: Boolean,
+    /** «12 задач» или null, когда сервер счётчик не отдал (не рисуем «0»). */
+    val countLabel: String?,
+)
+
+/**
+ * Одна плашка фильтра исполнителей. [isSelected] запекается в модель, чтобы UI
+ * не сверял состояние сам.
+ */
+data class KanbanAssigneeChipUi(
+    val name: String,
+    val label: String,
+    val countLabel: String?,
+    val isSelected: Boolean,
 )
 
 /** Одна строка read-only диалога задачи («Исполнитель: mars»). */
@@ -167,6 +202,75 @@ object KanbanPolicy {
     const val COLUMN_EMPTY_HINT = "Пусто"
     const val GOAL_BADGE = "goal"
     const val BLOCKED_BADGE = "блокировка"
+
+    /** Заголовки строк переключателя досок и фильтра исполнителей. */
+    const val BOARDS_LABEL = "Доски"
+    const val ASSIGNEES_LABEL = "Исполнители"
+    const val ALL_ASSIGNEES_LABEL = "Все"
+    const val LIVE_BADGE = "в эфире"
+    const val MSG_LIVE_LOST = "Поток событий прерван"
+
+    /** «12 задач» в плашке доски/исполнителя; пустой счётчик не рисуем. */
+    fun taskCountLabel(count: Int): String? = when {
+        count <= 0 -> null
+        count % 10 == 1 && count % 100 != 11 -> "$count задача"
+        count % 10 in 2..4 && count % 100 !in 12..14 -> "$count задачи"
+        else -> "$count задач"
+    }
+
+    /**
+     * Переключатель досок. Пусто -> пустой список: экран не рисует строку вообще
+     * (старые мосты `/api/kanban/boards` не имеют, и пустая «Доски» была бы шумом).
+     * Подпись — имя, при пустом имени slug; текущая доска помечается [isCurrent],
+     * чтобы UI не пересчитывал это по [KanbanUiState.currentBoardSlug].
+     */
+    fun boardChips(boards: List<BoardSummary>, current: String?): List<KanbanBoardChipUi> =
+        boards.map { board ->
+            KanbanBoardChipUi(
+                slug = board.slug,
+                label = board.name.ifBlank { board.slug },
+                isCurrent = board.isCurrent || (current != null && board.slug == current),
+                countLabel = taskCountLabel(board.total).takeIf { board.hasCounts },
+            )
+        }
+
+    /**
+     * Фильтр исполнителей: первая плашка — «Все» (снять фильтр), затем по имени.
+     * Серверный список исполнителей доски (`board.assignees`) предпочитается
+     * подробному `/assignees`: он описывает именно текущую доску, тогда как
+     * справочник перечисляет всех известных мосту, включая чужих для неё.
+     */
+    fun assigneeChips(
+        names: List<String>,
+        selected: String?,
+        counts: Map<String, Int> = emptyMap(),
+    ): List<KanbanAssigneeChipUi> = buildList {
+        add(
+            KanbanAssigneeChipUi(
+                name = ALL_ASSIGNEES_TOKEN,
+                label = ALL_ASSIGNEES_LABEL,
+                countLabel = null,
+                isSelected = selected == null,
+            )
+        )
+        names.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .forEach { name ->
+                add(
+                    KanbanAssigneeChipUi(
+                        name = name,
+                        label = name,
+                        countLabel = counts[name]?.let(::taskCountLabel),
+                        isSelected = selected == name,
+                    )
+                )
+            }
+    }
+
+    /** Токен плашки «Все» — не имя исполнителя, а команда снять фильтр. */
+    const val ALL_ASSIGNEES_TOKEN = "\u0000all"
 
     /** Бейдж комментариев карточки («2 комментария» сокращаем до счётчика). */
     fun commentsLabel(count: Int): String = "$count комм."
