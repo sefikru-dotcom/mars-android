@@ -19,10 +19,12 @@ import okhttp3.ResponseBody
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import ru.mars.network.http.HttpClients
+import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
+import ru.mars.network.model.Playlist
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -128,6 +130,192 @@ class MusicRepository(
         }
         return parsed?.favorited
     }
+
+    // ---------------------------------------------------------------- playlists
+
+    /**
+     * GET /api/playlists — every server-side playlist of the account.
+     *
+     * Response is `{"success":true,"playlists":[{"id":"2e0d0d47","title":"Street",
+     * "created_at":"2026-09-30 14:25:34","track_count":1}]}`; `success:false` (with
+     * `error`) is an exception, never an empty list, so the screen can tell «нет
+     * плейлистов» from «сервис отказал».
+     */
+    suspend fun getPlaylists(): List<Playlist> {
+        val body = getJson("api/playlists") { it.source().readUtf8() }
+        val parsed = moshi.adapter(PlaylistListEnvelope::class.java).fromJson(body)
+            ?: throw IOException("Empty playlists response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Music request failed")
+        return parsed.playlists.map { it.toModel() }
+    }
+
+    /**
+     * POST /api/playlist/create with the single body field `title`. The service answers
+     * `{"success":true,"id":"<8 hex>","title":"…"}`; an empty/blank title comes back as
+     * HTTP 400 + `{"success":false,"error":"Title required"}` and surfaces here as that
+     * very message (see [postText], which keeps the error body on non-2xx).
+     *
+     * A blank title is deliberately NOT rejected locally: the service's own wording is
+     * the message the user sees, and a client-side check would replace it with a
+     * generic one the screen cannot translate into «укажите название».
+     */
+    suspend fun createPlaylist(title: String): Playlist {
+        val body = postText("api/playlist/create", moshi.adapter(CreatePlaylistRequest::class.java).toJson(CreatePlaylistRequest(title)))
+        val parsed = moshi.adapter(PlaylistCreatedResponse::class.java).fromJson(body)
+            ?: throw IOException("Empty playlist response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Playlist not created")
+        val id = parsed.id?.takeIf { it.isNotBlank() } ?: throw IOException("Playlist response without id")
+        // A fresh playlist has no tracks and the endpoint returns no created_at.
+        return Playlist(id, parsed.title?.takeIf { it.isNotBlank() } ?: title, "", 0)
+    }
+
+    /** DELETE /api/playlist/{id}; a `success:false`/`status:error` answer throws. */
+    suspend fun deletePlaylist(id: String) {
+        require(id.isNotBlank()) { "id must not be blank" }
+        val body = sendJson(pathWithSegment("api/playlist", id), "", "DELETE")
+        requireSuccess("api/playlist/$id", moshi.adapter(MutationResponse::class.java).fromJson(body) ?: MutationResponse())
+    }
+
+    /**
+     * GET /api/playlist/{id} — the playlist's tracks. Same envelope as charts, so
+     * [fetchTracks] (results/favorites/tracks keys, `success:false` = exception) is reused.
+     */
+    suspend fun getPlaylistTracks(id: String): List<MusicTrack> {
+        require(id.isNotBlank()) { "id must not be blank" }
+        return fetchTracks(pathWithSegment("api/playlist", id))
+    }
+
+    /**
+     * POST /api/playlist/{id}/add — puts [videoId] into the playlist. The video id goes
+     * in as its own path segment (percent-encoded), so an id with `/` cannot bend the path.
+     */
+    suspend fun addTrackToPlaylist(id: String, videoId: String) {
+        require(id.isNotBlank()) { "id must not be blank" }
+        require(videoId.isNotBlank()) { "videoId must not be blank" }
+        mutate(pathWithSegment("api/playlist", id) + "/add", moshi.adapter(PlaylistTrackRequest::class.java).toJson(PlaylistTrackRequest(videoId)))
+    }
+
+    /** POST /api/playlist/{id}/remove — takes [videoId] back out of the playlist. */
+    suspend fun removeTrackFromPlaylist(id: String, videoId: String) {
+        require(id.isNotBlank()) { "id must not be blank" }
+        require(videoId.isNotBlank()) { "videoId must not be blank" }
+        mutate(pathWithSegment("api/playlist", id) + "/remove", moshi.adapter(PlaylistTrackRequest::class.java).toJson(PlaylistTrackRequest(videoId)))
+    }
+
+    // ------------------------------------------------------------------ history
+
+    /**
+     * GET /api/history — the server listening history, newest first.
+     *
+     * Each element carries the VIDEO id under the key `id` (not `video_id`) plus
+     * `title`, `artist`, `duration` («2:38»), a site-relative `thumbnail`
+     * (`/music/api/thumb?v=…`) and `played_at` (`2026-10-12 09:37:59`).
+     */
+    suspend fun getHistory(): List<HistoryEntry> {
+        val body = getJson("api/history") { it.source().readUtf8() }
+        // The service documents an object envelope, but a bare array is tolerated.
+        val normalized = if (body.trimStart().startsWith("[")) "{\"history\":$body}" else body
+        val parsed = moshi.adapter(HistoryEnvelope::class.java).fromJson(normalized)
+            ?: throw IOException("Empty history response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Music request failed")
+        return parsed.history.map { it.toModel() }
+    }
+
+    /**
+     * POST /api/history/record — writes one played track into the server history. The
+     * body is `{id,title,artist,duration,thumbnail}` (the service answers `status:ok`;
+     * a body without `id` is a 400 + `error:"Missing id"`). Callers treat a failure as
+     * non-fatal: playback must never break because the history write did.
+     */
+    suspend fun recordHistory(track: MusicTrack) {
+        require(track.id.isNotBlank()) { "track id must not be blank" }
+        mutate(
+            "api/history/record",
+            moshi.adapter(HistoryRecordRequest::class.java).toJson(
+                HistoryRecordRequest(
+                    id = track.id,
+                    title = track.title,
+                    artist = track.artist,
+                    duration = track.duration,
+                    thumbnail = track.thumbnail,
+                ),
+            ),
+        )
+    }
+
+    // ------------------------------------------------------------------- lyrics
+
+    /**
+     * POST /api/lyrics/translate — Russian translation of a song text. The request body
+     * is the single field `text`; the answer is `{"success":true,"translated":"…"}`.
+     * An empty input is answered with `translated:""` (not an error), so the empty
+     * string is returned as-is and the caller decides what to show.
+     */
+    suspend fun translateLyrics(text: String): String {
+        val body = postText("api/lyrics/translate", moshi.adapter(TranslateRequest::class.java).toJson(TranslateRequest(text)))
+        val parsed = moshi.adapter(TranslateResponse::class.java).fromJson(body)
+            ?: throw IOException("Empty translation response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Translation failed")
+        return parsed.translated.orEmpty()
+    }
+
+    /**
+     * Shared path builder for `/…/{segment}` calls: [addPathSegment] percent-encodes the
+     * id, so a malformed one can never introduce an extra path level (same rule as
+     * [getStreamUrl]). `pathWithSegment("api/playlist", "2e0d0d47")` → `api/playlist/2e0d0d47`.
+     */
+    private fun pathWithSegment(path: String, segment: String): String =
+        baseUrl.toHttpUrl().newBuilder().addPathSegments(path).addPathSegment(segment).build()
+            .encodedPath.removePrefix(baseUrl.toHttpUrl().encodedPath).trimStart('/')
+
+    /** Runs a JSON mutation and throws the server's own `error` text on a rejected one. */
+    private suspend fun mutate(path: String, json: String) {
+        val body = postText(path, json)
+        requireSuccess(path, moshi.adapter(MutationResponse::class.java).fromJson(body) ?: MutationResponse())
+    }
+
+    /** `success:false` or `status:error` is a failure; both shapes are in the live service. */
+    private fun requireSuccess(path: String, response: MutationResponse) {
+        if (response.success == false || response.status == "error") {
+            throw IllegalStateException(response.error ?: "Music request failed for /$path")
+        }
+    }
+
+    /**
+     * POSTs [json] to [path] and keeps the RAW body even for a non-2xx answer.
+     *
+     * The music service reports validation problems in the body (400 +
+     * `{"success":false,"error":"Title required"}`), and that text is the only thing
+     * worth showing to the user — [postJson] would replace it with a bare «HTTP 400».
+     * Transport failures still throw.
+     */
+    private suspend fun postText(path: String, json: String): String = sendJson(path, json, "POST")
+
+    /** One JSON request/response round trip for any method; returns the body text. */
+    private suspend fun sendJson(path: String, json: String, method: String): String =
+        suspendCancellableCoroutine { continuation ->
+            val builder = Request.Builder().url(baseUrl.toHttpUrl().newBuilder().addPathSegments(path).build())
+            val request = when (method) {
+                "DELETE" -> builder.delete().build()
+                else -> builder.post(json.toRequestBody("application/json; charset=utf-8".toMediaType())).build()
+            }
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        val body = resp.body?.string()
+                        when {
+                            body == null -> continuation.resumeWithException(IOException("Empty body from /$path"))
+                            else -> continuation.resume(body)
+                        }
+                    }
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            })
+        }
 
     /** POSTs a JSON body to [path] and maps the successful response through [parse]. */
     private suspend fun <T> postJson(path: String, json: String, parse: (ResponseBody) -> T): T =
@@ -427,6 +615,94 @@ class MusicRepository(
 
     @JsonClass(generateAdapter = false)
     private data class FavoriteToggleResponse(val status: String? = null, val favorited: Boolean? = null)
+
+    // ---------------------------------------------------------- playlists DTOs
+
+    /** GET /api/playlists envelope; `playlists` is the live key (server handle_get_playlists). */
+    @JsonClass(generateAdapter = false)
+    private data class PlaylistListEnvelope(
+        val success: Boolean? = null,
+        val playlists: List<PlaylistDto> = emptyList(),
+        val error: String? = null,
+    )
+
+    @JsonClass(generateAdapter = false)
+    private data class PlaylistDto(
+        val id: String,
+        val title: String,
+        @Json(name = "created_at") val createdAt: String? = null,
+        @Json(name = "track_count") val trackCount: Int = 0,
+    ) {
+        fun toModel(): Playlist = Playlist(id, title, createdAt.orEmpty(), trackCount)
+    }
+
+    /** POST /api/playlist/create body — the handler reads exactly one field, `title`. */
+    @JsonClass(generateAdapter = false)
+    private data class CreatePlaylistRequest(val title: String)
+
+    @JsonClass(generateAdapter = false)
+    private data class PlaylistCreatedResponse(val success: Boolean? = null, val id: String? = null, val title: String? = null, val error: String? = null)
+
+    /**
+     * The field is `id`, not `videoId`: server handle_add_playlist_track and
+     * handle_remove_playlist_track both do `data.get("id")`, and a body without it is a
+     * 400 `Invalid params`.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class PlaylistTrackRequest(val id: String)
+
+    /** Shared answer of the mutating music endpoints: `success`/`error` or `status`/`error`. */
+    @JsonClass(generateAdapter = false)
+    private data class MutationResponse(val success: Boolean? = null, val status: String? = null, val error: String? = null)
+
+    // ------------------------------------------------------------ history DTOs
+
+    @JsonClass(generateAdapter = false)
+    private data class HistoryEnvelope(
+        val history: List<HistoryDto> = emptyList(),
+        val success: Boolean? = null,
+        val error: String? = null,
+    )
+
+    /** `id` here is the video id — the API key is `id`, never `video_id`. */
+    @JsonClass(generateAdapter = false)
+    private data class HistoryDto(
+        val id: String,
+        val title: String,
+        val artist: String? = null,
+        val duration: String? = null,
+        val thumbnail: String? = null,
+        @Json(name = "played_at") val playedAt: String? = null,
+    ) {
+        fun toModel(): HistoryEntry = HistoryEntry(
+            id = id,
+            title = title,
+            artist = artist.orEmpty(),
+            duration = duration?.takeIf { it.isNotBlank() } ?: "--:--",
+            thumbnail = thumbnail,
+            playedAt = playedAt.orEmpty(),
+        )
+    }
+
+    /** POST /api/history/record body; without `id` the service answers 400 «Missing id». */
+    @JsonClass(generateAdapter = false)
+    private data class HistoryRecordRequest(
+        val id: String,
+        val title: String,
+        val artist: String,
+        val duration: String,
+        val thumbnail: String? = null,
+    )
+
+    // ------------------------------------------------------------- lyrics DTOs
+
+    /** POST /api/lyrics/translate body — one field, `text`. */
+    @JsonClass(generateAdapter = false)
+    private data class TranslateRequest(val text: String)
+
+    /** An empty input is answered with `translated:""` and no `success` field at all. */
+    @JsonClass(generateAdapter = false)
+    private data class TranslateResponse(val success: Boolean? = null, val translated: String? = null, val error: String? = null)
     @JsonClass(generateAdapter = false)
     private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null, val timestamp: Long? = null) {
         fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId, timestamp)

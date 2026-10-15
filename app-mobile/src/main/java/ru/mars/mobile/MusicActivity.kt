@@ -38,8 +38,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.service.MarsMusicService
+import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicTrack
+import ru.mars.network.model.Playlist
 import ru.mars.network.repository.MusicRepository
 import java.io.Closeable
 import java.net.HttpURLConnection
@@ -68,8 +70,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Monotonic id of the in-flight search run; stale runs are dropped by [SearchRunGuard]. */
     private var searchRunId = 0
 
-    /** Which pill tab is active: chart, personal flow, favorites, or the live playback queue. */
-    private enum class MusicTab { CHART, FLOW, FAVORITES, QUEUE }
+    /** Which pill tab is active: chart, flow, favorites, queue, server playlists, server history. */
+    private enum class MusicTab { CHART, FLOW, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
     private var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
@@ -90,6 +92,22 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var flowTabButton: TextView
     private lateinit var favoritesTabButton: TextView
     private lateinit var queueTabButton: TextView
+    private lateinit var playlistsTabButton: TextView
+    private lateinit var historyTabButton: TextView
+    /** Server-side playlists of the «Плейлисты» tab, newest first as the service returns them. */
+    private var playlists = emptyList<Playlist>()
+    /** Server-side listening history of the «История» tab; also the queue for history playback. */
+    private var historyEntries = emptyList<HistoryEntry>()
+    /** Opened playlist: its id/title drive the drill-down header and the tracks shown. */
+    private var openPlaylist: Playlist? = null
+    /** In-flight playlists/history fetch, separate from the chart [job] so tabs never cancel each other. */
+    private var libraryJob: Job? = null
+    /**
+     * Last id handed to /api/history/record. Mars Connect re-broadcasts the same track on
+     * every pause/resume/progress frame, so the raw callback would write the history many
+     * times a minute; the pure [HistoryRecordPolicy] gates the duplicate writes.
+     */
+    private var lastRecordedTrackId: String? = null
     private lateinit var searchInput: EditText
     private lateinit var clearSearchBtn: ImageButton
     /** Overlay with recent searches; floats above the results list, never replaces it. */
@@ -381,8 +399,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         })
         root.addView(header)
 
-        // Tabs: Чарт / Волна / Избранное / Очередь (pill toggles). Horizontally scrollable:
-        // four weighted pills clip «Избранное» on narrow screens, chips must stay whole.
+        // Tabs: Чарт / Волна / Избранное / Очередь / Плейлисты / История (pill toggles).
+        // Horizontally scrollable: six weighted pills clip «Избранное» on narrow screens,
+        // chips must stay whole.
         val tabRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -390,10 +409,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         chartTabButton = tabButton("Чарт") { selectTab(MusicTab.CHART) }
         flowTabButton = tabButton("Волна") { selectTab(MusicTab.FLOW) }
         favoritesTabButton = tabButton("Избранное") { selectTab(MusicTab.FAVORITES) }
+        playlistsTabButton = tabButton("Плейлисты") { selectTab(MusicTab.PLAYLISTS) }
+        historyTabButton = tabButton("История") { selectTab(MusicTab.HISTORY) }
         queueTabButton = tabButton("Очередь") { selectTab(MusicTab.QUEUE) }
         tabRow.addView(chartTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(flowTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        tabRow.addView(playlistsTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+        tabRow.addView(historyTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         tabRow.addView(queueTabButton, LinearLayout.LayoutParams(-2, -2))
         val tabScroll = android.widget.HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -717,6 +740,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Keep the queue tab in sync with player state (active track, play/pause,
             // auto-advance): re-render it whenever the queue view is on screen.
             if (currentTab == MusicTab.QUEUE && ::results.isInitialized) renderQueue()
+            recordPlayedTrack(track)
             track?.thumbnail?.let {
                 artwork.visibility = View.VISIBLE
                 ImageLoader.load(it, artwork)
@@ -946,10 +970,22 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
+     * Optional extra per-row control (icon, TalkBack description, tap handler). Used by the
+     * playlist drill-down for «убрать из плейлиста», which has no place on other lists.
+     */
+    private data class RowAction(
+        val iconRes: Int,
+        val description: String,
+        val onTap: (MusicTrack) -> Unit,
+    )
+
+    /**
      * Renders a track list (chart/search/favorites/flow rows). [header] is an optional
      * section card placed above the rows — used by «Волна» for its stream action.
+     * [action] adds one extra button to every row; a long press anywhere offers
+     * «Добавить в плейлист» and opens [promptAddToPlaylist] for that track.
      */
-    private fun showTracks(items: List<MusicTrack>, header: View? = null) {
+    private fun showTracks(items: List<MusicTrack>, header: View? = null, action: RowAction? = null) {
         tracks = items
         resetList()
         header?.let { results.addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }) }
@@ -969,6 +1005,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 setPadding(dp(12), dp(8), dp(8), dp(8))
                 background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
                 setOnClickListener { onTrackRowClicked(i) }
+                setOnLongClickListener {
+                    if (action == null) promptAddToPlaylist(t)
+                    true
+                }
             }
 
             val image = ImageView(this).apply {
@@ -1044,6 +1084,21 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
             row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
 
+            // Playlist drill-down only: «убрать из плейлиста» next to the usual actions.
+            action?.let { extra ->
+                val extraBtn = MarsTheme.circleIconButton(
+                    this,
+                    extra.iconRes,
+                    extra.description,
+                    bg = MarsTheme.SURFACE_SUBTLE,
+                    iconTint = MarsTheme.TEXT_MUTED,
+                    sizeDp = 34
+                ).apply {
+                    setOnClickListener { extra.onTap(t) }
+                }
+                row.addView(extraBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+            }
+
             results.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
 
             // Register the row so player state changes can highlight the current track live.
@@ -1080,6 +1135,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         style(chartTabButton, currentTab == MusicTab.CHART)
         style(flowTabButton, currentTab == MusicTab.FLOW)
         style(favoritesTabButton, currentTab == MusicTab.FAVORITES)
+        style(playlistsTabButton, currentTab == MusicTab.PLAYLISTS)
+        style(historyTabButton, currentTab == MusicTab.HISTORY)
         style(queueTabButton, currentTab == MusicTab.QUEUE)
     }
 
@@ -1089,11 +1146,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         updateTabStyles()
         showStatus(null)
         job?.cancel()
+        libraryJob?.cancel()
         when (tab) {
             MusicTab.CHART -> loadHome()
             MusicTab.FLOW -> loadFlow()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
+            MusicTab.PLAYLISTS -> loadPlaylists()
+            MusicTab.HISTORY -> loadHistory()
         }
     }
 
@@ -1101,11 +1161,489 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun reloadActiveTab() {
         showStatus(null)
         job?.cancel()
+        libraryJob?.cancel()
         when (currentTab) {
             MusicTab.CHART -> loadHome()
             MusicTab.FLOW -> loadFlow()
             MusicTab.FAVORITES -> loadFavorites()
             MusicTab.QUEUE -> renderQueue()
+            MusicTab.PLAYLISTS -> loadPlaylists()
+            MusicTab.HISTORY -> loadHistory()
+        }
+    }
+
+    // ------------------------------------------------------------------ библиотека
+
+    /**
+     * «Плейлисты»: server-side playlists of the account. The list itself is one card per
+     * playlist (title, «N треков · создан …», «Открыть» and a delete button) plus a
+     * «Создать плейлист» card on top; opening one drills into its tracks. All network
+     * calls stay in [MusicRepository] — this screen only renders what it returns.
+     */
+    private fun loadPlaylists() {
+        libraryJob?.cancel()
+        openPlaylist = null
+        renderLibrary(LibraryUiState.Loading, { loadPlaylists() }) {
+            playlists.forEach { playlist -> results.addView(playlistCard(playlist)) }
+        }
+        libraryJob = lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getPlaylists() } }
+            fetched.onSuccess { list ->
+                playlists = list
+                renderLibrary(MusicLibraryPolicy.state(false, null, list.size), { loadPlaylists() }) {
+                    headerCard(
+                        title = MusicLibraryPolicy.playlistCountLabel(playlists.size),
+                        action = "Создать плейлист",
+                        onAction = { promptCreatePlaylist() },
+                    )?.let { results.addView(it) }
+                    playlists.forEach { playlist -> results.addView(playlistCard(playlist)) }
+                }
+            }.onFailure {
+                renderLibrary(LibraryUiState.Error("Плейлисты недоступны — проверьте сеть"), { loadPlaylists() }) {}
+            }
+        }
+    }
+
+    /**
+     * Renders the [state] of a library section into the results list: loading/error/empty
+     * get their own placeholder (the error one carries a retry), [content] fills the rows.
+     * A failed fetch never leaves the previous cards on screen.
+     */
+    private fun renderLibrary(state: LibraryUiState, onRetry: () -> Unit, content: () -> Unit) {
+        tracks = emptyList() // stale chart cards must not stay clickable under a library section
+        resetList()
+        when (state) {
+            LibraryUiState.Loading -> results.addView(libraryPlaceholder("Загружаем…"))
+            LibraryUiState.Empty -> results.addView(libraryPlaceholder("Здесь пока пусто"))
+            is LibraryUiState.Error -> showListError(
+                message = state.message,
+                retryDescription = "Повторить загрузку",
+                onRetry = onRetry,
+            )
+            LibraryUiState.Content -> content()
+        }
+    }
+
+    private fun libraryPlaceholder(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setTextColor(MarsTheme.TEXT_MUTED)
+        gravity = Gravity.CENTER
+        setPadding(0, dp(32), 0, dp(32))
+    }
+
+    /**
+     * Section header card: a left caption plus an optional right action pill. Returns
+     * null when there is nothing to caption and no action to offer.
+     */
+    private fun headerCard(title: String, action: String? = null, onAction: (() -> Unit)? = null): View? {
+        if (action == null && title.isBlank()) return null
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(8), dp(10))
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
+        }
+        row.addView(TextView(this).apply {
+            text = title
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.DEFAULT_BOLD
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        if (action != null && onAction != null) {
+            row.addView(TextView(this).apply {
+                text = action
+                textSize = 13f
+                setTextColor(MarsTheme.ACCENT_TEXT)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(dp(14), dp(8), dp(14), dp(8))
+                background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT_BG, 10, MarsTheme.ACCENT)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onAction() }
+            }, LinearLayout.LayoutParams(-2, -2))
+        }
+        return row.also { it.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) } }
+    }
+
+    /** One playlist row: title, «N треков · создан …», an open action and a delete button. */
+    private fun playlistCard(playlist: Playlist): View {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(8), dp(8))
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { openPlaylistTracks(playlist) }
+        }
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), 0, dp(8), 0)
+        }
+        info.addView(TextView(this).apply {
+            text = playlist.title
+            textSize = 15f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        info.addView(TextView(this).apply {
+            text = MusicLibraryPolicy.playlistSubtitle(playlist.trackCount, playlist.createdAt)
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val openBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_play,
+            "Открыть плейлист ${playlist.title}",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.ACCENT,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { openPlaylistTracks(playlist) }
+        }
+        row.addView(openBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+        val deleteBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_trash,
+            "Удалить плейлист ${playlist.title}",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { confirmDeletePlaylist(playlist) }
+        }
+        row.addView(deleteBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
+        return row.also { it.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) } }
+    }
+
+    /** Asks for a title, then creates the playlist on the server and re-renders the list. */
+    private fun promptCreatePlaylist() {
+        var dialogRef: Dialog? = null
+        val field = MarsDialog.textField(this, hint = "Название плейлиста")
+        val errorStrip = MarsDialog.errorStrip(this)
+        fun submit() {
+            val title = field.text?.toString().orEmpty()
+            val controls = listOf(field)
+            MarsDialog.setResponding(controls, true)
+            MarsDialog.setError(errorStrip, null)
+            lifecycleScope.launch {
+                val created = withContext(Dispatchers.IO) { runCatching { repository.createPlaylist(title) } }
+                MarsDialog.setResponding(controls, false)
+                created.onSuccess {
+                    dialogRef?.dismiss()
+                    showStatus("Создан плейлист: ${it.title}")
+                    loadPlaylists()
+                }.onFailure { error ->
+                    // «Title required» is a deliberate refusal about the title, not a network
+                    // fault; MusicLibraryPolicy turns it into a phrase the user can act on.
+                    MarsDialog.setError(errorStrip, MusicLibraryPolicy.createPlaylistError(error.message))
+                }
+            }
+        }
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Новый плейлист", null))
+            root.addView(MarsDialog.paragraph(this, "Плейлист сохраняется на сервере и доступен с любого устройства."))
+            root.addView(field)
+            root.addView(errorStrip)
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, "Отмена") { dialogRef?.dismiss() },
+                    MarsDialog.primaryButton(this, "Создать") { submit() },
+                )
+            )
+            listOf(field)
+        }
+    }
+
+    /** Destructive confirmation before DELETE — a playlist may hold the only copy of a track. */
+    private fun confirmDeletePlaylist(playlist: Playlist) {
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Удалить плейлист", playlist.title))
+            root.addView(
+                MarsDialog.paragraph(
+                    this,
+                    "Плейлист «${playlist.title}» (${MusicLibraryPolicy.trackCountLabel(playlist.trackCount)}) " +
+                        "будет удалён на сервере. Действие необратимо.",
+                )
+            )
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, "Отмена") { dialogRef?.dismiss() },
+                    MarsDialog.denyButton(this, "Удалить") {
+                        dialogRef?.dismiss()
+                        deletePlaylist(playlist)
+                    },
+                )
+            )
+            emptyList()
+        }
+    }
+
+    private fun deletePlaylist(playlist: Playlist) {
+        lifecycleScope.launch {
+            val removed = withContext(Dispatchers.IO) { runCatching { repository.deletePlaylist(playlist.id) } }
+            removed.onSuccess {
+                showStatus("Удалён плейлист: ${playlist.title}")
+                loadPlaylists()
+            }.onFailure { error ->
+                showStatus("Не удалось удалить: ${error.message ?: "проверьте сеть"}")
+            }
+        }
+    }
+
+    /** Drill-down: the playlist's tracks, playable like any other list. */
+    private fun openPlaylistTracks(playlist: Playlist) {
+        libraryJob?.cancel()
+        openPlaylist = playlist
+        renderLibrary(LibraryUiState.Loading, { openPlaylistTracks(playlist) }) {}
+        libraryJob = lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getPlaylistTracks(playlist.id) } }
+            fetched.onSuccess { items ->
+                // showTracks renders the rows AND resets the list, so the header is handed
+                // to it instead of being added first (it would be wiped otherwise).
+                showTracks(
+                    items,
+                    headerCard(
+                        title = "${playlist.title} · ${MusicLibraryPolicy.trackCountLabel(items.size)}",
+                        action = "Плейлисты",
+                        onAction = { loadPlaylists() },
+                    ),
+                    action = RowAction(
+                        iconRes = R.drawable.ic_trash,
+                        description = "Убрать из плейлиста ${playlist.title}",
+                        onTap = { track -> removeFromPlaylist(playlist, track) },
+                    ),
+                )
+            }.onFailure {
+                renderLibrary(
+                    LibraryUiState.Error("Плейлист недоступен — проверьте сеть"),
+                    { openPlaylistTracks(playlist) },
+                ) {}
+            }
+        }
+    }
+
+    /** «История»: server-side listening history, newest first, each row playable. */
+    private fun loadHistory() {
+        libraryJob?.cancel()
+        openPlaylist = null
+        renderLibrary(LibraryUiState.Loading, { loadHistory() }) {}
+        libraryJob = lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getHistory() } }
+            fetched.onSuccess { entries ->
+                historyEntries = entries
+                renderLibrary(MusicLibraryPolicy.state(false, null, entries.size), { loadHistory() }) {
+                    if (entries.isEmpty()) {
+                        results.addView(libraryPlaceholder("Вы ещё ничего не слушали"))
+                        return@renderLibrary
+                    }
+                    headerCard(title = "Прослушано · ${MusicLibraryPolicy.trackCountLabel(entries.size)}")
+                        ?.let { results.addView(it) }
+                    val now = System.currentTimeMillis()
+                    entries.forEach { entry -> results.addView(historyCard(entry, now)) }
+                }
+            }.onFailure {
+                renderLibrary(LibraryUiState.Error("История недоступна — проверьте сеть"), { loadHistory() }) {}
+            }
+        }
+    }
+
+    /**
+     * One history row: cover, title, «исполнитель · длительность», the human played-at
+     * label and the same transport/favorite/queue actions as any track row. Tapping it
+     * plays that very track (the payload's `id` is the video id).
+     */
+    private fun historyCard(entry: HistoryEntry, nowMillis: Long): View {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(8), dp(8))
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { playFromHistory(entry) }
+        }
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
+            clipToOutline = true
+        }
+        entry.thumbnail?.takeIf { it.isNotBlank() }?.let { ImageLoader.load(it, image) }
+        row.addView(image, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(8), 0)
+        }
+        info.addView(TextView(this).apply {
+            text = entry.title
+            textSize = 15f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        info.addView(TextView(this).apply {
+            text = "${entry.artist} · ${entry.duration}"
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        info.addView(TextView(this).apply {
+            text = MusicLibraryPolicy.playedAtLabel(entry.playedAt, nowMillis)
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val playBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_play,
+            MusicA11yPolicy.ACTION_PLAY,
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.ACCENT,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener { playFromHistory(entry) }
+        }
+        row.addView(playBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+        val enqueueBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_playlist_add,
+            "В очередь",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 34
+        ).apply {
+            setOnClickListener {
+                MarsMusicPlayer.enqueue(entry.toTrack())
+                showStatus("Добавлено в очередь: ${entry.title}")
+            }
+        }
+        row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
+        return row.also { it.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) } }
+    }
+
+    /**
+     * Plays a history entry: the player needs a queue, so the whole history becomes the
+     * queue and playback starts at the tapped row (same contract as a chart row).
+     */
+    private fun playFromHistory(entry: HistoryEntry) {
+        val queue = historyEntries.map { it.toTrack() }.ifEmpty { listOf(entry.toTrack()) }
+        val index = queue.indexOfFirst { it.id == entry.id }.takeIf { it >= 0 } ?: 0
+        MarsMusicPlayer.playTrack(index, queue)
+    }
+
+    /**
+     * «Добавить в плейлист»: long-pressing any track row opens the list of server
+     * playlists and the tap adds that track there (POST .../add with the video id).
+     */
+    private fun promptAddToPlaylist(track: MusicTrack) {
+        var dialogRef: Dialog? = null
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val errorStrip = MarsDialog.errorStrip(this)
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Добавить в плейлист", null))
+            root.addView(
+                MarsDialog.paragraph(
+                    this,
+                    "«${track.title}» — ${track.artist}",
+                )
+            )
+            root.addView(body)
+            root.addView(errorStrip)
+            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
+            emptyList()
+        }
+
+        if (playlists.isEmpty()) {
+            body.addView(
+                MarsDialog.paragraph(this, "Плейлистов пока нет — создайте его в разделе «Плейлисты». Загружаем список.")
+            )
+        }
+        lifecycleScope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getPlaylists() } }
+            body.removeAllViews()
+            fetched.onSuccess { list ->
+                playlists = list
+                if (list.isEmpty()) {
+                    body.addView(MarsDialog.paragraph(this@MusicActivity, "Плейлистов пока нет — создайте его в разделе «Плейлисты»."))
+                    return@onSuccess
+                }
+                val buttons = list.map { playlist ->
+                    MarsDialog.secondaryButton(
+                        this@MusicActivity,
+                        "${playlist.title} · ${MusicLibraryPolicy.trackCountLabel(playlist.trackCount)}",
+                    ) {
+                        addToPlaylist(playlist, track, errorStrip)
+                    }
+                }
+                buttons.forEach { body.addView(it) }
+            }.onFailure {
+                MarsDialog.setError(errorStrip, "Не удалось получить плейлисты — проверьте сеть")
+            }
+        }
+    }
+
+    private fun addToPlaylist(playlist: Playlist, track: MusicTrack, errorStrip: TextView) {
+        MarsDialog.setError(errorStrip, null)
+        lifecycleScope.launch {
+            val added = withContext(Dispatchers.IO) {
+                runCatching { repository.addTrackToPlaylist(playlist.id, track.id) }
+            }
+            added.onSuccess {
+                showStatus("Добавлено в «${playlist.title}»: ${track.title}")
+            }.onFailure { error ->
+                MarsDialog.setError(
+                    errorStrip,
+                    MusicLibraryPolicy.playlistWriteError(error.message, fallback = "Не удалось добавить в плейлист"),
+                )
+            }
+        }
+    }
+
+    /** «Убрать из плейлиста»: the drill-down row action; re-renders the opened playlist. */
+    private fun removeFromPlaylist(playlist: Playlist, track: MusicTrack) {
+        lifecycleScope.launch {
+            val removed = withContext(Dispatchers.IO) {
+                runCatching { repository.removeTrackFromPlaylist(playlist.id, track.id) }
+            }
+            removed.onSuccess {
+                showStatus("Убрано из «${playlist.title}»: ${track.title}")
+                openPlaylistTracks(playlist)
+            }.onFailure {
+                showStatus("Не удалось убрать трек — проверьте сеть")
+            }
+        }
+    }
+
+    /**
+     * Records the track now playing on the server (POST /api/history/record), so the
+     * «История» tab and every other Mars client see the same list. Only a genuinely new
+     * track is recorded — a pause/resume or a re-broadcast of the same id must not spam
+     * the history ([HistoryRecordPolicy] decides on the pure id comparison).
+     */
+    private fun recordPlayedTrack(track: MusicTrack?) {
+        if (track == null) return
+        if (!HistoryRecordPolicy.shouldRecord(track.id, lastRecordedTrackId)) return
+        lastRecordedTrackId = track.id
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { runCatching { repository.recordHistory(track) } }
+            // A failed write stays silent: playback is what matters, the tab re-fetches.
         }
     }
 
@@ -1413,6 +1951,22 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setLineSpacing(dp(4).toFloat(), 1f)
             setTextIsSelectable(true)
         }
+        /** Original text as returned by /api/lyrics; null while it has not arrived yet. */
+        var original: String? = null
+        /** Russian translation, fetched on demand; null until the user asks for it. */
+        var translation: String? = null
+        var showingTranslation = false
+        /** Toggle button, added only once there is a text worth translating. */
+        val translateButton = MarsDialog.quietButton(this, LyricsTranslationPolicy.ACTION_TRANSLATE) {}
+        translateButton.visibility = View.GONE
+
+        fun applyBody() {
+            val text = original
+            if (text == null) return
+            bodyView.text = LyricsTranslationPolicy.bodyFor(text, translation, showingTranslation)
+            translateButton.text = LyricsTranslationPolicy.actionLabel(showingTranslation)
+        }
+
         var dialogRef: Dialog? = null
         dialogRef = MarsDialog.show(this) { root ->
             root.addView(MarsDialog.header(this, "Текст песни", null))
@@ -1427,6 +1981,46 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             })
             root.addView(metaView)
             root.addView(bodyView)
+            translateButton.setOnClickListener {
+                if (showingTranslation) {
+                    showingTranslation = false
+                    applyBody()
+                    return@setOnClickListener
+                }
+                val text = original
+                if (!LyricsTranslationPolicy.canTranslate(text)) {
+                    showStatus("Перевод недоступен — сначала нужен текст песни")
+                    return@setOnClickListener
+                }
+                if (translation != null) {
+                    showingTranslation = true
+                    applyBody()
+                    return@setOnClickListener
+                }
+                translation = null
+                translateButton.isEnabled = false
+                translateButton.alpha = 0.4f
+                translateButton.text = "Переводим…"
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { repository.translateLyrics(text.orEmpty()) }
+                    }
+                    translateButton.isEnabled = true
+                    translateButton.alpha = 1f
+                    result.onSuccess { translated ->
+                        translation = translated
+                        showingTranslation = translated.isNotBlank()
+                        if (translated.isBlank()) {
+                            showStatus(LyricsTranslationPolicy.emptyTranslationText())
+                        }
+                        applyBody()
+                    }.onFailure {
+                        translateButton.text = LyricsTranslationPolicy.ACTION_TRANSLATE
+                        showStatus(LyricsTranslationPolicy.failureText())
+                    }
+                }
+            }
+            root.addView(translateButton)
             root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
             emptyList()
         }
@@ -1438,8 +2032,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             result.onSuccess { lyrics ->
                 when (val state = LyricsViewPolicy.resolve(lyrics)) {
                     is LyricsUiState.Text -> {
-                        bodyView.text = state.body
+                        original = state.body
                         bodyView.setTextColor(MarsTheme.TEXT_EM)
+                        applyBody()
+                        translateButton.visibility =
+                            if (LyricsTranslationPolicy.canTranslate(state.body)) View.VISIBLE else View.GONE
                         val labels = buildList {
                             if (state.synced) add("синхронизированный текст")
                             state.source?.takeIf { it.isNotBlank() }?.let { add("источник: $it") }
