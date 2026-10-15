@@ -17,6 +17,7 @@ import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
+import ru.mars.network.model.SessionUsage
 import ru.mars.network.model.WorkspacePrefix
 
 /**
@@ -86,6 +87,9 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
                 workspace = string(s, "workspace"),
                 model = string(s, "model"),
                 modelProvider = string(s, "model_provider", "provider"),
+                // Server draft read path: the field lives on the DETAIL payload because
+                // `GET /api/session/draft` is not routed on the server (POST only).
+                composerDraft = composerDraft(s["composer_draft"]),
             )
         }
 
@@ -166,6 +170,69 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
                     .execute().use { it.isSuccessful }
             } catch (_: Exception) { false }
         }
+
+    /**
+     * Token usage and estimated cost of one session
+     * (`GET /api/session/usage?session_id=<id>` → `{"ok": true, "usage": {…}}`).
+     *
+     * Returns `null` when the session is unknown (the server answers 404
+     * `{"error": "Session not found"}`), the transport failed, or the payload
+     * carries no usage block — the UI treats all three as "usage unavailable"
+     * and hides the counter instead of showing zeros. A session that simply
+     * never ran a turn answers zeros and IS returned (see [SessionUsage]).
+     *
+     * Parsing lives in [SessionUsageParser] (single point, alias-tolerant);
+     * this method only does the request. The metering-based context pill keeps
+     * its own [ContextUsage] source — the two deliberately never share state.
+     */
+    suspend fun getSessionUsage(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionUsage? = withContext(Dispatchers.IO) {
+        if (sessionId.isBlank()) return@withContext null
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/session/usage")
+            .addQueryParameter("session_id", sessionId)
+            .build()
+            .toString()
+        SessionUsageParser.parse(parseMap(execute(url, credential) ?: return@withContext null))
+    }
+
+    /**
+     * Persists the composer draft of a session server-side
+     * (`POST /api/session/draft` body `{"session_id","text"}` →
+     * `200 {"ok": true}`); an empty [text] clears the server copy.
+     *
+     * Returns false when the session id is blank, the request failed, or the
+     * server refused it — the caller stays silent on failure (the local draft
+     * remains the source of truth offline) and never surfaces a network error
+     * for a background autosave. Debouncing/cadence is the caller's job
+     * (`ServerDraftSyncPolicy`), not this layer's.
+     */
+    suspend fun saveComposerDraft(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        text: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (sessionId.isBlank()) return@withContext false
+        val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session/draft").build()
+        val body = jsonBody(mapOf("session_id" to sessionId, "text" to text))
+        try {
+            client.newCall(Request.Builder().url(url).header("Authorization", bearer(credential)).post(body).build())
+                .execute().use { response ->
+                    if (!response.isSuccessful) return@use false
+                    // `{"ok": true}` is the committed form; a 2xx without the flag is
+                    // still accepted (the draft block is likewise returned on success).
+                    parseMap(response.body?.string().orEmpty())?.get("ok") != false
+                }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     private fun jsonBody(fields: Map<String, String>): RequestBody {
         val stringAdapter = moshi.adapter(String::class.java)
@@ -265,5 +332,18 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
     }
 
     private fun string(o: Map<*, *>, vararg keys: String) = keys.firstNotNullOfOrNull { o[it]?.toString()?.takeIf(String::isNotBlank) }
+
+    /**
+     * Server composer draft of a session detail. Two wire forms are live:
+     * an object `{"text": "...", "files": [...]}` (current server) and a plain
+     * string (older/leaner payloads). A blank/missing text means "no draft",
+     * never an empty draft the UI would have to special-case.
+     */
+    private fun composerDraft(raw: Any?): String? = when (raw) {
+        is String -> raw.takeIf { it.isNotBlank() }
+        is Map<*, *> -> (raw["text"] as? String)?.takeIf { it.isNotBlank() }
+        else -> null
+    }
+
     private fun bearer(c: ConsumedDeviceCredential) = "Bearer ${c.accessToken}"
 }

@@ -196,4 +196,17 @@ data class SessionDetail(
     /** Effective model identity returned by the server for this session. */
     val model: String? = null,
     val modelProvider: String? = null,
+    /**
+     * Server-side composer draft of this session (`session.composer_draft` of
+     * `GET /api/session`) — the text the user left in the composer and never
+     * sent. Reading it is ONLY possible here: `GET /api/session/draft` has no
+     * GET branch on the server, so the detail payload is the read path (writes
+     * go through `POST /api/session/draft`).
+     *
+     * The wire value is an object (`{text, files}`) on the current server and a
+     * plain string on older/leaner payloads — both are accepted; `null` or an
+     * empty text means "no draft". This is transport state, not a message: it
+     * never enters the transcript.
+     */
+    val composerDraft: String? = null,
 )
