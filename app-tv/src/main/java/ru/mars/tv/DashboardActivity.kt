@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
@@ -47,6 +48,17 @@ class DashboardActivity : AppCompatActivity() {
     private lateinit var nowPlayingRow: View
     private lateinit var nowPlayingText: TextView
     private lateinit var nowPlayingToggle: Button
+
+    /**
+     * Системная настройка «уменьшить движение»: читается ОДИН раз на экран и передаётся
+     * в политику движения ([TvMotionPolicy]) — подъём под фокусом и кроссфейд фона
+     * схлопываются в мгновенную смену состояния.
+     */
+    private val reducedMotion: Boolean by lazy {
+        TvMotionPolicy.isReducedMotion(
+            Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,6 +110,7 @@ class DashboardActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.settingsButton).setOnClickListener { logout() }
         TvFocusLift.attachAll(
+            reducedMotion,
             findViewById(R.id.chatButton),
             findViewById(R.id.projectsButton),
             findViewById(R.id.todosButton),

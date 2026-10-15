@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
@@ -265,6 +266,18 @@ class TvChatActivity : AppCompatActivity() {
     private var hiddenActivity = 0
     private var hiddenMarkerView: TextView? = null
 
+    /**
+     * Системная настройка «уменьшить движение», прочитанная ОДИН раз на экран и переданная
+     * в политику движения ([TvMotionPolicy]): подъём под фокусом D-pad и кроссфейд фоновых
+     * селекторов схлопываются в мгновенную смену состояния, когда она включена
+     * (Settings.Global.ANIMATOR_DURATION_SCALE).
+     */
+    private val reducedMotion: Boolean by lazy {
+        TvMotionPolicy.isReducedMotion(
+            Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_tv_chat)
@@ -327,7 +340,7 @@ class TvChatActivity : AppCompatActivity() {
         modelButton.setOnClickListener { chooseModel() }
         reasoningButton.setOnClickListener { chooseReasoningEffort() }
         wireParamsPicker()
-        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, displayModeButton, miniPlayerToggle, jumpToBottom, modelButton, reasoningButton, closeParamsButton)
+        TvFocusLift.attachAll(reducedMotion, input, send, newChat, back, sessionsButton, closeSessions, displayModeButton, miniPlayerToggle, jumpToBottom, modelButton, reasoningButton, closeParamsButton)
         miniPlayerToggle.setOnClickListener {
             TvMusicPlayer.togglePlayPause()
             renderMiniPlayer()
@@ -1296,7 +1309,7 @@ class TvChatActivity : AppCompatActivity() {
                     true
                 } else false
             }
-            TvFocusLift.attach(this)
+            TvFocusLift.attach(this, reducedMotion)
         }
         card.addView(TextView(this).apply {
             text = row.label
@@ -1409,7 +1422,7 @@ class TvChatActivity : AppCompatActivity() {
                     true
                 }
             }
-            TvFocusLift.attach(button)
+            TvFocusLift.attach(button, reducedMotion)
             quickChipsRow.addView(button, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { marginEnd = dp(12) })
@@ -1509,7 +1522,7 @@ class TvChatActivity : AppCompatActivity() {
         setPadding(dp(24), dp(16), dp(24), dp(16))
         setBackgroundResource(if (isUser) R.drawable.bg_bubble_user else R.drawable.bg_bubble_bot)
         isFocusable = true
-        TvFocusLift.attach(this)
+        TvFocusLift.attach(this, reducedMotion)
     }
 
     /** Общие параметры пузыря в ленте (отступ сверху). */
@@ -1571,7 +1584,7 @@ class TvChatActivity : AppCompatActivity() {
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
             isFocusable = true
-            TvFocusLift.attach(this)
+            TvFocusLift.attach(this, reducedMotion)
             tag = TAG_ACTIVITY_LINE
         }
         activityLineViews.addLast(view)
@@ -1938,7 +1951,7 @@ class TvChatActivity : AppCompatActivity() {
         setPadding(dp(26), dp(10), dp(26), dp(10))
         isFocusable = true
         setOnClickListener { loadSessionList() }
-        TvFocusLift.attach(this)
+        TvFocusLift.attach(this, reducedMotion)
     }
 
     /**
@@ -1972,7 +1985,7 @@ class TvChatActivity : AppCompatActivity() {
                     true
                 } else false
             }
-            TvFocusLift.attach(this)
+            TvFocusLift.attach(this, reducedMotion)
         }
         card.addView(TextView(this).apply {
             text = row.title
