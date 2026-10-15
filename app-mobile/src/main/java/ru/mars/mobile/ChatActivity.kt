@@ -1794,6 +1794,63 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
+     * A16: строка-сводка свёрнутого набора вызовов инструментов. Одна строка вместо
+     * простыни карточек: иконка, «N инструментов · Готово» и шеврон. Тап переключает
+     * ручное переопределение группы ([ChatUiState.toggleToolGroup]) и перерисовывает
+     * транскрипт. Иконки — монохромные векторы темы, счётчик ASCII.
+     */
+    private fun buildToolGroupSummary(messageIndex: Int, group: ToolGroupModel): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = MarsTheme.toolCallCard(this@ChatActivity)
+            setPadding(dp(10), dp(6), dp(8), dp(6))
+            isClickable = true
+        }
+        val iconRes = when (group.iconToolName?.let { ToolCardPresenter.present(ToolExecution("", it, "")).kind }) {
+            ToolKind.TERMINAL -> R.drawable.ic_chip
+            ToolKind.FILESYSTEM -> R.drawable.ic_plan
+            ToolKind.WEB -> R.drawable.ic_search
+            ToolKind.MCP -> R.drawable.ic_refresh
+            else -> R.drawable.ic_status
+        }
+        box.addView(ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
+            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+        box.addView(TextView(this).apply {
+            text = group.summary
+            textSize = 11.5f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        box.addView(ImageView(this).apply {
+            setImageDrawable(ContextCompat.getDrawable(
+                this@ChatActivity,
+                if (group.chevronExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
+            ))
+            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
+
+        applyExpandableHeaderA11y(
+            box,
+            group.summaryDescription,
+            if (group.chevronExpanded) "развёрнуто" else "свёрнуто"
+        )
+        box.setOnClickListener {
+            uiState.toggleToolGroup(messageIndex, group.chevronExpanded)
+            renderMessages()
+        }
+        return box
+    }
+
+    /**
      * Smart Quick Chips ribbon (WebUI parity): one-tap conversation actions above
      * the composer. Visibility is decided by the pure [QuickChips] policy; icons are
      * monochrome vectors per the design system (no emoji).
@@ -2550,7 +2607,26 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
 
+        // A16: набор вызовов инструментов одного сообщения сворачивается в одну
+        // строку-сводку («N инструментов · Готово» с шевроном). Режим активности
+        // даёт лишь НАЧАЛЬНОЕ состояние; ручной тап переопределяет его и держится
+        // до смены сессии. При COLLAPSED карточки ниже не создаются вообще —
+        // именно поэтому сначала считается модель, а цикл получает guard.
+        val toolGroup = ToolGroupPresenter.model(
+            tools = message.tools,
+            mode = uiState.activityMode,
+            manualExpanded = uiState.isToolGroupExpanded(index),
+        )
+        if (toolGroup.showsSummary) {
+            card.addView(
+                buildToolGroupSummary(index, toolGroup),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+            )
+        }
+
         message.tools.forEachIndexed { toolIndex, tool ->
+            // Свёрнутая группа: дочерние карточки не инфлейтятся впустую.
+            if (!toolGroup.showsCards) return@forEachIndexed
             val toolView = ToolCardPresenter.present(tool)
             val toolBox = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
