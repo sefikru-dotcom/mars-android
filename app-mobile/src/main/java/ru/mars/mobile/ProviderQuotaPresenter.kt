@@ -104,6 +104,11 @@ class ProviderQuotaPresenter {
             payload.isUnavailable -> QuotaChipState.UNAVAILABLE
             payload.quota != null -> QuotaChipState.OK
             !payload.ok -> QuotaChipState.ERROR
+            // Провайдер поддержан и ответил ok, но чисел в блоке quota нет.
+            // Рисовать «OK» нельзя: [model] в этом случае честно показывает
+            // «Квота не прочитана». Держим state и model согласованными, иначе
+            // любой, кто прочитает state вместо model(), получит ложь.
+            payload.supported -> QuotaChipState.UNAVAILABLE
             else -> QuotaChipState.OK
         }
         if (state == QuotaChipState.ERROR) errorMessage = payload.message?.trim().takeUnless { it.isNullOrEmpty() }
@@ -153,7 +158,7 @@ class ProviderQuotaPresenter {
                 canRefresh = true,
             )
         }
-        val label = current?.label?.trim().takeUnless { it.isNullOrEmpty() } ?: "Квота"
+        val label = current.label?.trim().takeUnless { it.isNullOrEmpty() } ?: "Квота"
         val remaining = amounts.limitRemaining
         val limit = amounts.limit
         val percent = percentRemaining(amounts.limitRemaining, amounts.limit)
