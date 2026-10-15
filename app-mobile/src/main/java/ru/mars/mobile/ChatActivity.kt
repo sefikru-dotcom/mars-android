@@ -65,6 +65,7 @@ import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionDetail
+import ru.mars.network.model.SessionUsage
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.ApprovalPayload
 import ru.mars.network.model.SubagentStatusUpdate
@@ -189,6 +190,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var workspaceSelection: WorkspaceSelection
     private var workspaceBtn: Button? = null
     private var contextIndicator: TextView? = null
+    /** Пилюля расхода/стоимости сессии (A14, `GET /api/session/usage`); скрыта при 0/недоступности. */
+    private var usageIndicator: TextView? = null
+    /** Последний измеренный расход сессии; null — ещё не запрошен или недоступен. */
+    private var sessionUsage: SessionUsage? = null
+    /** Дебаунс серверной записи черновика composer (A15) — чистая политика. */
+    private val serverDraftSync = ServerDraftSyncPolicy()
+    private var serverDraftJob: Job? = null
+    /**
+     * Программная вставка текста в композитор (восстановление черновика, steer-leftover):
+     * текст-вотчер не должен принимать её за ввод пользователя и слать черновик на сервер.
+     */
+    private var composerTextProgrammatic = false
     private lateinit var compressionController: ContextCompressionController
     private lateinit var autoCompressionStorage: AutoCompressionStorage
     private var compressionRunning = false
@@ -1114,6 +1127,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnEditorActionListener { _, action, _ ->
                 if (action == 4) { sendMessage(); true } else false
             }
+            // A15: серверный черновик composer. Запись дебаунсится политикой
+            // [ServerDraftSyncPolicy] (~2 с покоя между запросами); программная вставка
+            // (восстановление черновика, steer-leftover) записью НЕ считается.
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    if (composerTextProgrammatic) return
+                    scheduleServerDraftSync(s?.toString().orEmpty())
+                }
+            })
         }
         composer.addView(input, LinearLayout.LayoutParams(-1, -2))
 
@@ -1205,6 +1229,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { showContextUsageDetails() }
         }
         chipsRow.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2))
+
+        // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
+        // первый показывает кумулятивные токены и деньги (`GET /api/session/usage`),
+        // второй — процент окна из metering-кадров. NaN-подобный «$0.00» не показываем.
+        usageIndicator = TextView(this).apply {
+            textSize = 9.5f
+            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(7), dp(2), dp(7), dp(2))
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+            setOnClickListener { showSessionUsageDetails() }
+        }
+        chipsRow.addView(usageIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
         chipsScroll.addView(chipsRow)
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
@@ -1522,6 +1559,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (coroutineContext[Job]?.isCancelled != true) {
                 if (turnFailed && !credentialRejected) onTurnFailed?.invoke()
                 flushOfflineQueue()
+                // A14: расход сессии меняется только ходами — обновляем счётчик по завершении.
+                refreshSessionUsage()
             }
         }
         }
@@ -2979,7 +3018,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 uiState.setActiveTurn(detail.activeTurn)
                 uiState.setTodoState(detail.todoState)
                 currentSessionId = detail.id
+                // A15: окно дебаунса и «последний записанный» относятся к прежнему диалогу.
+                serverDraftSync.onSessionChanged()
                 restoreComposerDraft()
+                // A15: серверная копия черновика дополняет локальную (и только если пользователь
+                // не начал печатать своё после открытия диалога — решает [ServerDraftAdoption]).
+                adoptServerDraft(detail.composerDraft)
+                // A14: расход открытого диалога.
+                sessionUsage = null
+                refreshSessionUsage()
                 autoScroll.pinToBottom()
                 renderMessages()
                 setStatus()
@@ -3193,6 +3240,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setStatus()
         updateControls()
         flushOfflineQueue()
+        // A14: восстановленный ход тоже потратил токены — счётчик перечитывается.
+        refreshSessionUsage()
     }
 
     /** Снимает статусную строку, только если её поставил recovery-цикл (не пользователь/сервер). */
@@ -3917,6 +3966,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
         currentSessionId = null
         explicitStatus = null
+        // A15/A14: у нового чата нет ни серверного черновика, ни измеренного расхода.
+        serverDraftSync.onSessionChanged()
+        sessionUsage = null
+        updateUsageIndicator()
         restoreComposerDraft()
         // Буферизованные сообщения нового чата (sessionId == null) возвращают эхо;
         // при наличии сети они сразу уходят в отправку.
@@ -3938,16 +3991,145 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // не должен записывать черновик обратно в уже очищенное приватное хранилище.
         if (::authExitCleanup.isInitialized && !authExitCleanup.draftPersistenceAllowed) return
         drafts.saveDraft(currentSessionId, input.text.toString())
+        // A15: уход с экрана — остаток серверного черновика досылается вне окна дебаунса.
+        flushServerDraftOnPause()
     }
 
     /** Показывает сохранённый черновик текущего диалога (null — отдельный черновик нового чата). */
     private fun restoreComposerDraft() {
         if (!::drafts.isInitialized || !::input.isInitialized) return
         val text = drafts.draftFor(currentSessionId).orEmpty()
-        input.setText(text)
-        if (text.isNotEmpty()) {
-            input.setSelection(text.length)
+        setComposerTextProgrammatically(text)
+    }
+
+    /**
+     * Вставляет текст в композитор без реакции вотчера на «ввод пользователя»:
+     * без флага программная вставка немедленно ушла бы на сервер как черновик
+     * и перетёрла бы более свежую серверную копию.
+     */
+    private fun setComposerTextProgrammatically(text: String) {
+        val previous = composerTextProgrammatic
+        composerTextProgrammatic = true
+        try {
+            input.setText(text)
+            if (text.isNotEmpty()) input.setSelection(text.length)
+        } finally {
+            composerTextProgrammatic = previous
         }
+    }
+
+    // --- A15: серверный черновик composer -------------------------------------------------------
+
+    /**
+     * Планирует запись черновика в `POST /api/session/draft` по правилу
+     * [ServerDraftSyncPolicy]: не чаще ~2 с покоя при вводе. Пустая строка тоже
+     * записывается — она очищает серверную копию после отправки/стирания текста.
+     * Ошибки подавляются: фоновый автосейв не имеет права шуметь в статусе.
+     */
+    private fun scheduleServerDraftSync(text: String) {
+        val id = currentSessionId ?: return
+        serverDraftJob?.cancel()
+        val wait = serverDraftSync.delayFor(text, SystemClock.elapsedRealtime()) ?: return
+        serverDraftJob = lifecycleScope.launch {
+            if (wait > 0) delay(wait)
+            saveServerDraft(id, text)
+        }
+    }
+
+    /** Уход с экрана: остаток черновика досылается немедленно, если он отличается от записанного. */
+    private fun flushServerDraftOnPause() {
+        val id = currentSessionId ?: return
+        val text = if (::input.isInitialized) input.text.toString() else return
+        if (!serverDraftSync.drainOnPause(text)) return
+        serverDraftJob?.cancel()
+        // Отдельная корутина вне lifecycleScope: onPause может переживать сам экран
+        // (пересоздание), а незаписанный черновик — единственная копия текста пользователя.
+        lifecycleScope.launch { saveServerDraft(id, text) }
+    }
+
+    private suspend fun saveServerDraft(sessionId: String, text: String) {
+        val credential = store.read() ?: return
+        if (::authExitCleanup.isInitialized && !authExitCleanup.draftPersistenceAllowed) return
+        withContext(Dispatchers.IO) {
+            runCatching {
+                SessionRepository().saveComposerDraft(BASE_URL, credential, sessionId, text)
+            }
+        }
+        serverDraftSync.onSaved(text, SystemClock.elapsedRealtime())
+    }
+
+    /**
+     * A15: подстановка серверного черновика при открытии диалога. Порядок строгий
+     * ([ServerDraftAdoption]): набранный пользователем текст > локальный черновик >
+     * серверный. Серверный черновик только дополняет локальный и никогда не
+     * затирает то, что печатают прямо сейчас.
+     */
+    private fun adoptServerDraft(serverDraft: String?) {
+        if (serverDraft.isNullOrBlank()) return
+        val local = drafts.draftFor(currentSessionId)
+        val target = ServerDraftAdoption.textFor(serverDraft, local, input.text.toString()) ?: return
+        setComposerTextProgrammatically(target)
+        drafts.saveDraft(currentSessionId, target)
+    }
+
+    // --- A14: расход/стоимость сессии ----------------------------------------------------------
+
+    /**
+     * Запрашивает расход сессии (`GET /api/session/usage`) и показывает компактную
+     * пилюлю: токены и стоимость. Недоступный/нулевой расход пилюлю скрывает —
+     * «$0.00» вместо неизвестной цены был бы выдумкой. Вызывается при открытии
+     * диалога и по завершении хода (расход меняется только ходами).
+     */
+    private fun refreshSessionUsage() {
+        val id = currentSessionId
+        val credential = store.read()
+        if (id == null || credential == null) {
+            sessionUsage = null
+            updateUsageIndicator()
+            return
+        }
+        lifecycleScope.launch {
+            val usage = withContext(Dispatchers.IO) {
+                runCatching { SessionRepository().getSessionUsage(BASE_URL, credential, id) }.getOrNull()
+            }
+            // Диалог мог смениться, пока шёл запрос: чужой расход не показываем.
+            if (currentSessionId != id) return@launch
+            sessionUsage = usage
+            updateUsageIndicator()
+        }
+    }
+
+    /** Пилюля расхода: текст и видимость — из [SessionUsagePolicy], цвет — из палитры темы. */
+    private fun updateUsageIndicator() {
+        val view = usageIndicator ?: return
+        val state = SessionUsagePolicy.view(sessionUsage)
+        if (!state.visible) {
+            view.visibility = View.GONE
+            return
+        }
+        view.visibility = View.VISIBLE
+        view.text = state.text
+        view.contentDescription = state.contentDescription
+        view.setTextColor(MarsTheme.TEXT_MUTED)
+    }
+
+    /** Диалог расхода: разбивка токенов (запрос/ответ) и стоимость. Только чтение. */
+    private fun showSessionUsageDetails() {
+        val body = TextView(this).apply {
+            text = SessionUsagePolicy.detailsText(sessionUsage)
+            setTextColor(MarsTheme.TEXT)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = dp(20)
+            setPadding(pad, pad, pad, dp(8))
+            addView(body)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Расход сессии")
+            .setView(container)
+            .setPositiveButton("Закрыть", null)
+            .show()
     }
 
     // --- Autonomous execution state --------------------------------------------------------------
