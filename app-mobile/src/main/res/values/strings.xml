@@ -16,4 +16,9 @@
     <string name="error_unavailable">Не удалось подключиться. Проверьте сеть и повторите.</string>
     <string name="error_timeout">Код истёк. Создайте новый код и повторите.</string>
     <string name="error_revoke">Не удалось отозвать подключение. Повторите позже.</string>
+    <!-- Музыка: вкладка «Для тебя» (персональная лента /api/home) и живые подсказки поиска -->
+    <string name="music_tab_for_you">Для тебя</string>
+    <string name="music_for_you_empty">Лента пока пуста — включите пару треков, и она наполнится</string>
+    <string name="music_for_you_error">Лента недоступна — проверьте сеть</string>
+    <string name="music_suggestions_header">Подсказки</string>
 </resources>

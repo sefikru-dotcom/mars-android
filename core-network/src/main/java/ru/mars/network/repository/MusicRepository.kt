@@ -22,6 +22,7 @@ import ru.mars.network.http.HttpClients
 import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.LyricsResult
 import ru.mars.network.model.MusicPlayerState
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.PlaybackStatus
 import ru.mars.network.model.Playlist
@@ -83,6 +84,38 @@ class MusicRepository(
      * live service may answer with `{results}`, `{favorites}` or `{tracks}`.
      */
     suspend fun getFlow(): List<MusicTrack> = fetchTracks("api/flow")
+
+    /**
+     * GET /api/home → `shelf.sections[]` — персональная лента из четырёх полок
+     * («Продолжить слушать», «Новинки», «Для тебя», «Похожие на …»). Пустые полки
+     * возвращаются как есть (пустой список items); отсутствие поля `shelf` или
+     * `sections` даёт пустой результат, а не исключение. Сбой сети или
+     * `success:false` выбрасывается наружу.
+     */
+    suspend fun getHome(): List<MusicShelf> {
+        val body = getJson("api/home") { it.source().readUtf8() }
+        return parseHomeShelves(body)
+    }
+
+    /**
+     * GET /api/suggestions?q=[query] — живые подсказки поиска (до 8 строк).
+     * Пустой запрос, сбой сети или любой не-200 ответ дают пустой список,
+     * потому что подсказки — вспомогательный UX и никогда не должны блокировать
+     * ввод пользователя.
+     */
+    suspend fun getSuggestions(query: String): List<String> {
+        val trimmed = query.trim()
+        if (trimmed.length < 2) return emptyList()
+        return try {
+            val body = getJson("api/suggestions", listOf("q" to trimmed)) { it.source().readUtf8() }
+            parseSuggestions(body)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // Отмена coroutine (дебаунс заменил запрос) — не «сбой подсказок».
+            throw cancelled
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
 
     /**
      * GET /api/radio/{videoId} — a radio queue seeded from [videoId].
@@ -694,6 +727,105 @@ class MusicRepository(
         val thumbnail: String? = null,
     )
 
+    // ------------------------------------------------------ home/suggestions
+
+    /**
+     * Типизированный разбор полок GET /api/home. Живой сервер держит персональные
+     * полки в ключе `shelf` (`{sections, generatedAt}`, server.py build_personal_shelf);
+     * документированный контракт допускает те же полки прямо в верхнеуровневом
+     * `sections` — приоритет у `shelf`, верхний уровень служит фолбэком.
+     * `success:false` — ошибка (исключение); отсутствие секций — пустой список.
+     */
+    private fun parseHomeShelves(body: String): List<MusicShelf> {
+        val parsed = moshi.adapter(HomeEnvelope::class.java).fromJson(body)
+            ?: throw IOException("Empty home response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Music request failed")
+        val sections = parsed.shelf?.sections ?: parsed.sections
+        return sections.map { it.toModel() }
+    }
+
+    /**
+     * Разбор ответа GET /api/suggestions: `{"suggestions":["…",…]}` (сервер отдаёт
+     * не больше 8 и пустой массив при любом сбое). Пустые/пробельные строки
+     * отбрасываются, список ограничивается [MAX_SUGGESTIONS] со стороны клиента.
+     */
+    private fun parseSuggestions(body: String): List<String> {
+        val parsed = moshi.adapter(SuggestionsEnvelope::class.java).fromJson(body)
+            ?: throw IOException("Empty suggestions response")
+        if (parsed.success == false) throw IllegalStateException(parsed.error ?: "Music request failed")
+        return parsed.suggestions
+            .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+            .take(MAX_SUGGESTIONS)
+    }
+
+    /**
+     * GET /api/home envelope: персональные полки лежат в `shelf`, а верхнеуровневый
+     * `sections` — кураторские миксы обратной совместимости (без `id`). Разбор
+     * терпим к обоим формам; [ShelfDto.toModel] для миксов без `id` использует
+     * заголовок как ключ.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class HomeEnvelope(
+        val success: Boolean? = null,
+        val shelf: ShelfPageDto? = null,
+        val sections: List<ShelfDto> = emptyList(),
+        val error: String? = null,
+    )
+
+    @JsonClass(generateAdapter = false)
+    private data class ShelfPageDto(
+        val sections: List<ShelfDto> = emptyList(),
+        val generatedAt: Long? = null,
+    )
+
+    /** Одна полка; строки разбираются терпимо (те же фолбэки, что в [TrackDto.toModel]). */
+    @JsonClass(generateAdapter = false)
+    private data class ShelfDto(
+        val id: String? = null,
+        val title: String? = null,
+        val items: List<ShelfTrackDto> = emptyList(),
+    ) {
+        fun toModel(): MusicShelf = MusicShelf(
+            id = id?.takeIf { it.isNotBlank() } ?: title.orEmpty(),
+            title = title.orEmpty(),
+            items = items.mapNotNull { it.toModel() },
+        )
+    }
+
+    /**
+     * Трек полки с полностью необязательными полями: сервер собирает полки из БД и
+     * радио-выдачи, где отдельные ключи могут отсутствовать. Строка без `id`
+     * неиграбельна и отбрасывается ([toModel] → null), пустые поля получают те же
+     * подписи-фолбэки, что и в [MusicChartLoader.parseHomePayload] мобильного модуля.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class ShelfTrackDto(
+        val id: String? = null,
+        val title: String? = null,
+        val artist: String? = null,
+        val duration: String? = null,
+        val thumbnail: String? = null,
+    ) {
+        fun toModel(): MusicTrack? {
+            val trackId = id?.takeIf { it.isNotBlank() } ?: return null
+            return MusicTrack(
+                id = trackId,
+                title = title?.takeIf { it.isNotBlank() } ?: "Без названия",
+                artist = artist?.takeIf { it.isNotBlank() } ?: "Неизвестный артист",
+                duration = duration?.takeIf { it.isNotBlank() } ?: "--:--",
+                thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
+    /** Ответ GET /api/suggestions: `{"suggestions":["…",…]}`; `success:false` — отказ. */
+    @JsonClass(generateAdapter = false)
+    private data class SuggestionsEnvelope(
+        val success: Boolean? = null,
+        val suggestions: List<String> = emptyList(),
+        val error: String? = null,
+    )
+
     // ------------------------------------------------------------- lyrics DTOs
 
     /** POST /api/lyrics/translate body — one field, `text`. */
@@ -703,6 +835,7 @@ class MusicRepository(
     /** An empty input is answered with `translated:""` and no `success` field at all. */
     @JsonClass(generateAdapter = false)
     private data class TranslateResponse(val success: Boolean? = null, val translated: String? = null, val error: String? = null)
+
     @JsonClass(generateAdapter = false)
     private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null, val timestamp: Long? = null) {
         fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId, timestamp)
@@ -712,6 +845,9 @@ class MusicRepository(
         private const val SESSION_RESTORE = "SESSION_RESTORE"
         private const val DEVICES_UPDATE = "DEVICES_UPDATE"
         internal const val DEFAULT_RESTORE_TIMEOUT_MS = 10_000L
+
+        /** Живой сервер отдаёт не больше 8 подсказок; клиент дублирует предел. */
+        internal const val MAX_SUGGESTIONS = 8
 
         /**
          * Maps the HTTP(S) base URL onto the WebSocket scheme. Kotlin's
