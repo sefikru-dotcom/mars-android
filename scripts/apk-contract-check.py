@@ -106,6 +106,48 @@ def check_minified(apk_path, max_kt_names=DEFAULT_MAX_KT_NAMES):
     )
 
 
+# ---------- Рефлексионный граф Moshi ----------
+
+# Классы, которые десериализуются РЕФЛЕКСИОННО (Moshi + KotlinJsonAdapterFactory) и
+# поэтому обязаны сохранить имена в release-APK. Дебажные юнит-тесты этого не
+# проверяют: они идут на debug-варианте, где R8 не работает, — поэтому проверка
+# живёт здесь, на артефакте. Список сопровождать вместе с proguard-rules.pro.
+MOSHI_REFLECTIVE_CLASSES = (
+    "ru.mars.network.repository.MusicRepository",
+    "ru.mars.network.model.MusicTrack",
+    "ru.mars.network.model.PlaybackStatus",
+    "ru.mars.network.model.MusicPlayerState",
+    "ru.mars.network.model.MusicSearchResult",
+    "ru.mars.network.model.LyricsResult",
+    "ru.mars.network.model.Playlist",
+    "ru.mars.network.model.MusicShelf",
+    "ru.mars.network.model.HistoryEntry",
+)
+
+
+def check_reflective_models(apk_path, classes=MOSHI_REFLECTIVE_CLASSES):
+    """Требует, чтобы рефлексионные классы Moshi сохранили исходные имена в dex.
+
+    R8, переименовав такой класс, ломает парсинг ТИХО: необязательные поля
+    становятся null, обязательные бросают JsonDataException — но только в release
+    на устройстве. Ловим на артефакте: имя класса должно присутствовать в пуле
+    строк dex как 'L<path>;'.
+    """
+    dex, dex_names = read_dex_bytes(apk_path)
+    missing = [c for c in classes
+               if ("L" + c.replace(".", "/") + ";").encode() not in dex]
+    if missing:
+        raise contract_fail(
+            "Рефлексионные классы Moshi отсутствуют в dex ПОД ИСХОДНЫМИ ИМЕНАМИ: %s "
+            "(dex: %s). R8 их переименовал — в release сломается JSON-парсинг "
+            "(нулевые поля / JsonDataException). Дополни -keep в app-mobile/proguard-rules.pro: "
+            "%s"
+            % (", ".join(missing), ", ".join(dex_names),
+               " ".join("-keep class %s { *; }" % m for m in missing))
+        )
+    return "Рефлексионный граф Moshi OK: сохранено классов = %d" % len(classes)
+
+
 # ---------- Схема подписи ----------
 
 def parse_signing_schemes(verbose_output):
@@ -197,11 +239,20 @@ def main(argv=None):
              "v3-only — требовать схему v3 и отвергать v1/v2"
     )
     ap.add_argument("--apksigner", default=None, help="путь к apksigner (опционально)")
+    ap.add_argument(
+        "--skip-reflective", action="store_true",
+        help="не проверять сохранение имён рефлексионного графа Moshi "
+             "(для не-mobile APK и заведомо неполных артефактов)"
+    )
     args = ap.parse_args(argv)
 
     try:
         print("[apk-contract] %s" % args.apk)
         print("  " + check_minified(args.apk, args.max_kt_names))
+        if args.skip_reflective:
+            print("  рефлексионный граф Moshi: пропущен (--skip-reflective)")
+        else:
+            print("  " + check_reflective_models(args.apk))
         if args.signing_scheme == "v3-only":
             print("  " + check_signing_scheme_v3_only(args.apk, args.apksigner))
         else:

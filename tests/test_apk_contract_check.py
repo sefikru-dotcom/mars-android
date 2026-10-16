@@ -27,12 +27,22 @@ acc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(acc)
 
 
-def make_dex(kt_count, prefix="F"):
-    """Байты фейкового dex с kt_count исходными именами вида F0001.kt\\x00."""
+def make_dex(kt_count, prefix="F", reflective=True):
+    """Байты фейкового dex с kt_count исходными именами вида F0001.kt\\x00.
+
+    reflective=True добавляет в пул строк имена классов рефлексионного графа Moshi
+    в dex-форме (`Lru/mars/network/model/MusicTrack;`), как в настоящем R8-выходе:
+    без них проверка check_reflective_models справедливо провалит артефакт.
+    """
     head = b"dex\n035\x00" + b"\x00" * 32  # псевдо-заголовок, парсер его не читает
     names = b"".join(
         ("%s%04d.kt" % (prefix, i)).encode() + b"\x00" for i in range(kt_count)
     )
+    if reflective:
+        names += b"".join(
+            ("L" + c.replace(".", "/") + ";").encode() + b"\x00"
+            for c in acc.MOSHI_REFLECTIVE_CLASSES
+        )
     return head + names
 
 
@@ -225,6 +235,48 @@ Number of signers: 1
             self._check_with_output("", rc=1)
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn("apksigner verify не прошёл", ctx.exception.message)
+
+
+class TestReflectiveGraph(ApkContractTestCase):
+    """Проверка сохранения имён рефлексионного графа Moshi в release-APK."""
+
+    def test_renamed_reflective_class_fails(self):
+        """R8 переименовал класс рефлексионного графа — контракт провален (rc=1)."""
+        p = self.apk()
+        make_apk(p, {"classes.dex": make_dex(14, reflective=False)})
+        rc, _, err = run_main(p)
+        self.assertEqual(rc, 1)
+        self.assertIn("Рефлексионные классы Moshi", err)
+        # Сообщение обязано подсказать готовое правило для proguard-rules.pro.
+        self.assertIn("-keep class ru.mars.network.model.MusicTrack { *; }", err)
+
+    def test_partial_rename_fails_and_names_only_missing(self):
+        """Половина графа переименована — в ошибке только отсутствующие классы."""
+        p = self.apk()
+        head = b"dex\n035\x00" + b"\x00" * 32
+        kept = acc.MOSHI_REFLECTIVE_CLASSES[:2]
+        body = b"".join(("F%04d.kt" % i).encode() + b"\x00" for i in range(14))
+        body += b"".join(
+            ("L" + c.replace(".", "/") + ";").encode() + b"\x00" for c in kept
+        )
+        make_apk(p, {"classes.dex": head + body})
+        rc, _, err = run_main(p)
+        self.assertEqual(rc, 1)
+        self.assertIn("ru.mars.network.model.LyricsResult", err)
+
+    def test_skip_reflective_flag(self):
+        """--skip-reflective отключает проверку (для не-mobile артефактов)."""
+        p = self.apk()
+        make_apk(p, {"classes.dex": make_dex(14, reflective=False)})
+        rc, out, _ = run_main(p, "--skip-reflective")
+        self.assertEqual(rc, 0)
+        self.assertIn("пропущен", out)
+
+    def test_check_function_direct(self):
+        """check_reflective_models возвращает отчёт при полном графе."""
+        p = self.apk()
+        make_apk(p, {"classes.dex": make_dex(14)})
+        self.assertIn("Moshi OK", acc.check_reflective_models(p))
 
 
 class TestCliDefaults(ApkContractTestCase):
