@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.Manifest
 import android.app.Dialog
 import android.content.Context
 import android.content.Intent
@@ -12,8 +13,6 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.text.ClipboardManager
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -32,6 +31,7 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.AccessibilityDelegateCompat
 import androidx.core.view.GravityCompat
@@ -78,6 +78,7 @@ import ru.mars.network.repository.SessionToolsetsOutcome
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.SessionAutonomyRepository
 import ru.mars.network.repository.AutonomyLookup
+import ru.mars.network.repository.TranscribeOutcome
 import ru.mars.network.repository.UploadOutcome
 import ru.mars.network.repository.UploadTooLargeException
 import ru.mars.network.repository.WorkspaceRepository
@@ -206,7 +207,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var compressionRunning = false
     private lateinit var attachmentChips: LinearLayout
     private val attachments = mutableListOf<ChatAttachment>()
-    private var speech: SpeechRecognizer? = null
     // Voice output: policy lives in VoiceOutputController (pure JVM), the platform
     // TextToSpeech is isolated behind AndroidSpeechEngine — ChatActivity only wires both.
     private lateinit var speechEngine: AndroidSpeechEngine
@@ -217,9 +217,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     private var speechEngineInitResult: Boolean? = null
     private lateinit var voiceSession: VoiceSessionController
+    /** Своя запись с микрофона (WAV 16 кГц моно) — вход серверного распознавания. */
+    private lateinit var voiceRecorder: VoiceRecorder
+    /** Распознавание уже записанного звука: повторный тап не запускает второе. */
+    private var voiceTranscribeJob: Job? = null
     private var volumeBtn: ImageButton? = null
     private var voiceBtn: ImageButton? = null
     private val pickAttachment = 4101
+    /** requestCode рантайм-запроса RECORD_AUDIO (код системного распознавателя — тот же). */
     private val recognizeVoice = 4102
 
     // Mini-player in chat
@@ -375,12 +380,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             speechEngineInitResult = null
             voiceOutput.onEngineReady(available)
         }
-        // Voice-input state machine: guards the recognizer session, delivers haptic feedback on
+        // Голосовой ввод: своя запись (16 кГц моно WAV) → серверное распознавание.
+        // Микрофон открывается только по явному тапу (и только с разрешения).
+        voiceRecorder = VoiceRecorder()
+        // Voice-input state machine: guards the capture session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
             override fun onListeningStarted() {
                 voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                statusView.text = "Слушаю…"
+                statusView.text = VOICE_LISTENING_STATUS
             }
 
             override fun onResult(text: String) {
@@ -477,7 +485,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Живой ход умирает вместе с экраном (destroy — точка прерывания collect send-пути
         // и recovery-цикла).
         teardownLiveTurn()
-        speech?.destroy()
+        // Запись умирает вместе с экраном: AudioRecord освобождается, буфер не держится.
+        if (::voiceRecorder.isInitialized) voiceRecorder.cancel()
         if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
         super.onDestroy()
     }
@@ -585,20 +594,27 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == recognizeVoice) {
-            // Haptic feedback on voice-input finish (success or dismissal).
-            voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            if (resultCode == RESULT_OK) {
-                val recognized = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-                if (voiceSession.onResult(recognized.orEmpty())) voiceSession.onProcessingComplete()
-            } else {
-                voiceSession.cancel()
-                statusView.text = ""
-            }
-        }
         if (requestCode == pickAttachment && resultCode == RESULT_OK) {
             data?.data?.let { uploadAttachment(it) }
         }
+    }
+
+    /**
+     * Результат рантайм-запроса микрофона (единственное использование [recognizeVoice]).
+     *
+     * Разрешение выдано — запись начинается сразу: пользователь уже выразил намерение тапом,
+     * второй тап ему не нужен. Отказ — понятная причина в статусе (и куда идти включать),
+     * а не молчание: без этого выдача/отказ разрешения ничего не запускал и не объяснял.
+     */
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != recognizeVoice) return
+        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
     }
 
     private fun buildView(): View {
@@ -3387,23 +3403,95 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }.getOrNull()
 
+    /**
+     * Кнопка микрофона: тап — начать запись, тап во время записи — остановить, распознать и
+     * отправить. Записываем сами ([VoiceRecorder], WAV 16 кГц моно) и распознаём на сервере
+     * (`POST /api/transcribe`): системный `RecognizerIntent` больше не используется — он есть
+     * не на каждой сборке, а качество записи им не управляется (живой вывод ломался ровно на
+     * этом: «Распознавание речи недоступно» и пустой результат).
+     *
+     * История переходов — в [VoiceSessionController] (LISTENING → PROCESSING → IDLE).
+     * Здесь только обвязка: разрешение, микрофон, статус и отправка распознанного текста.
+     */
     private fun startVoiceInput() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            statusView.text = "Распознавание речи недоступно"; return
+        // Идёт распознавание уже записанного звука — второй записи не начинаем.
+        if (voiceTranscribeJob?.isActive == true) {
+            statusView.text = VOICE_TRANSCRIBING_STATUS
+            return
         }
-        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.RECORD_AUDIO), recognizeVoice); return
+        // Запись идёт (или уже закончилась по лимиту длительности) — тап её закрывает.
+        if (voiceSession.state == VoiceSessionController.State.LISTENING) {
+            stopVoiceInputAndTranscribe()
+            return
         }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault())
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), recognizeVoice)
+            return
         }
-        // Launch is part of the guarded transition: ActivityNotFound/SecurityException cannot leave
-        // the controller stuck in LISTENING.
-        voiceSession.start {
-            startActivityForResult(intent, recognizeVoice)
+        beginVoiceRecording()
+    }
+
+    /** Микрофон разрешён: открываем сессию записи (состояние ведёт [VoiceSessionController]). */
+    private fun beginVoiceRecording() {
+        if (!voiceSession.start()) {
+            statusView.text = VOICE_BUSY_STATUS
+            return
+        }
+        // Микрофон не открылся (занят другим приложением, отозван на уровне системы, сломан
+        // вход): сессия честно уходит в ERROR с причиной, а не молчит под «Слушаю…».
+        if (!voiceRecorder.start()) voiceSession.onError(VOICE_MIC_UNAVAILABLE_STATUS)
+    }
+
+    /**
+     * Останавливает запись, отдаёт WAV на распознавание и отправляет распознанный текст
+     * существующим [sendMessage]. Запись не теряется молча: и пустой результат, и любой
+     * отказ распознавания ([TranscribeOutcome.Failure]) показываются в статусе.
+     */
+    private fun stopVoiceInputAndTranscribe() {
+        voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        val recording = voiceRecorder.stop()
+        if (recording == null) {
+            voiceSession.cancel()
+            statusView.text = VOICE_EMPTY_STATUS
+            return
+        }
+        if (store.read() == null) {
+            // Тот же отказ, что вернул бы репозиторий, — но без сетевого вызова и понятнее.
+            voiceSession.onError(VOICE_NO_CREDENTIAL_STATUS)
+            return
+        }
+        statusView.text = VOICE_TRANSCRIBING_STATUS
+        voiceTranscribeJob = lifecycleScope.launch {
+            // credentialProvider обязателен: голый ChatRepository() отдал бы
+            // Failure("No device credential"), не дойдя до сети.
+            val outcome = ChatRepository(credentialProvider = { store.read() })
+                .transcribePcmWav(recording.wav)
+            when (outcome) {
+                is TranscribeOutcome.Success -> {
+                    // Текст принимается только из LISTENING и попадает в композитор через
+                    // listener (setText + armSpeakNextAnswer), затем сессия закрывается.
+                    if (voiceSession.onResult(outcome.transcript)) {
+                        sendMessage()
+                        voiceSession.onProcessingComplete()
+                    }
+                }
+                is TranscribeOutcome.Failure -> voiceSession.onError(transcribeFailureStatus(outcome))
+            }
         }
     }
+
+    /** Отказ распознавания — короткая причина для человека вместо HTTP-кода и стектрейса. */
+    private fun transcribeFailureStatus(outcome: TranscribeOutcome.Failure): String =
+        when (outcome.httpCode) {
+            null -> VOICE_UNREACHABLE_STATUS
+            400 -> VOICE_REJECTED_STATUS
+            401, 403 -> VOICE_UNAUTHORIZED_STATUS
+            413 -> VOICE_TOO_LONG_STATUS
+            503 -> VOICE_DISABLED_STATUS
+            else -> VOICE_FAILED_STATUS
+        }
 
     /** Speak a message through [VoiceOutputController] (markdown is filtered inside). */
     private fun speakMessage(text: String) {
@@ -4499,5 +4587,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val KEY_AUTO_SPEAK = "auto_speak"
         /** TTS-движок отсутствует/сломался — статус вместо краша и ретраев. */
         private const val VOICE_OUTPUT_UNAVAILABLE = "Озвучивание недоступно на этом устройстве"
+        /** Индикация голосового ввода (запись → распознавание) и понятные отказы. */
+        private const val VOICE_LISTENING_STATUS = "Слушаю… (тап — остановить и отправить)"
+        private const val VOICE_TRANSCRIBING_STATUS = "Распознаю…"
+        private const val VOICE_BUSY_STATUS = "Голосовой ввод уже выполняется"
+        private const val VOICE_EMPTY_STATUS = "Запись пустая — скажите чуть дольше"
+        private const val VOICE_PERMISSION_DENIED_STATUS = "Нет доступа к микрофону — разрешите его Марсу в настройках"
+        private const val VOICE_MIC_UNAVAILABLE_STATUS = "Микрофон недоступен на этом устройстве"
+        private const val VOICE_NO_CREDENTIAL_STATUS = "Устройство не привязано — распознавание недоступно"
+        private const val VOICE_UNREACHABLE_STATUS = "Нет связи с сервером — запись не распознана"
+        private const val VOICE_REJECTED_STATUS = "Сервер не принял запись — попробуйте ещё раз"
+        private const val VOICE_UNAUTHORIZED_STATUS = "Доступ устройства истёк — войдите заново"
+        private const val VOICE_TOO_LONG_STATUS = "Запись слишком длинная — не удалось распознать"
+        private const val VOICE_DISABLED_STATUS = "Распознавание речи выключено на сервере"
+        private const val VOICE_FAILED_STATUS = "Не удалось распознать речь — попробуйте ещё раз"
     }
 }
