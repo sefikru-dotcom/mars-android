@@ -18,6 +18,21 @@
 -keep class ru.mars.network.repository.MusicRepository { *; }
 -keep class ru.mars.network.repository.MusicRepository$* { *; }
 
+# ВАЖНО: MusicModels.kt лежит в ru.mars.network.model, но эти классы — часть ТОГО ЖЕ
+# рефлексионного графа: moshi.adapter(LyricsResult::class.java) и типы полей вложенных
+# envelope-ов (MusicTrack/MusicShelf/MusicPlayerState/PlaybackStatus/HistoryEntry/Playlist).
+# KotlinJsonAdapterFactory читает kotlin-метаданные, поэтому R8 переименование имён и
+# свойств ломает парсинг: необязательные поля молча становятся null, обязательные
+# (MusicTrack.id) бросают JsonDataException. Дебажные тесты этого НЕ видят — R8 там не работает.
+-keep class ru.mars.network.model.MusicTrack { *; }
+-keep class ru.mars.network.model.PlaybackStatus { *; }
+-keep class ru.mars.network.model.MusicPlayerState { *; }
+-keep class ru.mars.network.model.MusicSearchResult { *; }
+-keep class ru.mars.network.model.LyricsResult { *; }
+-keep class ru.mars.network.model.Playlist { *; }
+-keep class ru.mars.network.model.MusicShelf { *; }
+-keep class ru.mars.network.model.HistoryEntry { *; }
+
 # Moshi: аннотации и generic-сигнатуры нужны рефлексионным адаптерам.
 -keep @interface com.squareup.moshi.Json
 -keep @interface com.squareup.moshi.JsonClass
