@@ -61,6 +61,14 @@ android {
                 storePassword = releaseKeystorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
+                // Норма раздачи — v3-only (minSdk 24+): v1 (JAR) и v2 отключены,
+                // включается только APK Signature Scheme v3. Совпадает с контрактом
+                // scripts/apk-contract-check.py --signing-scheme v3-only, поэтому
+                // артефакт CI и артефакт раздачи — один и тот же файл.
+                enableV1Signing = false
+                enableV2Signing = false
+                enableV3Signing = true
+                enableV4Signing = false
             }
         }
     }

@@ -35,6 +35,12 @@ android { namespace = "ru.mars.tv"; compileSdk = 34
                 storePassword = releaseKeystorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
+                // Норма раздачи — v3-only: v1/v2 отключены, включается только
+                // APK Signature Scheme v3. Тот же контракт, что в app-mobile.
+                enableV1Signing = false
+                enableV2Signing = false
+                enableV3Signing = true
+                enableV4Signing = false
             }
         }
     }
