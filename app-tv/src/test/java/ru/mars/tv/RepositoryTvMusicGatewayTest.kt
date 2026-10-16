@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.LyricsResult
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.repository.MusicRepository
 import java.net.URLDecoder
@@ -169,6 +170,66 @@ class RepositoryTvMusicGatewayTest {
             assertTrue("expected Failed, got $result", result is TvMusicChartsResult.Failed)
             assertTrue((result as TvMusicChartsResult.Failed).message.isNotBlank())
             assertEquals("a rejected query must not hit the network", 0, server.requestCount)
+        }
+    }
+
+    // --- personal feed (GET /api/home → shelf.sections[]) ----------------------------------------
+
+    @Test
+    fun homeEnvelopeMapsToLoadedShelvesAndHitsHomePath() {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"success":true,"shelf":{"sections":[
+                       {"id":"continue","title":"Продолжить слушать","items":[
+                         {"type":"song","id":"h1","title":"One","artist":"A","duration":"2:10"}]},
+                       {"id":"new","title":"Новинки","items":[]}]},"generatedAt":1696000000}""",
+                ),
+            )
+            val result = gatewayFor(server).fetchHome()
+            assertEquals(
+                TvMusicHomeResult.Loaded(
+                    listOf(
+                        MusicShelf(
+                            id = "continue",
+                            title = "Продолжить слушать",
+                            items = listOf(MusicTrack(id = "h1", title = "One", artist = "A", duration = "2:10")),
+                        ),
+                        // Пустая полка доезжает как есть — «скрывать ли её» решает TvMusicHomePolicy.
+                        MusicShelf(id = "new", title = "Новинки", items = emptyList()),
+                    ),
+                ),
+                result,
+            )
+            assertEquals("/music/api/home", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun homeWithoutSectionsMapsToLoadedEmptyListNotFailure() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":true,"shelf":{"sections":[]}}"""))
+            assertEquals(TvMusicHomeResult.Loaded(emptyList()), gatewayFor(server).fetchHome())
+        }
+    }
+
+    @Test
+    fun homeServiceLevelFailureMapsToFailedWithError() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"success":false,"error":"no profile"}"""))
+            val result = gatewayFor(server).fetchHome()
+            assertTrue("expected Failed, got $result", result is TvMusicHomeResult.Failed)
+            assertTrue((result as TvMusicHomeResult.Failed).message.contains("no profile"))
+        }
+    }
+
+    @Test
+    fun homeHttpErrorMapsToFailedNotException() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(500))
+            val result = gatewayFor(server).fetchHome()
+            assertTrue("expected Failed, got $result", result is TvMusicHomeResult.Failed)
+            assertTrue((result as TvMusicHomeResult.Failed).message.isNotBlank())
         }
     }
 

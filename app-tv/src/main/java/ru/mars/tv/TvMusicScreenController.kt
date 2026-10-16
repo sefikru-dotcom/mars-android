@@ -1,5 +1,6 @@
 package ru.mars.tv
 
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
@@ -17,15 +18,38 @@ sealed interface TvMusicChartsResult {
 }
 
 /**
+ * Result of one personal-feed fetch (`GET /api/home`) for the TV music screen. Produced by
+ * [TvMusicGateway]: the production implementation ([RepositoryTvMusicGateway]) maps
+ * [ru.mars.network.repository.MusicRepository.getHome] onto it; unit tests substitute fakes.
+ */
+sealed interface TvMusicHomeResult {
+    /**
+     * Shelves arrived in server order. Empty `items` inside a shelf is a normal server
+     * condition and stays as-is — [TvMusicHomePolicy] decides what is renderable.
+     */
+    data class Loaded(val shelves: List<MusicShelf>) : TvMusicHomeResult
+    /** Network/parse failure; [message] is safe to surface verbatim on screen. */
+    data class Failed(val message: String) : TvMusicHomeResult
+}
+
+/**
  * Data seam between the TV music controller and Mars Music HTTP (`GET /api/charts`,
- * `GET /api/search?q=…`). Blocking by contract: the controller runs it on its background
- * [Executor], exactly like [TvInteractiveGateway] does for the interactive requests.
+ * `GET /api/search?q=…`, `GET /api/home`). Blocking by contract: the controller runs it on
+ * its background [Executor], exactly like [TvInteractiveGateway] does for the interactive
+ * requests.
  */
 interface TvMusicGateway {
     fun fetchCharts(): TvMusicChartsResult
 
     /** Searches the catalog; [query] is already normalized (never blank — see [TvMusicSearchSpec]). */
     fun search(query: String): TvMusicChartsResult
+
+    /**
+     * Personal feed (`GET /api/home`, mobile «Для тебя» parity): the server's shelf set
+     * («Продолжить слушать», «Новинки», «Для тебя», «Похожие на …»). An empty feed is
+     * [TvMusicHomeResult.Loaded] with no renderable shelves — never a failure.
+     */
+    fun fetchHome(): TvMusicHomeResult
 }
 
 /**
@@ -69,18 +93,55 @@ sealed interface TvMusicUiState {
 }
 
 /**
+ * Which branch the TV music screen shows. «Для тебя» renders the personal feed shelves
+ * ([TvMusicHomeState]); «Чарты» renders [TvMusicUiState] (charts *and* search results —
+ * a search happens in the catalog branch, so submitting one selects [CHARTS]).
+ */
+enum class TvMusicTab { FOR_YOU, CHARTS }
+
+/**
+ * State of the «Для тебя» personal feed (`GET /api/home`), independent of the charts list
+ * state [TvMusicUiState]. Exactly one value is current at a time:
+ *
+ * - [Idle] — nothing requested yet (the screen starts on the feed and immediately [Loading]).
+ * - [Loading] — fetch in flight on the background executor.
+ * - [Failed] — network/parse failure; [Failed.message] is the user-visible reason and
+ *   `retry` repeats the FEED (not the charts).
+ * - [Empty] — the fetch succeeded but no shelf carries tracks ([TvMusicHomePolicy]); the
+ *   screen then falls back to the usual charts, so the empty feed never dead-ends.
+ * - [Shelves] — renderable shelves in server order, each becoming a heading plus its
+ *   rows; the flattened [TvMusicHomePolicy.playbackQueue] is the playback list.
+ */
+sealed interface TvMusicHomeState {
+    object Idle : TvMusicHomeState
+    object Loading : TvMusicHomeState
+    data class Failed(val message: String) : TvMusicHomeState
+    object Empty : TvMusicHomeState
+    data class Shelves(val shelves: List<MusicShelf>) : TvMusicHomeState
+}
+
+/**
  * Pure state machine of the TV music screen (TvInteractiveController parity: no Android,
  * no HTTP — [TvMusicGateway] and [TvMusicTransport] are the only I/O seams):
  *
  * - [load] (charts) and [search] publish [TvMusicUiState.Loading], fetch on the background
  *   [executor] and map the outcome to [TvMusicUiState.Content] / [TvMusicUiState.Empty] /
- *   [TvMusicUiState.Error] on the UI thread. Gateway crashes are contained as an Error
- *   state — a broken music backend must never take the screen down.
+ *   [TvMusicUiState.Error] on the UI thread. [loadHome] does the same for the personal feed
+ *   («Для тебя», `GET /api/home`) with its own state ([TvMusicHomeState]) and its own
+ *   generation counter, so a late feed answer can never flash over the catalog branch.
+ *   Gateway crashes are contained as an Error state — a broken music backend must never
+ *   take the screen down.
  * - Every request bumps a generation counter; a result from a superseded request is
  *   dropped (latest request wins), so a slow search can never flash over fresh charts
  *   and a stale failure can never overwrite newer content.
- * - [retry] repeats the LAST operation — the same search query or a charts reload —
- *   so the D-pad «Повторить» button recovers exactly what failed.
+ * - The screen has two branches ([tab]): «Для тебя» renders the feed, «Чарты» renders
+ *   charts and search results. A search selects «Чарты» (the catalog is where searching
+ *   happens) and an empty feed falls back to it ([TvMusicHomePolicy.tabAfterHomeResult]),
+ *   so the personal feed never dead-ends on a blank screen.
+ * - [retry] repeats the LAST operation OF THE ACTIVE BRANCH — the same search query, a
+ *   charts reload, or the feed again when the feed itself failed
+ *   ([TvMusicHomePolicy.retryRepeatsFeed]) — so the D-pad «Повторить» button recovers
+ *   exactly what failed.
  * - [clearSearch] returns the screen to the charts without touching the transport:
  *   music that is already playing keeps playing across the list swap.
  * - [onTrackActivated] routes the shown list plus the selected row to the global
@@ -104,6 +165,24 @@ class TvMusicScreenController(
     var onStateChanged: ((TvMusicUiState) -> Unit)? = null
 
     /**
+     * Active branch of the screen: «Для тебя» (personal feed) or «Чарты» (charts/search).
+     * Starts on the feed ([TvMusicHomePolicy.initialTab]); switching is always explicit —
+     * a D-pad press on a tab button, a submitted search or the empty-feed fallback.
+     */
+    var tab: TvMusicTab = TvMusicHomePolicy.initialTab
+        private set
+
+    /** Feed state of the «Для тебя» branch — independent of [state], which mirrors the charts. */
+    var homeState: TvMusicHomeState = TvMusicHomeState.Idle
+        private set
+
+    /** Branch observer (tab buttons restyle); called on the UI thread only. */
+    var onTabChanged: ((TvMusicTab) -> Unit)? = null
+
+    /** Feed-state observer (feed branch render); called on the UI thread only. */
+    var onHomeStateChanged: ((TvMusicHomeState) -> Unit)? = null
+
+    /**
      * The operation [retry] must repeat: `null` — charts ([load]), non-null — the last
      * requested search query. Updated synchronously at request time (UI-confined).
      */
@@ -112,30 +191,74 @@ class TvMusicScreenController(
     /** Generation counter (UI-confined): every [load]/[destroy] invalidates in-flight work. */
     private var generation = 0
 
+    /** Feed generation counter (UI-confined): a charts load invalidates an in-flight feed. */
+    private var homeGeneration = 0
+
     @Volatile
     private var destroyed = false
 
     /** Loads the charts: publishes Loading, fetches in background, applies the result on UI. */
     fun load() {
         if (destroyed) return
+        setTab(TvMusicHomePolicy.chartsTab)
         lastQuery = null
+        // Каталог — единственная видимая ветка: ответ по ленте в пути больше не актуален.
+        homeGeneration++
         fetch(query = null) { gateway.fetchCharts() }
     }
 
     /**
+     * Loads the personal feed («Для тебя», `GET /api/home`) — the screen's startup request.
+     * A gateway failure stays on the feed as [TvMusicHomeState.Failed] with a retry that
+     * repeats the FEED; a genuinely empty feed ([TvMusicHomeState.Empty]) falls back to the
+     * charts so the screen never ends up blank ([TvMusicHomePolicy]).
+     */
+    fun loadHome() {
+        if (destroyed) return
+        setTab(TvMusicHomePolicy.initialTab)
+        // В ветке ленты «Повторить» повторяет ленту, а не последний поиск по каталогу.
+        lastQuery = null
+        val gen = ++homeGeneration
+        setHomeState(TvMusicHomeState.Loading)
+        executor.execute {
+            val result = try {
+                gateway.fetchHome()
+            } catch (error: Throwable) {
+                // Сбой шва/разбора — состояние ошибки, а не падение экрана (parity с fetch()).
+                TvMusicHomeResult.Failed(error.message ?: error.javaClass.simpleName)
+            }
+            uiDispatcher.dispatch {
+                if (destroyed || gen != homeGeneration) return@dispatch
+                applyHomeResult(result)
+            }
+        }
+    }
+
+    /** D-pad switch between the two branches: the selected one is always (re)loaded. */
+    fun selectTab(next: TvMusicTab) {
+        if (destroyed) return
+        when (next) {
+            TvMusicTab.FOR_YOU -> loadHome()
+            TvMusicTab.CHARTS -> load()
+        }
+    }
+
+    /**
      * Searches the catalog (IME «search» action or the D-pad «Найти» button). A blank
-     * query is a silent no-op ([TvMusicSearchSpec.normalizedQuery]) — the «Чарт» button
-     * is the explicit way back to the charts. Supersedes any in-flight request.
+     * query is a silent no-op ([TvMusicSearchSpec.normalizedQuery]) — the «Чарты» tab
+     * button is the explicit way back to the charts. Supersedes any in-flight request.
      */
     fun search(rawQuery: String) {
         if (destroyed) return
         val query = TvMusicSearchSpec.normalizedQuery(rawQuery) ?: return
+        // Поиск живёт в каталоге: результат показывается в ветке чартов, а не в ленте.
+        setTab(TvMusicHomePolicy.chartsTab)
         lastQuery = query
         fetch(query = query) { gateway.search(query) }
     }
 
     /**
-     * Returns the screen to the charts (the D-pad «Чарт» button) and supersedes any
+     * Returns the screen to the charts (the «Чарты» tab button) and supersedes any
      * in-flight search. Deliberately does NOT touch the transport: clearing the list
      * must never stop music that is already playing.
      */
@@ -143,9 +266,18 @@ class TvMusicScreenController(
         load()
     }
 
-    /** Repeats the last operation after a failure: the same search query, or the charts. */
+    /**
+     * Repeats the last operation of the ACTIVE branch — the same search query, a charts
+     * reload, or the feed itself when the feed is what failed
+     * ([TvMusicHomePolicy.retryRepeatsFeed]) — so «Повторить» never silently answers a
+     * failed feed with the charts.
+     */
     fun retry() {
         if (destroyed) return
+        if (TvMusicHomePolicy.retryRepeatsFeed(tab)) {
+            loadHome()
+            return
+        }
         lastQuery?.let { search(it) } ?: load()
     }
 
@@ -188,6 +320,20 @@ class TvMusicScreenController(
         transport.playPlaylist(tracks, index)
     }
 
+    /**
+     * D-pad select on a FEED row: the shelves' flat [TvMusicHomePolicy.playbackQueue] becomes
+     * the transport playlist and playback starts on [index] — the row index on screen is the
+     * queue position, so the feed keeps playing past the shelf it was started in. Without
+     * rendered shelves or with an out-of-range index it is a silent no-op.
+     */
+    fun onHomeTrackActivated(index: Int) {
+        if (destroyed) return
+        val shelves = (homeState as? TvMusicHomeState.Shelves)?.shelves ?: return
+        val queue = TvMusicHomePolicy.playbackQueue(shelves)
+        if (queue.getOrNull(index) == null) return
+        transport.playPlaylist(queue, index)
+    }
+
     /** Explicit user stop of the global transport (leaving the screen does NOT stop music). */
     fun stopPlayback() {
         if (destroyed) return
@@ -198,6 +344,31 @@ class TvMusicScreenController(
     fun destroy() {
         destroyed = true
         generation++
+        homeGeneration++
+    }
+
+    /**
+     * Applies one feed answer: state first, then the branch decision. The tab is published
+     * BEFORE the state so an empty feed switches the screen to the charts without rendering
+     * a feed branch that is about to disappear; the charts reload is the fallback itself
+     * ([TvMusicHomePolicy.tabAfterHomeResult]) — an empty feed must never leave a blank screen.
+     */
+    private fun applyHomeResult(result: TvMusicHomeResult) {
+        val next = TvMusicHomePolicy.state(result)
+        setTab(TvMusicHomePolicy.tabAfterHomeResult(result))
+        setHomeState(next)
+        if (next is TvMusicHomeState.Empty) load()
+    }
+
+    private fun setTab(next: TvMusicTab) {
+        if (tab == next) return
+        tab = next
+        onTabChanged?.invoke(next)
+    }
+
+    private fun setHomeState(next: TvMusicHomeState) {
+        homeState = next
+        onHomeStateChanged?.invoke(next)
     }
 
     private fun setState(next: TvMusicUiState) {

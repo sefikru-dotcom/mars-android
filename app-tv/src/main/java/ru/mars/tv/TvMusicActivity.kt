@@ -3,6 +3,7 @@ package ru.mars.tv
 import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
@@ -21,6 +22,7 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 
 /**
@@ -90,13 +92,20 @@ internal object TvMusicFocusPolicy {
 
 /**
  * TV music screen (P1 vertical slice): the dashboard's «Музыка» button lands here,
- * [TvMusicScreenController] loads the real charts through [RepositoryTvMusicGateway]
+ * [TvMusicScreenController] loads the real music through [RepositoryTvMusicGateway]
  * (core-network MusicRepository over `https://marscore.ru/music`) and renders one of the
- * four states — loading / error (with a D-pad «Повторить» retry) / empty / content.
+ * two branches. «Для тебя» (the startup branch) shows the personal feed `GET /api/home` as
+ * shelves — a heading plus track rows for each shelf — with loading / error (D-pad
+ * «Повторить») states of its own; a genuinely empty feed falls back to the charts, so the
+ * screen never dead-ends blank. «Чарты» shows the catalog in the four states it always had
+ * — loading / error (D-pad «Повторить») / empty / content. The two D-pad tabs sit next to
+ * the search row and always restyle to show the open one ([TvMusicHomePolicy] decides what
+ * is renderable, the fallback and what «Повторить» repeats).
  * The search row queries the SAME repository seam (`/api/search`): the field's IME
- * «search» action and the explicit «Найти» button submit, «Чарт» returns to the charts
- * without stopping playback, and «Повторить» retries exactly the last operation — so
- * the remote user never depends on the soft keyboard being reachable or dismissable.
+ * «search» action and the explicit «Найти» button submit (a result lives in the «Чарты»
+ * branch), «Чарты» returns to the charts without stopping playback, and «Повторить»
+ * retries exactly the last operation of the active branch — so the remote user never
+ * depends on the soft keyboard being reachable or dismissable.
  * Selecting a track row binds the shown list as the process-global [TvMusicPlayer]
  * transport's playlist and starts it on that row; the transport keeps playing after this
  * screen closes, auto-advances to the next track when one completes ([TvPlaylistPolicy])
@@ -165,6 +174,7 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var searchInput: EditText
     private lateinit var searchButton: Button
     private lateinit var chartsButton: Button
+    private lateinit var forYouButton: Button
 
     /** Открытый диалог текста песни (один на экран; пересоздаётся на каждый показ). */
     private var lyricsDialog: Dialog? = null
@@ -223,6 +233,7 @@ class TvMusicActivity : AppCompatActivity() {
         searchInput = findViewById(R.id.searchInput)
         searchButton = findViewById(R.id.searchButton)
         chartsButton = findViewById(R.id.chartsButton)
+        forYouButton = findViewById(R.id.forYouButton)
         backButton.setOnClickListener { finish() }
         // Retry repeats the LAST operation (charts or the failed search query).
         retryButton.setOnClickListener { controller.retry() }
@@ -250,8 +261,9 @@ class TvMusicActivity : AppCompatActivity() {
             lyricsFlow.open(track)
         }
         // The IME «search» action and the explicit «Найти» button are the same submit;
-        // «Чарт» empties the field and returns to the charts WITHOUT touching the
-        // transport — music that is playing keeps playing across the list swap.
+        // «Чарты» empties the field and returns to the charts WITHOUT touching the
+        // transport — music that is playing keeps playing across the list swap. Both tab
+        // buttons reload their branch ([TvMusicScreenController.selectTab]).
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 submitSearch()
@@ -263,8 +275,9 @@ class TvMusicActivity : AppCompatActivity() {
         searchButton.setOnClickListener { submitSearch() }
         chartsButton.setOnClickListener {
             searchInput.setText("")
-            controller.clearSearch()
+            controller.selectTab(TvMusicTab.CHARTS)
         }
+        forYouButton.setOnClickListener { controller.selectTab(TvMusicTab.FOR_YOU) }
         // Клавиатура НЕ всплывает на фокус сама (setShowSoftInputOnFocus(false), у XML-
         // атрибута нет публичного статуса): D-pad проходит через поле поиска вниз к
         // трекам без залипания. Открываем её только явным нажатием (DPAD_CENTER/клик).
@@ -324,7 +337,12 @@ class TvMusicActivity : AppCompatActivity() {
         TvFocusLift.attach(searchInput, reducedMotion)
         TvFocusLift.attach(searchButton, reducedMotion)
         TvFocusLift.attach(chartsButton, reducedMotion)
-        controller.onStateChanged = ::render
+        TvFocusLift.attach(forYouButton, reducedMotion)
+        // Одна точка рендера на все три наблюдателя: ветку выбирает активная вкладка,
+        // поэтому переключение вкладки, лента и чартовый список рисуются одинаково.
+        controller.onStateChanged = { renderCurrent() }
+        controller.onTabChanged = { renderCurrent() }
+        controller.onHomeStateChanged = { renderCurrent() }
         lyricsFlow.onStateChanged = { state ->
             // Фокус на скролл — только когда пришёл НОВЫЙ текст: перерисовки перевода
             // не должны вырывать D-pad у кнопки/скролла (требование панели).
@@ -332,8 +350,10 @@ class TvMusicActivity : AppCompatActivity() {
         }
         lyricsTranslationFlow.onStateChanged = { renderLyricsPanel(lyricsFlow.state, focusText = false) }
         TvMusicPlayer.onTransportChanged = ::renderTransportState
-        controller.load()
-        render(controller.state)
+        // Стартовая ветка — персональная лента «Для тебя»; пустая лента сама откатит
+        // экран на чарты, поэтому старт без ленты не оставляет пустое окно.
+        controller.loadHome()
+        renderCurrent()
         backButton.requestFocus()
     }
 
@@ -360,6 +380,8 @@ class TvMusicActivity : AppCompatActivity() {
         // The transport is global: teardown silences the controller but music keeps playing.
         controller.destroy()
         controller.onStateChanged = null
+        controller.onTabChanged = null
+        controller.onHomeStateChanged = null
         // Панель текста: глушим запрос в пути и снимаем хук рендера (окно умирает).
         lyricsFlow.destroy()
         lyricsFlow.onStateChanged = null
@@ -373,14 +395,38 @@ class TvMusicActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private fun render(state: TvMusicUiState) {
+    /**
+     * Единственная точка рендера: ветку выбирает АКТИВНАЯ вкладка контроллера
+     * ([TvMusicTab.FOR_YOU] — лента, [TvMusicTab.CHARTS] — чарты/поиск), а не то, какой из
+     * наблюдателей сработал, поэтому смена вкладки, состояние ленты и чартовый список
+     * рисуются одним и тем же путём. Общая часть (статусная строка, транспорт, цепочки
+     * фокуса) — после ветки.
+     */
+    private fun renderCurrent() {
         trackList.removeAllViews()
         trackRows.clear()
         retryButton.visibility = View.GONE
+        when (controller.tab) {
+            TvMusicTab.FOR_YOU -> renderHome(controller.homeState)
+            TvMusicTab.CHARTS -> renderCharts(controller.state)
+        }
+        renderTabStyles()
+        renderTransportState()
+        // DOWN из строки поиска ведёт к списку треков: список динамический, поэтому
+        // цель переставляется кодом после каждого рендера (XML nextFocusDown — лишь
+        // стартовый fallback на @+id/trackList).
+        rewireSearchDownFocus()
+    }
+
+    /** Ветка «Чарты»/поиск: те же четыре состояния, что и раньше — loading/error/empty/content. */
+    private fun renderCharts(state: TvMusicUiState) {
         when (state) {
             is TvMusicUiState.Loading -> {
                 stateText.visibility = View.VISIBLE
-                stateText.text = "Загрузка треков…"
+                stateText.text = getString(R.string.tv_music_charts_loading)
+                // Список стёрт этим же кадром: если фокус был в строке трека, окно
+                // осталось бы без фокуса — отдаём его устойчивой шапке.
+                if (currentFocus == null) backButton.requestFocus()
             }
             is TvMusicUiState.Error -> {
                 stateText.visibility = View.VISIBLE
@@ -402,84 +448,196 @@ class TvMusicActivity : AppCompatActivity() {
                 renderTracks(state.tracks)
             }
         }
-        renderTransportState()
-        // DOWN из строки поиска ведёт к списку треков: список динамический, поэтому
-        // цель переставляется кодом после каждого рендера (XML nextFocusDown — лишь
-        // стартовый fallback на @+id/trackList).
-        rewireSearchDownFocus()
+    }
+
+    /**
+     * Ветка «Для тебя»: полки персональной ленты. Loading/Failed — статусная строка (у
+     * сбоя свой «Повторить», который повторяет ИМЕННО ленту, а не чарты), Shelves — полки
+     * заголовками и строками, Empty — кадр до отката на чарты, который уже сделал
+     * контроллер ([TvMusicHomePolicy.tabAfterHomeResult]); фокус здесь всегда уходит в
+     * устойчивую шапку, потому что терминального «Повторить» у пустой ленты нет.
+     */
+    private fun renderHome(state: TvMusicHomeState) {
+        when (state) {
+            is TvMusicHomeState.Idle, is TvMusicHomeState.Loading -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_home_loading)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvMusicHomeState.Failed -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = state.message
+                retryButton.visibility = View.VISIBLE
+                if (currentFocus == null) retryButton.requestFocus()
+            }
+            is TvMusicHomeState.Empty -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_home_empty)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvMusicHomeState.Shelves -> {
+                stateText.visibility = View.GONE
+                renderShelves(state.shelves)
+            }
+        }
+    }
+
+    /**
+     * Полки ленты: заголовок (серверный [MusicShelf.title] — это данные, а не хардкод) и
+     * строки треков под ним. Индекс строки совпадает с позицией в плоской очереди
+     * ([TvMusicHomePolicy.playbackQueue]), поэтому пульт запускает ленту ровно с
+     * выбранного трека. Заголовок не фокусируется — D-pad его перешагивает.
+     */
+    private fun renderShelves(shelves: List<MusicShelf>) {
+        var index = 0
+        shelves.forEach { shelf ->
+            trackList.addView(
+                shelfHeading(shelf.title),
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(6)
+                    bottomMargin = dp(10)
+                },
+            )
+            shelf.items.forEach { track ->
+                addTrackRow(track, index) { controller.onHomeTrackActivated(it) }
+                index++
+            }
+        }
+        // Заголовки не фокусируются, поэтому строка ищется среди фокусируемых детей
+        // ([firstTrackRow]) — иначе после смены вкладки окно осталось бы без фокуса.
+        if (currentFocus == null || currentFocus === retryButton) {
+            firstTrackRow()?.requestFocus()
+        }
+    }
+
+    /** Заголовок полки: тема-цвета, жирный, НЕ фокусируемый ([MusicShelf.title] как есть). */
+    private fun shelfHeading(title: String): TextView = TextView(this).apply {
+        text = title
+        textSize = 24f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
+        isFocusable = false
+    }
+
+    /** Вкладки: активная — акцентная рамка и яркий текст, вторая — карточка и обычный. */
+    private fun renderTabStyles() {
+        val onFeed = controller.tab == TvMusicTab.FOR_YOU
+        styleTab(forYouButton, R.string.tv_music_tab_for_you, active = onFeed)
+        styleTab(chartsButton, R.string.tv_music_tab_charts, active = !onFeed)
+    }
+
+    /**
+     * Оформление одной вкладки: цвета только из темы, а TalkBack читает, какая вкладка
+     * открыта (текст плюс подпись активной — паритет с мобильным клиентом).
+     */
+    private fun styleTab(button: Button, labelRes: Int, active: Boolean) {
+        val label = getString(labelRes)
+        button.setTextColor(
+            ContextCompat.getColor(this, if (active) R.color.mars_text_strong else R.color.mars_text),
+        )
+        button.setBackgroundResource(if (active) R.drawable.bg_focus_accent else R.drawable.bg_focus_card)
+        button.contentDescription =
+            if (active) getString(R.string.tv_music_tab_active, label) else label
     }
 
     private fun renderTracks(tracks: List<MusicTrack>) {
         tracks.forEachIndexed { index, track ->
-            // Обложка трека: серверный thumbnail грузит TvImageLoader; при пустом/нерезолвящемся
-            // URL или ошибке загрузки вьюха остаётся GONE (строка читается как раньше).
-            val cover = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                visibility = View.GONE
-                contentDescription = null
-            }
-            val label = TextView(this).apply {
-                text = trackLabel(track)
-                textSize = 20f
-                isSingleLine = true
-                ellipsize = TextUtils.TruncateAt.END
-                setTextColor(ContextCompat.getColor(context, R.color.mars_text))
-            }
-            // Маркер текущего трека (вместо compound-drawable у Button-строки старой версии).
-            val marker = ImageView(this).apply {
-                setImageResource(R.drawable.ic_music)
-                imageTintList =
-                    ColorStateList.valueOf(ContextCompat.getColor(context, R.color.mars_accent))
-                visibility = View.GONE
-            }
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(24), 0, dp(24), 0)
-                setBackgroundResource(R.drawable.bg_focus_card)
-                isFocusable = true
-                isClickable = true
-                // Динамические строки получают собственный id, чтобы код мог навести
-                // nextFocusDown поля поиска на ПЕРВЫЙ трек: rewireSearchDownFocus().
-                id = View.generateViewId()
-                setOnClickListener { controller.onTrackActivated(index) }
-            }
-            row.addView(
-                cover,
-                LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    marginEnd = dp(14)
-                },
-            )
-            row.addView(
-                label,
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                },
-            )
-            row.addView(
-                marker,
-                LinearLayout.LayoutParams(dp(26), dp(26)).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    marginStart = dp(12)
-                },
-            )
-            TvFocusLift.attach(row, reducedMotion)
-            val trackRow = TrackRow(track.id, label, marker)
-            applyRowState(trackRow)
-            trackRows += trackRow
-            trackList.addView(
-                row,
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(72)).apply {
-                    bottomMargin = dp(12)
-                },
-            )
-            TvImageLoader.load(track.thumbnail, cover)
+            addTrackRow(track, index) { controller.onTrackActivated(it) }
         }
         // Hand D-pad focus to the list when nothing meaningful is focused (retry may be GONE now).
         if (currentFocus == null || currentFocus === retryButton) {
-            trackList.getChildAt(0)?.requestFocus()
+            firstTrackRow()?.requestFocus()
         }
+    }
+
+    /**
+     * Первая ФОКУСИРУЕМАЯ строка списка: в ветке чартов это trackList.getChildAt(0), а в
+     * ленте первым ребёнком полки идёт заголовок (не фокусируется) — после быстрого пути
+     * ищем первого фокусируемого ребёнка, иначе DOWN из поиска вёл бы в невидимую цель.
+     */
+    private fun firstTrackRow(): View? {
+        val first = trackList.getChildAt(0)
+        if (first != null && first.isFocusable) return first
+        for (index in 0 until trackList.childCount) {
+            val child = trackList.getChildAt(index)
+            if (child.isFocusable) return child
+        }
+        return null
+    }
+
+    /**
+     * Одна строка трека — общая для чартов и полок ленты: обложка, подпись, маркер
+     * текущего трека и [onActivate] с индексом строки (в ленте — позиция в плоской
+     * очереди полок, [TvMusicHomePolicy.playbackQueue]).
+     */
+    private fun addTrackRow(track: MusicTrack, index: Int, onActivate: (Int) -> Unit) {
+        // Обложка трека: серверный thumbnail грузит TvImageLoader; при пустом/нерезолвящемся
+        // URL или ошибке загрузки вьюха остаётся GONE (строка читается как раньше).
+        val cover = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+            contentDescription = null
+        }
+        val label = TextView(this).apply {
+            text = trackLabel(track)
+            textSize = 20f
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            setTextColor(ContextCompat.getColor(context, R.color.mars_text))
+        }
+        // Маркер текущего трека (вместо compound-drawable у Button-строки старой версии).
+        val marker = ImageView(this).apply {
+            setImageResource(R.drawable.ic_music)
+            imageTintList =
+                ColorStateList.valueOf(ContextCompat.getColor(context, R.color.mars_accent))
+            visibility = View.GONE
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            setBackgroundResource(R.drawable.bg_focus_card)
+            isFocusable = true
+            isClickable = true
+            // Динамические строки получают собственный id, чтобы код мог навести
+            // nextFocusDown поля поиска на ПЕРВЫЙ трек: rewireSearchDownFocus().
+            id = View.generateViewId()
+            setOnClickListener { onActivate(index) }
+        }
+        row.addView(
+            cover,
+            LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                marginEnd = dp(14)
+            },
+        )
+        row.addView(
+            label,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                gravity = Gravity.CENTER_VERTICAL
+            },
+        )
+        row.addView(
+            marker,
+            LinearLayout.LayoutParams(dp(26), dp(26)).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                marginStart = dp(12)
+            },
+        )
+        TvFocusLift.attach(row, reducedMotion)
+        val trackRow = TrackRow(track.id, label, marker)
+        applyRowState(trackRow)
+        trackRows += trackRow
+        trackList.addView(
+            row,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(72)).apply {
+                bottomMargin = dp(12)
+            },
+        )
+        TvImageLoader.load(track.thumbnail, cover)
     }
 
     /** Transport snapshot to the UI: transport pair, header line, row highlight. */
@@ -552,9 +710,10 @@ class TvMusicActivity : AppCompatActivity() {
             it.nextFocusDownId = R.id.searchInput
             it.nextFocusUpId = it.id
         }
-        // Вверх из строки поиска — только в видимые кнопки шапки.
+        // Вверх из строки поиска и вкладок — только в видимые кнопки шапки.
         searchInput.nextFocusUpId = backButton.id
         searchButton.nextFocusUpId = repeatButton.id
+        forYouButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
         chartsButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
     }
 
@@ -565,7 +724,9 @@ class TvMusicActivity : AppCompatActivity() {
      * Первый трек получает nextFocusUp обратно в поле поиска.
      */
     private fun rewireSearchDownFocus() {
-        val firstRow = trackList.getChildAt(0)
+        // Первая ФОКУСИРУЕМАЯ строка: в ленте первым ребёнком полки идёт заголовок,
+        // который не фокусируется, поэтому просто getChildAt(0) навёл бы DOWN в никуда.
+        val firstRow = firstTrackRow()
         val target = TvMusicFocusPolicy.downTargetFromSearchRow(
             firstTrackRowId = firstRow?.id?.takeIf { it != View.NO_ID },
             retryButtonId = R.id.retryButton,
@@ -573,6 +734,7 @@ class TvMusicActivity : AppCompatActivity() {
         )
         searchInput.nextFocusDownId = target
         searchButton.nextFocusDownId = target
+        forYouButton.nextFocusDownId = target
         chartsButton.nextFocusDownId = target
         // «Повторить» вниз — в первый трек, а без треков цели нет (фокус остаётся на месте;
         // самопетлю GONE-кнопке не ставим, чтобы чужой focusSearch не зациклился о невидимое).

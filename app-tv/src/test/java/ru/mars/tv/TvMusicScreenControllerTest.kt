@@ -3,6 +3,7 @@ package ru.mars.tv
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import java.util.concurrent.Executor
 
@@ -36,6 +37,12 @@ class TvMusicScreenControllerTest {
         var calls = 0
         var chartCalls = 0
         val queries = mutableListOf<String>()
+
+        /** Ответы ленты «Для тебя»: своя очередь и свой фолбэк, счётчик отдельный. */
+        val homeResults = ArrayDeque<TvMusicHomeResult>()
+        var homeFallback: TvMusicHomeResult = TvMusicHomeResult.Loaded(emptyList())
+        var homeCalls = 0
+
         override fun fetchCharts(): TvMusicChartsResult {
             calls++
             chartCalls++
@@ -46,6 +53,12 @@ class TvMusicScreenControllerTest {
             calls++
             queries += query
             return if (results.isNotEmpty()) results.removeFirst() else fallback
+        }
+
+        override fun fetchHome(): TvMusicHomeResult {
+            calls++
+            homeCalls++
+            return if (homeResults.isNotEmpty()) homeResults.removeFirst() else homeFallback
         }
     }
 
@@ -64,6 +77,9 @@ class TvMusicScreenControllerTest {
     }
 
     private fun track(id: String) = MusicTrack(id = id, title = "Track $id", artist = "Artist $id", duration = "3:20")
+
+    private fun shelf(id: String, items: List<MusicTrack>) =
+        MusicShelf(id = id, title = "Shelf $id", items = items)
 
     private class Harness {
         val gateway = FakeGateway()
@@ -139,6 +155,7 @@ class TvMusicScreenControllerTest {
         val throwing = object : TvMusicGateway {
             override fun fetchCharts(): TvMusicChartsResult = throw IllegalStateException("boom")
             override fun search(query: String): TvMusicChartsResult = throw IllegalStateException("boom")
+            override fun fetchHome(): TvMusicHomeResult = throw IllegalStateException("boom")
         }
         val states = mutableListOf<TvMusicUiState>()
         val controller = TvMusicScreenController(throwing, h.transport, h.executor, h.ui).apply {
@@ -325,6 +342,105 @@ class TvMusicScreenControllerTest {
         // The pre-destroy charts fetch still runs on the executor, but nothing else may.
         assertEquals("destroyed controller must not start new fetches", 1, h.gateway.calls)
         assertTrue("destroyed controller must not search", h.gateway.queries.isEmpty())
+    }
+
+    // --- personal feed «Для тебя» (GET /api/home) ------------------------------------------------
+
+    @Test
+    fun loadHomeLoadsTheFeedAndSelectsTheForYouTab() {
+        val h = Harness()
+        val shelves = listOf(shelf("continue", listOf(track("a"), track("b"))))
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(shelves)
+        h.controller.loadHome()
+        assertEquals("лента показывает загрузку до ответа", TvMusicHomeState.Loading, h.controller.homeState)
+        assertEquals(TvMusicTab.FOR_YOU, h.controller.tab)
+        h.drain()
+        assertEquals(TvMusicHomeState.Shelves(shelves), h.controller.homeState)
+        assertEquals("лента не дёргает чарты", 0, h.gateway.chartCalls)
+    }
+
+    @Test
+    fun emptyFeedFallsBackToTheCharts() {
+        val h = Harness()
+        val charts = listOf(track("c1"))
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(listOf(shelf("new", emptyList())))
+        h.gateway.fallback = TvMusicChartsResult.Loaded(charts)
+        h.controller.loadHome()
+        h.drain()
+        assertEquals("пустая лента откатывает на чарты", TvMusicTab.CHARTS, h.controller.tab)
+        assertEquals(TvMusicUiState.Content(charts), h.controller.state)
+        assertEquals("откат обязан перезапросить чарты", 1, h.gateway.chartCalls)
+    }
+
+    @Test
+    fun failedFeedStaysOnTheFeedAndRetryRepeatsIt() {
+        val h = Harness()
+        h.gateway.homeFallback = TvMusicHomeResult.Failed("timeout")
+        h.controller.loadHome()
+        h.drain()
+        assertEquals(TvMusicHomeState.Failed("timeout"), h.controller.homeState)
+        assertEquals("сбой ленты не уводит на чарты", TvMusicTab.FOR_YOU, h.controller.tab)
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(listOf(shelf("new", listOf(track("n")))))
+        h.controller.retry()
+        h.drain()
+        assertEquals("«Повторить» на ленте повторяет ЛЕНТУ", 2, h.gateway.homeCalls)
+        assertEquals("«Повторить» не изобретает запрос к чартам", 0, h.gateway.chartCalls)
+        assertEquals(TvMusicTab.FOR_YOU, h.controller.tab)
+    }
+
+    @Test
+    fun selectTabReloadsTheSelectedBranch() {
+        val h = Harness()
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(listOf(shelf("new", listOf(track("n")))))
+        h.gateway.fallback = TvMusicChartsResult.Loaded(listOf(track("c")))
+        h.controller.selectTab(TvMusicTab.CHARTS)
+        h.drain()
+        assertEquals(TvMusicTab.CHARTS, h.controller.tab)
+        assertEquals(1, h.gateway.chartCalls)
+        h.controller.selectTab(TvMusicTab.FOR_YOU)
+        h.drain()
+        assertEquals(TvMusicTab.FOR_YOU, h.controller.tab)
+        assertEquals(1, h.gateway.homeCalls)
+    }
+
+    @Test
+    fun homeTrackActivationPlaysTheFlattenedShelfQueue() {
+        val h = Harness()
+        val shelves = listOf(
+            shelf("continue", listOf(track("a"), track("b"))),
+            shelf("new", listOf(track("c"))),
+        )
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(shelves)
+        h.controller.loadHome()
+        h.drain()
+        // Индекс строки на экране == позиция в плоской очереди: третий трек — «c».
+        h.controller.onHomeTrackActivated(2)
+        assertEquals(listOf(track("c")), h.transport.played)
+        assertEquals(listOf(shelves.flatMap { it.items } to 2), h.transport.playlists)
+    }
+
+    @Test
+    fun homeTrackActivationWithoutShelvesIsNoop() {
+        val h = Harness()
+        h.controller.onHomeTrackActivated(0) // лента ещё не загружена
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(emptyList())
+        h.controller.loadHome()
+        h.drain()
+        h.controller.onHomeTrackActivated(0) // пустая лента
+        h.controller.onHomeTrackActivated(-1)
+        assertTrue("никакого фантомного воспроизведения", h.transport.played.isEmpty())
+    }
+
+    @Test
+    fun destroyedControllerIgnoresFeedRequests() {
+        val h = Harness()
+        h.gateway.homeFallback = TvMusicHomeResult.Loaded(listOf(shelf("new", listOf(track("n")))))
+        h.controller.loadHome()
+        h.controller.destroy()
+        h.controller.loadHome()
+        h.controller.selectTab(TvMusicTab.FOR_YOU)
+        h.drain()
+        assertEquals("destroyed controller must not start new feed fetches", 1, h.gateway.homeCalls)
     }
 
     // --- playback -------------------------------------------------------------------------------
