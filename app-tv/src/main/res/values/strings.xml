@@ -24,4 +24,17 @@
     <string name="tv_status_reasoning_saving">Сохраняю уровень размышлений…</string>
     <string name="tv_status_reasoning_saved">Уровень размышлений: %1$s</string>
     <string name="tv_status_reasoning_save_failed">Не удалось изменить уровень размышлений: %1$s</string>
+
+    <!-- Вкладки ТВ-музыки: персональная лента «Для тебя» (/api/home) и каталог «Чарты». -->
+    <string name="tv_music_tab_for_you">Для тебя</string>
+    <string name="tv_music_tab_charts">Чарты</string>
+    <!-- TalkBack: подпись активной вкладки (MUS-M3 parity мобильного клиента). -->
+    <string name="tv_music_tab_active">%1$s, открытая вкладка</string>
+
+    <!-- Состояния персональной ленты. Пустая лента откатывает на чарты, поэтому её текст
+         виден только если откат ещё не отрисован. -->
+    <string name="tv_music_home_loading">Загружаю ленту…</string>
+    <string name="tv_music_home_empty">Лента пока пуста</string>
+    <!-- Состояние загрузки ветки чартов/поиска (было хардкодом в Kotlin). -->
+    <string name="tv_music_charts_loading">Загрузка треков…</string>
 </resources>

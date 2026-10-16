@@ -154,8 +154,9 @@
             android:layout_height="@dimen/tv_music_control_h" />
     </LinearLayout>
 
-    <!-- Search row: IME actionSearch on the field plus explicit D-pad «Найти»/«Чарт»
-         buttons — the remote user never depends on the soft keyboard being reachable. -->
+    <!-- Search row: IME actionSearch on the field plus explicit D-pad «Найти» and the
+         two branch tabs «Для тебя»/«Чарты» — the remote user never depends on the soft
+         keyboard being reachable. -->
     <LinearLayout
         android:orientation="horizontal"
         android:gravity="center_vertical"
@@ -194,16 +195,17 @@
             android:gravity="center"
             android:focusable="true"
             android:nextFocusLeft="@+id/searchInput"
-            android:nextFocusRight="@+id/chartsButton"
+            android:nextFocusRight="@+id/forYouButton"
             android:nextFocusUp="@+id/repeatButton"
             android:nextFocusDown="@+id/trackList"
             android:layout_marginStart="16dp"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/tv_music_control_h" />
 
+        <!-- Вкладка «Для тебя»: персональная лента /api/home (паритет с мобильной). -->
         <Button
-            android:id="@+id/chartsButton"
-            android:text="Чарт"
+            android:id="@+id/forYouButton"
+            android:text="@string/tv_music_tab_for_you"
             android:textSize="18sp"
             android:textColor="@color/mars_text"
             android:background="@drawable/bg_focus_card"
@@ -212,6 +214,24 @@
             android:gravity="center"
             android:focusable="true"
             android:nextFocusLeft="@+id/searchButton"
+            android:nextFocusRight="@+id/chartsButton"
+            android:nextFocusUp="@+id/stopButton"
+            android:nextFocusDown="@+id/trackList"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/tv_music_control_h" />
+
+        <Button
+            android:id="@+id/chartsButton"
+            android:text="@string/tv_music_tab_charts"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/forYouButton"
             android:nextFocusRight="@+id/chartsButton"
             android:nextFocusUp="@+id/stopButton"
             android:nextFocusDown="@+id/trackList"
