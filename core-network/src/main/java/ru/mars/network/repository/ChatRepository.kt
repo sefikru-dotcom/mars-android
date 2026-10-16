@@ -15,6 +15,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import ru.mars.network.api.MarsApi
 import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatAttachment
@@ -91,6 +92,20 @@ class ChatRepository(
      * with [client] unless overridden.
      */
     private val restClient: OkHttpClient = HttpClients.rest,
+    /**
+     * Базовый адрес бэкенда для вызовов БЕЗ явного URL — сейчас это только
+     * [transcribePcmWav] (у него контрактный no-arg вид). Остальные методы
+     * репозитория по-прежнему принимают baseUrl параметром. По умолчанию —
+     * [MarsApi.BASE_URL]; injectable для тестов против локального сервера.
+     */
+    private val baseUrl: String = MarsApi.BASE_URL,
+    /**
+     * Источник device-credential для [transcribePcmWav]: тот же `store.read()`
+     * AndroidKeyStore, что кормит остальные no-arg-гейтвеи в `ChatActivity`.
+     * `null`-результат — устройство не привязано, распознавание честно
+     * отказывает [TranscribeOutcome.Failure] без сетевого вызова.
+     */
+    private val credentialProvider: () -> ConsumedDeviceCredential? = { null },
 ) {
     /**
      * Sends a message and streams the answer.
@@ -322,6 +337,60 @@ class ChatRepository(
             throw cancelled
         } catch (error: Exception) {
             UploadOutcome.Failure(describeNetworkError(error))
+        }
+    }
+
+    /**
+     * Распознаёт речь из готовой WAV-записи: `POST /api/transcribe` (multipart,
+     * поле файла ровно `file`). Контракт эндпоинта — fixtures/voice-mvp-contract.md,
+     * раздел 1; успех — HTTP 200 и JSON `{"ok": true, "transcript": "<текст>"}`.
+     *
+     * Авторизация — существующий device-Bearer ([credentialProvider], та же схема,
+     * что у остальных native-вызовов); собственная схема не изобретается.
+     * `baseUrl`/`credential` берутся из конструктора, потому что контрактный вид
+     * метода — no-arg по URL (в отличие от [uploadAttachment]).
+     *
+     * Никогда не бросает (кроме отмены корутины): пустой вход, отсутствие
+     * credential, HTTP-ошибка, пустой/битый ответ и транспортный сбой сворачиваются
+     * в явный [TranscribeOutcome.Failure]. Пустой [wav] отсекается ДО сети.
+     */
+    suspend fun transcribePcmWav(
+        wav: ByteArray,
+        filename: String = "voice.wav"
+    ): TranscribeOutcome = withContext(Dispatchers.IO) {
+        if (wav.isEmpty()) {
+            return@withContext TranscribeOutcome.Failure("Empty recording: nothing to transcribe")
+        }
+        val safeName = filename.trim()
+        if (safeName.isEmpty()) {
+            return@withContext TranscribeOutcome.Failure("Transcribe filename must not be blank")
+        }
+        val credential = credentialProvider()
+            ?: return@withContext TranscribeOutcome.Failure("No device credential")
+        val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("file", safeName, wav.toRequestBody("audio/wav".toMediaType()))
+            .build()
+        val request = Request.Builder()
+            .url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/transcribe").build())
+            .header("Authorization", bearer(credential)).post(multipart).build()
+        try {
+            restClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (response.code != 200) {
+                    return@use TranscribeOutcome.Failure(describeHttpError(response.code, body), response.code)
+                }
+                val obj = StreamEventMapper.parseObject(body)
+                    ?: return@use TranscribeOutcome.Failure("Malformed transcribe response")
+                val transcript = (obj["transcript"] as? String)?.trim().orEmpty()
+                if (transcript.isEmpty()) {
+                    return@use TranscribeOutcome.Failure("Transcribe response missing transcript")
+                }
+                TranscribeOutcome.Success(transcript)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            TranscribeOutcome.Failure(describeNetworkError(error))
         }
     }
 
