@@ -203,6 +203,26 @@
                 android:layout_marginStart="12dp"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
+
+            <!-- Чип квоты провайдера (A10 parity): видимость, подпись и цвет — из
+                 TvQuotaPolicy. Интерактивен ровно тогда, когда повтор осмыслен
+                 (ошибка/не прочитано); в остальных состояниях D-pad его пропускает. -->
+            <TextView
+                android:id="@+id/quotaChip"
+                android:textColor="@color/mars_text_em"
+                android:textSize="16sp"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:maxWidth="420dp"
+                android:visibility="gone"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:background="@drawable/bg_chip"
+                android:layout_marginStart="12dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
         </LinearLayout>
 
         <!-- Transcript + floating «К последнему» jump control. Auto-scroll is pin-aware

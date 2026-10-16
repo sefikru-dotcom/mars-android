@@ -12,6 +12,24 @@
     <string name="tv_picker_close">Закрыть</string>
     <string name="tv_picker_current">текущий выбор</string>
 
+    <!-- Чип квоты провайдера в статус-строке чата (mobile A10 parity). Подпись, видимость
+         и тон — из TvQuotaPolicy; строки здесь, чтобы экран не собирал прозу сам. -->
+    <string name="tv_chip_quota_loading">Квота…</string>
+    <string name="tv_chip_quota_default">Квота</string>
+    <string name="tv_chip_quota_unsupported">Квота недоступна</string>
+    <string name="tv_chip_quota_unread">Квота не прочитана</string>
+    <string name="tv_chip_quota_error">Квота: ошибка</string>
+    <string name="tv_chip_quota_of">%1$s из %2$s (%3$d%%)</string>
+    <string name="tv_chip_quota_left">осталось %1$d%%</string>
+    <string name="tv_chip_quota_desc">Квота провайдера</string>
+    <string name="tv_chip_quota_ok_desc">Квота провайдера: %1$s</string>
+    <string name="tv_chip_quota_loading_desc">Квота провайдера: загрузка</string>
+    <string name="tv_chip_quota_unread_desc">Квота провайдера недоступна</string>
+    <string name="tv_chip_quota_error_desc">Квота провайдера: ошибка</string>
+    <string name="tv_chip_quota_retry_desc">%1$s. Нажмите, чтобы обновить</string>
+    <string name="tv_chip_quota_no_data">Провайдер не отдаёт данные о квоте</string>
+    <string name="tv_chip_quota_no_data_provider">Провайдер %1$s не отдаёт данные о квоте</string>
+
     <!-- Строки статуса для загрузки/применения параметров хода. -->
     <string name="tv_status_models_loading">Загружаю модели…</string>
     <string name="tv_status_models_unavailable">Каталог моделей недоступен</string>

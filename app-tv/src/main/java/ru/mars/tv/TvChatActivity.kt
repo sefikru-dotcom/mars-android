@@ -38,6 +38,7 @@ import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.MidTurnRecoveryCoordinator
 import ru.mars.network.repository.ModelsRepository
+import ru.mars.network.repository.ProviderQuotaOutcome
 import ru.mars.network.repository.ReasoningRepository
 import ru.mars.network.repository.ReasoningStatusResult
 import ru.mars.network.repository.SessionRepository
@@ -52,6 +53,11 @@ import ru.mars.tv.chat.TvMarkdownRenderer
 import ru.mars.tv.chat.TvModelChoicePrefs
 import ru.mars.tv.chat.TvModelPickerEntry
 import ru.mars.tv.chat.TvModelSelection
+import ru.mars.tv.chat.TvQuotaAmountsShape
+import ru.mars.tv.chat.TvQuotaChip
+import ru.mars.tv.chat.TvQuotaPolicy
+import ru.mars.tv.chat.TvQuotaState
+import ru.mars.tv.chat.TvQuotaTone
 import ru.mars.tv.chat.TvReasoningChoicePrefs
 import ru.mars.tv.chat.TvReasoningSelection
 import ru.mars.tv.chat.TvSteerPolicy
@@ -100,6 +106,13 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var newChat: Button
     private lateinit var statusView: TextView
     private lateinit var contextView: TextView
+
+    /**
+     * Чип квоты провайдера (mobile A10 parity) — статус-строка рядом с индикатором
+     * контекста. Числа квоты относятся к АККАУНТУ провайдера, а не к диалогу, и
+     * локальный бюджет контекста ([contextView]) остаётся отдельным источником.
+     */
+    private lateinit var quotaChip: TextView
     private lateinit var chatRoot: LinearLayout
     private lateinit var sessionsButton: Button
     private lateinit var sessionsOverlay: View
@@ -153,6 +166,13 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var reasoningSelection: TvReasoningSelection
     private lateinit var modelButton: Button
     private lateinit var reasoningButton: Button
+
+    /**
+     * Чип квоты провайдера: решения (видимость/состояние/тон) — в чистой
+     * [TvQuotaPolicy] (JVM-тесты), экран только возит HTTP и рендерит модель.
+     * Только ЧТЕНИЕ: квота нигде не пишется и не мутируется.
+     */
+    private val quotaPolicy = TvQuotaPolicy()
 
     // Пикер параметров хода: один модальный оверлей на модель и уровни размышлений
     // (механика та же, что у браузера диалогов: блокировка фокуса чата, BACK, возврат).
@@ -278,6 +298,12 @@ class TvChatActivity : AppCompatActivity() {
         newChat = findViewById(R.id.newChatButton)
         statusView = findViewById(R.id.statusText)
         contextView = findViewById(R.id.contextText)
+        quotaChip = findViewById(R.id.quotaChip)
+        // Чип квоты интерактивен только там, где повтор осмыслен (политика решает это в
+        // canRefresh); клик — повторное чтение квоты, ничего не пишем.
+        quotaChip.setOnClickListener {
+            if (quotaPolicy.model().canRefresh) refreshProviderQuota()
+        }
         val back = findViewById<Button>(R.id.backButton)
         chatRoot = findViewById(R.id.chatRoot)
         sessionsButton = findViewById(R.id.sessionsButton)
@@ -327,7 +353,9 @@ class TvChatActivity : AppCompatActivity() {
         modelButton.setOnClickListener { chooseModel() }
         reasoningButton.setOnClickListener { chooseReasoningEffort() }
         wireParamsPicker()
-        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, displayModeButton, miniPlayerToggle, jumpToBottom, modelButton, reasoningButton, closeParamsButton)
+        TvFocusLift.attachAll(input, send, newChat, back, sessionsButton, closeSessions, displayModeButton, miniPlayerToggle, jumpToBottom, modelButton, reasoningButton, quotaChip, closeParamsButton)
+        // Стартовое состояние чипа квоты: скрыт до открытия диалога (провайдер неизвестен).
+        renderQuotaChip()
         miniPlayerToggle.setOnClickListener {
             TvMusicPlayer.togglePlayPause()
             renderMiniPlayer()
@@ -710,6 +738,9 @@ class TvChatActivity : AppCompatActivity() {
             sessionFlow.endTurn()
             renderStatus()
             renderSendControl()
+            // Диалог перечитан из истории: квота провайдера (числа аккаунта) обновляется
+            // тем же проходом — mobile parity, сбой сети чип не роняет.
+            refreshProviderQuota()
         }
 
         override fun onGiveUp(reason: String) {
@@ -1227,6 +1258,122 @@ class TvChatActivity : AppCompatActivity() {
         if (label == null && reasoningButton.hasFocus()) modelButton.requestFocus()
         reasoningButton.visibility = if (label == null) View.GONE else View.VISIBLE
         reasoningButton.text = getString(R.string.tv_chip_reasoning, label.orEmpty())
+    }
+
+    /**
+     * Чип квоты провайдера в статус-строке ([TvQuotaPolicy]): тон политики переводится
+     * в палитру MarsTheme, проза — из ресурсов (экран не собирает текст сам). Чип
+     * интерактивен РОВНО при `canRefresh`: там, где повтор бессмыслен («провайдер не
+     * отдаёт квоту»), он остаётся непроходимым для D-pad, а не рисует ложную кнопку.
+     */
+    private fun renderQuotaChip() {
+        if (!::quotaChip.isInitialized) return
+        val model = quotaPolicy.model()
+        // Уход чипа (скрытие или потеря интерактива) не имеет права оставить D-pad на
+        // исчезающем элементе — тот же приём, что в [renderReasoningChip].
+        if ((!model.visible || !model.canRefresh) && quotaChip.hasFocus() && ::modelButton.isInitialized) {
+            modelButton.requestFocus()
+        }
+        quotaChip.visibility = if (model.visible) View.VISIBLE else View.GONE
+        quotaChip.text = quotaLabel(model)
+        quotaChip.contentDescription = quotaDescription(model)
+        quotaChip.isFocusable = model.canRefresh
+        quotaChip.isClickable = model.canRefresh
+        quotaChip.setBackgroundResource(if (model.canRefresh) R.drawable.bg_focus_chip else R.drawable.bg_chip)
+        quotaChip.setTextColor(ContextCompat.getColor(this, when (model.tone) {
+            TvQuotaTone.ONLINE -> R.color.mars_status_online
+            TvQuotaTone.WARNING -> R.color.mars_status_warning
+            TvQuotaTone.ALERT -> R.color.mars_status_error
+            TvQuotaTone.NEUTRAL -> R.color.mars_text_em
+        }))
+    }
+
+    /** Подпись чипа: числа форматирует политика (JVM-тест), проза — из ресурсов. */
+    private fun quotaLabel(model: TvQuotaChip): String = when (model.state) {
+        TvQuotaState.HIDDEN -> ""
+        TvQuotaState.LOADING -> getString(R.string.tv_chip_quota_loading)
+        TvQuotaState.UNSUPPORTED -> getString(R.string.tv_chip_quota_unsupported)
+        TvQuotaState.UNAVAILABLE -> getString(R.string.tv_chip_quota_unread)
+        TvQuotaState.ERROR -> getString(R.string.tv_chip_quota_error)
+        TvQuotaState.OK -> quotaAmountsLabel(model)
+    }
+
+    /** Числовая подпись успеха; выдуманных нулей нет — нечего показать, значит «Квота». */
+    private fun quotaAmountsLabel(model: TvQuotaChip): String {
+        val remaining = model.remaining
+        val limit = model.limit
+        val percent = model.percentRemaining
+        return when (model.amountsShape) {
+            TvQuotaAmountsShape.REMAINING_OF_LIMIT ->
+                if (remaining != null && limit != null && percent != null) {
+                    getString(
+                        R.string.tv_chip_quota_of,
+                        TvQuotaPolicy.formatAmount(remaining),
+                        TvQuotaPolicy.formatAmount(limit),
+                        percent,
+                    )
+                } else {
+                    getString(R.string.tv_chip_quota_default)
+                }
+            TvQuotaAmountsShape.REMAINING_ONLY ->
+                remaining?.let { TvQuotaPolicy.formatAmount(it) } ?: getString(R.string.tv_chip_quota_default)
+            TvQuotaAmountsShape.PERCENT_ONLY ->
+                percent?.let { getString(R.string.tv_chip_quota_left, it) } ?: getString(R.string.tv_chip_quota_default)
+            TvQuotaAmountsShape.NONE -> getString(R.string.tv_chip_quota_default)
+        }
+    }
+
+    /**
+     * Пояснение для фокуса/озвучки. У «не поддерживается» причина — сообщение сервера,
+     * иначе честная фраза с именем провайдера; у сбоя — текст сети (или общая фраза).
+     * Повторяемое состояние дописывает подсказку о нажатии — кнопка не бывает немой.
+     */
+    private fun quotaDescription(model: TvQuotaChip): String {
+        val base = when (model.state) {
+            TvQuotaState.HIDDEN -> ""
+            TvQuotaState.LOADING -> getString(R.string.tv_chip_quota_loading_desc)
+            TvQuotaState.UNSUPPORTED -> model.note ?: run {
+                val name = model.providerName
+                if (name.isNullOrBlank()) getString(R.string.tv_chip_quota_no_data)
+                else getString(R.string.tv_chip_quota_no_data_provider, name)
+            }
+            TvQuotaState.UNAVAILABLE -> getString(R.string.tv_chip_quota_unread_desc)
+            TvQuotaState.ERROR -> model.note ?: getString(R.string.tv_chip_quota_error_desc)
+            TvQuotaState.OK -> getString(R.string.tv_chip_quota_ok_desc, quotaLabel(model))
+        }
+        return if (model.canRefresh && base.isNotEmpty()) {
+            getString(R.string.tv_chip_quota_retry_desc, base)
+        } else {
+            base
+        }
+    }
+
+    /**
+     * Читает квоту активного провайдера (mobile A10 parity): при открытии диалога и при
+     * перезагрузке истории — в остальных состояниях провайдер неизвестен, а числа
+     * относятся к АККАУНТУ, не к диалогу. Сбой сети не роняет экран: чип переходит в
+     * ERROR с доступным повтором. Ручка только читающая — квота не пишется и не мутируется.
+     */
+    private fun refreshProviderQuota() {
+        val credential = store.read() ?: run {
+            quotaPolicy.reset()
+            renderQuotaChip()
+            return
+        }
+        quotaPolicy.onLoading()
+        renderQuotaChip()
+        lifecycleScope.launch {
+            val outcome = try {
+                SessionRepository().getProviderQuota(BASE_URL, credential)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // Пустое сообщение — не повод сочинять текст: общую фразу даст ресурс.
+                ProviderQuotaOutcome.Failure(error.message ?: "")
+            }
+            quotaPolicy.apply(outcome)
+            renderQuotaChip()
+        }
     }
 
     /**
@@ -2053,6 +2200,9 @@ class TvChatActivity : AppCompatActivity() {
                     modelSelection.setSessionModel(outcome.detail.model, outcome.detail.modelProvider)
                     renderModelChip()
                     refreshReasoningStatus()
+                    // Квота провайдера читается вместе с открытием диалога (mobile A10
+                    // parity): без сессии провайдер неизвестен, а числа относятся к аккаунту.
+                    refreshProviderQuota()
                     resetLiveAnswerState()
                     // Внеэкранная сборка + подмена одним проходом (renderTranscriptRows):
                     // длинная история не блокирует главный поток и не даёт пустого кадра.
