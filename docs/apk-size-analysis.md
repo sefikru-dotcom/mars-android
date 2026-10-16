@@ -5,20 +5,29 @@
 (`flock … ./gradlew --no-daemon --max-workers=1`), разбор — скриптами по
 zip/dex/mapping артефактам. Ничего не оценено «на глаз».
 
+> **Итог приёмки (актуально).** Принятая сборка на `main` — **5 216 221 Б**
+> (против 5 632 694 Б до сужения, выигрыш **−416 473 Б, −7,4 %**). Колонка
+> «после» в таблицах ниже (5 201 669 Б) — это промежуточная версия правила,
+> в которой R8 переименовывал модели музыки; она **дефектна в рантайме** и
+> служит только для сравнения состава dex. Разница 14 552 Б — цена сохранения
+> рефлексионного графа `ru.mars.network.model` (см. §2 и §3).
+
 ## 1. Замеры до/после
 
-| метрика | до (широкий keep) | после (сужен) | Δ |
-|---|---:|---:|---:|
-| APK (unsigned), байт | 5 632 694 | **5 201 669** | **−431 025 (−7.65 %)** |
-| `classes.dex`, байт | 4 347 264 | **3 916 464** | **−430 800 (−9.91 %)** |
-| `resources.arsc`, байт | 458 800 | 458 800 | 0 |
-| классы в dex | 4 778 | 4 625 | −153 |
-| методы в dex | 28 266 | 25 457 | −2 809 |
-| строки (strings) | 25 278 | 22 913 | −2 365 |
-| поля / типы / прототипы | 16 235 / 6 024 / 7 679 | 15 806 / 5 867 / 6 901 | − |
-| классы `ru.mars.*` (по коду) | 1 186 | 1 038 | −148 |
-| байты кода `ru.mars.*` | 659 100 | 517 934 | −141 166 |
-| классы `ru/mars` с исходным именем в dex | 529 | 286 | −243 |
+| метрика | до (широкий keep) | промежуточно | **принято (main)** | Δ принято |
+|---|---:|---:|---:|---:|
+| APK (unsigned), байт | 5 632 694 | 5 201 669 | **5 216 221** | **−416 473 (−7,39 %)** |
+| `classes.dex`, байт | 4 347 264 | 3 916 464 | 3 931 016 | −416 248 |
+| `resources.arsc`, байт | 458 800 | 458 800 | 458 800 | 0 |
+| классов в dex | 4 778 | 4 625 | 4 630 | −148 |
+| методов в dex | 28 266 | 25 457 | 25 561 | −2 705 |
+| строк в dex | 25 278 | 22 913 | 22 966 | −2 312 |
+| полей / типов / прототипов | 16 235 / 6 024 / 7 679 | 15 806 / 5 867 / 6 901 | 15 818 / 5 874 / 6 922 | −417 / −150 / −757 |
+
+Колонки «до» и «промежуточно» — из отчёта воркера (тот же способ подсчёта по
+заголовку dex); колонка «принято» измерена заново по артефакту `main` скриптом
+по `classes.dex`. Разница между «промежуточно» и «принято» — ровно те 8 моделей
+`ru.mars.network.model`, что восстановлены keep-правилами.
 
 Выигрыш целиком в dex: `resources.arsc` и `res/**` не изменились. Dex — вообще
 доминанта APK (77 % до, 75 % после); native-библиотек в приложении нет.
@@ -36,12 +45,21 @@ zip/dex/mapping артефактам. Ничего не оценено «на г
 ```
 -keep class ru.mars.network.repository.MusicRepository { *; }
 -keep class ru.mars.network.repository.MusicRepository$* { *; }
+-keep class ru.mars.network.model.MusicTrack { *; }
+-keep class ru.mars.network.model.PlaybackStatus { *; }
+-keep class ru.mars.network.model.MusicPlayerState { *; }
+-keep class ru.mars.network.model.MusicSearchResult { *; }
+-keep class ru.mars.network.model.LyricsResult { *; }
+-keep class ru.mars.network.model.Playlist { *; }
+-keep class ru.mars.network.model.MusicShelf { *; }
+-keep class ru.mars.network.model.HistoryEntry { *; }
 ```
 
 ### Почему это безопасно
 
-Весь рефлексионный сериализационный путь в `ru.mars.network` — это **ровно** модели
-`MusicRepository`. Он единственный строит Moshi с `KotlinJsonAdapterFactory`:
+Рефлексионный сериализационный путь в `ru.mars.network` — это **не только**
+`MusicRepository`, но он и музыкальные модели из `ru.mars.network.model`.
+`MusicRepository` единственный строит Moshi с `KotlinJsonAdapterFactory`:
 
 - `MusicRepository.kt:43` — `Moshi.Builder().add(KotlinJsonAdapterFactory()).build()`;
 - 22 вложенных data-класса помечены `@JsonClass(generateAdapter = false)`
@@ -49,6 +67,25 @@ zip/dex/mapping артефактам. Ничего не оценено «на г
 
 `KotlinJsonAdapterFactory` читает Kotlin-метаданные, primary-конструктор и имена
 свойств — поэтому именно эти классы обязаны дожить до рантайма с именами и членами.
+
+**Важная поправка.** Первоначальная версия правила сохраняла только
+`MusicRepository`, и это был **runtime-дефект**: модели музыки из
+`ru.mars.network.model` (`MusicTrack`, `LyricsResult`, `PlaybackStatus`,
+`MusicPlayerState`, `MusicSearchResult`, `Playlist`, `MusicShelf`, `HistoryEntry`)
+передаются в тот же рефлексионный `moshi.adapter(...)` как типы-аргументы, поэтому
+R8 переименовывал их вместе с полями. По `mapping.txt` это выглядело так:
+
+```
+ru.mars.network.model.LyricsResult  -> m9.f1   (translated -> a)
+ru.mars.network.model.MusicTrack    -> m9.n1   (id -> a)
+ru.mars.network.model.PlaybackStatus -> m9.o1
+```
+
+Следствие: необязательные поля молча становились `null`, обязательные
+(`MusicTrack.id`) бросали `JsonDataException` — и только в release, то есть на
+устройстве. Дебажные тесты этого не видят: R8 в них выключен. Замер «до/после»
+ниже (5 201 669 Б) относится именно к этой дефектной версии; рабочая сборка с
+сохранением моделей даёт **5 216 221 Б** — цена корректности ≈14 КБ.
 
 Остальной слой `ru.mars.network` рефлексией по классам не сериализуется:
 
@@ -65,26 +102,37 @@ zip/dex/mapping артефактам. Ничего не оценено «на г
 
 ## 3. Проверка, что сериализация не сломана
 
-Сборка release прошла (`BUILD SUCCESSFUL`), затем подтверждено по dex:
+Сборка release прошла (`BUILD SUCCESSFUL`), затем подтверждено по dex и `mapping.txt`:
 
-- все 54 класса `MusicRepository$*` присутствуют в dex под **исходными именами**;
+- все 54 класса `MusicRepository$*` присутствуют в dex под **исходными именами**
+  (плюс 8 моделей `ru.mars.network.model` из списка выше — итого 9 сохранённых
+  записей рефлексионного графа проверяет гейт `scripts/apk-contract-check.py`);
 - структура членов всех 54 классов **байт-в-байт совпадает** с базовой сборкой
   (0 изменённых, 0 пропавших);
 - имена полей сохранены точно: `TrackDto` → `id/title/artist/duration/thumbnail`,
   `Session` → `track/queue/currentIndex/currentTime/volume/isPlaying/activeDeviceId/timestamp`;
 - конструкторы (включая synthetic `DefaultConstructorMarker`) и residual-сигнатуры
   сохранены; `kotlin.Metadata`, `@Json`/`@JsonClass`, `Signature`/`InnerClasses`/
-  `EnclosingMethod` keep-правила оставлены без изменений.
+  `EnclosingMethod` keep-правила оставлены без изменений;
+- остальные ~490 классов `ru.mars.network.**` обфусцированы (в dex нет исходных
+  имён .kt сверх порога) — это и дало экономию.
 
 Т.е. R8 не трогал рефлексионно-значимую часть: обфускация и сокращение применились
 только к прямому Kotlin-коду, который по имени не ищется.
 
-### Тесты
+### Тесты и гейт
 
 ```
 :app-mobile:testDebugUnitTest     — 2025 тестов, 0 failures, 0 errors
 :core-network:testDebugUnitTest   —  925 тестов, 0 failures, 0 errors
+scripts/apk-contract-check.py     — PASS (рефлексионный граф: сохранено классов = 9)
+tests/test_apk_contract_check.py  —  22 теста, OK
 ```
+
+Дебажные тесты **не** являются проверкой R8 — они идут на дебаг-варианте, где
+минификация выключена. Поэтому контракт вынесен в `scripts/apk-contract-check.py`
+и подключён в CI: он падает `rc=1` с готовым списком `-keep`, если R8 переименовал
+класс рефлексионного графа.
 
 ## 4. Почему APK вырос с ~3,3 до ~5,6 МБ (реальная причина)
 
@@ -126,7 +174,7 @@ CI (сборка `app-mobile-release-unsigned.apk` на версиях 26/27/31;
 
 ## 6. Итог
 
-- Легитимная, проверенная экономия: **−431 025 байт APK (−7,65 %)**, целиком за счёт
+- Легитимная, проверенная экономия: **−416 473 байт APK (−7,39 %)**, целиком за счёт
   dex, без потери функциональности и без изменения сериализации.
 - Причина «раздувания» до ~5,6 МБ — не регресс R8 (он работал), а новые тяжёлые
   зависимости (media3, FCM) плюс постоянный `kotlin-reflect`; широкий keep-правило

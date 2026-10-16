@@ -1,20 +1,26 @@
 # Mars app-mobile — R8 keep-правила для release (minify + shrinkResources).
 #
-# Единственный рефлексионный путь сериализации в ru.mars.network — MusicRepository:
-# он строит Moshi с KotlinJsonAdapterFactory и парсит вложенные data-классы
-# (Session, TrackDto, HomeEnvelope, ShelfDto, ...). KotlinJsonAdapterFactory читает
-# Kotlin-метаданные, primary-конструктор и имена свойств, поэтому РОВНО эти классы
-# (вложенные в MusicRepository) обязаны дожить до рантайма с именами и членами.
+# Рефлексионный путь сериализации в ru.mars.network — это MusicRepository И модели
+# музыкального графа из ru.mars.network.model (см. блок ниже): MusicRepository строит
+# Moshi с KotlinJsonAdapterFactory и парсит вложенные data-классы (Session, TrackDto,
+# HomeEnvelope, ShelfDto, ...), а модели музыки передаются в moshi.adapter(...) как
+# типы-аргументы из MusicRepository/экранов. KotlinJsonAdapterFactory читает
+# Kotlin-метаданные, primary-конструктор и имена свойств, поэтому и вложенные классы
+# MusicRepository, и перечисленные ниже модели ru.mars.network.model обязаны дожить
+# до рантайма с именами и членами.
 #
-# Остальной слой ru.mars.network (репозитории, кэши, модели, credential, API)
+# Остальной слой ru.mars.network (прочие репозитории, кэши, credential, API)
 # десериализуется в Map<String, Any?> — Moshi над generic-типами Map/List/String,
 # без рефлексии по классам-моделям — и вызывается напрямую из Kotlin-кода.
 # Class.forName/доступ к полям и методам по имени в проде не используются
 # (retrofit.create не вызывается, Gson/kotlinx.serialization/org.json отсутствуют),
-# поэтому весь пакет, кроме моделей MusicRepository, можно обфусцировать и
-# сокращать средствами R8. Это снимает прежнее широкое правило
-# `-keep class ru.mars.network.** { *; }`, из-за которого имена и все члены
-# 490+ классов оставались нетронутыми.
+# поэтому остальной пакет можно обфусцировать и сокращать средствами R8. Это снимает
+# прежнее широкое правило `-keep class ru.mars.network.** { *; }`, из-за которого
+# имена и все члены 490+ классов оставались нетронутыми.
+#
+# ГРАБЛИ: проверять сужение по mapping.txt, а не только по зелёной сборке. Дебажные
+# тесты R8 не покрывают; гейт-проверка — scripts/apk-contract-check.py (ловит
+# переименование классов рефлексионного графа).
 -keep class ru.mars.network.repository.MusicRepository { *; }
 -keep class ru.mars.network.repository.MusicRepository$* { *; }
 
