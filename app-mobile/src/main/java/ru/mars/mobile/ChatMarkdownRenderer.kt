@@ -15,12 +15,30 @@ import android.widget.*
 import androidx.core.content.ContextCompat
 
 object ChatMarkdownRenderer {
+
+    /**
+     * Состояние инкрементальной отрисовки одной markdown-секции: какие единицы
+     * ([MarkdownUnit]) уже нарисованы. Живёт столько же, сколько секция (карточка),
+     * и передаётся из кадра стрима в кадр — без него переиспользовать префикс нельзя.
+     * Все обращения — только с главного потока.
+     */
+    class MarkdownRenderState {
+        internal var units: List<MarkdownUnit> = emptyList()
+    }
+
+    /**
+     * Рисует markdown-блоки в [parent] ИНКРЕМЕНТАЛЬНО: неизменившийся префикс view
+     * остаётся на месте, сносится и перерисовывается только хвост, начиная с первой
+     * изменившейся единицы ([StreamingMarkdownPlan.reusablePrefix]). Конечный вид
+     * не меняется: тот же набор view в том же порядке.
+     */
     fun render(
         context: Context,
         blocks: List<ContentBlock>,
         parent: LinearLayout,
         user: Boolean,
         messageIndex: Int,
+        state: MarkdownRenderState,
         isCodeBlockExpanded: (Int, Int) -> Boolean,
         toggleCodeBlock: (Int, Int) -> Unit,
         copyMessage: (String) -> Unit,
@@ -29,85 +47,93 @@ object ChatMarkdownRenderer {
     ) {
         fun dp(value: Int) = MarsTheme.dp(context, value)
 
-        blocks.forEachIndexed { blockIndex, block ->
-            when (block) {
-                is ContentBlock.Text -> {
-                    block.lines.forEach { line ->
-                        val tv = TextView(context).apply {
-                            movementMethod = LinkMovementMethod.getInstance()
-                            setTextColor(if (user) Color.WHITE else MarsTheme.TEXT)
-                            textSize = 15f
-                            setPadding(0, dp(2), 0, dp(2))
-                            setLineSpacing(dp(2).toFloat(), 1f)
-                        }
-                        val ssb = SpannableStringBuilder()
-                        when (line) {
-                            is RichLine.Header -> {
-                                tv.textSize = when (line.level) {
-                                    1 -> 18f
-                                    2 -> 17f
-                                    else -> 16f
-                                }
-                                tv.setTypeface(null, Typeface.BOLD)
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                            }
-                            is RichLine.Bullet -> {
-                                ssb.append("•  ")
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                            }
-                            is RichLine.Numbered -> {
-                                ssb.append("${line.number} ")
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                            }
-                            is RichLine.Quote -> {
-                                val quoteStart = ssb.length
-                                ssb.append("  ")
-                                ssb.setSpan(
-                                    android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
-                                    quoteStart,
-                                    quoteStart + 1,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                                )
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                                tv.setTypeface(null, Typeface.ITALIC)
-                            }
-                            is RichLine.TaskItem -> {
-                                val iconStart = ssb.length
-                                ssb.append("  ")
-                                val iconRes = if (line.checked) R.drawable.ic_check else R.drawable.ic_checkbox_empty
-                                ssb.setSpan(
-                                    ImageSpan(context, iconRes, ImageSpan.ALIGN_BASELINE),
-                                    iconStart,
-                                    ssb.length,
-                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                                )
-                                val start = ssb.length
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                                if (line.checked) {
-                                    ssb.setSpan(StrikethroughSpan(), start, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                                    ssb.setSpan(ForegroundColorSpan(MarsTheme.TEXT_MUTED), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                                }
-                            }
-                            is RichLine.Normal -> {
-                                appendInlineSpans(ssb, line.spans, openImage, openUrl)
-                            }
-                            is RichLine.Divider -> {
-                                tv.text = ""
-                                tv.setBackgroundColor(MarsTheme.BORDER)
-                                tv.layoutParams = LinearLayout.LayoutParams(
-                                    LinearLayout.LayoutParams.MATCH_PARENT,
-                                    dp(1)
-                                ).apply {
-                                    topMargin = dp(6)
-                                    bottomMargin = dp(6)
-                                }
-                            }
-                        }
-                        tv.text = ssb
-                        parent.addView(tv)
+        val units = StreamingMarkdownPlan.units(blocks)
+        // Инвариант «единица ↔ ребёнок parent» может быть нарушен извне (секцию чистили
+        // не этим рендерером) — тогда пересобираем всё, а не рисуем поверх.
+        val intact = parent.childCount == state.units.size
+        val reuse = if (intact) StreamingMarkdownPlan.reusablePrefix(state.units, units) else 0
+        if (parent.childCount > reuse) parent.removeViews(reuse, parent.childCount - reuse)
+
+        for (unitIndex in reuse until units.size) {
+            when (val unit = units[unitIndex]) {
+                is MarkdownUnit.Line -> {
+                    val line = unit.line
+                    val tv = TextView(context).apply {
+                        movementMethod = LinkMovementMethod.getInstance()
+                        setTextColor(if (user) Color.WHITE else MarsTheme.TEXT)
+                        textSize = 15f
+                        setPadding(0, dp(2), 0, dp(2))
+                        setLineSpacing(dp(2).toFloat(), 1f)
                     }
+                    val ssb = SpannableStringBuilder()
+                    when (line) {
+                        is RichLine.Header -> {
+                            tv.textSize = when (line.level) {
+                                1 -> 18f
+                                2 -> 17f
+                                else -> 16f
+                            }
+                            tv.setTypeface(null, Typeface.BOLD)
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                        }
+                        is RichLine.Bullet -> {
+                            ssb.append("•  ")
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                        }
+                        is RichLine.Numbered -> {
+                            ssb.append("${line.number} ")
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                        }
+                        is RichLine.Quote -> {
+                            val quoteStart = ssb.length
+                            ssb.append("  ")
+                            ssb.setSpan(
+                                android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
+                                quoteStart,
+                                quoteStart + 1,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                            tv.setTypeface(null, Typeface.ITALIC)
+                        }
+                        is RichLine.TaskItem -> {
+                            val iconStart = ssb.length
+                            ssb.append("  ")
+                            val iconRes = if (line.checked) R.drawable.ic_check else R.drawable.ic_checkbox_empty
+                            ssb.setSpan(
+                                ImageSpan(context, iconRes, ImageSpan.ALIGN_BASELINE),
+                                iconStart,
+                                ssb.length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                            val start = ssb.length
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                            if (line.checked) {
+                                ssb.setSpan(StrikethroughSpan(), start, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                ssb.setSpan(ForegroundColorSpan(MarsTheme.TEXT_MUTED), 0, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            }
+                        }
+                        is RichLine.Normal -> {
+                            appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                        }
+                        is RichLine.Divider -> {
+                            tv.text = ""
+                            tv.setBackgroundColor(MarsTheme.BORDER)
+                            tv.layoutParams = LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                dp(1)
+                            ).apply {
+                                topMargin = dp(6)
+                                bottomMargin = dp(6)
+                            }
+                        }
+                    }
+                    tv.text = ssb
+                    parent.addView(tv)
                 }
-                is ContentBlock.Code -> {
+                is MarkdownUnit.Code -> {
+                    val blockIndex = unit.blockIndex
+                    val block = unit.block
                     val expanded = isCodeBlockExpanded(messageIndex, blockIndex)
                     val view = CodeBlockPresenter.present(block, expanded)
                     val box = LinearLayout(context).apply {
@@ -171,7 +197,8 @@ object ChatMarkdownRenderer {
                     }
                     parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
                 }
-                is ContentBlock.Table -> {
+                is MarkdownUnit.Table -> {
+                    val block = unit.block
                     // Card with a HorizontalScrollView around a TableLayout so wide tables
                     // scroll sideways smoothly instead of breaking the phone layout.
                     val card = LinearLayout(context).apply {
@@ -216,6 +243,7 @@ object ChatMarkdownRenderer {
                 }
             }
         }
+        state.units = units
     }
 
     private fun appendInlineSpans(
@@ -285,7 +313,6 @@ object ChatMarkdownRenderer {
 
 
 }
-
 
 private fun Button.chevronStart(context: Context, drawableRes: Int, tint: Int) {
     setCompoundDrawablesRelativeWithIntrinsicBounds(ContextCompat.getDrawable(context, drawableRes), null, null, null)
