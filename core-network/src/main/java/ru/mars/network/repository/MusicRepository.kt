@@ -32,6 +32,49 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/**
+ * Страница исполнителя из `GET /api/artist/{id_or_name}`: имя, канал, подписчики,
+ * аватар и готовый список песен. Пустые строки сервера приведены к null, чтобы UI
+ * отличал «поля нет» от «поле пустое».
+ */
+data class MusicArtist(
+    val name: String,
+    val channelId: String? = null,
+    val radioId: String? = null,
+    val description: String? = null,
+    val subscribers: String? = null,
+    val thumbnail: String? = null,
+    val songs: List<MusicTrack> = emptyList(),
+)
+
+/** Альбом из `GET /api/album/{browseId}`: обложка, год и треки в порядке нумерации. */
+data class MusicAlbum(
+    val browseId: String,
+    val title: String,
+    val artist: String,
+    val year: String? = null,
+    val trackCount: Int = 0,
+    val thumbnail: String? = null,
+    val description: String? = null,
+    val tracks: List<MusicTrack> = emptyList(),
+)
+
+/**
+ * Итог запроса альбома. Отказ «неверный browseId» — это ответ сервера по контракту
+ * (`must start with MPRE`), а не сбой, поэтому он несёт собственный вариант
+ * [InvalidBrowseId] и не превращается в исключение.
+ */
+sealed interface AlbumResult {
+    /** Альбом найден и разобран. */
+    data class Loaded(val album: MusicAlbum) : AlbumResult
+
+    /** browseId не в формате `MPRE…` — такой страницы у сервера нет. */
+    data object InvalidBrowseId : AlbumResult
+
+    /** Сеть или сервер: [message] — техническая деталь, текст для UI даёт политика. */
+    data class Failed(val message: String) : AlbumResult
+}
+
 /** Mars Music's HTTP search/charts and Mars Connect WebSocket client. */
 class MusicRepository(
     private val baseUrl: String = "https://marscore.ru/music",
@@ -138,6 +181,67 @@ class MusicRepository(
         return getJson("api/lyrics/$videoId", query) { body ->
             moshi.adapter(LyricsResult::class.java).fromJson(body.source()) ?: LyricsResult(null, null, null)
         }
+    }
+
+    /**
+     * GET /api/artist/{id_or_name} — страница исполнителя вместе с его песнями
+     * (`songs[]` уже приходят в ответе, отдельный запрос за ними не нужен).
+     *
+     * [query] — имя исполнителя ИЛИ его channelId (`UC…`): сервер различает их по
+     * префиксу `UC` и во втором случае идёт прямо в канал. Значение уходит ОДНИМ
+     * сегментом пути, поэтому имя со слэшем (`AC/DC`) не превращается в два сегмента
+     * и не получает 404.
+     *
+     * null — сервер ответил 404 (`Artist not found`): исполнителя нет, это ответ по
+     * контракту, а не сбой. Сеть и прочие коды — исключение, как у [getRadio].
+     */
+    suspend fun getArtist(query: String): MusicArtist? {
+        val target = query.trim()
+        require(target.isNotEmpty()) { "artist query must not be blank" }
+        val response = getRaw("api/artist", target)
+        if (response.code == HTTP_NOT_FOUND) return null
+        if (response.code !in HTTP_OK_RANGE) {
+            throw IllegalStateException("HTTP ${response.code} for /api/artist")
+        }
+        val dto = moshi.adapter(ArtistDto::class.java).fromJson(response.body)
+            ?: throw IOException("Empty artist response")
+        return dto.toModel(fallbackName = target)
+    }
+
+    /**
+     * GET /api/album/{browseId} — альбом и его треки.
+     *
+     * browseId альбома — это НЕ имя: сервис принимает только `MPRE…`, на всё
+     * остальное отвечает `{"error":"Invalid album browseId provided, must start with
+     * MPRE."}` с кодом 500. Такой отказ — часть контракта, поэтому он возвращается
+     * вариантом [AlbumResult.InvalidBrowseId], а не исключением; неверный префикс
+     * отсекается до запроса. Исключений метод не бросает вовсе: транспортная ошибка
+     * приходит как [AlbumResult.Failed] (отмена coroutine пробрасывается как есть).
+     */
+    suspend fun getAlbum(browseId: String): AlbumResult {
+        val target = browseId.trim()
+        if (!target.startsWith(ALBUM_BROWSE_ID_PREFIX)) return AlbumResult.InvalidBrowseId
+        val response = try {
+            getRaw("api/album", target)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return AlbumResult.Failed(error.message ?: "Album request failed")
+        }
+        if (response.code !in HTTP_OK_RANGE) {
+            return if (response.body.contains(INVALID_BROWSE_ID_MARKER, ignoreCase = true)) {
+                AlbumResult.InvalidBrowseId
+            } else {
+                AlbumResult.Failed(errorText(response.body) ?: "HTTP ${response.code}")
+            }
+        }
+        val parsed = runCatching { moshi.adapter(AlbumEnvelope::class.java).fromJson(response.body) }
+            .getOrNull() ?: return AlbumResult.Failed("Malformed album response")
+        if (parsed.success == false) {
+            return AlbumResult.Failed(parsed.error ?: "Album request failed")
+        }
+        val album = parsed.album ?: return AlbumResult.Failed("Empty album response")
+        return AlbumResult.Loaded(album.toModel(target))
     }
 
     /**
@@ -390,6 +494,48 @@ class MusicRepository(
                 }
             })
         }
+
+    /** Код и тело ответа без истолкования: нужен там, где отказ сервера — часть контракта. */
+    private data class RawResponse(val code: Int, val body: String)
+
+    /**
+     * GET `{base}/{path}/{segment}` — ровно один закодированный сегмент пути.
+     *
+     * В отличие от [getJson], любой HTTP-код возвращается вызывающему как данные:
+     * отказ «неверный browseId» приходит с кодом 500, и его надо разобрать по телу,
+     * а не превратить в исключение. Сбой транспорта по-прежнему исключение.
+     */
+    private suspend fun getRaw(path: String, segment: String): RawResponse =
+        suspendCancellableCoroutine { continuation ->
+            val request = Request.Builder()
+                .url(
+                    baseUrl.toHttpUrl().newBuilder()
+                        .addPathSegments(path)
+                        .addPathSegment(segment)
+                        .build(),
+                )
+                .get()
+                .build()
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        val text = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                        if (continuation.isActive) continuation.resume(RawResponse(resp.code, text))
+                    }
+                }
+
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            })
+        }
+
+    /** Текст серверной ошибки из `{"error": "…"}`; null — тело не об этом. */
+    private fun errorText(body: String): String? = runCatching {
+        moshi.adapter(ErrorEnvelope::class.java).fromJson(body)?.error?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     /** GETs [path] with optional [query] parameters and maps the successful response through [parse]. */
     private suspend fun <T> getJson(path: String, query: List<Pair<String, String>> = emptyList(), parse: (ResponseBody) -> T): T =
@@ -836,6 +982,78 @@ class MusicRepository(
     @JsonClass(generateAdapter = false)
     private data class TranslateResponse(val success: Boolean? = null, val translated: String? = null, val error: String? = null)
 
+    // -------------------------------------------------------- artist/album DTOs
+
+    /**
+     * GET /api/artist/{id_or_name} отвечает объектом БЕЗ конверта `success`:
+     * `{name, channelId, radioId, description, subscribers, thumbnail, songs[]}`.
+     * Песни — та же строка трека, что у поиска, поэтому разбираются терпимым
+     * [ShelfTrackDto] (пустая `duration` становится «--:--»).
+     */
+    @JsonClass(generateAdapter = false)
+    private data class ArtistDto(
+        val name: String? = null,
+        val channelId: String? = null,
+        val radioId: String? = null,
+        val description: String? = null,
+        val subscribers: String? = null,
+        val thumbnail: String? = null,
+        val songs: List<ShelfTrackDto> = emptyList(),
+    ) {
+        fun toModel(fallbackName: String): MusicArtist = MusicArtist(
+            name = name?.takeIf { it.isNotBlank() } ?: fallbackName,
+            channelId = channelId?.takeIf { it.isNotBlank() },
+            radioId = radioId?.takeIf { it.isNotBlank() },
+            description = description?.takeIf { it.isNotBlank() },
+            subscribers = subscribers?.takeIf { it.isNotBlank() },
+            thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+            songs = songs.mapNotNull { it.toModel() },
+        )
+    }
+
+    /** GET /api/album/{browseId}: `{"success":true,"album":{…,"tracks":[…]}}`. */
+    @JsonClass(generateAdapter = false)
+    private data class AlbumEnvelope(
+        val success: Boolean? = null,
+        val album: AlbumDto? = null,
+        val error: String? = null,
+    )
+
+    /**
+     * Тело альбома. `year` приходит строкой, но Moshi приводит к строке и число —
+     * поэтому тип не ломается на `2024`. `trackCount` при отсутствии считается по
+     * фактическому числу треков, чтобы счётчик в UI не врал нулём.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class AlbumDto(
+        val title: String? = null,
+        val artist: String? = null,
+        val year: String? = null,
+        val trackCount: Int? = null,
+        val duration: String? = null,
+        val thumbnail: String? = null,
+        val description: String? = null,
+        val tracks: List<ShelfTrackDto> = emptyList(),
+    ) {
+        fun toModel(browseId: String): MusicAlbum {
+            val mapped = tracks.mapNotNull { it.toModel() }
+            return MusicAlbum(
+                browseId = browseId,
+                title = title?.takeIf { it.isNotBlank() } ?: "Без названия",
+                artist = artist?.takeIf { it.isNotBlank() } ?: "Неизвестный артист",
+                year = year?.trim()?.takeIf { it.isNotEmpty() },
+                trackCount = trackCount?.takeIf { it > 0 } ?: mapped.size,
+                thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+                description = description?.takeIf { it.isNotBlank() },
+                tracks = mapped,
+            )
+        }
+    }
+
+    /** Тело серверной ошибки: `{"error": "…"}` (его же отдаёт отказ по browseId). */
+    @JsonClass(generateAdapter = false)
+    private data class ErrorEnvelope(val error: String? = null)
+
     @JsonClass(generateAdapter = false)
     private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null, val timestamp: Long? = null) {
         fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId, timestamp)
@@ -848,6 +1066,17 @@ class MusicRepository(
 
         /** Живой сервер отдаёт не больше 8 подсказок; клиент дублирует предел. */
         internal const val MAX_SUGGESTIONS = 8
+
+        /** browseId альбома обязан начинаться с этого префикса (иначе сервер отвечает отказом). */
+        const val ALBUM_BROWSE_ID_PREFIX = "MPRE"
+
+        /** Маркер серверного отказа «неверный browseId» в теле ответа. */
+        private const val INVALID_BROWSE_ID_MARKER = "must start with MPRE"
+
+        private const val HTTP_NOT_FOUND = 404
+
+        /** Успешный диапазон кодов: 2xx. */
+        private val HTTP_OK_RANGE = 200..299
 
         /**
          * Maps the HTTP(S) base URL onto the WebSocket scheme. Kotlin's

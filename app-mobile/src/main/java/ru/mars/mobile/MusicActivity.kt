@@ -32,6 +32,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -44,6 +45,7 @@ import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.Playlist
+import ru.mars.network.repository.MusicArtist
 import ru.mars.network.repository.MusicRepository
 import java.io.Closeable
 import java.net.HttpURLConnection
@@ -87,11 +89,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Rendered chart/search row views per track id, so playback state can re-style them live. */
     private class TrackRowHolder(
         val trackId: String,
-        val artist: String,
         val duration: String,
         val row: View,
         val titleView: TextView,
-        val subTitleView: TextView,
+        /** Хвост подписи строки (« · 3:24» / « · Сейчас играет»); имя исполнителя — отдельная кликабельная вьюха. */
+        val metaView: TextView,
         val playButton: ImageButton,
     )
     private val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
@@ -140,6 +142,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
     private var lyricsJob: Job? = null
+    /**
+     * Запрос страницы исполнителя (GET /api/artist/…). Один на диалог: пока он в
+     * полёте, повторный тап по имени не запускает второй (см. [MusicArtistPolicy.canStartRequest]).
+     */
+    private var artistJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
@@ -588,10 +595,15 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         artistView = TextView(this).apply {
             text = "Mars Audio"
             textSize = 13f
-            setTextColor(MarsTheme.TEXT_MUTED)
+            setTextColor(MarsTheme.ACCENT_TEXT)
             isSingleLine = true
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, dp(2), 0, 0)
+            // Переход к исполнителю текущего трека: цвет акцента — единственная
+            // подсказка кликабельности, поэтому он же и в палитре.
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onArtistClicked(MarsMusicPlayer.currentTrack?.artist) }
         }
         info.addView(artistView)
 
@@ -1143,14 +1155,32 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         trackInfo.addView(titleView)
-        val subTitleView = TextView(this).apply {
-            text = "${t.artist} · ${t.duration}"
+        // Подпись строки разделена: имя исполнителя — отдельная кликабельная вьюха
+        // (переход к исполнителю), длительность/статус — некликабельный хвост.
+        // Иначе тап по нижней половине строки перестал бы включать трек.
+        val subRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val artistLabel = TextView(this).apply {
+            text = t.artist
+            textSize = 12f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onArtistClicked(t.artist) }
+        }
+        subRow.addView(artistLabel, LinearLayout.LayoutParams(0, -2, 1f))
+        val metaView = TextView(this).apply {
+            text = " · ${t.duration}"
             textSize = 12f
             setTextColor(MarsTheme.TEXT_MUTED)
             isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        trackInfo.addView(subTitleView)
+        subRow.addView(metaView, LinearLayout.LayoutParams(-2, -2))
+        trackInfo.addView(subRow)
         row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
 
         val playTrackBtn = MarsTheme.circleIconButton(
@@ -1209,7 +1239,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
 
         // Register the row so player state changes can highlight the current track live.
-        val holder = TrackRowHolder(t.id, t.artist, t.duration, row, titleView, subTitleView, playTrackBtn)
+        val holder = TrackRowHolder(t.id, t.duration, row, titleView, metaView, playTrackBtn)
         trackRows.getOrPut(t.id) { mutableListOf() }.add(holder)
         applyTrackRowState(holder)
         return row
@@ -2218,6 +2248,222 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    // ------------------------------------------------------------- исполнитель
+
+    /**
+     * Тап по имени исполнителя (строка трека или мини-плеер) открывает диалог
+     * исполнителя. Пока запрос в полёте, повторный тап игнорируется: второй запрос
+     * ничего не добавит, а ответ всё равно перерисует тот же диалог.
+     */
+    private fun onArtistClicked(rawName: String?) {
+        val target = MusicArtistPolicy.requestTarget(rawName)
+        if (target == null) {
+            showStatus(MusicArtistPolicy.UNKNOWN_ARTIST)
+            return
+        }
+        if (!MusicArtistPolicy.canStartRequest(artistJob?.isActive == true)) return
+        openArtistDialog(target)
+    }
+
+    /**
+     * Диалог исполнителя: аватар, имя, подписчики и песни из `GET /api/artist/…`
+     * (песни приходят в том же ответе — второго запроса нет).
+     *
+     * Состояния честные: «Загружаем…» → список, либо «не найден» (404 — повтор не
+     * поможет, кнопки нет), либо «проверьте сеть» + «Повторить». Повтор стартует
+     * только при свободном [artistJob], поэтому серия тапов не плодит запросы.
+     *
+     * Воспроизведение идёт через общий плеер: тап по песне ставит весь список
+     * очередью с этой песни ([MarsMusicPlayer.playTrack]), кнопка «В очередь» —
+     * добавляет одну песню к текущей очереди ([MarsMusicPlayer.enqueue]).
+     * Мини-плеер, вкладка «Очередь» и кнопки трека работают как раньше.
+     */
+    private fun openArtistDialog(target: String) {
+        val avatar = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 28)
+            clipToOutline = true
+            visibility = View.GONE
+        }
+        val nameView = TextView(this).apply {
+            text = MusicArtistPolicy.initialName(target)
+            textSize = 17f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val subscribersView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(2), 0, 0)
+            visibility = View.GONE
+        }
+        val statusView = TextView(this).apply {
+            text = MusicArtistPolicy.LOADING
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(12), 0, dp(10))
+        }
+        val songsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val retryBtn = MarsDialog.quietButton(this, MusicArtistPolicy.RETRY) {}
+        retryBtn.visibility = View.GONE
+
+        /** Обратная связь по действию — в строке статуса диалога (за ним ничего не видно). */
+        fun feedback(message: String) {
+            statusView.text = message
+            statusView.setTextColor(MarsTheme.ACCENT_TEXT)
+        }
+
+        fun load() {
+            if (!MusicArtistPolicy.canStartRequest(artistJob?.isActive == true)) return
+            statusView.text = MusicArtistPolicy.LOADING
+            statusView.setTextColor(MarsTheme.TEXT_MUTED)
+            retryBtn.visibility = View.GONE
+            songsBox.removeAllViews()
+
+            fun renderFailure(notFound: Boolean) {
+                statusView.text = MusicArtistPolicy.failureText(notFound = notFound)
+                statusView.setTextColor(MarsTheme.ACCENT_TEXT)
+                retryBtn.visibility =
+                    if (MusicArtistPolicy.retryAvailable(notFound = notFound)) View.VISIBLE else View.GONE
+            }
+
+            fun renderArtist(artist: MusicArtist) {
+                nameView.text = artist.name
+                MusicArtistPolicy.subscribersLabel(artist.subscribers)?.let { label ->
+                    subscribersView.text = label
+                    subscribersView.visibility = View.VISIBLE
+                }
+                artist.thumbnail?.let { url ->
+                    avatar.visibility = View.VISIBLE
+                    ImageLoader.load(url, avatar)
+                }
+                val songs = MusicArtistPolicy.songs(artist.songs)
+                if (songs.isEmpty()) {
+                    statusView.text = MusicArtistPolicy.EMPTY_SONGS
+                    statusView.setTextColor(MarsTheme.TEXT_MUTED)
+                    return
+                }
+                statusView.text = MusicArtistPolicy.songsLabel(songs.size)
+                statusView.setTextColor(MarsTheme.TEXT_MUTED)
+                songs.forEachIndexed { index, song ->
+                    songsBox.addView(
+                        artistSongRow(song, index, songs, ::feedback),
+                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
+                    )
+                }
+            }
+
+            artistJob = lifecycleScope.launch {
+                // Отмена (диалог закрыли) — не «сбой сети»: пробрасываем, чтобы не
+                // трогать вьюхи уже закрытого диалога.
+                val artist = try {
+                    withContext(Dispatchers.IO) { repository.getArtist(target) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    renderFailure(notFound = false)
+                    return@launch
+                }
+                if (artist == null) renderFailure(notFound = true) else renderArtist(artist)
+            }
+        }
+
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, MusicArtistPolicy.TITLE, null))
+            val identity = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(12), 0, 0)
+            }
+            identity.addView(avatar, LinearLayout.LayoutParams(dp(56), dp(56)))
+            val names = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), 0, 0, 0)
+            }
+            names.addView(nameView)
+            names.addView(subscribersView)
+            identity.addView(names, LinearLayout.LayoutParams(0, -2, 1f))
+            root.addView(identity)
+            root.addView(statusView)
+            root.addView(songsBox, LinearLayout.LayoutParams(-1, -2))
+            root.addView(retryBtn)
+            root.addView(MarsDialog.quietButton(this, MusicArtistPolicy.CLOSE) { dialogRef?.dismiss() })
+            retryBtn.setOnClickListener { load() }
+            emptyList()
+        }
+        // Закрыли диалог — незавершённый запрос больше не нужен.
+        dialogRef?.setOnDismissListener { artistJob?.cancel() }
+        load()
+    }
+
+    /**
+     * Строка песни в диалоге исполнителя: обложка, название, длительность.
+     * Тап по строке играет список с этой песни, кнопка — добавляет песню в очередь.
+     */
+    private fun artistSongRow(
+        track: MusicTrack,
+        index: Int,
+        queue: List<MusicTrack>,
+        feedback: (String) -> Unit,
+    ): View {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(8), dp(8), dp(8))
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 12)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Играть: ${track.title}"
+            setOnClickListener {
+                MarsMusicPlayer.playTrack(index, queue)
+                feedback("Играет: ${track.title}")
+            }
+        }
+        val cover = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
+            clipToOutline = true
+        }
+        track.thumbnail?.takeIf { it.isNotBlank() }?.let { ImageLoader.load(it, cover) }
+        row.addView(cover, LinearLayout.LayoutParams(dp(40), dp(40)))
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, dp(6), 0)
+        }
+        info.addView(TextView(this).apply {
+            text = track.title
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        info.addView(TextView(this).apply {
+            text = track.duration
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+        })
+        row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val enqueueBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_playlist_add,
+            "В очередь: ${track.title}",
+            bg = MarsTheme.SURFACE_SUBTLE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 32,
+        ).apply {
+            setOnClickListener {
+                MarsMusicPlayer.enqueue(track)
+                feedback("Добавлено в очередь: ${track.title}")
+            }
+        }
+        row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+        return row
+    }
+
     /** Radio/lyrics act on the current track only: dim and disable both without one. */
     private fun updatePlayerActionStates() {
         if (!::radioBtn.isInitialized || !::lyricsBtn.isInitialized) return
@@ -2268,10 +2514,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
         holder.titleView.setTextColor(if (state.active) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_STRONG)
         holder.titleView.typeface = if (state.active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-        holder.subTitleView.text = if (state.active && MarsMusicPlayer.isPlaying) {
-            "Сейчас играет · ${holder.artist}"
+        holder.metaView.text = if (state.active && MarsMusicPlayer.isPlaying) {
+            " · Сейчас играет"
         } else {
-            "${holder.artist} · ${holder.duration}"
+            " · ${holder.duration}"
         }
         setPlayPauseGlyph(holder.playButton, state.showPauseIcon)
         holder.playButton.contentDescription = MusicA11yPolicy.playPauseAction(state.showPauseIcon)
