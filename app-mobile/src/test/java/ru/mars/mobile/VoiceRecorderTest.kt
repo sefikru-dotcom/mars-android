@@ -48,14 +48,18 @@ class VoiceRecorderTest {
 
     /**
      * Synthetic [AudioSource]. Returns [bytesPerRead] non-zero bytes per read until
-     * [readsBeforeEnd], can block a read on [gate] (released by [release]), can throw on a chosen
-     * read, and reports its read count with an [onRead] hook (used to advance the fake clock).
+     * [readsBeforeEnd], can block a read on [gate] (released by [release]), can pause on a chosen
+     * read until [pauseGate] opens (then keeps returning DATA, unlike [blockFromRead] which ends
+     * the stream), can throw on a chosen read, and reports its read count with an [onRead] hook
+     * (used to advance the fake clock).
      */
     private class FakeAudioSource(
         private val bytesPerRead: Int = VoiceRecorder.READ_CHUNK_BYTES,
         private val readsBeforeEnd: Int = Int.MAX_VALUE,
         private val blockFromRead: Int? = null,
         private val gate: CountDownLatch? = null,
+        private val pauseAtRead: Int? = null,
+        private val pauseGate: CountDownLatch? = null,
         private val failOnRead: Int? = null,
         private val onRead: ((Int) -> Unit)? = null,
     ) : AudioSource {
@@ -68,6 +72,11 @@ class VoiceRecorderTest {
         override fun read(buf: ByteArray): Int {
             val n = counter.incrementAndGet()
             if (failOnRead != null && n == failOnRead) throw RuntimeException("simulated read failure")
+            // Pause: the test needs the loop alive at a known point; after the gate opens the read
+            // still carries audio, so the captured size is unaffected.
+            if (pauseAtRead != null && n == pauseAtRead) {
+                pauseGate?.await(5, TimeUnit.SECONDS)
+            }
             if (blockFromRead != null && n >= blockFromRead) {
                 val g = gate ?: return -1
                 try {
@@ -112,8 +121,11 @@ class VoiceRecorderTest {
     fun `start begins recording and stop returns a wav with plausible duration`() {
         val clock = FakeClock()
         val firstRead = CountDownLatch(1)
+        val pauseGate = CountDownLatch(1)
         val source = FakeAudioSource(
             readsBeforeEnd = 3,
+            pauseAtRead = 2,
+            pauseGate = pauseGate,
             onRead = { n ->
                 if (n == 1) firstRead.countDown()
                 clock.advanceBy(100)
@@ -125,8 +137,12 @@ class VoiceRecorderTest {
         assertTrue(recorder.start())
         assertTrue(recorder.isRecording)
         assertTrue(firstRead.await(5, TimeUnit.SECONDS))
+        // The loop is parked inside read(2), so `isRecording` is observed while capturing for
+        // certain — asserting it after the drain would be a race the source can win.
+        assertTrue("still capturing while parked in read", recorder.isRecording)
 
-        // Source drains after three chunks: the pull loop ends on its own.
+        // Release the pause: the source drains after the third chunk and the pull loop ends.
+        pauseGate.countDown()
         awaitCondition("source drained") { !recorder.isRecording }
 
         val recording = recorder.stop()
