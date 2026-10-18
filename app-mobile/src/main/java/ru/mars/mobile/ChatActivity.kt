@@ -269,10 +269,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         var snapshot: CardSnapshot,
         /** Секция markdown внутри пузыря; null, пока текст пуст (секции ещё нет). */
         var markdownHost: LinearLayout?,
+        /** Состояние инкрементальной отрисовки секции (переиспользование префикса). */
+        val markdownState: ChatMarkdownRenderer.MarkdownRenderState? = null,
     )
 
     /** Нарисованные карточки: children контейнера [messages] ↔ cardEntries 1:1 по индексу. */
     private val cardEntries = mutableListOf<CardEntry>()
+
+    /**
+     * Снимки карточек между кадрами: на кадре стрима меняется одно сообщение, остальные
+     * переиспользуются по тождеству экземпляра — без календарной арифметики и аллокаций.
+     */
+    private val snapshotCache = TranscriptSnapshotCache()
+
+    /** Гейт ленты smart-чипов: её входы меняются 2-3 раза за ход, а не 20 раз в секунду. */
+    private val chipsGate = QuickChipsRenderGate()
 
     /**
      * Хост рендерера карточки: узкие адаптеры к состоянию и колбэкам Activity вместо передачи
@@ -1422,13 +1433,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      */
     private fun renderSmartChips() {
         if (!::smartChipsRow.isInitialized) return
-        smartChipsRow.removeAllViews()
         val lastAssistant = uiState.messages.lastOrNull { it.role == "assistant" }
+        val hasReply = lastAssistant != null &&
+            (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty())
+        val lastTurnFailed = lastAssistant?.status == MessageStatus.ERROR
+        // Лента зависит только от этих трёх входов: тот же набор — перерисовка не нужна.
+        // Раньше на КАЖДОМ кадре стрима сносились и заново инфлейтились кнопки с фонами.
+        if (!chipsGate.shouldRender(QuickChipsRenderGate.Signature(uiState.status, hasReply, lastTurnFailed))) return
+        smartChipsRow.removeAllViews()
         val chips = QuickChips.visibleChips(
             status = uiState.status,
-            hasAssistantReply = lastAssistant != null &&
-                (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty()),
-            lastTurnFailed = lastAssistant?.status == MessageStatus.ERROR,
+            hasAssistantReply = hasReply,
+            lastTurnFailed = lastTurnFailed,
         )
         smartChipsRow.visibility = if (chips.isEmpty()) View.GONE else View.VISIBLE
         if (chips.isEmpty()) return
@@ -1745,8 +1761,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Take the auto-scroll decision from the PRE-render viewport (synchronously, before any
         // mutation): a user scrolled up reading history stays put while SSE tokens keep coming;
         // only a pinned viewport follows the stream to the bottom.
-        autoScroll.onViewportDistanceFromBottom(distanceFromBottomPx())
-        scrollToBottomPolicy.onViewportDistanceFromBottom(distanceFromBottomPx())
+        // Дистанция до низа считается один раз: два вызова = два обхода дерева на кадр.
+        val distance = distanceFromBottomPx()
+        autoScroll.onViewportDistanceFromBottom(distance)
+        scrollToBottomPolicy.onViewportDistanceFromBottom(distance)
 
         streamFlushJob?.cancel()
         streamFlushJob = null
@@ -1797,23 +1815,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Актуальные снимки всех сообщений: сообщение + день-разделитель + стрим-флаг + эпоха хрома. */
-    private fun currentSnapshots(): List<CardSnapshot> {
-        var previousTimestamp = MessageTimePolicy.UNKNOWN_TIMESTAMP
-        val lastIndex = uiState.messages.size - 1
-        val typing = uiState.status == ChatStatus.TYPING
-        return uiState.messages.mapIndexed { index, message ->
-            val snapshot = CardSnapshotPolicy.of(
-                message = message,
-                previousTimestamp = previousTimestamp,
-                chromeEpoch = transcriptChromeEpoch,
-                streamingFlag = typing && index == lastIndex,
-            )
-            // Разделители суток: первая известная метка и каждая смена локального дня
-            // получают день-чип («Сегодня»/«Вчера»/«9 октября») — чистая MessageTimePolicy.
-            if (message.timestamp > MessageTimePolicy.UNKNOWN_TIMESTAMP) previousTimestamp = message.timestamp
-            snapshot
-        }
-    }
+    private fun currentSnapshots(): List<CardSnapshot> =
+        snapshotCache.update(
+            messages = uiState.messages,
+            chromeEpoch = transcriptChromeEpoch,
+            typing = uiState.status == ChatStatus.TYPING,
+        )
 
     /** Хвост рендера (общий для синхронного и фонового путей): поиск, чипы, автоскролл. */
     private fun finishTranscriptRender() {
@@ -1845,10 +1852,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val old = cardEntries.getOrNull(patch.index) ?: continue
             val newSnapshot = current[patch.index]
             // Text-only: карточка живёт, пересобирается только markdown-секция (без шапки/кнопок).
+            // Секция рисуется инкрементально: неизменившийся префикс строк остаётся на месте.
             val host = old.markdownHost
-            if (patch.kind == CardUpdateKind.TEXT_ONLY && host != null) {
-                host.removeAllViews()
-                renderMarkdownBlocks(message.text, host, message.role == "user", patch.index)
+            val state = old.markdownState
+            if (patch.kind == CardUpdateKind.TEXT_ONLY && host != null && state != null) {
+                renderMarkdownBlocks(message.text, host, message.role == "user", patch.index, state)
                 old.snapshot = newSnapshot
                 continue
             }
@@ -1881,6 +1889,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (only.kind != CardUpdateKind.TEXT_ONLY) return false
         val entry = cardEntries.getOrNull(only.index) ?: return false
         val host = entry.markdownHost ?: return false // секции ещё нет (пустой пузырь) — полная сборка
+        val state = entry.markdownState ?: return false
         val message = uiState.messages.getOrNull(only.index) ?: return false
         val text = message.text
         val isUser = message.role == "user"
@@ -1894,13 +1903,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 if (isDestroyed || !::messages.isInitialized) return@withContext
                 // Карточку могли заменить синхронным патчем, пока парсинг летел, — обновляем только «свою».
                 if (cardEntries.getOrNull(messageIndex) !== entry) return@withContext
-                host.removeAllViews()
                 ChatMarkdownRenderer.render(
                     context = this@ChatActivity,
                     blocks = blocks,
                     parent = host,
                     user = isUser,
                     messageIndex = messageIndex,
+                    state = state,
                     isCodeBlockExpanded = uiState::isCodeBlockExpanded,
                     toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
                     copyMessage = ::copyMessage,
@@ -1934,7 +1943,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         val views = ChatMessageCardRenderer.build(this, message, index, snapshot, cardRendererHost)
         wrapper.addView(views.root, cardLayoutParams(snapshot))
-        return CardEntry(wrapper, snapshot, views.markdownHost)
+        return CardEntry(wrapper, snapshot, views.markdownHost, views.markdownState)
     }
 
     /** Геометрия пузыря: 88% ширины экрана, справа у пользователя, слева у ассистента, отступ 8dp. */
@@ -2029,8 +2038,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Markdown-секция пузыря — реализация в [ChatMessageCardRenderer.renderMarkdownBlocks]. */
-    private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
-        ChatMessageCardRenderer.renderMarkdownBlocks(this, value, parent, user, messageIndex, cardRendererHost)
+    private fun renderMarkdownBlocks(
+        value: String,
+        parent: LinearLayout,
+        user: Boolean,
+        messageIndex: Int,
+        state: ChatMarkdownRenderer.MarkdownRenderState,
+    ) {
+        ChatMessageCardRenderer.renderMarkdownBlocks(this, value, parent, user, messageIndex, cardRendererHost, state)
     }
 
     private fun toolDump(tool: ToolExecution): String =

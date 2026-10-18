@@ -79,7 +79,12 @@ object ChatMessageCardRenderer {
     }
 
     /** Корень пузыря + его markdown-секция (null, если текст пуст — секции нет). */
-    class CardViews(val root: View, val markdownHost: LinearLayout?)
+    class CardViews(
+        val root: View,
+        val markdownHost: LinearLayout?,
+        /** Состояние инкрементальной отрисовки секции: переживает кадры стрима. */
+        val markdownState: ChatMarkdownRenderer.MarkdownRenderState? = null,
+    )
 
     /**
      * Сборка ОДНОЙ карточки сообщения. Тело перенесено из прежнего монолитного renderMessages
@@ -167,11 +172,13 @@ object ChatMessageCardRenderer {
         }
 
         var markdownHost: LinearLayout? = null
+        var markdownState: ChatMarkdownRenderer.MarkdownRenderState? = null
         if (message.text.isNotBlank()) {
             // markdown — в отдельную секцию: кадры стрима пересобирают только её
             // (text-only), не трогая шапку/кнопки карточки. Ядро ANR-фикса.
             val markdownColumn = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            renderMarkdownBlocks(context, message.text, markdownColumn, isUser, index, host)
+            markdownState = ChatMarkdownRenderer.MarkdownRenderState()
+            renderMarkdownBlocks(context, message.text, markdownColumn, isUser, index, host, markdownState)
             card.addView(markdownColumn, LinearLayout.LayoutParams(-1, -2))
             markdownHost = markdownColumn
             val actionsRow = LinearLayout(context).apply {
@@ -547,7 +554,7 @@ object ChatMessageCardRenderer {
         }
         // Тег = индекс сообщения: по нему поиск находит карточку для подсветки/скролла.
         card.tag = index
-        return CardViews(card, markdownHost)
+        return CardViews(card, markdownHost, markdownState)
     }
 
     /**
@@ -624,6 +631,7 @@ object ChatMessageCardRenderer {
         user: Boolean,
         messageIndex: Int,
         host: Host,
+        state: ChatMarkdownRenderer.MarkdownRenderState,
     ) {
         ChatMarkdownRenderer.render(
             context = context,
@@ -631,6 +639,7 @@ object ChatMessageCardRenderer {
             parent = parent,
             user = user,
             messageIndex = messageIndex,
+            state = state,
             isCodeBlockExpanded = host::isCodeBlockExpanded,
             toggleCodeBlock = host::toggleCodeBlock,
             copyMessage = host::copyMessage,
