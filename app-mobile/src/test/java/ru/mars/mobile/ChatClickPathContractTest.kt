@@ -34,6 +34,16 @@ class ChatClickPathContractTest {
     }
 
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+
+    /** Каркас экрана чата: шапка, баннеры, поиск, чипы и композер собираются здесь. */
+    private val scaffold by lazy { source("src/main/java/ru/mars/mobile/ChatScreenScaffold.kt") }
+
+    /**
+     * UI-слой экрана чата: Activity (делегат, пикеры, update*-методы) + вынесенный каркас.
+     * Проверки кликпутей те же — они читают оба файла, чтобы контракт не зависел от того,
+     * в каком файле физически собирается view.
+     */
+    private val chatUi by lazy { chat + "\n" + scaffold }
     private val searchController by lazy { source("src/main/java/ru/mars/mobile/TranscriptSearchHighlightController.kt") }
     private val main by lazy { source("src/main/java/ru/mars/mobile/MainActivity.kt") }
     private val manifest by lazy { source("src/main/AndroidManifest.xml") }
@@ -110,18 +120,18 @@ class ChatClickPathContractTest {
     fun `search - transcript search plate is wired with policy navigation and close`() {
         assertTrue(
             "Панель поиска по диалогу обязана существовать (searchPlate/searchInput/searchCounter)",
-            chat.contains("searchPlate = LinearLayout(this)") &&
-                chat.contains("searchInput = EditText(this)") &&
-                chat.contains("searchCounter = TextView(this)")
+            chatUi.contains("searchPlate = LinearLayout(context)") &&
+                chatUi.contains("searchInput = EditText(context)") &&
+                chatUi.contains("searchCounter = TextView(context)")
         )
         assertTrue(
             "Next/prev поискa обязаны вызывать navigateTranscriptSearch",
-            chat.contains("navigateTranscriptSearch(forward = true)") &&
-                chat.contains("navigateTranscriptSearch(forward = false)")
+            chatUi.contains("navigateTranscriptSearch(forward = true)") &&
+                chatUi.contains("navigateTranscriptSearch(forward = false)")
         )
         assertTrue(
             "Закрытие панели поиска обязано быть wired",
-            chat.contains("setOnClickListener { closeTranscriptSearch() }")
+            chatUi.contains("setOnClickListener { host.closeTranscriptSearch() }")
         )
         assertTrue(
             "Совпадения/счётчик/подсветка — контроллер поиска на чистой MessageSearchPolicy",
@@ -160,10 +170,13 @@ class ChatClickPathContractTest {
 
     @Test
     fun `model chip - click opens picker from live catalog and persists explicit pick`() {
-        val chip = chat.substringAfter("modelBtn = Button(this).apply {")
+        val chip = chatUi.substringAfter("modelBtn = Button(context).apply {")
             .substringBefore("chipsRow.addView(modelBtn")
         assertTrue("Чип модели обязан иметь contentDescription «Модель»", chip.contains("contentDescription = \"Модель\""))
-        assertTrue("Клик по чипу обязан вызывать chooseModel()", chip.contains("setOnClickListener { chooseModel() }"))
+        assertTrue(
+            "Клик по чипу обязан вызывать chooseModel() (через хост каркаса)",
+            chip.contains("setOnClickListener { host.chooseModel() }")
+        )
 
         val choose = chat.substringAfter("private fun chooseModel() {").substringBefore("private fun ")
         assertTrue(
@@ -178,15 +191,15 @@ class ChatClickPathContractTest {
 
     @Test
     fun `reasoning chip - hidden until server status, click opens ladder, pick saved only after server confirm`() {
-        val chip = chat.substringAfter("reasoningBtn = Button(this).apply {")
+        val chip = chatUi.substringAfter("reasoningBtn = Button(context).apply {")
             .substringBefore("chipsRow.addView(reasoningBtn")
         assertTrue(
             "Чип reasoning скрыт до серверного статуса (visibility = View.GONE)",
             chip.contains("visibility = View.GONE")
         )
         assertTrue(
-            "Клик по чипу обязан вызывать chooseReasoningEffort()",
-            chip.contains("setOnClickListener { chooseReasoningEffort() }")
+            "Клик по чипу обязан вызывать chooseReasoningEffort() (через хост каркаса)",
+            chip.contains("setOnClickListener { host.chooseReasoningEffort() }")
         )
 
         val update = chat.substringAfter("private fun updateReasoningButton() {").substringBefore("/** Activity display mode")

@@ -787,701 +787,202 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         finish()
     }
 
+    /**
+     * Каркас экрана чата собирает [ChatScreenScaffold] (чистый рефакторинг: вид и поведение
+     * прежние — тот же порядок вставки, те же LayoutParams, тексты и обработчики). Activity
+     * остаётся тонким делегатом: отдаёт каркасу колбэки и подписи чипов, а полученные view
+     * раскладывает по своим полям — на них по-прежнему смотрят update*-методы и рендер
+     * транскрипта в этом классе.
+     */
     private fun buildChatContent(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(12), dp(8), dp(12), dp(10))
-        }
+        val v = ChatScreenScaffold.build(this, scaffoldHost)
+        networkBanner = v.networkBanner
+        miniPlayerBox = v.miniPlayer.box
+        miniPlayerTitle = v.miniPlayer.title
+        miniPlayerPlayBtn = v.miniPlayer.playBtn
+        statusView = v.statusView
+        searchPlate = v.search.plate
+        searchInput = v.search.input
+        searchCounter = v.search.counter
+        attachmentChips = v.attachmentChips
+        scroll = v.transcript.scroll
+        messages = v.transcript.messages
+        scrollToBottomFab = v.transcript.fab
+        quickChipsScroll = v.quickChipsScroll
+        smartChipsRow = v.smartChipsRow
+        todoWidgetPlate = v.todo.plate
+        todoWidgetHeader = v.todo.header
+        todoWidgetTitle = v.todo.title
+        todoWidgetChevron = v.todo.chevron
+        todoWidgetContainer = v.todo.container
+        liveRunPlate = v.liveRun.plate
+        liveRunLabel = v.liveRun.label
+        liveRunDetail = v.liveRun.detail
+        composerQuoteView = v.composer.quoteView
+        composerQuoteTitle = v.composer.quoteTitle
+        composerQuoteExcerpt = v.composer.quoteExcerpt
+        input = v.composer.input
+        modelBtn = v.composer.modelBtn
+        reasoningBtn = v.composer.reasoningBtn
+        activityModeBtn = v.composer.activityModeBtn
+        workspaceBtn = v.composer.workspaceBtn
+        contextIndicator = v.composer.contextIndicator
+        usageIndicator = v.composer.usageIndicator
+        toolsetsChip = v.composer.toolsetsChip
+        quotaChip = v.composer.quotaChip
+        voiceBtn = v.composer.voiceBtn
+        volumeBtn = v.composer.volumeBtn
+        sendButton = v.composer.sendButton
+        // Прежний вызов в конце сборки композера: поля уже разложены, кнопка озвучки
+        // получает тон по текущему режиму автоозвучивания (до attach, как и раньше).
+        updateVolumeBtn()
+        return v.root
+    }
 
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(12), systemBars.top + dp(6), dp(12), systemBars.bottom + dp(6))
-            insets
-        }
-
-        // Header
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(2), 0, dp(8))
-        }
-
-        val menuBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_menu,
-            "Разделы",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40
-        ).apply {
-            setOnClickListener {
-                if (drawer.isDrawerOpen(GravityCompat.START)) {
-                    drawer.closeDrawer(GravityCompat.START)
-                } else {
-                    drawer.openDrawer(GravityCompat.START)
-                }
+    /**
+     * Хост каркаса экрана: каркас не держит Activity, поэтому всё, что раньше он дёргал
+     * напрямую, приходит отсюда. Вызовы с теми же именами, что у методов Activity,
+     * квалифицированы `this@ChatActivity` — иначе был бы рекурсивный вызов себя.
+     */
+    private val scaffoldHost = object : ChatScreenScaffold.Host {
+        override fun onMenuClick() {
+            if (drawer.isDrawerOpen(GravityCompat.START)) {
+                drawer.closeDrawer(GravityCompat.START)
+            } else {
+                drawer.openDrawer(GravityCompat.START)
             }
         }
-        header.addView(menuBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
 
-        val titleBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(8), 0)
+        override fun onNewChat() {
+            this@ChatActivity.startNewChat()
         }
-        val logoDot = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.mars_planet))
-        }
-        titleBox.addView(logoDot, LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(6) })
-        titleBox.addView(TextView(this).apply {
-            text = "МАРС"
-            textSize = 17f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            letterSpacing = 0.08f
-        })
-        val headerStatusDot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
-        titleBox.addView(headerStatusDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginStart = dp(8) })
-        header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
 
-        val newChatBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_edit,
-            "Новый диалог",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40
-        ).apply {
-            setOnClickListener { startNewChat() }
+        override fun openMusic() {
+            startActivity(Intent(this@ChatActivity, MusicActivity::class.java))
         }
-        header.addView(newChatBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
 
-        root.addView(header)
+        override fun navigateTranscriptSearch(forward: Boolean) {
+            this@ChatActivity.navigateTranscriptSearch(forward)
+        }
 
-        // Баннер сетевого статуса: видимость/текст/тон решает чистая NetworkBannerPolicy,
-        // хост лишь мапит тон на токены MarsTheme (полоса под хедером, над мини-плеером).
-        networkBanner = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            visibility = View.GONE
-            // Доступность: смену сетевого статуса TalkBack озвучивает сам (polite).
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        override fun refreshTranscriptSearch(resetPosition: Boolean, scrollToMatch: Boolean) {
+            this@ChatActivity.refreshTranscriptSearch(resetPosition = resetPosition, scrollToMatch = scrollToMatch)
         }
-        root.addView(networkBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
-        // Mini-player strip
-        miniPlayerBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(6), dp(8), dp(6))
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.BORDER)
-            visibility = View.GONE
-            setOnClickListener { startActivity(Intent(this@ChatActivity, MusicActivity::class.java)) }
+        override fun closeTranscriptSearch() {
+            this@ChatActivity.closeTranscriptSearch()
         }
-        val miniIcon = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_music))
-            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-        }
-        miniPlayerBox.addView(miniIcon, LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(8) })
 
-        miniPlayerTitle = TextView(this).apply {
-            textSize = 13f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        miniPlayerBox.addView(miniPlayerTitle, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val miniPrevBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_skip_prev,
-            "Предыдущий",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.previous() }
-        }
-        miniPlayerBox.addView(miniPrevBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-
-        miniPlayerPlayBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_play,
-            "Воспроизведение",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = Color.WHITE,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.togglePlay() }
-        }
-        miniPlayerBox.addView(miniPlayerPlayBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-        val miniNextBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_skip_next,
-            "Следующий",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.next() }
-        }
-        miniPlayerBox.addView(miniNextBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-        root.addView(miniPlayerBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-
-        // Status bar
-        statusView = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(dp(4), dp(4), 0, dp(4))
-            // Доступность: статусная строка озвучивается при смене текста (polite).
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        }
-        root.addView(statusView)
-
-        // Панель поиска по диалогу: поле, счётчик «N из M», кольцевая навигация и закрытие.
-        // Решение о совпадениях/подписи — чистая MessageSearchPolicy (JVM-тесты);
-        // состояние и подсветка — в TranscriptSearchHighlightController.
-        searchPlate = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(10), dp(4), dp(6), dp(4))
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 12, strokeColor = MarsTheme.BORDER)
-        }
-        val searchPlateIcon = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_search))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-        }
-        searchPlate.addView(searchPlateIcon, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
-        searchInput = EditText(this).apply {
-            hint = "Искать в диалоге…"
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setHintTextColor(MarsTheme.TEXT_MUTED)
-            textSize = 14f
-            isSingleLine = true
-            background = null
-            contentDescription = "Поиск по диалогу"
-            imeOptions = 3 // IME_ACTION_SEARCH: кнопка «Найти» листает совпадения вперёд.
-            setOnEditorActionListener { _, _, _ -> navigateTranscriptSearch(forward = true); true }
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    refreshTranscriptSearch(resetPosition = true, scrollToMatch = true)
-                }
-                override fun afterTextChanged(s: android.text.Editable?) {}
-            })
-        }
-        searchPlate.addView(searchInput, LinearLayout.LayoutParams(0, -2, 1f))
-        searchCounter = TextView(this).apply {
-            textSize = 11.5f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            isSingleLine = true
-            setPadding(dp(6), 0, dp(6), 0)
-            // Доступность: счётчик «N из M» озвучивается при навигации по совпадениям.
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        }
-        searchPlate.addView(searchCounter, LinearLayout.LayoutParams(-2, -2))
-        val searchPrevBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_chevron_up,
-            "Предыдущее совпадение",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply { setOnClickListener { navigateTranscriptSearch(forward = false) } }
-        searchPlate.addView(searchPrevBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-        val searchNextBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_chevron_down,
-            "Следующее совпадение",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply { setOnClickListener { navigateTranscriptSearch(forward = true) } }
-        searchPlate.addView(searchNextBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-        val searchCloseBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_close,
-            "Закрыть поиск",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply { setOnClickListener { closeTranscriptSearch() } }
-        searchPlate.addView(searchCloseBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-        root.addView(searchPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
-
-        // Attachment chips
-        attachmentChips = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            visibility = View.GONE
-        }
-        root.addView(attachmentChips)
-
-        // Chat scroll view
-        scroll = ScrollView(this).apply {
-            isFillViewport = true
-            clipToPadding = false
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        // Feed live scroll positions into the policies so scrolling back down re-pins the
-        // viewport and hides the scroll-to-bottom FAB.
-        scroll.setOnScrollChangeListener { _, _, _, _, _ ->
+        // Прокрутка транскрипта питает политики так же, как прежний inline-листенер:
+        // расстояние до низа -> auto-scroll -> видимость FAB.
+        override fun onTranscriptScrolled() {
             val distance = distanceFromBottomPx()
             autoScroll.onViewportDistanceFromBottom(distance)
             scrollToBottomPolicy.onViewportDistanceFromBottom(distance)
             syncScrollToBottomFab()
         }
-        messages = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        scroll.addView(messages, ViewGroup.LayoutParams(-1, -2))
-        // Transcript frame: overlays the scroll-to-bottom FAB on the transcript's bottom-right,
-        // right above the chips rows and the composer, so it never covers the input bar.
-        val transcriptFrame = FrameLayout(this)
-        transcriptFrame.addView(scroll, ViewGroup.LayoutParams(-1, -1))
-        scrollToBottomFab = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_chevron_down,
-            "К последнему сообщению",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 40,
-            strokeColor = MarsTheme.BORDER
-        ).apply {
-            visibility = View.GONE
-            setOnClickListener { jumpToLatestFromFab() }
-        }
-        transcriptFrame.addView(
-            scrollToBottomFab,
-            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.BOTTOM or Gravity.END).apply {
-                marginEnd = dp(12)
-                bottomMargin = dp(10)
-            }
-        )
-        root.addView(transcriptFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        // Quick suggestions / chips
-        quickChipsScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        val quickBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val quickPrompts = listOf(
-            "Погода в Ставрополе" to { quickSend("Какая сейчас погода и прогноз на день в Ставрополе?") },
-            "Статус хоста" to { quickSend("Марс, проверь аптайм, диск и состояние сервисов") },
-            "Новый чат" to { startNewChat() },
-            "Финиш" to { finishSession() }
-        )
-        quickPrompts.forEach { (title, action) ->
-            quickBox.addView(Button(this).apply {
-                text = title
-                textSize = 12f
-                setTextColor(MarsTheme.TEXT)
-                background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
-                setPadding(dp(12), dp(4), dp(12), dp(4))
-                setOnClickListener { action() }
-            }, LinearLayout.LayoutParams(-2, dp(32)).apply { marginEnd = dp(6) })
-        }
-        quickChipsScroll.addView(quickBox)
-        root.addView(quickChipsScroll)
-
-        // Smart quick chips: context-aware one-tap replies right above the composer.
-        smartChipsRow = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            visibility = View.GONE
-            setPadding(0, 0, 0, dp(2))
-        }
-        root.addView(smartChipsRow)
-
-        // Interactive Session Todos Widget (Accordion)
-        todoWidgetPlate = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+        override fun onJumpToLatest() {
+            jumpToLatestFromFab()
         }
 
-        todoWidgetHeader = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            isClickable = true
-            setOnClickListener {
-                todoWidgetExpanded = !todoWidgetExpanded
-                updateTodoWidget()
-            }
-        }
-        val todoHeaderRow = todoWidgetHeader
-        val todoIcon = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_plan))
-            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-        }
-        todoHeaderRow.addView(todoIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) })
-
-        todoWidgetTitle = TextView(this).apply {
-            textSize = 12.5f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        todoHeaderRow.addView(todoWidgetTitle, LinearLayout.LayoutParams(0, -2, 1f))
-
-        todoWidgetChevron = ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_chevron_down))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-        }
-        todoHeaderRow.addView(todoWidgetChevron, LinearLayout.LayoutParams(dp(16), dp(16)))
-        todoWidgetPlate.addView(todoHeaderRow)
-
-        todoWidgetContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(4), 0, 0)
-        }
-        todoWidgetPlate.addView(todoWidgetContainer)
-        root.addView(todoWidgetPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
-
-        // Live Run Status Plate: active runner pulse right above the composer
-        liveRunPlate = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_0, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
-        }
-        val liveRunDot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_RUNNING)
-        liveRunPlate.addView(liveRunDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-        liveRunLabel = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            setTypeface(null, Typeface.BOLD)
-        }
-        liveRunPlate.addView(liveRunLabel)
-        liveRunDetail = TextView(this).apply {
-            textSize = 11f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setTypeface(Typeface.MONOSPACE)
-            setPadding(dp(8), 0, 0, 0)
-        }
-        liveRunPlate.addView(liveRunDetail)
-        root.addView(liveRunPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
-
-        // Two-Level Floating Glass Composer Capsule (WebUI Parity)
-        val composer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = MarsTheme.composerCapsule(this@ChatActivity)
+        override fun quickSend(text: String) {
+            this@ChatActivity.quickSend(text)
         }
 
-        // Top level: Quote/Reply Plate (if active)
-        composerQuoteView = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(8), dp(4), dp(4), dp(4))
-            background = MarsTheme.card(this@ChatActivity, MarsTheme.SURFACE_1, radiusDp = 8, strokeColor = MarsTheme.ACCENT_BORDER)
-        }
-        val quoteAccentBar = View(this).apply {
-            setBackgroundColor(MarsTheme.ACCENT)
-        }
-        composerQuoteView.addView(quoteAccentBar, LinearLayout.LayoutParams(dp(3), dp(24)).apply { marginEnd = dp(6) })
-        val quoteTextBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        composerQuoteTitle = TextView(this).apply {
-            textSize = 11f
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            setTypeface(null, Typeface.BOLD)
-        }
-        quoteTextBox.addView(composerQuoteTitle)
-        composerQuoteExcerpt = TextView(this).apply {
-            textSize = 11f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        quoteTextBox.addView(composerQuoteExcerpt)
-        composerQuoteView.addView(quoteTextBox, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val quoteCancelBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_close,
-            "Отменить цитату",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 24,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener {
-                composerLayoutPresenter.clearQuote()
-                updateQuotePlate()
-            }
-        }
-        composerQuoteView.addView(quoteCancelBtn, LinearLayout.LayoutParams(dp(24), dp(24)))
-        composer.addView(composerQuoteView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
-
-        // Input field: multiline, clean, responsive
-        input = EditText(this).apply {
-            hint = ComposerLayoutPresenter.HINT
-            setTextColor(MarsTheme.TEXT_STRONG)
-            setHintTextColor(MarsTheme.TEXT_MUTED)
-            textSize = 15f
-            maxLines = ComposerLayoutPresenter.MAX_INPUT_LINES
-            isSingleLine = false
-            background = null
-            setPadding(dp(6), dp(4), dp(6), dp(4))
-            imeOptions = 4
-            setOnEditorActionListener { _, action, _ ->
-                if (action == 4) { sendMessage(); true } else false
-            }
-            // A15: серверный черновик composer. Запись дебаунсится политикой
-            // [ServerDraftSyncPolicy] (~2 с покоя между запросами); программная вставка
-            // (восстановление черновика, steer-leftover) записью НЕ считается.
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                override fun afterTextChanged(s: android.text.Editable?) {
-                    if (composerTextProgrammatic) return
-                    scheduleServerDraftSync(s?.toString().orEmpty())
-                }
-            })
-        }
-        composer.addView(input, LinearLayout.LayoutParams(-1, -2))
-
-        // Bottom level: Session Chips on the left + Action Buttons on the right
-        val composerBottomBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, 0)
+        override fun finishSession() {
+            this@ChatActivity.finishSession()
         }
 
-        // Left: compact controls for model, reasoning level, and always-visible context.
-        val chipsScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-        }
-        val chipsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        override fun toggleTodoWidget() {
+            todoWidgetExpanded = !todoWidgetExpanded
+            updateTodoWidget()
         }
 
-        modelBtn = Button(this).apply {
-            text = modelSelection.buttonLabel() ?: "Модель"
-            textSize = 10.5f
-            contentDescription = "Модель"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setOnClickListener { chooseModel() }
-        }
-        chipsRow.addView(modelBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-
-        reasoningBtn = Button(this).apply {
-            text = "· Авто"
-            textSize = 10.5f
-            contentDescription = "Уровень размышлений"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            visibility = View.GONE
-            setOnClickListener { chooseReasoningEffort() }
-        }
-        chipsRow.addView(reasoningBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-
-        activityModeBtn = Button(this).apply {
-            text = "· ${activityModeSelection.buttonLabel()}"
-            textSize = 10.5f
-            contentDescription = "Режим активности"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setOnClickListener { chooseActivityMode() }
-        }
-        chipsRow.addView(activityModeBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-
-        workspaceBtn = Button(this).apply {
-            text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
-            textSize = 10.5f
-            contentDescription = "Рабочее пространство"
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            isSingleLine = true
-            maxEms = 11
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setOnClickListener { chooseWorkspace() }
-        }
-        chipsRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
-
-        contextIndicator = TextView(this).apply {
-            textSize = 9.5f
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            visibility = View.GONE
-            setOnClickListener { showContextUsageDetails() }
-        }
-        chipsRow.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2))
-
-        // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
-        // первый показывает кумулятивные токены и деньги (`GET /api/session/usage`),
-        // второй — процент окна из metering-кадров. NaN-подобный «$0.00» не показываем.
-        usageIndicator = TextView(this).apply {
-            textSize = 9.5f
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            setTextColor(MarsTheme.TEXT_MUTED)
-            visibility = View.GONE
-            setOnClickListener { showSessionUsageDetails() }
-        }
-        chipsRow.addView(usageIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
-
-        // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
-        // tap открывает множественный выбор из справочника тулсетов.
-        toolsetsChip = Button(this).apply {
-            text = toolsetsPresenter.chipLabel()
-            textSize = 10.5f
-            contentDescription = toolsetsPresenter.chipDescription()
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(8), 0, dp(8), 0)
-            minimumHeight = 0
-            minHeight = 0
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            visibility = View.GONE
-            setOnClickListener { showToolsetsDialog() }
-        }
-        chipsRow.addView(toolsetsChip, LinearLayout.LayoutParams(-2, dp(24)).apply { marginStart = dp(4) })
-
-        // A10: чип квоты провайдера. Провайдер без квоты показывает это словами, а не пустотой:
-        // состояние берётся из полей ответа (supported/status), а не из HTTP-кода.
-        quotaChip = TextView(this).apply {
-            textSize = 9.5f
-            background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            setTextColor(MarsTheme.TEXT_MUTED)
-            visibility = View.GONE
-            setOnClickListener { showQuotaDetails() }
-        }
-        chipsRow.addView(quotaChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
-
-        chipsScroll.addView(chipsRow)
-        composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
-
-        // Right: Action buttons (Search, Attach, Voice, Volume, Send/Stop)
-        val actionsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        override fun onComposerTextChanged(text: String) {
+            if (composerTextProgrammatic) return
+            scheduleServerDraftSync(text)
         }
 
-        // Вход в поиск по диалогу: панель раскрывается над транскриптом (под статус-строкой).
-        val searchEntryBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_search,
-            "Поиск по диалогу",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener { openTranscriptSearch() }
+        override fun sendMessage() {
+            this@ChatActivity.sendMessage()
         }
-        actionsRow.addView(searchEntryBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
-        val attachBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_attach,
-            "Прикрепить файл",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener { chooseAttachment() }
+        override fun clearQuote() {
+            composerLayoutPresenter.clearQuote()
+            updateQuotePlate()
         }
-        actionsRow.addView(attachBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
-        val voiceButton = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_mic,
-            "Голосовой ввод",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener { startVoiceInput() }
+        override fun modelChipLabel(): String = modelSelection.buttonLabel() ?: "Модель"
+
+        override fun activityModeChipLabel(): String = "· ${activityModeSelection.buttonLabel()}"
+
+        override fun workspaceChipLabel(): String =
+            workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+
+        override fun toolsetsChipLabel(): String = toolsetsPresenter.chipLabel()
+
+        override fun toolsetsChipDescription(): String = toolsetsPresenter.chipDescription()
+
+        override fun chooseModel() {
+            this@ChatActivity.chooseModel()
         }
-        voiceBtn = voiceButton
-        actionsRow.addView(voiceButton, LinearLayout.LayoutParams(dp(34), dp(34)))
 
-        val volumeButton = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_volume,
-            "Озвучить ответ, удержание — автоозвучивание",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener { speakLastMessage() }
-            // Явное действие пользователя: долгое нажатие переключает режим «читать ответы
-            // вслух» (persisted). Автоматически режим никогда не включается.
-            setOnLongClickListener {
-                voiceOutput.setAutoSpeak(!voiceOutput.autoSpeakEnabled)
-                updateVolumeBtn()
-                Toast.makeText(
-                    this@ChatActivity,
-                    if (voiceOutput.autoSpeakEnabled) "Озвучивание ответов включено"
-                    else "Озвучивание ответов выключено",
-                    Toast.LENGTH_SHORT,
-                ).show()
-                true
-            }
+        override fun chooseReasoningEffort() {
+            this@ChatActivity.chooseReasoningEffort()
         }
-        volumeBtn = volumeButton
-        actionsRow.addView(volumeButton, LinearLayout.LayoutParams(dp(34), dp(34)))
-        updateVolumeBtn()
 
-        sendButton = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_send,
-            "Отправить",
-            bg = MarsTheme.ACCENT,
-            iconTint = Color.WHITE,
-            sizeDp = 36,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener {
-                if (uiState.status == ChatStatus.TYPING) {
-                    cancelStream()
-                } else {
-                    sendMessage()
-                }
-            }
+        override fun chooseActivityMode() {
+            this@ChatActivity.chooseActivityMode()
         }
-        actionsRow.addView(sendButton, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(2) })
 
-        composerBottomBar.addView(actionsRow, LinearLayout.LayoutParams(-2, -2))
-        composer.addView(composerBottomBar, LinearLayout.LayoutParams(-1, -2))
+        override fun chooseWorkspace() {
+            this@ChatActivity.chooseWorkspace()
+        }
 
-        root.addView(composer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-        return root
+        override fun showContextUsageDetails() {
+            this@ChatActivity.showContextUsageDetails()
+        }
+
+        override fun showSessionUsageDetails() {
+            this@ChatActivity.showSessionUsageDetails()
+        }
+
+        override fun showQuotaDetails() {
+            this@ChatActivity.showQuotaDetails()
+        }
+
+        override fun showToolsetsDialog() {
+            this@ChatActivity.showToolsetsDialog()
+        }
+
+        override fun openTranscriptSearch() {
+            this@ChatActivity.openTranscriptSearch()
+        }
+
+        override fun chooseAttachment() {
+            this@ChatActivity.chooseAttachment()
+        }
+
+        override fun startVoiceInput() {
+            this@ChatActivity.startVoiceInput()
+        }
+
+        override fun speakLastMessage() {
+            this@ChatActivity.speakLastMessage()
+        }
+
+        override fun toggleAutoSpeak(): Boolean {
+            voiceOutput.setAutoSpeak(!voiceOutput.autoSpeakEnabled)
+            updateVolumeBtn()
+            return voiceOutput.autoSpeakEnabled
+        }
+
+        override fun isTyping(): Boolean = uiState.status == ChatStatus.TYPING
+
+        override fun cancelStream() {
+            this@ChatActivity.cancelStream()
+        }
     }
 
     private fun quickSend(text: String) {

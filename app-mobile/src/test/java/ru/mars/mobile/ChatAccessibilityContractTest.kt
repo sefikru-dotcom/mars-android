@@ -38,6 +38,17 @@ class ChatAccessibilityContractTest {
     /** Карточку сообщения собирает вынесенный рендерер — заголовки thinking/tool/группы живут там. */
     private val messageCard by lazy { source("src/main/java/ru/mars/mobile/ChatMessageCardRenderer.kt") }
 
+    /** Каркас экрана (шапка, баннеры, поиск, композер) собирает вынесенный [ChatScreenScaffold]. */
+    private val scaffold by lazy { source("src/main/java/ru/mars/mobile/ChatScreenScaffold.kt") }
+
+    /**
+     * Исходники UI-слоя экрана чата: Activity (делегат + update*-методы) и каркас (создание
+     * view). Live-регионы проверяются теми же регулярками, но читаются оба файла: контракт
+     * не должен зависеть от того, в каком файле физически собирается view.
+     */
+    private val chatUi by lazy { chat + "\n" + scaffold }
+
+
     /**
      * Исходники обоих файлов рендер-слоя транскрипта: Activity (композер, todo-заголовок)
      * + рендерер карточки (thinking/tool/группа инструментов). Проверки те же, но покрывают
@@ -59,8 +70,8 @@ class ChatAccessibilityContractTest {
     @Test
     fun `statusView is a polite live region`() {
         liveRegionIn(
-            Regex("statusView = TextView\\(this\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
-            chat,
+            Regex("statusView = TextView\\((?:this|context)\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
+            chatUi,
             "statusView"
         )
     }
@@ -68,8 +79,8 @@ class ChatAccessibilityContractTest {
     @Test
     fun `networkBanner is a polite live region`() {
         liveRegionIn(
-            Regex("networkBanner = TextView\\(this\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
-            chat,
+            Regex("networkBanner = TextView\\((?:this|context)\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
+            chatUi,
             "networkBanner"
         )
     }
@@ -77,8 +88,8 @@ class ChatAccessibilityContractTest {
     @Test
     fun `searchCounter is a polite live region`() {
         liveRegionIn(
-            Regex("searchCounter = TextView\\(this\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
-            chat,
+            Regex("searchCounter = TextView\\((?:this|context)\\)\\.apply \\{[\\s\\S]{0,300}?accessibilityLiveRegion = View\\.ACCESSIBILITY_LIVE_REGION_POLITE"),
+            chatUi,
             "searchCounter"
         )
     }
