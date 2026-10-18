@@ -26,7 +26,7 @@ if (!hasReleaseSigning) {
 }
 
 android { namespace = "ru.mars.tv"; compileSdk = 34
-    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 29; versionName = "1.5.5" }
+    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 30; versionName = "1.5.6" }
 
     signingConfigs {
         if (hasReleaseSigning) {
