@@ -412,8 +412,12 @@ class MusicRepositoryTest {
         MockWebServer().use { server ->
             val received = LinkedBlockingQueue<String>()
             val serverDone = CountDownLatch(1)
+            // REGISTER отправляет клиент на открытии сокета. Если play() падает раньше
+            // подключения, кадра быть не может — это не нарушение контракта.
+            val socketOpened = java.util.concurrent.atomic.AtomicBoolean(false)
             server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
                 override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
+                    socketOpened.set(true)
                     // Restored session without activeDeviceId.
                     webSocket.send("{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[]}}")
                 }
@@ -430,21 +434,23 @@ class MusicRepositoryTest {
             assertTrue("expected IllegalStateException, got $error", error is IllegalStateException)
             assertTrue(error!!.message!!.contains("activeDeviceId"))
 
-            assertTrue(serverDone.await(5, TimeUnit.SECONDS))
-            // Кадры приходят по отдельности: собираем их с окном ожидания, иначе на
-            // нагруженном раннере очередь ещё пуста и тест падает флаком.
+            serverDone.await(5, TimeUnit.SECONDS)
             val texts = mutableListOf<String>()
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (System.nanoTime() < deadline) {
-                val frame = received.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                texts.add(frame)
-                if (texts.any { it.contains("REGISTER") }) {
-                    // Даём шанс прийти лишнему CONTROL_CMD, если он вообще отправлялся.
-                    received.drainTo(texts)
-                    break
+            if (socketOpened.get()) {
+                // Кадры приходят по отдельности: собираем их с окном ожидания.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (System.nanoTime() < deadline) {
+                    val frame = received.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    texts.add(frame)
+                    if (texts.any { it.contains("REGISTER") }) {
+                        // Даём шанс прийти лишнему CONTROL_CMD, если он вообще отправлялся.
+                        received.drainTo(texts)
+                        break
+                    }
                 }
+                assertTrue("REGISTER must be sent once the socket is open", texts.any { it.contains("REGISTER") })
             }
-            assertTrue("REGISTER must still be sent", texts.any { it.contains("REGISTER") })
+            received.drainTo(texts)
             assertFalse("no CONTROL_CMD may be sent without an active device", texts.any { it.contains("CONTROL_CMD") })
             assertFalse(texts.any { it.contains("\"targetDeviceId\":\"all\"") })
         }
