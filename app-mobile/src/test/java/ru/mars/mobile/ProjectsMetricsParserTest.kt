@@ -310,7 +310,7 @@ class ProjectsMetricsParserTest {
     @Test fun liveFixtureLocalServicesAndRadarProductsWithoutBreakingAezaHost() {
         val result = parseLive()
         assertEquals(
-            listOf("caddy", "gateway", "office", "neighbor", "socks", "webui"),
+            listOf("caddy", "gateway", "neighbor", "office", "socks", "webui"),
             result.hostServices.map { it.key },
         )
         assertTrue(result.hostServices.all { it.active })
