@@ -1,5 +1,7 @@
 package ru.mars.mobile
 
+import android.Manifest
+import androidx.annotation.RequiresPermission
 import java.io.ByteArrayOutputStream
 
 /** A pull-based PCM source: the seam that keeps [VoiceRecorder] free of the Android audio stack. */
@@ -16,8 +18,29 @@ interface AudioSource {
     fun release()
 }
 
-/** Creates a fresh [AudioSource] per recording session. */
+/**
+ * The platform refused to open the microphone because RECORD_AUDIO is not granted (denied by the
+ * user, revoked at runtime, or restricted by the device policy).
+ *
+ * It deliberately extends [SecurityException]: callers keep the familiar failure type of a denied
+ * permission, while the specific type lets the voice UI tell "microphone denied" apart from a
+ * genuine AudioRecord initialization failure.
+ */
+class MicrophonePermissionDeniedException(
+    message: String,
+    cause: Throwable? = null,
+) : SecurityException(message, cause)
+
+/**
+ * Creates a fresh [AudioSource] per recording session.
+ *
+ * Implementations open the microphone, so the call requires RECORD_AUDIO. The requirement is
+ * declared on the abstraction (not only on the Android implementation) so every caller — including
+ * the JVM tests' fakes — is checked by lint against the same contract: either hold the permission
+ * or handle [SecurityException].
+ */
 interface AudioSourceFactory {
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun create(): AudioSource
 }
 
@@ -77,6 +100,11 @@ class VoiceRecorder(
             if (running || session != null || worker != null) return false
             val source = try {
                 sourceFactory.create()
+            } catch (denied: SecurityException) {
+                // RECORD_AUDIO was denied or revoked between the UI permission check and the open.
+                // Nothing has been allocated yet, so the recorder stays idle and a later start()
+                // (after the user grants the permission) is free to try again.
+                return false
             } catch (ignored: Exception) {
                 return false
             }

@@ -277,6 +277,100 @@ class VoiceRecorderTest {
         assertNull(recorder.stop())
     }
 
+    // --- permission denial ---------------------------------------------------------------------
+
+    @Test
+    fun `microphone denial is a security exception so callers keep one failure type`() {
+        val denial = MicrophonePermissionDeniedException("RECORD_AUDIO is not granted")
+
+        assertTrue(
+            "start() relies on the denial being a SecurityException",
+            SecurityException::class.java.isAssignableFrom(denial.javaClass),
+        )
+    }
+
+    @Test
+    fun `permission denial leaves the recorder idle and reports failure`() {
+        var created = 0
+        val recorder = VoiceRecorder(
+            FakeFactory {
+                created += 1
+                throw MicrophonePermissionDeniedException("RECORD_AUDIO is not granted")
+            },
+        ) { 0L }
+
+        assertFalse(recorder.start())
+        assertEquals("the factory is asked exactly once per start", 1, created)
+        assertFalse(recorder.isRecording)
+        assertNull("no session survives a denial", recorder.stop())
+        // Harmless no-ops: they would blow up or hand back a session if the denial had leaked state.
+        recorder.cancel()
+        assertFalse(recorder.isRecording)
+        assertNull(recorder.stop())
+    }
+
+    @Test
+    fun `raw security exception from the factory is treated as a denial`() {
+        val recorder = VoiceRecorder(FakeFactory { throw SecurityException("RECORD_AUDIO revoked") }) { 0L }
+
+        assertFalse(recorder.start())
+        assertFalse(recorder.isRecording)
+        assertNull(recorder.stop())
+    }
+
+    @Test
+    fun `start succeeds after a denial once the permission is granted`() {
+        val clock = FakeClock()
+        var attempts = 0
+        val source = FakeAudioSource(readsBeforeEnd = 2, onRead = { clock.advanceBy(100) })
+        val recorder = VoiceRecorder(
+            FakeFactory {
+                attempts += 1
+                if (attempts == 1) throw MicrophonePermissionDeniedException("RECORD_AUDIO is not granted")
+                source
+            },
+        ) { clock.now() }
+
+        assertFalse(recorder.start())
+        assertFalse("a denial must not leave the recorder half-started", recorder.isRecording)
+
+        assertTrue("the retry after the grant must be accepted", recorder.start())
+        assertEquals(2, attempts)
+        awaitCondition("source drained") { !recorder.isRecording }
+
+        val recording = recorder.stop()
+        assertNotNull("the granted session captures audio normally", recording)
+        recording!!
+        assertEquals(44 + 2 * chunk, recording.wav.size)
+        assertEquals(200L, recording.durationMs)
+        assertTrue("the granted session releases its source", source.releases >= 1)
+        assertFalse(recorder.isRecording)
+    }
+
+    @Test
+    fun `denial after a finished session leaves the recorder reusable`() {
+        var attempts = 0
+        val source = FakeAudioSource(readsBeforeEnd = 0)
+        val recorder = VoiceRecorder(
+            FakeFactory {
+                attempts += 1
+                if (attempts == 2) throw MicrophonePermissionDeniedException("RECORD_AUDIO revoked")
+                source
+            },
+        ) { 0L }
+
+        assertTrue(recorder.start())
+        recorder.cancel()
+
+        assertFalse("a revoked permission is reported, not a stale session", recorder.start())
+        assertFalse(recorder.isRecording)
+        assertNull(recorder.stop())
+
+        assertTrue("a later grant still works", recorder.start())
+        recorder.cancel()
+        assertFalse(recorder.isRecording)
+    }
+
     @Test
     fun `read failure ends the session and still releases the source`() {
         val clock = FakeClock()

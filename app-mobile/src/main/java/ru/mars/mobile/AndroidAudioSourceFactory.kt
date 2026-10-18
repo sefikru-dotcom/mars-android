@@ -1,8 +1,10 @@
 package ru.mars.mobile
 
+import android.Manifest
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import androidx.annotation.RequiresPermission
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -16,11 +18,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The returned source releases the AudioRecord exactly once (repeated calls are ignored), which
  * lets both the reader thread's cleanup and [VoiceRecorder.stop]/[VoiceRecorder.cancel] unblock a
  * pending read without double-releasing the hardware.
+ *
+ * [create] requires RECORD_AUDIO. A denial (or a revocation between the UI's runtime check and the
+ * open) arrives as a [SecurityException] and is rethrown as
+ * [MicrophonePermissionDeniedException], so a refused microphone is never mistaken for a broken
+ * audio stack.
  */
 class AndroidAudioSourceFactory(
     private val sampleRate: Int = VoiceRecorder.SAMPLE_RATE,
 ) : AudioSourceFactory {
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override fun create(): AudioSource {
         val channelMask = AudioFormat.CHANNEL_IN_MONO
         val encoding = AudioFormat.ENCODING_PCM_16BIT
@@ -30,19 +38,37 @@ class AndroidAudioSourceFactory(
         // Two read chunks of slack keeps the hardware buffer fed between reads.
         val bufferBytes = maxOf(minBuffer, VoiceRecorder.READ_CHUNK_BYTES * 2)
 
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            channelMask,
-            encoding,
-            bufferBytes,
-        )
+        // A denied or revoked RECORD_AUDIO surfaces here as a SecurityException. It is translated
+        // into the domain type so the caller sees "the microphone was refused", never a generic
+        // initialization failure that would look like broken hardware.
+        val record = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelMask,
+                encoding,
+                bufferBytes,
+            )
+        } catch (denied: SecurityException) {
+            throw MicrophonePermissionDeniedException(
+                "AudioRecord could not be opened: RECORD_AUDIO is not granted",
+                denied,
+            )
+        }
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             throw IllegalStateException("AudioRecord is not initialized (state=${record.state})")
         }
 
-        record.startRecording()
+        try {
+            record.startRecording()
+        } catch (denied: SecurityException) {
+            record.release()
+            throw MicrophonePermissionDeniedException(
+                "AudioRecord could not start recording: RECORD_AUDIO is not granted",
+                denied,
+            )
+        }
         if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             record.release()
             throw IllegalStateException("AudioRecord failed to enter the recording state")
