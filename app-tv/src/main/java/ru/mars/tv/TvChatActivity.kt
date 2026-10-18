@@ -27,14 +27,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatEvent
+import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.StreamSideEvent
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.MidTurnRecoveryCoordinator
@@ -48,6 +51,11 @@ import ru.mars.tv.chat.TvActivityDisplayMode
 import ru.mars.tv.chat.TvActivityDisplayPolicy
 import ru.mars.tv.chat.TvActivityModePrefs
 import ru.mars.tv.chat.TvActivityModeSelection
+import ru.mars.tv.chat.TvContextBadge
+import ru.mars.tv.chat.TvContextStatusPresenter
+import ru.mars.tv.chat.TvContextTone
+import ru.mars.tv.chat.TvHistoryReloadPlan
+import ru.mars.tv.chat.TvHistoryReloadPolicy
 import ru.mars.tv.chat.TvLiveRenderBatchPolicy
 import ru.mars.tv.chat.TvMarkdownBlocks
 import ru.mars.tv.chat.TvMarkdownRenderer
@@ -107,6 +115,13 @@ class TvChatActivity : AppCompatActivity() {
     private lateinit var newChat: Button
     private lateinit var statusView: TextView
     private lateinit var contextView: TextView
+
+    /**
+     * Бейдж статуса префилл-контекста (`context_status` side-канала): отдельный
+     * крупный чип рядом со строкой статуса — на ТВ его читают с дистанции, поэтому
+     * он не сливается с мелкой статус-цепочкой хода.
+     */
+    private lateinit var contextStatusBadge: TextView
 
     /**
      * Чип квоты провайдера (mobile A10 parity) — статус-строка рядом с индикатором
@@ -287,6 +302,20 @@ class TvChatActivity : AppCompatActivity() {
     private var hiddenMarkerView: TextView? = null
 
     /**
+     * Снимок строк, РЕАЛЬНО нарисованных в ленте из истории (после среза
+     * [TvTranscriptRetentionPolicy.historySlice]): база для инкрементальной
+     * перезагрузки ([TvHistoryReloadPolicy]) — неизменившиеся пузыри
+     * переиспользуются, а не сносятся и не инфлейтятся заново.
+     */
+    private var renderedRows: List<TvSessionBrowserPolicy.TranscriptRow> = emptyList()
+
+    /** Текущий бейдж статуса префилл-контекста (side-канал `context_status`). */
+    private var contextBadge: TvContextBadge? = null
+
+    /** Таймер автосброса бейджа контекста; новый кадр его перезапускает. */
+    private var contextBadgeJob: Job? = null
+
+    /**
      * Системная настройка «уменьшить движение», прочитанная ОДИН раз на экран и переданная
      * в политику движения ([TvMotionPolicy]): подъём под фокусом D-pad и кроссфейд фоновых
      * селекторов схлопываются в мгновенную смену состояния, когда она включена
@@ -311,6 +340,7 @@ class TvChatActivity : AppCompatActivity() {
         newChat = findViewById(R.id.newChatButton)
         statusView = findViewById(R.id.statusText)
         contextView = findViewById(R.id.contextText)
+        contextStatusBadge = findViewById(R.id.contextStatusBadge)
         quotaChip = findViewById(R.id.quotaChip)
         // Чип квоты интерактивен только там, где повтор осмыслен (политика решает это в
         // canRefresh); клик — повторное чтение квоты, ничего не пишем.
@@ -549,6 +579,8 @@ class TvChatActivity : AppCompatActivity() {
                         model = choice?.modelId,
                         modelProvider = choice?.providerId,
                         explicitModelPick = choice?.explicitPick == true,
+                        // Side-канал хода: индикатор контекста (context_status).
+                        onSideEvent = sideEventCallback(sessionFlow.sessionId, generation),
                         onEventId = { resumeTracker.onFrameId(it) },
                     ),
                     generation,
@@ -803,6 +835,7 @@ class TvChatActivity : AppCompatActivity() {
                     ChatRepository().attachToStream(
                         BASE_URL, credential, plan.streamId,
                         lastEventId = resumeTracker.lastEventId,
+                        onSideEvent = sideEventCallback(sessionId, generation),
                         onEventId = { resumeTracker.onFrameId(it) },
                     ),
                     generation,
@@ -846,6 +879,8 @@ class TvChatActivity : AppCompatActivity() {
         detail ?: return
         if (::interactive.isInitialized) interactive.dismissAll()
         resetLiveAnswerState()
+        // Бейдж контекста принадлежит прежнему ходу — в новом диалоге он не актуален.
+        clearContextStatus()
         renderTranscriptRows(TvSessionBrowserPolicy.transcript(detail))
         pinAndScrollToBottom()
     }
@@ -902,9 +937,13 @@ class TvChatActivity : AppCompatActivity() {
             var sawDone = false
             var sawGone = false
             var errorMessage: String? = null
+            // Поколение фиксируется на входе: кадр side-канала, пришедший после смены
+            // экрана/диалога, не должен красить бейдж нового хода.
+            val boundGeneration = streamGeneration
             ChatRepository().attachToStream(
                 BASE_URL, credential, streamId,
                 lastEventId = lastEventId,
+                onSideEvent = sideEventCallback(sessionFlow.sessionId, boundGeneration),
                 onEventId = { resumeTracker.onFrameId(it) },
             ).collect { event ->
                 when (event) {
@@ -1615,6 +1654,73 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /**
+     * Side-канал SSE-метаданных ([StreamSideEvent]) живого хода: ТВ-чат реагирует
+     * только на `context_status` (статус префилл-контекста) — остальные носители
+     * доставляются, но остаются без реакции (паритет с мобильным чатом).
+     *
+     * Кадр приходит на IO-контексте потока — прыжок на UI-поток здесь.
+     * [boundSessionId] фиксирует сессию на момент старта хода, [boundGeneration] —
+     * поколение стрима: опоздавший кадр не перекрасит уже другой диалог/экран.
+     */
+    private fun sideEventCallback(
+        boundSessionId: String?,
+        boundGeneration: Int,
+    ): (StreamSideEvent) -> Unit = { event ->
+        if (event is ContextStatusUpdate) {
+            runOnUiThread {
+                if (boundGeneration == streamGeneration) onContextStatus(event, boundSessionId)
+            }
+        }
+    }
+
+    /**
+     * Бейдж префилл-контекста: каждый кадр ПЕРЕЗАПИСЫВАЕТ предыдущий (не
+     * накапливает), виден [TvContextStatusPresenter.DISPLAY_DURATION_MS] и гаснет.
+     * Кадр, который показывать нечего (`not_configured`/чужая сессия), гасит
+     * бейдж сразу — статус чужого диалога не протекает в текущий экран.
+     */
+    private fun onContextStatus(update: ContextStatusUpdate, boundSessionId: String?) {
+        if (!::contextStatusBadge.isInitialized) return
+        val activeSessionId = sessionFlow.sessionId
+        if (boundSessionId != null && activeSessionId != boundSessionId) return
+        contextBadgeJob?.cancel()
+        val badge = TvContextStatusPresenter.badge(update, activeSessionId)
+        if (badge == null) {
+            contextBadgeJob = null
+            hideContextBadge()
+            return
+        }
+        contextBadge = badge
+        contextStatusBadge.text = badge.text
+        contextStatusBadge.setTextColor(
+            ContextCompat.getColor(this, when (badge.tone) {
+                TvContextTone.LOADED -> R.color.mars_status_online
+                TvContextTone.COMPACTED -> R.color.mars_status_warning
+                TvContextTone.ERROR -> R.color.mars_status_error
+            })
+        )
+        contextStatusBadge.visibility = View.VISIBLE
+        contextBadgeJob = lifecycleScope.launch {
+            delay(TvContextStatusPresenter.DISPLAY_DURATION_MS)
+            contextBadgeJob = null
+            hideContextBadge()
+        }
+    }
+
+    /** Снятие бейджа контекста (таймер, смена диалога, «Новый чат»). */
+    private fun hideContextBadge() {
+        contextBadge = null
+        if (::contextStatusBadge.isInitialized) contextStatusBadge.visibility = View.GONE
+    }
+
+    /** Сброс бейджа при любом уходе с контекста диалога (таймер гасится, вид скрывается). */
+    private fun clearContextStatus() {
+        contextBadgeJob?.cancel()
+        contextBadgeJob = null
+        hideContextBadge()
+    }
+
+    /**
      * Header status strip: live reasoning/tool status line plus the context-fill pill
      * (green <=50%, orange <=75%, red above — WebUI ring parity). Both hide when unknown.
      * Режим показа хода ([TvActivityDisplayPolicy.status]) глушит детали хода в «Тишине»;
@@ -1805,52 +1911,131 @@ class TvChatActivity : AppCompatActivity() {
     /** Полная очистка ленты («Новый чат»): View, строки активности, счётчики, live-состояние. */
     private fun clearTranscript() {
         for (index in 0 until messages.childCount) detachTranscriptView(messages.getChildAt(index))
-        messages.removeAllViews()
+        // removeAllViewsInLayout: снятие без requestLayout/layout на каждого ребёнка —
+        // именно этот проход по сотням View давал ANR на длинной истории.
+        messages.removeAllViewsInLayout()
+        messages.requestLayout()
         activityLineViews.clear()
         hiddenMessages = 0
         hiddenActivity = 0
         hiddenMarkerView = null
+        renderedRows = emptyList()
+        clearContextStatus()
         resetLiveAnswerState()
     }
 
     /**
-     * Подмена транскрипта историей БЕЗ полного сноса на главном потоке: пузыри
-     * собираются в offscreen-контейнере (не присоединён к окну — addView не тянет
-     * measure/layout на каждую строку), затем содержимое меняется одним проходом в
-     * одном кадре (пустого кадра нет). Длинная история режется до последних
+     * Подмена транскрипта историей — инкрементально, без полного сноса ленты.
+     *
+     * План считает чистая [TvHistoryReloadPolicy]: неизменившиеся пузыри
+     * переиспользуются, доинфлейтится только хвост ([TvHistoryReloadPlan.Append])
+     * или изменившаяся середина ([TvHistoryReloadPlan.Patch]). Прежний путь
+     * (`messages.removeAllViews()` + инфлейт ВСЕЙ истории) на длинном диалоге давал
+     * ANR: сотни addView и measure/layout в одном кадре на главном потоке.
+     * Полная пересборка осталась fallback'ом — когда общего префикса/суффикса нет
+     * (сменился диалог) или в ленте есть не-исторические View (карточки, строки
+     * активности, живой пузырь): их индексы сдвинули бы патч.
+     *
+     * Длинная история режется до последних
      * [TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES] сообщений с маркером
      * «…ранее скрыто» (чистое решение — [TvTranscriptRetentionPolicy.historySlice]).
-     * D-pad фокус возвращается на прежнюю позицию (или в композер).
      */
     private fun renderTranscriptRows(rows: List<TvSessionBrowserPolicy.TranscriptRow>) {
         val slice = TvTranscriptRetentionPolicy.historySlice(rows.size)
-        val offscreen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        var marker: TextView? = null
-        if (slice.hiddenMessages > 0) {
-            marker = buildHiddenMarker(TvTranscriptRetentionPolicy.hiddenMarkerText(slice.hiddenMessages, 0))
-            offscreen.addView(marker, LinearLayout.LayoutParams(-1, -2))
+        val target = rows.drop(slice.firstRowIndex)
+        val plan = TvHistoryReloadPolicy.plan(renderedRows, target)
+        if (plan is TvHistoryReloadPlan.NoChange && slice.hiddenMessages == hiddenMessages) return
+
+        // Маркер на время операции снимается: индексы строк совпадают с индексами детей.
+        hiddenMarkerView?.let { marker -> if (marker.parent === messages) messages.removeView(marker) }
+        hiddenMarkerView = null
+
+        val effective = if (plan is TvHistoryReloadPlan.FullRebuild || !historyOnlyTranscript()) {
+            TvHistoryReloadPlan.FullRebuild
+        } else {
+            plan
         }
-        rows.drop(slice.firstRowIndex).forEach { row ->
-            offscreen.addView(buildBubble(row.author, row.text, row.isUser), bubbleParams())
+        when (effective) {
+            is TvHistoryReloadPlan.NoChange -> Unit
+            is TvHistoryReloadPlan.Append -> appendHistoryRows(target, effective.fromIndex)
+            is TvHistoryReloadPlan.Patch ->
+                patchHistoryRows(target, effective.rebuildFrom, effective.rebuildTo)
+            is TvHistoryReloadPlan.FullRebuild -> rebuildTranscript(target)
         }
-        swapTranscript(offscreen)
         activityLineViews.clear()
+        renderedRows = target
         hiddenMessages = slice.hiddenMessages
         hiddenActivity = 0
-        hiddenMarkerView = marker
+        updateHiddenMarker()
     }
+
+    /**
+     * В ленте ровно пузыри истории (плюс маркер скрытого): только тогда индексы
+     * строк и детей совпадают и точечный патч безопасен.
+     */
+    private fun historyOnlyTranscript(): Boolean {
+        val markerAttached = hiddenMarkerView?.let { it.parent === messages } == true
+        if (messages.childCount != renderedRows.size + if (markerAttached) 1 else 0) return false
+        val start = if (markerAttached) 1 else 0
+        for (index in start until messages.childCount) {
+            if (messages.getChildAt(index).tag != TAG_HISTORY_ROW) return false
+        }
+        return true
+    }
+
+    /** Хвост истории: доинфлейт только новых строк, существующие View не трогаются. */
+    private fun appendHistoryRows(rows: List<TvSessionBrowserPolicy.TranscriptRow>, fromIndex: Int) {
+        for (index in fromIndex until rows.size) {
+            messages.addView(buildHistoryRow(rows[index]), bubbleParams())
+        }
+    }
+
+    /**
+     * Изменившаяся середина: снимаются и собираются заново ТОЛЬКО строки
+     * [rebuildFrom]..[rebuildTo); общий префикс и суффикс переиспользуются как есть.
+     */
+    private fun patchHistoryRows(
+        rows: List<TvSessionBrowserPolicy.TranscriptRow>,
+        rebuildFrom: Int,
+        rebuildTo: Int,
+    ) {
+        if (rebuildTo <= rebuildFrom) return
+        for (index in rebuildTo - 1 downTo rebuildFrom) {
+            val victim = messages.getChildAt(index) ?: continue
+            detachTranscriptView(victim)
+            messages.removeViewAt(index)
+        }
+        rows.subList(rebuildFrom, rebuildTo).forEachIndexed { offset, row ->
+            messages.addView(buildHistoryRow(row), rebuildFrom + offset, bubbleParams())
+        }
+    }
+
+    /**
+     * Fallback: пузыри собираются в offscreen-контейнере (не присоединён к окну —
+     * addView не тянет measure/layout на каждую строку), затем подмена одним проходом.
+     */
+    private fun rebuildTranscript(rows: List<TvSessionBrowserPolicy.TranscriptRow>) {
+        val offscreen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        rows.forEach { row -> offscreen.addView(buildHistoryRow(row), bubbleParams()) }
+        swapTranscript(offscreen)
+    }
+
+    /** Пузырь строки истории с меткой переиспользования ([TAG_HISTORY_ROW]). */
+    private fun buildHistoryRow(row: TvSessionBrowserPolicy.TranscriptRow): View =
+        buildBubble(row.author, row.text, row.isUser).apply { tag = TAG_HISTORY_ROW }
 
     /** Атомарная подмена содержимого ленты: фокус сохраняется, пустого кадра нет. */
     private fun swapTranscript(prepared: LinearLayout) {
         val focusedIndex = (0 until messages.childCount)
             .firstOrNull { messages.getChildAt(it).hasFocus() }
         for (index in 0 until messages.childCount) detachTranscriptView(messages.getChildAt(index))
-        messages.removeAllViews()
+        messages.removeAllViewsInLayout()
         while (prepared.childCount > 0) {
             val child = prepared.getChildAt(0)
             prepared.removeViewAt(0)
             messages.addView(child, child.layoutParams)
         }
+        messages.requestLayout()
         if (focusedIndex != null) {
             val target = messages.getChildAt(minOf(focusedIndex, messages.childCount - 1))
             if (target != null && target.isFocusable) target.requestFocus() else input.requestFocus()
@@ -2245,6 +2430,12 @@ class TvChatActivity : AppCompatActivity() {
 
         /** Тег View строк активности — по нему чистая политика отличает их от сообщений. */
         private const val TAG_ACTIVITY_LINE = "tv-transcript-activity-line"
+
+        /**
+         * Тег пузыря, нарисованного из истории: по нему инкрементальная перезагрузка
+         * ([TvHistoryReloadPolicy]) понимает, что View можно переиспользовать как есть.
+         */
+        private const val TAG_HISTORY_ROW = "tv-transcript-history-row"
 
         /** Recovery give-up label of a dead credential ([MidTurnRecoveryCoordinator.giveUpReason]). */
         private const val GIVE_UP_AUTH_PREFIX = "auth rejected"

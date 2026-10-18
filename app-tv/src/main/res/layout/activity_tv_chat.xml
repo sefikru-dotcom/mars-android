@@ -194,6 +194,28 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content" />
 
+            <!-- Бейдж статуса префилл-контекста (side-кадр `context_status`): крупный
+                 читаемый с дистанции чип, цвет и текст — из TvContextStatusPresenter.
+                 Гаснет сам по таймеру; D-pad его не фокусирует (не интерактивен). -->
+            <TextView
+                android:id="@+id/contextStatusBadge"
+                android:textColor="@color/mars_status_online"
+                android:textStyle="bold"
+                android:textSize="20sp"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:maxWidth="620dp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:background="@drawable/bg_chip"
+                android:focusable="false"
+                android:visibility="gone"
+                android:layout_marginStart="12dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
             <TextView
                 android:id="@+id/contextText"
                 android:textColor="@color/mars_status_online"
