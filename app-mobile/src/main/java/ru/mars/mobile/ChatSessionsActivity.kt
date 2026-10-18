@@ -360,10 +360,13 @@ class ChatSessionsActivity : ComponentActivity() {
                     setOnClickListener { deleteSession(session) }
                 }
                 row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+            }
 
-                // Контекстное меню карточки: pin / archive / export (A3). Состав
-                // меню — чистая SessionManagementPolicy; подписи зависят от
-                // текущего состояния строки («Закрепить» / «Открепить»).
+            // Контекстное меню карточки: pin / archive / export для управляемых строк
+            // и «Перенести» для дочерних (субагент/форк). Состав считает чистая
+            // SessionManagementPolicy, поэтому у read_only-субагента кнопка остаётся —
+            // но в меню у него только перенос.
+            if (SessionManagementPolicy.menu(session).isNotEmpty()) {
                 val moreBtn = MarsTheme.circleIconButton(
                     this,
                     R.drawable.ic_more_vert,
@@ -549,18 +552,24 @@ class ChatSessionsActivity : ComponentActivity() {
                 SessionActionKind.PIN -> SessionManagementPolicy.pinLabel(session)
                 SessionActionKind.ARCHIVE -> SessionManagementPolicy.archiveLabel(session)
                 SessionActionKind.EXPORT -> "Экспорт в Markdown"
+                SessionActionKind.MOVE -> SessionManagementPolicy.moveLabel()
             }
         }
-        android.app.AlertDialog.Builder(this)
+        val builder = android.app.AlertDialog.Builder(this)
             .setTitle(session.title?.takeIf { it.isNotBlank() } ?: "Диалог")
             .setItems(labels.toTypedArray()) { _, index ->
                 when (kinds[index]) {
                     SessionActionKind.PIN -> togglePinned(session)
                     SessionActionKind.ARCHIVE -> toggleArchived(session)
                     SessionActionKind.EXPORT -> exportSession(session)
+                    SessionActionKind.MOVE -> pickMoveTarget(session)
                 }
             }
-            .setNeutralButton("Поделиться (недоступно)") { _, _ ->
+            .setNegativeButton("Отмена", null)
+        // Пункт «поделиться» осмыслен только рядом с экспортом: у субагента в меню
+        // один перенос, и кнопка-отказ ему не нужна.
+        if (kinds.contains(SessionActionKind.EXPORT)) {
+            builder.setNeutralButton("Поделиться (недоступно)") { _, _ ->
                 // Честный отказ вместо обхода 401: share-ссылка сервера требует
                 // session-cookie WebUI, на device-токене её нет.
                 android.widget.Toast.makeText(
@@ -569,8 +578,66 @@ class ChatSessionsActivity : ComponentActivity() {
                     android.widget.Toast.LENGTH_LONG
                 ).show()
             }
+        }
+        builder.show()
+    }
+
+    /**
+     * Выбор нового родителя для дочернего диалога.
+     *
+     * Список целей — из УЖЕ загруженного [sessions] (отдельного запроса не нужно):
+     * чистый [SessionMovePolicy.targets] отбрасывает сам диалог, его потомков,
+     * текущего родителя, субагентов и архивные строки. В пунктах — заголовок и дата,
+     * сырой id в UI не показывается.
+     */
+    private fun pickMoveTarget(session: SessionItem) {
+        val targets = SessionMovePolicy.targets(sessions, session)
+        if (targets.isEmpty()) {
+            android.widget.Toast.makeText(this, SessionMovePolicy.NO_TARGETS, android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = targets.map { SessionMovePolicy.targetLabel(it) }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle(SessionMovePolicy.DIALOG_TITLE)
+            .setItems(labels) { _, index -> moveSessionTo(session, targets[index]) }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    /**
+     * Перенос: `POST /api/session/move`. Строка обновляется по ОТВЕТУ сервера, как
+     * и pin/archive: подтверждённая строка из [SessionMutationOutcome.Success] кладётся
+     * в список, а затем список перечитывается — новая ветка дерева строится сервером,
+     * локально её не дорисовать. Отказ сервера — тост с его текстом, состояние списка
+     * не трогаем (никакого оптимистичного переноса).
+     */
+    private fun moveSessionTo(session: SessionItem, target: SessionItem) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val outcome = SessionRepository().moveSession(ChatActivity.BASE_URL, c, session.id, target.id)
+            when (outcome) {
+                is SessionMutationOutcome.Success -> {
+                    outcome.session?.let { confirmed ->
+                        sessions = sessions.map { if (it.id == confirmed.id) confirmed else it }
+                        renderSessionList()
+                    }
+                    // Дерево и порядок строк — по серверу: перенос меняет родителя,
+                    // поэтому список перечитывается, а не правится на месте.
+                    loadSessions()
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionMovePolicy.successMessage(target),
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                is SessionMutationOutcome.Failure ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionMovePolicy.failureMessage(outcome.message),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+            }
+        }
     }
 
     /**
