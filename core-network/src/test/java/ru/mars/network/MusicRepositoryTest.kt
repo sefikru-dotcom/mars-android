@@ -431,8 +431,19 @@ class MusicRepositoryTest {
             assertTrue(error!!.message!!.contains("activeDeviceId"))
 
             assertTrue(serverDone.await(5, TimeUnit.SECONDS))
+            // Кадры приходят по отдельности: собираем их с окном ожидания, иначе на
+            // нагруженном раннере очередь ещё пуста и тест падает флаком.
             val texts = mutableListOf<String>()
-            received.drainTo(texts)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline) {
+                val frame = received.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                texts.add(frame)
+                if (texts.any { it.contains("REGISTER") }) {
+                    // Даём шанс прийти лишнему CONTROL_CMD, если он вообще отправлялся.
+                    received.drainTo(texts)
+                    break
+                }
+            }
             assertTrue("REGISTER must still be sent", texts.any { it.contains("REGISTER") })
             assertFalse("no CONTROL_CMD may be sent without an active device", texts.any { it.contains("CONTROL_CMD") })
             assertFalse(texts.any { it.contains("\"targetDeviceId\":\"all\"") })
