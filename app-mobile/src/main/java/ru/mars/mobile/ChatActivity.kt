@@ -274,6 +274,71 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Нарисованные карточки: children контейнера [messages] ↔ cardEntries 1:1 по индексу. */
     private val cardEntries = mutableListOf<CardEntry>()
 
+    /**
+     * Хост рендерера карточки: узкие адаптеры к состоянию и колбэкам Activity вместо передачи
+     * её целиком ([ChatMessageCardRenderer.Host]). Один экземпляр на Activity — аллокаций на
+     * кадр стрима не добавляет; методы читают актуальное состояние в момент вызова.
+     */
+    private val cardRendererHost = object : ChatMessageCardRenderer.Host {
+        override fun messageAt(index: Int): ChatMessage? = uiState.messages.getOrNull(index)
+
+        override fun modelLabel(): String? = modelSelection.buttonLabel()
+
+        override val activityMode: ActivityDisplayMode get() = uiState.activityMode
+
+        override fun isToolGroupExpanded(messageIndex: Int): Boolean? = uiState.isToolGroupExpanded(messageIndex)
+
+        override fun toggleThoughts(messageIndex: Int) {
+            uiState.toggleThoughts(messageIndex)
+        }
+
+        override fun toggleTool(messageIndex: Int, toolIndex: Int) {
+            uiState.toggleTool(messageIndex, toolIndex)
+        }
+
+        override fun toggleToolGroup(messageIndex: Int, currentlyExpanded: Boolean) {
+            uiState.toggleToolGroup(messageIndex, currentlyExpanded)
+        }
+
+        override fun isCodeBlockExpanded(messageIndex: Int, blockIndex: Int): Boolean =
+            uiState.isCodeBlockExpanded(messageIndex, blockIndex)
+
+        // Фолд code-блока меняет «эпоху хрома» (все снимки становятся «грязными») — как раньше.
+        override fun toggleCodeBlock(messageIndex: Int, blockIndex: Int) {
+            uiState.toggleCodeBlock(messageIndex, blockIndex)
+            transcriptChromeEpoch++
+            renderMessages()
+        }
+
+        override fun rerenderTranscript() {
+            renderMessages()
+        }
+
+        override fun copyMessage(text: String) {
+            this@ChatActivity.copyMessage(text)
+        }
+
+        override fun speakMessage(text: String) {
+            this@ChatActivity.speakMessage(text)
+        }
+
+        override fun showMessageActions(message: ChatMessage, index: Int) {
+            this@ChatActivity.showMessageActions(message, index)
+        }
+
+        override fun openImage(rawUrl: String) {
+            lightbox.open(rawUrl)
+        }
+
+        override fun openUrl(url: String) {
+            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        }
+
+        override fun a11yHeader(header: View, description: String, state: String) {
+            applyExpandableHeaderA11y(header, description, state)
+        }
+    }
+
     /** Снимки последнего завершённого рендера (вход [IncrementalTranscriptPolicy.plan]). */
     private var renderedSnapshots: List<CardSnapshot> = emptyList()
 
@@ -1850,63 +1915,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * A16: строка-сводка свёрнутого набора вызовов инструментов. Одна строка вместо
-     * простыни карточек: иконка, «N инструментов · Готово» и шеврон. Тап переключает
-     * ручное переопределение группы ([ChatUiState.toggleToolGroup]) и перерисовывает
-     * транскрипт. Иконки — монохромные векторы темы, счётчик ASCII.
-     */
-    private fun buildToolGroupSummary(messageIndex: Int, group: ToolGroupModel): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = MarsTheme.toolCallCard(this@ChatActivity)
-            setPadding(dp(10), dp(6), dp(8), dp(6))
-            isClickable = true
-        }
-        val iconRes = when (group.iconToolName?.let { ToolCardPresenter.present(ToolExecution("", it, "")).kind }) {
-            ToolKind.TERMINAL -> R.drawable.ic_chip
-            ToolKind.FILESYSTEM -> R.drawable.ic_plan
-            ToolKind.WEB -> R.drawable.ic_search
-            ToolKind.MCP -> R.drawable.ic_refresh
-            else -> R.drawable.ic_status
-        }
-        box.addView(ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, iconRes))
-            imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
-            contentDescription = null
-        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
-
-        box.addView(TextView(this).apply {
-            text = group.summary
-            textSize = 11.5f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-
-        box.addView(ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(
-                this@ChatActivity,
-                if (group.chevronExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
-            ))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-            contentDescription = null
-        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
-
-        applyExpandableHeaderA11y(
-            box,
-            group.summaryDescription,
-            if (group.chevronExpanded) "развёрнуто" else "свёрнуто"
-        )
-        box.setOnClickListener {
-            uiState.toggleToolGroup(messageIndex, group.chevronExpanded)
-            renderMessages()
-        }
-        return box
-    }
-
-    /**
      * Smart Quick Chips ribbon (WebUI parity): one-tap conversation actions above
      * the composer. Visibility is decided by the pure [QuickChips] policy; icons are
      * monochrome vectors per the design system (no emoji).
@@ -2423,7 +2431,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             wrapper.addView(buildTrimAnchorCard(message), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
             return CardEntry(wrapper, snapshot, null)
         }
-        val views = buildMessageCard(message, index, snapshot)
+        val views = ChatMessageCardRenderer.build(this, message, index, snapshot, cardRendererHost)
         wrapper.addView(views.root, cardLayoutParams(snapshot))
         return CardEntry(wrapper, snapshot, views.markdownHost)
     }
@@ -2443,467 +2451,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setTextColor(MarsTheme.TEXT_MUTED)
         gravity = Gravity.CENTER
         setPadding(dp(12), dp(6), dp(12), dp(6))
-    }
-
-    /** Корень пузыря + его markdown-секция (null, если текст пуст — секции нет). */
-    private class CardViews(val root: View, val markdownHost: LinearLayout?)
-
-    /**
-     * Сборка ОДНОЙ карточки сообщения. Тело перенесено из прежнего монолитного renderMessages
-     * почти дословно; отличия: snapshot.streamingFlag вместо пересчёта, markdown в отдельной
-     * секции (для text-only обновлений), текст/действия резолвятся по индексу в момент клика
-     * (карточка теперь переживает кадры стрима и захваченная копия устаревает).
-     */
-    private fun buildMessageCard(message: ChatMessage, index: Int, snapshot: CardSnapshot): CardViews {
-        val isUser = message.role == "user"
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = if (isUser) {
-                MarsTheme.userBubble(this@ChatActivity)
-            } else {
-                MarsTheme.botMessageCard(this@ChatActivity)
-            }
-        }
-
-        val labelRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        if (!isUser) {
-            // Vector status dot with ambient glow (WebUI parity)
-            val dot = MarsTheme.glowingStatusDot(this, MarsTheme.STATUS_ONLINE)
-            labelRow.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
-        }
-        val label = TextView(this).apply {
-            text = if (isUser) "Вы" else "Марс"
-            setTextColor(if (isUser) MarsTheme.TEXT_MUTED else MarsTheme.TEXT_STRONG)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        labelRow.addView(label)
-
-        if (!isUser) {
-            // Фактическая модель хода (волна C, фича A): приоритет — серверный штамп
-            // пузыря (открывающий кадр context_status, фоллбэк — effective_model из
-            // chat/start, подпись — TurnModelPolicy); локальный выбор пикера остаётся
-            // фоллбэком ТОЛЬКО до прихода серверного значения, чужая устаревшая
-            // модель в шапке ответа больше не висит.
-            val modelName = TurnModelPolicy.label(message.model, message.modelProvider)
-                ?.let { ChatParamRowPresenter.safeLabel(it) }
-                ?: modelSelection.buttonLabel()
-            modelName?.let { pillLabel ->
-                val modelPill = TextView(this).apply {
-                    text = pillLabel
-                    textSize = 9.5f
-                    setTextColor(MarsTheme.ACCENT_TEXT)
-                    background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
-                    setPadding(dp(6), dp(1), dp(6), dp(1))
-                }
-                labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
-            }
-        }
-
-        // Час сообщения справа в шапке карточки; при неизвестной метке не показываем.
-        MessageTimePolicy.clockLabel(message.timestamp)?.let { clock ->
-            labelRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-            labelRow.addView(TextView(this).apply {
-                text = clock
-                textSize = 10.5f
-                setTextColor(MarsTheme.TEXT_MUTED)
-                isSingleLine = true
-            })
-        }
-        card.addView(labelRow)
-
-        if (message.attachments.isNotEmpty()) {
-            card.addView(TextView(this).apply {
-                text = message.attachments.joinToString("\n") { "[Файл: $it]" }
-                setTextColor(MarsTheme.TEXT_MUTED)
-                textSize = 12f
-                setPadding(0, dp(4), 0, 0)
-            })
-        }
-
-        var markdownHost: LinearLayout? = null
-        if (message.text.isNotBlank()) {
-            // markdown — в отдельную секцию: кадры стрима пересобирают только её
-            // (text-only), не трогая шапку/кнопки карточки. Ядро ANR-фикса.
-            val host = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            renderMarkdownBlocks(message.text, host, isUser, index)
-            card.addView(host, LinearLayout.LayoutParams(-1, -2))
-            markdownHost = host
-            val actionsRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(4), 0, 0)
-            }
-            val copyBtn = Button(this).apply {
-                text = "Копировать"
-                textSize = 11f
-                setTextColor(MarsTheme.TEXT_MUTED)
-                background = null
-                setPadding(0, 0, 0, 0)
-                minimumHeight = 0
-                minHeight = 0
-                gravity = Gravity.START
-                setOnClickListener { copyMessage(uiState.messages.getOrNull(index)?.text ?: message.text) }
-            }
-            actionsRow.addView(copyBtn)
-            // «⋮» button: full message-actions sheet (copy/quote/share), WebUI parity.
-            val moreBtn = MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_more_vert,
-                "Действия с сообщением",
-                bg = Color.TRANSPARENT,
-                iconTint = MarsTheme.TEXT_MUTED,
-                sizeDp = 30,
-                strokeColor = 0
-            ).apply {
-                setOnClickListener { showMessageActions(uiState.messages.getOrNull(index) ?: message, index) }
-            }
-            actionsRow.addView(moreBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
-            if (!isUser) {
-                // Speaker button: read Mars's answer aloud through the speech filter.
-                val speakBtn = MarsTheme.circleIconButton(
-                    this,
-                    R.drawable.ic_volume,
-                    "Озвучить сообщение",
-                    bg = Color.TRANSPARENT,
-                    iconTint = MarsTheme.TEXT_MUTED,
-                    sizeDp = 30,
-                    strokeColor = 0
-                ).apply {
-                    setOnClickListener { speakMessage(uiState.messages.getOrNull(index)?.text ?: message.text) }
-                }
-                actionsRow.addView(speakBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(10) })
-            }
-            card.addView(actionsRow)
-        }
-
-        if (message.thoughts.isNotEmpty()) {
-            val isStreaming = snapshot.streamingFlag
-            val thinkingView = ThinkingCardPresenter.present(
-                thoughts = message.thoughts,
-                expanded = message.thoughtsExpanded,
-                streaming = isStreaming
-            )
-            if (thinkingView.visible) {
-                val thoughtBox = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.thinkingCard(this@ChatActivity)
-                    setPadding(dp(10), dp(6), dp(10), dp(6))
-                }
-                val header = LinearLayout(this).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    isClickable = true
-                    setOnClickListener { uiState.toggleThoughts(index); renderMessages() }
-                }
-                applyExpandableHeaderA11y(
-                    header,
-                    ChatA11yPolicy.expandableHeaderDescription(
-                        thinkingView.expanded,
-                        thinkingView.chipLabel,
-                        thinkingView.statusLabel
-                    ),
-                    ChatA11yPolicy.stateDescription(thinkingView.expanded)
-                )
-                val chevron = ImageView(this).apply {
-                    setImageDrawable(ContextCompat.getDrawable(
-                        this@ChatActivity,
-                        if (thinkingView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
-                    ))
-                    imageTintList = ColorStateList.valueOf(thinkingView.chipColor)
-                }
-                header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
-
-                val chipTitle = TextView(this).apply {
-                    text = thinkingView.chipLabel
-                    textSize = 12f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(thinkingView.chipColor)
-                }
-                header.addView(chipTitle, LinearLayout.LayoutParams(0, -2, 1f))
-
-                if (thinkingView.statusLabel != null) {
-                    val statusBadge = TextView(this).apply {
-                        text = thinkingView.statusLabel
-                        textSize = 10.5f
-                        setTextColor(if (thinkingView.streaming) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
-                        setPadding(dp(6), dp(2), dp(6), dp(2))
-                        background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_0, strokeColor = 0)
-                    }
-                    header.addView(statusBadge)
-                }
-                thoughtBox.addView(header, LinearLayout.LayoutParams(-1, -2))
-
-                if (thinkingView.expanded) {
-                    val body = TextView(this).apply {
-                        text = thinkingView.bodyText
-                        setTextColor(thinkingView.bodyColor)
-                        textSize = 12.5f
-                        setTypeface(null, Typeface.ITALIC)
-                        setLineSpacing(dp(2).toFloat(), 1f)
-                        setPadding(dp(thinkingView.bodyIndentDp), dp(6), 0, dp(4))
-                    }
-                    thoughtBox.addView(body)
-
-                    val copyBtn = Button(this).apply {
-                        text = thinkingView.copyLabel
-                        textSize = 11f
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        background = null
-                        isAllCaps = false
-                        setPadding(dp(thinkingView.bodyIndentDp), dp(2), 0, 0)
-                        minimumHeight = 0
-                        minHeight = 0
-                        gravity = Gravity.START
-                        setOnClickListener { copyMessage(thinkingView.copySource) }
-                    }
-                    thoughtBox.addView(copyBtn)
-                }
-                card.addView(thoughtBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-            }
-        }
-
-        // A16: набор вызовов инструментов одного сообщения сворачивается в одну
-        // строку-сводку («N инструментов · Готово» с шевроном). Режим активности
-        // даёт лишь НАЧАЛЬНОЕ состояние; ручной тап переопределяет его и держится
-        // до смены сессии. При COLLAPSED карточки ниже не создаются вообще —
-        // именно поэтому сначала считается модель, а цикл получает guard.
-        val toolGroup = ToolGroupPresenter.model(
-            tools = message.tools,
-            mode = uiState.activityMode,
-            manualExpanded = uiState.isToolGroupExpanded(index),
-        )
-        if (toolGroup.showsSummary) {
-            card.addView(
-                buildToolGroupSummary(index, toolGroup),
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
-            )
-        }
-
-        message.tools.forEachIndexed { toolIndex, tool ->
-            // Свёрнутая группа: дочерние карточки не инфлейтятся впустую.
-            if (!toolGroup.showsCards) return@forEachIndexed
-            val toolView = ToolCardPresenter.present(tool)
-            val toolBox = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = MarsTheme.toolCallCard(this@ChatActivity)
-                setPadding(dp(10), dp(6), dp(8), dp(6))
-            }
-            val header = LinearLayout(this).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                isClickable = true
-                setOnClickListener { uiState.toggleTool(index, toolIndex); renderMessages() }
-            }
-            applyExpandableHeaderA11y(
-                header,
-                ChatA11yPolicy.expandableHeaderDescription(toolView.expanded, toolView.kindLabel, toolView.toolName, toolView.stateLabel),
-                ChatA11yPolicy.stateDescription(toolView.expanded)
-            )
-            val toolIconRes = when (toolView.kind) {
-                ToolKind.TERMINAL -> R.drawable.ic_chip
-                ToolKind.FILESYSTEM -> R.drawable.ic_plan
-                ToolKind.WEB -> R.drawable.ic_search
-                ToolKind.MCP -> R.drawable.ic_refresh
-                ToolKind.GENERIC -> R.drawable.ic_status
-            }
-            val toolIcon = ImageView(this).apply {
-                setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, toolIconRes))
-                imageTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
-            }
-            header.addView(toolIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
-
-            val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            val kindBadge = TextView(this).apply {
-                text = toolView.kindLabel
-                textSize = 9.5f
-                setTextColor(MarsTheme.TEXT_MUTED)
-            }
-            titleCol.addView(kindBadge)
-            val toolTitle = TextView(this).apply {
-                text = toolView.toolName
-                textSize = 11.5f
-                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextColor(toolView.titleColor)
-            }
-            titleCol.addView(toolTitle)
-            header.addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
-
-            val stateBadge = TextView(this).apply {
-                text = toolView.stateLabel
-                textSize = 9.5f
-                setTypeface(Typeface.MONOSPACE)
-                val statusEnum = if (toolView.state == ToolState.DONE) MarsGradients.Status.DONE else MarsGradients.Status.RUNNING
-                MarsTheme.applyStatusBadge(this, statusEnum)
-            }
-            header.addView(stateBadge)
-
-            val chevron = ImageView(this).apply {
-                setImageDrawable(ContextCompat.getDrawable(
-                    this@ChatActivity,
-                    if (toolView.chevronUp) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down
-                ))
-                imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-            }
-            header.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) })
-
-            val copyBtn = MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_copy,
-                "Копировать инструмент",
-                bg = Color.TRANSPARENT,
-                iconTint = MarsTheme.TEXT_MUTED,
-                sizeDp = 28,
-                strokeColor = 0
-            ).apply {
-                setOnClickListener {
-                    copyMessage(toolView.copySource)
-                    Toast.makeText(this@ChatActivity, "Скопировано", Toast.LENGTH_SHORT).show()
-                }
-            }
-            header.addView(copyBtn, LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(4) })
-            toolBox.addView(header, LinearLayout.LayoutParams(-1, -2))
-
-            if (!toolView.expanded && toolView.detailLabel != null) {
-                toolBox.addView(TextView(this).apply {
-                    text = toolView.detailLabel
-                    textSize = 11f
-                    typeface = Typeface.MONOSPACE
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    isSingleLine = true
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(22), dp(4), 0, 0)
-                })
-            }
-
-            if (toolView.expanded) {
-                toolView.argsSection?.let { section ->
-                    toolBox.addView(TextView(this).apply {
-                        text = section.label
-                        textSize = 10.5f
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        setTypeface(null, Typeface.BOLD)
-                        setPadding(0, dp(6), 0, dp(2))
-                    })
-                    val argsScroll = HorizontalScrollView(this).apply {
-                        addView(TextView(this@ChatActivity).apply {
-                            text = section.visibleText
-                            textSize = 11f
-                            typeface = Typeface.MONOSPACE
-                            setTextColor(MarsTheme.TEXT)
-                            setTextIsSelectable(true)
-                            setPadding(dp(8), dp(6), dp(8), dp(6))
-                            background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
-                        })
-                    }
-                    toolBox.addView(argsScroll)
-                }
-
-                toolView.resultSection?.let { section ->
-                    toolBox.addView(TextView(this).apply {
-                        text = section.label
-                        textSize = 10.5f
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        setTypeface(null, Typeface.BOLD)
-                        setPadding(0, dp(6), 0, dp(2))
-                    })
-                    val resScroll = HorizontalScrollView(this).apply {
-                        addView(TextView(this@ChatActivity).apply {
-                            text = section.visibleText
-                            textSize = 11f
-                            typeface = Typeface.MONOSPACE
-                            setTextColor(MarsTheme.TEXT)
-                            setTextIsSelectable(true)
-                            setPadding(dp(8), dp(6), dp(8), dp(6))
-                            background = MarsTheme.card(this@ChatActivity, MarsTheme.CODE_BG, radiusDp = 8, strokeColor = MarsTheme.CODE_BORDER)
-                        })
-                    }
-                    toolBox.addView(resScroll)
-                }
-            }
-            card.addView(toolBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-        }
-
-        // Доска живых статусов субагентов (волна C, фича B): дети текущего хода
-        // читаются ПРЯМО на родительской карточке — без открытия дочернего
-        // экрана. Активные — с пульсирующим индикатором, терминальные — со
-        // знаком результата (бейдж статуса); у Failed — причина, если сервер
-        // её прислал. Данные — редьюсер SubagentStatusPolicy в ChatUiState.
-        if (message.subagents.isNotEmpty()) {
-            val board = SubagentBoardPresenter.present(message.subagents)
-            if (board.visible) {
-                val boardBox = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    background = MarsTheme.toolCallCard(this@ChatActivity)
-                    setPadding(dp(10), dp(6), dp(10), dp(6))
-                }
-                val boardHeader = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-                if (board.activeCount > 0) {
-                    val liveDot = ImageView(this).apply {
-                        setImageDrawable(ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_status))
-                        imageTintList = ColorStateList.valueOf(MarsGradients.Status.RUNNING.badge.dot)
-                        contentDescription = null
-                    }
-                    boardHeader.addView(liveDot, LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(6) })
-                }
-                boardHeader.addView(TextView(this).apply {
-                    text = board.headerLabel
-                    textSize = 10.5f
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                }, LinearLayout.LayoutParams(0, -2, 1f))
-                boardBox.addView(boardHeader)
-                board.rows.forEach { row ->
-                    val rowLine = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(0, dp(4), 0, 0)
-                    }
-                    val titleLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-                    titleLine.addView(TextView(this@ChatActivity).apply {
-                        text = row.title
-                        textSize = 11.5f
-                        setTextColor(if (row.active) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
-                        isSingleLine = true
-                        ellipsize = android.text.TextUtils.TruncateAt.END
-                    }, LinearLayout.LayoutParams(0, -2, 1f))
-                    val statusBadge = TextView(this).apply {
-                        text = row.statusLabel
-                        textSize = 9.5f
-                        val gradientStatus = MarsGradients.Status.valueOf(row.badge.name)
-                        setTextColor(gradientStatus.badge.text)
-                        background = MarsTheme.statusBadge(this@ChatActivity, gradientStatus)
-                        setPadding(dp(8), dp(3), dp(8), dp(3))
-                    }
-                    titleLine.addView(statusBadge)
-                    rowLine.addView(titleLine)
-                    val details = mutableListOf<String>()
-                    row.detail?.let { details += it }
-                    row.failureReason?.let { details += "причина: $it" }
-                    if (details.isNotEmpty()) {
-                        rowLine.addView(TextView(this).apply {
-                            text = details.joinToString(" · ")
-                            textSize = 10f
-                            setTextColor(if (row.failureReason != null) MarsGradients.Status.ERROR.badge.text else MarsTheme.TEXT_MUTED)
-                            setPadding(0, dp(1), 0, 0)
-                        })
-                    }
-                    boardBox.addView(rowLine)
-                }
-                card.addView(boardBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-            }
-        }
-
-        if (message.text.isNotBlank()) {
-            // Long-press anywhere on the bubble opens the message-actions sheet.
-            card.setOnLongClickListener { view ->
-                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                // Резолвим в момент клика: захваченная при сборке копия устаревает за кадры стрима.
-                showMessageActions(uiState.messages.getOrNull(index) ?: message, index)
-                true
-            }
-        }
-        // Тег = индекс сообщения: по нему поиск находит карточку для подсветки/скролла.
-        card.tag = index
-        return CardViews(card, markdownHost)
     }
 
     // --- Поиск по диалогу: хост-обвязка TranscriptSearchHighlightController -------------------
@@ -2980,19 +2527,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         transcriptSearch.navigate(forward)
     }
 
+    /** Markdown-секция пузыря — реализация в [ChatMessageCardRenderer.renderMarkdownBlocks]. */
     private fun renderMarkdownBlocks(value: String, parent: LinearLayout, user: Boolean, messageIndex: Int) {
-        ChatMarkdownRenderer.render(
-            context = this,
-            blocks = MarkdownFormatter.parseBlocks(value),
-            parent = parent,
-            user = user,
-            messageIndex = messageIndex,
-            isCodeBlockExpanded = uiState::isCodeBlockExpanded,
-            toggleCodeBlock = { index, blockIndex -> uiState.toggleCodeBlock(index, blockIndex); transcriptChromeEpoch++; renderMessages() },
-            copyMessage = ::copyMessage,
-            openImage = lightbox::open,
-            openUrl = { url -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } },
-        )
+        ChatMessageCardRenderer.renderMarkdownBlocks(this, value, parent, user, messageIndex, cardRendererHost)
     }
 
     private fun toolDump(tool: ToolExecution): String =

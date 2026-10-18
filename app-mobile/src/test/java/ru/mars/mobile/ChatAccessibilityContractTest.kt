@@ -34,6 +34,16 @@ class ChatAccessibilityContractTest {
     }
 
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+
+    /** Карточку сообщения собирает вынесенный рендерер — заголовки thinking/tool/группы живут там. */
+    private val messageCard by lazy { source("src/main/java/ru/mars/mobile/ChatMessageCardRenderer.kt") }
+
+    /**
+     * Исходники обоих файлов рендер-слоя транскрипта: Activity (композер, todo-заголовок)
+     * + рендерер карточки (thinking/tool/группа инструментов). Проверки те же, но покрывают
+     * место, куда код переехал при разбиении ChatActivity.
+     */
+    private val transcriptSources by lazy { chat + "\n" + messageCard }
     private val dialog by lazy { source("src/main/java/ru/mars/mobile/MarsDialog.kt") }
     private val interactive by lazy { source("src/main/java/ru/mars/mobile/MarsInteractiveView.kt") }
 
@@ -108,23 +118,25 @@ class ChatAccessibilityContractTest {
     fun `thinking, tool and todo headers are wired through the a11y helper`() {
         assertTrue(
             "Thinking-заголовок обязан получать доступную подпись из ChatA11yPolicy",
-            Regex("ChatA11yPolicy\\.expandableHeaderDescription\\(\\s*thinkingView\\.expanded").containsMatchIn(chat)
+            Regex("ChatA11yPolicy\\.expandableHeaderDescription\\(\\s*thinkingView\\.expanded").containsMatchIn(transcriptSources)
         )
         assertTrue(
             "Tool-заголовок обязан получать доступную подпись из ChatA11yPolicy",
-            chat.contains("ChatA11yPolicy.expandableHeaderDescription(toolView.expanded, toolView.kindLabel, toolView.toolName, toolView.stateLabel)")
+            transcriptSources.contains("ChatA11yPolicy.expandableHeaderDescription(toolView.expanded, toolView.kindLabel, toolView.toolName, toolView.stateLabel)")
         )
         assertTrue(
             "Todo-заголовок обязан получать доступную подпись из ChatA11yPolicy",
-            chat.contains("ChatA11yPolicy.expandableHeaderDescription(todoWidgetExpanded, card.title)")
+            transcriptSources.contains("ChatA11yPolicy.expandableHeaderDescription(todoWidgetExpanded, card.title)")
         )
         // Заголовков со сворачиванием четыре: thinking / tool / todo / группа инструментов.
         // Группа — тоже раскрываемый заголовок, поэтому обязана идти через тот же хелпер;
         // считаем вызовы, чтобы новый сворачиваемый заголовок не проскочил без подписи.
-        val calls = Regex("applyExpandableHeaderA11y\\(").findAll(chat).count()
+        // 6 = 4 заголовка + объявление хелпера + делегат [ChatMessageCardRenderer.Host.a11yHeader]
+        // (Activity пробрасывает хелпер в рендерер карточки, сам делегат заголовком не является).
+        val calls = Regex("applyExpandableHeaderA11y\\(").findAll(transcriptSources).count()
         assertEquals(
-            "Хелпер обязан вызываться в 4 заголовках (+1 объявление)",
-            5,
+            "Хелпер обязан вызываться в 4 заголовках (+1 объявление +1 делегат хоста)",
+            6,
             calls
         )
     }
