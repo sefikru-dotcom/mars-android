@@ -149,6 +149,40 @@ class MusicAlbumPolicyTest {
     }
 
     @Test
+    fun rankDoesNotTreatSameFirstNameAsOwn() {
+        // Живой замер по `Zemfira`: выдача забита однофамильцами — это РАЗНЫЕ
+        // исполнители, и поднимать их наверх нельзя. Настоящая «Земфира» здесь
+        // идёт в кириллице, поэтому «своих» не остаётся вовсе и список
+        // возвращается в серверном порядке — без «Альбомов нет».
+        val albums = listOf(
+            album("MPREb_ararat", "Я сильная", artist = "ZEMFIRA ARARAT"),
+            album("MPREb_atara", "Не такая, как все", artist = "Zemfira Atara"),
+            album("MPREb_mironova", "Želja", artist = "Zemfira Mironova"),
+            album("MPREb_real", "ЖИТЬ В ТВОЕЙ ГОЛОВЕ", artist = "Земфира"),
+        )
+        val ranked = MusicAlbumPolicy.rankForArtist(albums, "Zemfira")
+        assertEquals(
+            listOf("MPREb_ararat", "MPREb_atara", "MPREb_mironova", "MPREb_real"),
+            ranked.map { it.browseId },
+        )
+        // Ни одна карточка не пропала: это перестановка, а не фильтр.
+        assertEquals(albums.size, ranked.size)
+    }
+
+    @Test
+    fun rankDoesNotTreatTributeBandAsOwn() {
+        // «Linkin Park Tribute Band» — продолжение не маркер соавторства, значит чужой.
+        val albums = listOf(
+            album("MPREb_band", "Tribute", artist = "Linkin Park Tribute Band"),
+            album("MPREb_hybrid", "Hybrid Theory", artist = "Linkin Park"),
+        )
+        assertEquals(
+            listOf("MPREb_hybrid", "MPREb_band"),
+            MusicAlbumPolicy.rankForArtist(albums, "Linkin Park").map { it.browseId },
+        )
+    }
+
+    @Test
     fun rankCountsFeatInArtistNameAsOwn() {
         // Обе стороны: на странице «Linkin Park», у альбома «Linkin Park feat. X» —
         // и наоборот, когда страница открыта по полному имени.

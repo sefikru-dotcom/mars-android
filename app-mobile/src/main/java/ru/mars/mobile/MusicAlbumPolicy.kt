@@ -59,6 +59,14 @@ object MusicAlbumPolicy {
     const val CLOSE = "Закрыть"
 
     /**
+     * Признаки соавторства в имени исполнителя (уже нормализованные — без
+     * пунктуации). Продолжение имени считается «тем же исполнителем» только
+     * через один из них: «linkin park feat jay z» — свой, «linkin park tribute
+     * band» — чужой, «zemfira ararat» — чужой.
+     */
+    private val COLLAB_MARKERS = listOf("feat", "ft", "featuring", "with", "prod", "при уч", "при участии")
+
+    /**
      * browseId для `GET /api/album/{browseId}`: обрезанный id с префиксом `MPRE`
      * либо null — открывать нечего.
      *
@@ -210,21 +218,35 @@ object MusicAlbumPolicy {
     /**
      * Совпал ли исполнитель альбома с искомым.
      *
-     * Сравнение — равенство или вхождение ЦЕЛЫМ словом с начала строки:
-     * «linkin park» и «linkin park feat x» — свои, «mano dj mtg linkin park» —
-     * чужой (имя лишь встречается внутри, но альбом не его). Наивный поиск
-     * подстроки здесь дал бы «своим» любой кавер, у которого имя исполнителя
-     * приписано в хвосте, — ровно тот дефект, который чиним.
+     * Равенство нормализованных имён — свой. Продолжение допускается ТОЛЬКО если
+     * это маркер соавторства: «linkin park» и «linkin park feat jay z» — свой,
+     * причём в обе стороны (страницу могли открыть по полному имени).
+     *
+     * Любое другое продолжение — чужой. Это не придирка: префиксное совпадение
+     * по слову поднимало наверх однофамильцев. Замер на живом поиске `Zemfira`:
+     * «ZEMFIRA ARARAT», «Zemfira Atara», «Zemfira Mironova» — другие исполнители,
+     * но они получали статус «своих» и вставали перед настоящей «Земфирой».
+     * Так же «Linkin Park Tribute Band» — не Linkin Park.
      */
     private fun sameArtist(candidate: String, needle: String): Boolean {
         if (candidate.isEmpty()) return false
         if (candidate == needle) return true
-        return candidate.startsWithWord(needle) || needle.startsWithWord(candidate)
+        return candidate.isCollabOf(needle) || needle.isCollabOf(candidate)
     }
 
-    /** [this] начинается с [prefix] и граница проходит по слову, а не по букве. */
-    private fun String.startsWithWord(prefix: String): Boolean =
-        length > prefix.length && startsWith(prefix) && this[prefix.length] == ' '
+    /**
+     * [this] — это [base], продолженный маркером соавторства
+     * («feat», «ft», «with», «prod», «при участии»).
+     *
+     * Маркеры уже нормализованы: пунктуация вырезана, поэтому «feat.» стало
+     * «feat», а «при уч.» — «при уч». Сравнение по целому слову, иначе
+     * «with» совпало бы с началом «withney».
+     */
+    private fun String.isCollabOf(base: String): Boolean {
+        if (length <= base.length || !startsWith(base) || this[base.length] != ' ') return false
+        val rest = substring(base.length + 1)
+        return COLLAB_MARKERS.any { marker -> rest == marker || rest.startsWith("$marker ") }
+    }
 
     /** Русская форма числительного: 1 → one, 2..4 → few, остальное → many. */
     private fun plural(count: Long, one: String, few: String, many: String): String {
