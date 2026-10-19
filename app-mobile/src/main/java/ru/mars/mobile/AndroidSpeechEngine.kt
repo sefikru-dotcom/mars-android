@@ -2,6 +2,7 @@ package ru.mars.mobile
 
 import android.content.Context
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
 
 /**
@@ -22,11 +23,16 @@ import java.util.Locale
 class AndroidSpeechEngine(
     context: Context,
     private val onInitFinished: (Boolean) -> Unit,
+    /** Озвучка закончилась (дочитала или упала): хост переводит hands-free-цикл в слушание. */
+    private val onSpeechFinished: () -> Unit = {},
 ) : VoiceOutputController.SpeechEngine {
 
     private var ready = false
     private var dead = false
     private var pendingText: String? = null
+
+    /** Считаем «озвучка идёт», чтобы не дёргать хост дважды (onDone + onError, стопы). */
+    private var speaking = false
 
     private val initListener = TextToSpeech.OnInitListener { status ->
         if (status != TextToSpeech.SUCCESS) {
@@ -40,10 +46,23 @@ class AndroidSpeechEngine(
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 engine.setLanguage(Locale.forLanguageTag("ru-RU"))
             }
+            // Единственный способ узнать, что синтез реально дочитал: без этого слушателя
+            // hands-free-цикл не смог бы отличить свой голос от ответа пользователя.
+            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) = Unit
+
+                override fun onDone(utteranceId: String?) = finishSpeech()
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) = finishSpeech()
+
+                override fun onError(utteranceId: String?, errorCode: Int) = finishSpeech()
+            })
         }
         ready = true
         pendingText?.let { text ->
             pendingText = null
+            speaking = true
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
         }
         onInitFinished(true)
@@ -69,22 +88,31 @@ class AndroidSpeechEngine(
         val accepted = runCatching {
             engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.SUCCESS
         }.getOrDefault(false)
-        if (!accepted) dead = true
+        if (!accepted) dead = true else speaking = true
         return accepted
     }
 
     override fun stop() {
         pendingText = null
         runCatching { tts?.stop() }
+        // Платформа не всегда присылает onStop после stop(): «звук кончился» объявляем сами.
+        finishSpeech()
     }
 
     override fun shutdown() {
         pendingText = null
         ready = false
         dead = true
+        speaking = false
         runCatching { tts?.stop() }
         runCatching { tts?.shutdown() }
         tts = null
+    }
+
+    private fun finishSpeech() {
+        if (!speaking) return
+        speaking = false
+        runCatching { onSpeechFinished() }
     }
 
     companion object {

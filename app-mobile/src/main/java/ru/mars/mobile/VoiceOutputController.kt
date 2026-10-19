@@ -63,6 +63,20 @@ class VoiceOutputController(
     /** One-shot flag: the NEXT completed answer is spoken even with [autoSpeakEnabled] off. */
     private var speakNextAnswer = false
 
+    /**
+     * Хост узнаёт, что озвучка реально закончилась (или оборвалась). Нужен только
+     * hands-free-циклу: пока TTS говорит, микрофон не должен приниматься за ответ пользователя,
+     * а как только звук стих — цикл снова слушает. Движок сообщает об этом сам (Android TTS —
+     * через `UtteranceProgressListener`, серверный — по концу воспроизведения); если движок
+     * молчит, цикл остаётся в SPEAKING и в слушание не вернётся — это видимое, а не тихое
+     * поведение (см. предупреждение в [VoiceDialogLoop]).
+     */
+    var onSpeakingFinished: (() -> Unit)? = null
+
+    /** Озвучка сейчас звучит: ставится при принятом [speakInternal], снимается любым стопом. */
+    var speaking: Boolean = false
+        private set
+
     /** Platform engine init result (async). `false` disables all output gracefully. */
     fun onEngineReady(available: Boolean) {
         engineAvailable = available
@@ -132,7 +146,18 @@ class VoiceOutputController(
 
     /** Immediate silence (e.g. explicit «stop»). Never throws into the host. */
     fun stopSpeaking() {
+        val wasSpeaking = speaking
+        speaking = false
         runCatching { engine.stop() }
+        // Стоп — тоже «звук закончился»: hands-free-цикл обязан вернуться в слушание, иначе
+        // после первого же перебивания он навсегда остался бы в SPEAKING.
+        if (wasSpeaking) notifySpeakingFinished()
+    }
+
+    /** Движок сообщил, что дочитал (или упал): хост переводит цикл обратно в слушание. */
+    fun notifySpeakingFinished() {
+        speaking = false
+        runCatching { onSpeakingFinished?.invoke() }
     }
 
     private fun speakInternal(text: String?): SpeakOutcome {
@@ -142,8 +167,10 @@ class VoiceOutputController(
         if (!accepted) {
             // Engine is dead/unbound: disable output instead of failing every future turn.
             engineAvailable = false
+            speaking = false
             return SpeakOutcome.ENGINE_UNAVAILABLE
         }
+        speaking = true
         return SpeakOutcome.SPOKEN
     }
 }
