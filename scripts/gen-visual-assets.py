@@ -12,10 +12,22 @@ gen-visual-assets.py — воспроизводимый генератор ра�
 
   res/drawable-nodpi/mars_bg.jpg          обои окна (копия источника байт-в-байт)
   res/drawable-nodpi/mars_planet.png      планета для шапки, прозрачный фон
+  res/drawable-nodpi/mars_splash_planet.png  планета заставки, прозрачный фон
+  res/drawable-nodpi/mars_splash_bg.jpg   фон заставки полной яркости (копия источника)
   res/mipmap-<d>/ic_launcher.png          квадратная legacy-иконка
   res/mipmap-<d>/ic_launcher_round.png    круглая legacy-иконка
   res/mipmap-<d>/ic_launcher_foreground.png  foreground adaptive-иконки (108dp)
   (только app-tv) res/drawable-xhdpi/tv_banner_render.png  TV-баннер 320x180
+
+Заставка (splash) — отдельная пара ресурсов, а не переиспользование окна:
+`mars_window_bg.xml` приглушает обои слоем alpha 0.40, и для чёрного старта
+это правильно, но SplashActivity нужен яркий кадр. Поэтому фон заставки —
+копия источника без какой-либо альфы (приглушение живёт в layer-list, а не
+в JPEG), а планета — нативный кроп рендера: 436px при источнике 512px.
+Потолок разрешения задаёт сам источник: апскейл выше нативного кропа
+(favicon-512.png — это 512px, лимб 358px) не добавил бы деталей, только
+размыл лимб, поэтому 1080px из него не рисуется. Пропорции фона сохраняются
+1:1, поверх ничего не дорисовывается — неоновый ореол накладывает код.
 
 Геометрия источника не зашита числами: лимб планеты (край диска) ищется как
 медиана перепадов яркости по 360-градусным лучам, центр — сдвигом с наименьшим
@@ -68,6 +80,15 @@ assert FOREGROUND_LIMB_DP / 2 * HALO_SPAN <= SAFE_DP / 2, (
 )
 PLANET_LOGO_PX = 192         # логотип шапки
 TV_BANNER_PX = (320, 180)
+
+# ── заставка (splash) ────────────────────────────────────────────────────────
+# Планета заставки рендерится в НАТИВНОМ разрешении кропа keyed_planet
+# (2*HALO_SPAN*r), без ресемплинга: множитель 1.0. Почему не 1080px, хотя
+# экран POCO F5 — 2712x1220: источник favicon-512.png всего 512px, лимб в нём
+# 179px, кроп 436px. Апскейл до 1080 размыл бы лимб и ореол (мыло вместо
+# деталей), поэтому честный потолок — 436px, а масштабирование под экран
+# делает View на устройстве. Значение > 1.0 запрещено assert'ом ниже.
+SPLASH_PLANET_UPSCALE = 1.0
 
 # Порог яркости фона источника (lum пикселя (7,7,9) ≈ 7.2) и яркость ореола,
 # на которой альфа выходит в максимум (измерено на источнике вдоль лимба).
@@ -336,6 +357,14 @@ def build_plan(src_dir: Path, root: Path) -> list[dict]:
     logo = render_planet(art, meta, canvas=(PLANET_LOGO_PX, PLANET_LOGO_PX),
                          limb_px=PLANET_LOGO_PX * meta["limb_frac"])
 
+    # Планета заставки: нативный кроп, ресемплинг не нужен (множитель 1.0).
+    # art уже квадратный и отцентрован по лимбу, поэтому берём его как есть —
+    # ореол и прозрачность вокруг лимба посчитаны в keyed_planet.
+    assert SPLASH_PLANET_UPSCALE <= 1.0, "планета заставки не апскейлится выше источника"
+    splash_px = int(round(art.size[0] * SPLASH_PLANET_UPSCALE))
+    splash_planet = art.copy() if splash_px == art.size[0] else art.resize(
+        (splash_px, splash_px), Image.LANCZOS)
+
     out: list[dict] = []
     for module in modules:
         nodpi = module / "src/main/res/drawable-nodpi"
@@ -346,6 +375,20 @@ def build_plan(src_dir: Path, root: Path) -> list[dict]:
                         "data": bg_bytes, "what": "обои окна"})
         out.append({"module": module.name, "path": nodpi / "mars_planet.png",
                     "data": png_bytes(logo), "what": "логотип-рендер"})
+        # Заставка — в обеих целях: SplashActivity есть и на телефоне, и на TV,
+        # имена ресурсов там одинаковые, поэтому паритет важнее экономии
+        # байтов (фон заставки на TV — тот же кадр, что и на телефоне).
+        out.append({"module": module.name,
+                    "path": nodpi / "mars_splash_planet.png",
+                    "data": png_bytes(splash_planet),
+                    "what": "планета заставки"})
+        # Копия источника байт-в-байт: приглушение до alpha 0.40 живёт в
+        # mars_window_bg.xml (layer-list), а не в JPEG, поэтому файл уже
+        # «полной яркости». Отдельный ресурс — чтобы SplashActivity не зависел
+        # от раскладки окна и её правок; пропорции не трогаем, поверх ничего
+        # не рисуем (неоновый ореол накладывает код).
+        out.append({"module": module.name, "path": nodpi / "mars_splash_bg.jpg",
+                    "data": bg_bytes, "what": "фон заставки"})
         for density, px in DENSITIES.items():
             mip = module / "src/main/res" / f"mipmap-{density}"
             # legacy-иконка: весь рендер (с ореолом) занимает LEGACY_CONTENT_FRAC
@@ -386,6 +429,10 @@ def find_src(explicit: str | None, root: Path) -> Path:
     candidates = [
         Path(os.environ["MARS_ASSETS_SRC"]) if os.environ.get("MARS_ASSETS_SRC") else None,
         root.parent / "orchestrator/assets-src",
+        # Рабочие деревья воркеров лежат в /root/workspace/<wave>, а источники —
+        # в скрытом /root/workspace/.mars/orchestrator/assets-src. Без этого
+        # кандидата `--verify` из worktree падал «не найден assets-src».
+        root.parent / ".mars/orchestrator/assets-src",
         root.parent.parent / "orchestrator/assets-src",
         Path.home() / ".mars/orchestrator/assets-src",
     ]
