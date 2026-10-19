@@ -34,6 +34,13 @@ object AuthExitStores {
     /** Офлайн-кэш задач (TodosActivity). */
     const val TODOS_OFFLINE_PREFS = "mars_todos_offline"
 
+    /**
+     * Офлайн-снимок музыки ([ru.mars.network.cache.MusicOfflineCache]): последний чарт
+     * и последний список плейлистов. Снимок чарта — это фактически история
+     * прослушивания, поэтому файл входит в cleanup-набор выхода из аккаунта.
+     */
+    const val MUSIC_OFFLINE_PREFS = "mars_music_offline"
+
     /** Офлайн-кэш метрик проектов (ProjectsActivity). */
     const val PROJECTS_OFFLINE_PREFS = "mars_projects_offline"
 
@@ -60,6 +67,7 @@ object AuthExitStores {
         TODOS_OFFLINE_PREFS,
         PROJECTS_OFFLINE_PREFS,
         KNOWLEDGE_OFFLINE_PREFS,
+        MUSIC_OFFLINE_PREFS,
         PENDING_QUEUE_PREFS,
     )
 

@@ -5,6 +5,7 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.app.Dialog
+import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.LayerDrawable
@@ -39,6 +40,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.service.MarsMusicService
+import ru.mars.network.cache.MusicOfflineCache
+import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicShelf
@@ -71,6 +74,20 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var artwork: ImageView
     private var tracks = emptyList<MusicTrack>()
     private var job: Job? = null
+    /**
+     * Офлайн-снимок вкладок музыки ([MusicOfflineCache]): при сбое сети «Обзор» и
+     * «Плейлисты» показывают последний успешный ответ с подписью возраста вместо
+     * экрана ошибки. Решение «снимок есть / снимка нет» — чистая
+     * [MusicOfflineFallbackPolicy]. Файл стирается на выходе из аккаунта
+     * ([AuthExitStores.MUSIC_OFFLINE_PREFS]): снимок чарта = история прослушивания.
+     */
+    private val offlineCache by lazy {
+        MusicOfflineCache(
+            SharedPreferencesKeyValueStore(
+                getSharedPreferences(AuthExitStores.MUSIC_OFFLINE_PREFS, Context.MODE_PRIVATE),
+            ),
+        )
+    }
     /** Local history of successful searches (newest first); pure policy in [MusicSearchHistoryPolicy]. */
     private lateinit var searchHistory: MusicSearchHistory
     /** Monotonic id of the in-flight search run; stale runs are dropped by [SearchRunGuard]. */
@@ -819,9 +836,52 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 }
             }
             when (outcome) {
-                is MusicChartLoader.Outcome.Tracks -> showTracks(outcome.items)
-                is MusicChartLoader.Outcome.Failed -> showHomeError()
+                is MusicChartLoader.Outcome.Tracks -> {
+                    // Снимок пишется только из успешного ответа и только непустого:
+                    // кэш должен повторять то, что пользователь реально видел.
+                    if (outcome.items.isNotEmpty()) offlineCache.saveChartsSnapshot(outcome.items)
+                    showTracks(outcome.items)
+                }
+                is MusicChartLoader.Outcome.Failed -> showCachedCharts()
             }
+        }
+    }
+
+    /**
+     * Сеть упала на «Обзоре»: если есть годный снимок чарта — рисуем его с явной
+     * подписью возраста («из кэша, снимок на 18.10 23:41») вместо экрана ошибки.
+     * Нет снимка (или он протух/пуст) — прежнее поведение [showHomeError] с retry.
+     */
+    private fun showCachedCharts() {
+        val decision = MusicOfflineFallbackPolicy.decide(
+            items = offlineCache.getChartsSnapshot(),
+            snapshotTakenAtMs = offlineCache.getTimestamp(),
+            nowMs = System.currentTimeMillis(),
+        )
+        val cached = decision.items
+        if (cached == null) {
+            showHomeError()
+            return
+        }
+        showStatus(null)
+        showTracks(cached, header = offlineNotice(decision.label.orEmpty()))
+    }
+
+    /**
+     * Подпись офлайн-снимка под заголовком списка: пилюля цвета предупреждения.
+     * Обёрнута в контейнер на всю ширину, потому что [showTracks] растягивает header.
+     */
+    private fun offlineNotice(label: String): View {
+        val pill = TextView(this).apply {
+            text = label
+            textSize = 12f
+            setTextColor(MarsTheme.STATUS_WARNING)
+            background = MarsTheme.pill(this@MusicActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(pill, LinearLayout.LayoutParams(-2, -2))
         }
     }
 
@@ -1500,17 +1560,40 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val fetched = withContext(Dispatchers.IO) { runCatching { repository.getPlaylists() } }
             fetched.onSuccess { list ->
                 playlists = list
-                renderLibrary(MusicLibraryPolicy.state(false, null, list.size), { loadPlaylists() }) {
-                    headerCard(
-                        title = MusicLibraryPolicy.playlistCountLabel(playlists.size),
-                        action = "Создать плейлист",
-                        onAction = { promptCreatePlaylist() },
-                    )?.let { results.addView(it) }
-                    playlists.forEach { playlist -> results.addView(playlistCard(playlist)) }
-                }
+                if (list.isNotEmpty()) offlineCache.savePlaylistsSnapshot(list)
+                renderPlaylistsContent(notice = null)
             }.onFailure {
-                renderLibrary(LibraryUiState.Error("Плейлисты недоступны — проверьте сеть"), { loadPlaylists() }) {}
+                // Сбой сети: последний снимок плейлистов лучше пустого экрана с retry.
+                // Снимка нет — прежнее поведение (ошибка «Плейлисты недоступны»).
+                val decision = MusicOfflineFallbackPolicy.decide(
+                    items = offlineCache.getPlaylistsSnapshot(),
+                    snapshotTakenAtMs = offlineCache.getPlaylistsTimestamp(),
+                    nowMs = System.currentTimeMillis(),
+                )
+                val cached = decision.items
+                if (cached == null) {
+                    renderLibrary(LibraryUiState.Error("Плейлисты недоступны — проверьте сеть"), { loadPlaylists() }) {}
+                } else {
+                    playlists = cached
+                    renderPlaylistsContent(notice = decision.label.orEmpty())
+                }
             }
+        }
+    }
+
+    /**
+     * Ряды вкладки «Плейлисты»: заголовок со счётчиком, «Создать плейлист» и карточки.
+     * [notice] — подпись офлайн-снимка; null для живых данных с сервера.
+     */
+    private fun renderPlaylistsContent(notice: String?) {
+        renderLibrary(MusicLibraryPolicy.state(false, null, playlists.size), { loadPlaylists() }) {
+            notice?.let { results.addView(offlineNotice(it)) }
+            headerCard(
+                title = MusicLibraryPolicy.playlistCountLabel(playlists.size),
+                action = "Создать плейлист",
+                onAction = { promptCreatePlaylist() },
+            )?.let { results.addView(it) }
+            playlists.forEach { playlist -> results.addView(playlistCard(playlist)) }
         }
     }
 
