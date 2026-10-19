@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Альбом на TV: подписи диалога «трек -> альбом». Тексты состояний (загрузка/не найден/
+     пусто) живут в чистой TvAlbumPolicy — как TvLyricsViewPolicy у панели текста, поэтому
+     здесь только подписи кнопок и заголовок. Отдельный файл — как strings_tv_lyrics.xml:
+     параллельные ветки добавляют ключи без add/add-конфликта при слиянии. -->
+<resources>
+    <string name="tv_album_title">Альбом</string>
+    <string name="tv_album_close">Закрыть</string>
+    <string name="tv_album_retry">Повторить</string>
+    <string name="tv_album_action">Альбом</string>
+    <string name="tv_album_action_for">Открыть альбом: %1$s</string>
+    <string name="tv_album_play_track">Играть трек: %1$s</string>
+</resources>

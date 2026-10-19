@@ -3,21 +3,24 @@ package ru.mars.tv
 import kotlinx.coroutines.runBlocking
 import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
+import ru.mars.network.repository.AlbumResult
 import ru.mars.network.repository.MusicRepository
 
 /**
- * Production [TvMusicGateway] + [TvLyricsGateway]: binds the REAL core-network [MusicRepository]
+ * Production [TvMusicGateway] + [TvLyricsGateway] + [TvAlbumGateway]: binds the REAL
+ * core-network [MusicRepository]
  * (`GET {baseUrl}/api/charts`, `GET {baseUrl}/api/search?q=…` and the personal feed
  * `GET {baseUrl}/api/home`, baseUrl = [MUSIC_BASE_URL], mobile MusicActivity parity) into
  * the TV controller's blocking seam.
  * All HTTP, envelope normalization, id cleanup and error mapping stay in core-network —
  * the TV layer only bridges suspend to blocking (the controller runs this on its
  * background executor) and guarantees that no exception ever escapes: every outcome lands
- * as an explicit [TvMusicChartsResult] / [TvMusicHomeResult] / [TvLyricsResult].
+ * as an explicit [TvMusicChartsResult] / [TvMusicHomeResult] / [TvLyricsResult] /
+ * [TvAlbumResult].
  */
 class RepositoryTvMusicGateway(
     private val repository: MusicRepository,
-) : TvMusicGateway, TvLyricsGateway, TvLyricsTranslationGateway {
+) : TvMusicGateway, TvLyricsGateway, TvLyricsTranslationGateway, TvAlbumGateway {
 
     override fun fetchCharts(): TvMusicChartsResult = fetch { repository.getCharts() }
 
@@ -57,6 +60,22 @@ class RepositoryTvMusicGateway(
         TvLyricsTranslationResult.Translated(runBlocking { repository.translateLyrics(text) })
     } catch (error: Throwable) {
         TvLyricsTranslationResult.Failed(error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName)
+    }
+
+    /**
+     * `GET {baseUrl}/api/album/{browseId}` -> [TvAlbumResult]. Используется тот же
+     * `MusicRepository.getAlbum`, что и мобильным диалогом: сервер принимает только
+     * `MPRE…`, отказ по префиксу приходит вариантом [AlbumResult.InvalidBrowseId]
+     * (в TV-шов — [TvAlbumResult.NotFound]), транспорт — [TvAlbumResult.Failed].
+     */
+    override fun fetchAlbum(browseId: String): TvAlbumResult = try {
+        when (val result = runBlocking { repository.getAlbum(browseId) }) {
+            is AlbumResult.Loaded -> TvAlbumResult.Loaded(result.album)
+            AlbumResult.InvalidBrowseId -> TvAlbumResult.NotFound
+            is AlbumResult.Failed -> TvAlbumResult.Failed(result.message)
+        }
+    } catch (error: Throwable) {
+        TvAlbumResult.Failed(reasonOf(error))
     }
 
     /** Suspend-to-blocking bridge; contains every failure as [TvMusicChartsResult.Failed]. */
