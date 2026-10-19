@@ -12,7 +12,9 @@ import android.app.Application
  * Что чистим:
  * - битмап-кэш [ImageLoader] ([ImageLoader.trimMemoryCache]): LruCache ограничен
  *   бюджетом [ImageLoaderPolicy.cacheBudgetBytes] (≤ 24 МБ), под давлением памяти
- *   освобождается целиком, битмапы перезагружаются по URL лениво;
+ *   освобождается целиком, битмапы перезагружаются по URL лениво. Дисковый кэш
+ *   обложек ([ImageDiskCache]) trim НЕ трогает: давление памяти — про кучу, а не про
+ *   место на диске, и стирать диск значило бы снова качать обложки по мобильной сети;
  * - кэш разбора Markdown ([MarkdownFormatter.trimCache]): восстанавливается лениво
  *   при следующем рендере.
  *
@@ -28,6 +30,9 @@ class MarsApplication : Application() {
         // application-контекст здесь — раньше любого экрана/сервиса, который может
         // запустить воспроизведение (MusicActivity, ChatActivity, MarsMusicService).
         MarsMusicPlayer.attachContext(this)
+        // Дисковый кэш обложек: каталог берётся от application-контекста, поэтому
+        // привязка живёт здесь, а не в Activity — обложки грузят и чат, и музыка.
+        ImageLoader.attachContext(this)
     }
 
     override fun onTrimMemory(level: Int) {

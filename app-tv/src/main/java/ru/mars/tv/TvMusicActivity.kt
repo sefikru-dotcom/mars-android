@@ -220,6 +220,9 @@ class TvMusicActivity : AppCompatActivity() {
         // Global music transport: audio focus + network wake mode need an application
         // context; playback started from this screen is a good audio citizen.
         TvMusicPlayer.attachContext(this)
+        // Дисковый кэш обложек: отдельного Application-класса в app-tv нет, а обложки
+        // грузит только этот экран — привязка здесь, до первого load().
+        TvImageLoader.attachContext(this)
         stateText = findViewById(R.id.stateText)
         retryButton = findViewById(R.id.retryButton)
         stopButton = findViewById(R.id.stopButton)
