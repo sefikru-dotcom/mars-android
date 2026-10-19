@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -52,11 +53,24 @@ class ChatClickPathContractTest {
     // --- Шаг 1: запуск ------------------------------------------------------------------
 
     @Test
-    fun `launch - launcher entry is MainActivity and ChatActivity is declared`() {
+    fun `launch - launcher entry is SplashActivity and ChatActivity is declared`() {
+        // Точка входа — заставка: MainActivity при сохранённом токене не рисует
+        // ни одного кадра, поэтому LAUNCHER обязан вести на бренд-экран.
+        val splashBlock = manifest.substringAfter("android:name=\".SplashActivity\"")
+            .substringBefore("</activity>")
         assertTrue(
-            "LAUNCHER должен быть на MainActivity",
-            manifest.contains("android:name=\".MainActivity\"") &&
-                manifest.contains("android.intent.category.LAUNCHER")
+            "LAUNCHER должен быть на SplashActivity",
+            splashBlock.contains("android.intent.category.LAUNCHER")
+        )
+        assertTrue(
+            "SplashActivity обязан нести брендовую тему",
+            splashBlock.contains("android:theme=\"@style/SplashTheme\"")
+        )
+        val mainBlock = manifest.substringAfter("android:name=\".MainActivity\"")
+            .substringBefore("</activity>")
+        assertFalse(
+            "MainActivity больше не точка входа: иначе заставка не показывается",
+            mainBlock.contains("android.intent.category.LAUNCHER")
         )
         assertTrue(
             "ChatActivity обязан быть объявлен в манифесте",

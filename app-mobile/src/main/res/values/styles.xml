@@ -8,4 +8,13 @@
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>
+
+    <!-- Стартовая тема заставки: до первого кадра Activity окно уже должно быть
+         брендовым, иначе между тапом по иконке и onCreate виден системный
+         чёрный/дефолтный фон. Родитель — AppTheme, чтобы шрифт, бары и акцент
+         остались общими; переопределяется только фон.
+         API 31+ перекрывает эту тему своей версией (values-v31/styles.xml). -->
+    <style name="SplashTheme" parent="@style/AppTheme">
+        <item name="android:windowBackground">@drawable/splash_window_bg</item>
+    </style>
 </resources>

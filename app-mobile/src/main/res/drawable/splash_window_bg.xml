@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Фон заставки: фирменный рендер Марса на ПОЛНОЙ яркости.
+     Отличие от mars_window_bg (alpha 0.40) намеренное: там картинка — подложка
+     под читаемый текст и карточки, здесь она и есть бренд-экран, поэтому
+     приглушать её нечем и незачем. Базовый цвет — тот же обсидиан, что и у
+     остального клиента, чтобы стык с первым кадром ChatActivity не мигал. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/mars_background" />
+    <item>
+        <bitmap
+            android:src="@drawable/mars_bg"
+            android:gravity="center"
+            android:filter="true" />
+    </item>
+</layer-list>

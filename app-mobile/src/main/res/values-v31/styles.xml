@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+ рисует СВОЙ системный сплэш (иконка на фоне) до первого кадра
+     Activity. Без этой версии темы системный сплэш брал бы windowBackground из
+     AppTheme и показывал приглушённую картинку с иконкой приложения — два разных
+     экрана подряд. Здесь системный слой приведён к бренду: тот же обсидиановый
+     фон, логотип-планета как анимируемая иконка и короткая (200 мс) системная
+     анимация, после которой слово «МАРС» и пульсация продолжаются уже в
+     SplashActivity.
+     Библиотека androidx.core:core-splashscreen НЕ используется: на targetSdk 34
+     платформенных атрибутов достаточно, а новая зависимость ради одного экрана
+     не оправдана.
+     postSplashScreenTheme объявлен как локальный атрибут (values/attrs.xml):
+     в android-namespace такого атрибута нет, его приносит только библиотека. -->
+<resources>
+    <style name="SplashTheme" parent="@style/AppTheme">
+        <item name="android:windowSplashScreenBackground">@color/mars_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenAnimationDuration">200</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <!-- Окно под системным сплэшем: тот же брендовый фон, что и в базовой
+             версии темы, иначе после исчезновения системной иконки кадр моргнул
+             бы приглушённой картинкой AppTheme. -->
+        <item name="android:windowBackground">@drawable/splash_window_bg</item>
+    </style>
+</resources>

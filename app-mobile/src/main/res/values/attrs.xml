@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Атрибут `postSplashScreenTheme` в android-namespace не существует: его
+         приносит только androidx.core:core-splashscreen, а библиотеки в проекте нет
+         (и новых зависимостей добавлять нельзя). Тема заставки при этом обязана
+         назвать тему, в которую переходит окно после системного сплэша, поэтому
+         объявляем атрибут локально. Значение — ссылка на @style/AppTheme в
+         values-v31/styles.xml. -->
+    <attr name="postSplashScreenTheme" format="reference" />
+</resources>

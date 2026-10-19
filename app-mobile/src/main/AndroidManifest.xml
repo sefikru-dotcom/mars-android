@@ -58,13 +58,23 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- Точка входа — заставка, а не MainActivity: при сохранённом credential
+             MainActivity не рисует ни кадра (сразу openChat + finish), поэтому
+             бренд-экран должен быть отдельным шагом ДО неё. exported=true обязателен
+             для LAUNCHER-активности, иначе система не покажет иконку в лончере. -->
         <activity
-            android:name=".MainActivity"
-            android:exported="true">
+            android:name=".SplashActivity"
+            android:exported="true"
+            android:theme="@style/SplashTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Логин/маршрутизация после заставки. exported остаётся true: на этот экран
+             ведут deep link и повторная авторизация из ChatActivity/Settings. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true" />
     </application>
 </manifest>
