@@ -1,6 +1,7 @@
 package ru.mars.mobile
 
 import java.util.Arrays
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -23,6 +24,11 @@ import org.junit.Test
 class VoiceRecorderTest {
 
     private val chunk = VoiceRecorder.READ_CHUNK_BYTES
+
+    private companion object {
+        /** Заметно выше порога SilenceDetector (400) — обычная речь у микрофона телефона. */
+        const val SPEECH_AMPLITUDE = 8_000
+    }
 
     // --- fakes ---------------------------------------------------------------------------------
 
@@ -103,6 +109,41 @@ class VoiceRecorderTest {
 
         private companion object {
             const val DATA_BYTE: Byte = 7
+        }
+    }
+
+    /**
+     * Synthetic source with a scripted amplitude per read: lets a test play "speech, then a pause"
+     * without any real audio. Every read is a full buffer of the same constant sample, so the RMS
+     * the detector sees is exactly that amplitude. After the script is exhausted the stream ends,
+     * so a test that forgot to assert the stop still terminates instead of spinning.
+     */
+    private class ScriptedAudioSource(
+        private val amplitudes: List<Int>,
+        private val onRead: ((Int) -> Unit)? = null,
+    ) : AudioSource {
+
+        private val counter = AtomicInteger(0)
+
+        @Volatile var releases = 0
+            private set
+
+        override fun read(buf: ByteArray): Int {
+            val n = counter.incrementAndGet()
+            if (n > amplitudes.size) return -1
+            val amplitude = amplitudes[n - 1]
+            var index = 0
+            while (index + 1 < buf.size) {
+                buf[index] = (amplitude and 0xFF).toByte()
+                buf[index + 1] = ((amplitude shr 8) and 0xFF).toByte()
+                index += 2
+            }
+            onRead?.invoke(n)
+            return buf.size
+        }
+
+        override fun release() {
+            releases += 1
         }
     }
 
@@ -264,6 +305,86 @@ class VoiceRecorderTest {
         assertEquals(VoiceRecorder.MAX_DURATION_MS, recording.durationMs)
         assertEquals(44 + (VoiceRecorder.MAX_DURATION_MS / 100).toInt() * chunk, recording.wav.size)
         assertTrue(source.releases >= 1)
+    }
+
+    // --- auto-stop by silence ------------------------------------------------------------------
+
+    @Test
+    fun `silence auto-stops the recording and hands it out exactly once`() {
+        val clock = FakeClock()
+        val delivered = CopyOnWriteArrayList<Recording>()
+        // 5 чанков речи (амплитуда 8000 выше порога детектора), дальше — тишина.
+        val source = ScriptedAudioSource(
+            amplitudes = List(5) { SPEECH_AMPLITUDE } + List(60) { 0 },
+            onRead = { clock.advanceBy(100) },
+        )
+        val recorder = VoiceRecorder(
+            sourceFactory = FakeFactory { source },
+            onAutoStop = { recording -> delivered += recording },
+            nowMs = { clock.now() },
+        )
+
+        assertTrue(recorder.start())
+        awaitCondition("auto-stop on silence") { delivered.size == 1 && !recorder.isRecording }
+
+        assertEquals("запись отдаётся ровно один раз", 1, delivered.size)
+        val recording = delivered.single()
+        // 5 чанков речи + 13 чанков тишины, пока не накопятся 1.2 с hangover: 18 чанков = 1.8 с
+        // (длительность считается от start(), а первый чанк приходит на метке 100 мс).
+        assertEquals(1_800L, recording.durationMs)
+        assertEquals(44 + 18 * chunk, recording.wav.size)
+        assertEquals("RIFF", String(recording.wav, 0, 4, Charsets.US_ASCII))
+        assertTrue("микрофон освобождён к моменту колбэка", source.releases >= 1)
+        assertTrue("хост видит, что запись забрал авто-стоп", recorder.autoStopTaken)
+        assertNull("повторный stop после авто-стопа не отдаёт второй WAV", recorder.stop())
+        assertNull("и следующий тоже", recorder.stop())
+    }
+
+    @Test
+    fun `auto stop is off when no callback is passed`() {
+        val clock = FakeClock()
+        // 200 чанков тишины = 20 с: намного больше minNoSpeechMs детектора (3 с).
+        val source = ScriptedAudioSource(List(200) { 0 }, onRead = { clock.advanceBy(100) })
+        val recorder = VoiceRecorder(sourceFactory = FakeFactory { source }, nowMs = { clock.now() })
+
+        assertTrue(recorder.start())
+        awaitCondition("source drained") { !recorder.isRecording }
+
+        val recording = recorder.stop()
+        assertNotNull("без колбэка запись идёт до конца источника", recording)
+        recording!!
+        assertEquals(20_000L, recording.durationMs)
+        assertEquals(44 + 200 * chunk, recording.wav.size)
+        assertFalse("детектор не включался", recorder.autoStopTaken)
+    }
+
+    @Test
+    fun `recorder is reusable after an auto stop`() {
+        val clock = FakeClock()
+        val delivered = CopyOnWriteArrayList<Recording>()
+        val autoStopped = ScriptedAudioSource(List(5) { SPEECH_AMPLITUDE } + List(60) { 0 }, onRead = { clock.advanceBy(100) })
+        val manual = ScriptedAudioSource(List(2) { SPEECH_AMPLITUDE }, onRead = { clock.advanceBy(100) })
+        val sources = ArrayDeque(listOf(autoStopped, manual))
+        val recorder = VoiceRecorder(
+            sourceFactory = FakeFactory { sources.removeFirst() },
+            onAutoStop = { recording -> delivered += recording },
+            nowMs = { clock.now() },
+        )
+
+        assertTrue(recorder.start())
+        awaitCondition("first session auto-stopped") { delivered.size == 1 && !recorder.isRecording }
+
+        // Новая сессия: детектор и флаг авто-стопа сброшены, обычный stop снова отдаёт запись.
+        assertTrue(recorder.start())
+        assertFalse("новая сессия не считается авто-стопнутой", recorder.autoStopTaken)
+        awaitCondition("second session drained") { !recorder.isRecording }
+
+        val recording = recorder.stop()
+        assertNotNull("ручной stop после авто-стопа работает", recording)
+        recording!!
+        assertEquals(200L, recording.durationMs)
+        assertEquals(44 + 2 * chunk, recording.wav.size)
+        assertEquals("второго авто-стопа не было", 1, delivered.size)
     }
 
     // --- failure paths -------------------------------------------------------------------------
