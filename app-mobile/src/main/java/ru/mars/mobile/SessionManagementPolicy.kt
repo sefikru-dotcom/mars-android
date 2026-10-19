@@ -18,6 +18,9 @@ enum class SessionActionKind {
     ARCHIVE,
     EXPORT,
 
+    /** Публичная ссылка: `POST /api/share/create` (ручка разрешена device-токену). */
+    SHARE,
+
     /** Перенос дочерней строки в другого родителя ([SessionMovePolicy]). */
     MOVE,
 }
@@ -26,37 +29,45 @@ enum class SessionActionKind {
  * Чистая политика действий над диалогом: состав меню, подписи, имя файла экспорта
  * и доступность «поделиться».
  *
- * Серверные `/api/share/create` и `/api/share/revoke` на device-токене отвечают 401
- * — это серверный блокер (публичный share-эндпоинт требует session-cookie WebUI), а
- * не дефект клиента. Поэтому пункт «поделиться» не ходит в эти ручки вовсе: экспорт
- * формируется ЛОКАЛЬНО из ответа `GET /api/session/export` готовым
- * [ru.mars.network.export.SessionMarkdownExporter], после чего уходит в системный
- * share-sheet Android. Так экспорт работает офлайн и не обходит авторизацию.
+ * «Поделиться» — это ПУБЛИЧНАЯ ССЫЛКА сервера (`POST /api/share/create`, отзыв —
+ * `POST /api/share/revoke`): обе ручки входят в device-Bearer allowlist
+ * (`hermes-webui/api/auth.py`, `NATIVE_BEARER_EXACT_PATHS`), поэтому клиент зовёт
+ * их напрямую. Прежнее утверждение «на device-токене эти ручки отвечают 401»
+ * было серверным блокером и снято — ссылка делается через сервер, а локальный
+ * Markdown-экспорт ([ru.mars.network.export.SessionMarkdownExporter]) остаётся
+ * отдельным пунктом для файла.
  */
 object SessionManagementPolicy {
 
     /**
-     * Пункт «поделиться» доступен, только если сервер отдал серверную share-ссылку
-     * (`share_url`/`share_token` в строке сессии). На device-токене такой ссылки нет
-     * никогда, поэтому в UI этот пункт честно показывается недоступным с пояснением,
-     * а НЕ подменяется вызовом `/api/share/create`.
-     */
-    const val SHARE_UNAVAILABLE_NOTE = "Публичная ссылка недоступна на этом устройстве"
-
-    /**
-     * Состав меню для строки: управляемые строки получают pin/archive/export,
+     * Состав меню для строки: управляемые строки получают pin/archive/export/share,
      * дочерние (субагент/форк) — «Перенести». Оба набора складываются: у субагента
-     * `read_only` отсекает pin/archive/export, но перенос в другого родителя сервер
-     * разрешает, поэтому пункт [SessionActionKind.MOVE] остаётся.
+     * `read_only` отсекает pin/archive/export/share, но перенос в другого родителя
+     * сервер разрешает, поэтому пункт [SessionActionKind.MOVE] остаётся.
      */
     fun menu(session: SessionItem): List<SessionActionKind> {
         val manageable = SessionRowActions.canManage(session)
         val movable = SessionMovePolicy.canMove(session)
         return buildList {
-            if (manageable) addAll(listOf(SessionActionKind.PIN, SessionActionKind.ARCHIVE, SessionActionKind.EXPORT))
+            if (manageable) {
+                addAll(
+                    listOf(
+                        SessionActionKind.PIN,
+                        SessionActionKind.ARCHIVE,
+                        SessionActionKind.EXPORT,
+                        SessionActionKind.SHARE,
+                    )
+                )
+            }
             if (movable) add(SessionActionKind.MOVE)
         }
     }
+
+    /** Подпись пункта публичной ссылки. */
+    fun shareLabel(): String = "Поделиться ссылкой"
+
+    /** Подпись пункта отзыва ссылки (в диалоге ссылки). */
+    fun revokeLabel(): String = "Отозвать ссылку"
 
     /** Подпись пункта переноса. */
     fun moveLabel(): String = SessionMovePolicy.LABEL

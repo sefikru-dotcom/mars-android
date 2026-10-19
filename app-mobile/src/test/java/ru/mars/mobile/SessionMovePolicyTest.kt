@@ -128,14 +128,20 @@ class SessionMovePolicyTest {
 
     @Test
     fun menuOffersMoveOnlyForChildRows() {
-        // У субагента read_only отсекает pin/archive/export — остаётся один перенос.
+        // У субагента read_only отсекает pin/archive/export/share — остаётся один перенос.
         assertEquals(
             listOf(SessionActionKind.MOVE),
             SessionManagementPolicy.menu(child("sub", "p1", subagent = true)),
         )
-        // Обычная корневая строка перенос не предлагает: состав меню не изменился.
+        // Обычная корневая строка перенос не предлагает: у неё полный набор
+        // управляемых действий, включая публичную ссылку (share закрыт в этой волне).
         assertEquals(
-            listOf(SessionActionKind.PIN, SessionActionKind.ARCHIVE, SessionActionKind.EXPORT),
+            listOf(
+                SessionActionKind.PIN,
+                SessionActionKind.ARCHIVE,
+                SessionActionKind.EXPORT,
+                SessionActionKind.SHARE,
+            ),
             SessionManagementPolicy.menu(root("s1")),
         )
     }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -79,6 +80,18 @@ object ChatScreenScaffold {
 
         /** Заголовок todo-виджета: свернуть/развернуть список задач. */
         fun toggleTodoWidget()
+
+        /** Карточка очереди: ручной повтор недоставленного сообщения. */
+        fun retryQueuedMessage(messageId: String)
+
+        /** Карточка очереди: удаление недоставленного сообщения (с подтверждением). */
+        fun discardQueuedMessage(messageId: String)
+
+        /** Карточка очереди: удалить все недоставленные сообщения. */
+        fun discardAllQueuedMessages()
+
+        /** Карточка цели: скрыть её локально (цель на сервере не меняется). */
+        fun dismissGoalCard()
 
         /** Ввод в композере: серверный черновик (программная вставка не пишется). */
         fun onComposerTextChanged(text: String)
@@ -168,6 +181,23 @@ object ChatScreenScaffold {
     /** Live-run плашка: полоса, метка и деталь хода. */
     class LiveRunViews(val plate: LinearLayout, val label: TextView, val detail: TextView)
 
+    /** Карточка неотправленных: плашка, заголовок, контейнер строк и «Удалить все». */
+    class QueueViews(
+        val plate: LinearLayout,
+        val title: TextView,
+        val rows: LinearLayout,
+        val discardAll: Button,
+    )
+
+    /** Карточка статуса цели: плашка, точка состояния, заголовок, деталь и «Скрыть». */
+    class GoalViews(
+        val plate: LinearLayout,
+        val dot: View,
+        val title: TextView,
+        val detail: TextView,
+        val dismiss: ImageButton,
+    )
+
     /** Композер: цитата, поле ввода, чипы сессии и кнопки действий. */
     class ComposerViews(
         val quoteView: LinearLayout,
@@ -201,6 +231,8 @@ object ChatScreenScaffold {
         val smartChipsRow: HorizontalScrollView,
         val todo: TodoViews,
         val liveRun: LiveRunViews,
+        val queue: QueueViews,
+        val goal: GoalViews,
         val composer: ComposerViews,
     )
 
@@ -523,6 +555,81 @@ object ChatScreenScaffold {
             setPadding(0, 0, 0, dp(2))
         }
         root.addView(smartChipsRow)
+
+        // Карточка неотправленных сообщений (OfflineQueuePresenter): строки очереди
+        // этого диалога с ручным повтором/удалением. Показывается только когда есть
+        // что показать — обычный онлайн-чат её не видит.
+        val queuePlate = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = MarsTheme.card(context, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = MarsTheme.STATUS_WARNING)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        val queueTitle = TextView(context).apply {
+            textSize = 12.5f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        queuePlate.addView(queueTitle, LinearLayout.LayoutParams(-1, -2))
+        val queueRows = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        queuePlate.addView(queueRows, LinearLayout.LayoutParams(-1, -2))
+        val queueDiscardAll = Button(context).apply {
+            text = "Удалить все"
+            textSize = 11.5f
+            setTextColor(MarsTheme.STATUS_ERROR)
+            background = null
+            setPadding(0, dp(4), 0, 0)
+            gravity = Gravity.START
+            visibility = View.GONE
+            setOnClickListener { host.discardAllQueuedMessages() }
+        }
+        queuePlate.addView(queueDiscardAll, LinearLayout.LayoutParams(-2, -2))
+        root.addView(queuePlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+
+        // Карточка статуса цели (/goal loop): точка состояния, текст кадра `goal`
+        // и кнопка локального скрытия. Управление целью — серверный путь, поэтому
+        // карточка только показывает то, что прислал живой поток.
+        val goalPlate = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            background = MarsTheme.card(context, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
+            setPadding(dp(12), dp(8), dp(8), dp(8))
+        }
+        val goalDot = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(MarsTheme.STATUS_RUNNING)
+            }
+        }
+        goalPlate.addView(goalDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+        val goalText = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val goalTitle = TextView(context).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            setTypeface(null, Typeface.BOLD)
+        }
+        goalText.addView(goalTitle, LinearLayout.LayoutParams(-1, -2))
+        val goalDetail = TextView(context).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+        }
+        goalText.addView(goalDetail, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+        goalPlate.addView(goalText, LinearLayout.LayoutParams(0, -2, 1f))
+        val goalDismiss = MarsTheme.circleIconButton(
+            context,
+            R.drawable.ic_close,
+            "Скрыть карточку цели",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 24,
+        ).apply { setOnClickListener { host.dismissGoalCard() } }
+        goalPlate.addView(goalDismiss, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(6) })
+        root.addView(goalPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
         // Виджет задач сессии (аккордеон)
         val todoWidgetPlate = LinearLayout(context).apply {
@@ -920,6 +1027,8 @@ object ChatScreenScaffold {
             smartChipsRow = smartChipsRow,
             todo = TodoViews(todoWidgetPlate, todoWidgetHeader, todoWidgetTitle, todoWidgetChevron, todoWidgetContainer),
             liveRun = LiveRunViews(liveRunPlate, liveRunLabel, liveRunDetail),
+            queue = QueueViews(queuePlate, queueTitle, queueRows, queueDiscardAll),
+            goal = GoalViews(goalPlate, goalDot, goalTitle, goalDetail, goalDismiss),
             composer = ComposerViews(
                 quoteView = composerQuoteView,
                 quoteTitle = composerQuoteTitle,

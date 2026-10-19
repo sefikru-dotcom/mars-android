@@ -166,7 +166,10 @@ class KanbanActivity : ComponentActivity() {
         pollJob = lifecycleScope.launch {
             while (isActive) {
                 delay(POLL_INTERVAL_MS)
-                presenter.refresh()
+                // Пока живой поток открыт, изменения приходят кадрами SSE и таймер
+                // молчит: доска не опрашивается дважды за один и тот же промежуток.
+                // Поток оборвался/не поднялся — polling снова единственный источник.
+                if (!presenter.state.live) presenter.refresh()
             }
         }
         // Поток живёт ровно столько, сколько экран на переднем плане: при уходе

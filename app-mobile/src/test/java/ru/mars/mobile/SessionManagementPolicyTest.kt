@@ -9,9 +9,14 @@ import ru.mars.network.model.SessionItem
 class SessionManagementPolicyTest {
 
     @Test
-    fun menuOffersPinArchiveExportForPlainRow() {
+    fun menuOffersPinArchiveExportShareForPlainRow() {
         assertEquals(
-            listOf(SessionActionKind.PIN, SessionActionKind.ARCHIVE, SessionActionKind.EXPORT),
+            listOf(
+                SessionActionKind.PIN,
+                SessionActionKind.ARCHIVE,
+                SessionActionKind.EXPORT,
+                SessionActionKind.SHARE,
+            ),
             SessionManagementPolicy.menu(SessionItem("s1", "Работа")),
         )
     }
@@ -54,11 +59,22 @@ class SessionManagementPolicyTest {
     }
 
     @Test
-    fun shareIsNeverOfferedAsAServerCall() {
-        // POST /api/share/create на device-токене — 401 (серверный блокер), обходить
-        // его нельзя; UI обязан сказать об этом, а не молча отказать.
-        assertTrue(SessionManagementPolicy.SHARE_UNAVAILABLE_NOTE.contains("недоступна"))
-        assertFalse(SessionManagementPolicy.menu(SessionItem("s1", "A")).any { it.name == "SHARE" })
+    fun shareIsOfferedThroughServerAllowlistedRoute() {
+        // Блокер снят: /api/share/create и /api/share/revoke добавлены в
+        // NATIVE_BEARER_EXACT_PATHS (hermes-webui/api/auth.py), device-токен их
+        // принимает. Значит публичная ссылка — штатная функция меню, а не отказ.
+        assertTrue(SessionManagementPolicy.menu(SessionItem("s1", "A")).contains(SessionActionKind.SHARE))
+        assertEquals("Поделиться ссылкой", SessionManagementPolicy.shareLabel())
+        assertFalse(SessionManagementPolicy.shareLabel().contains("недоступ"))
+    }
+
+    @Test
+    fun shareMenuEntryStaysOutOfReadOnlyRows() {
+        // read_only (дочерние субагенты) не получает ни одной мутации — включая share.
+        assertFalse(
+            SessionManagementPolicy.menu(SessionItem("sub", "Субагент", readOnly = true))
+                .contains(SessionActionKind.SHARE)
+        )
     }
 
     @Test
