@@ -1092,6 +1092,13 @@ class MusicRepository(
         val artist: String? = null,
         val duration: String? = null,
         val thumbnail: String? = null,
+        /**
+         * Тот же `album`, что и в остальных выдачах ([AlbumRefDto]). Необязателен:
+         * полки собираются из БД и радио, где ключа может не быть вовсе, — но если
+         * сервер его отдал, трек не должен терять альбом только потому, что пришёл
+         * не через [TrackDto].
+         */
+        val album: AlbumRefDto? = null,
     ) {
         fun toModel(): MusicTrack? {
             val trackId = id?.takeIf { it.isNotBlank() } ?: return null
@@ -1101,6 +1108,8 @@ class MusicRepository(
                 artist = artist?.takeIf { it.isNotBlank() } ?: "Неизвестный артист",
                 duration = duration?.takeIf { it.isNotBlank() } ?: "--:--",
                 thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+                albumTitle = album?.name?.takeIf { it.isNotBlank() },
+                albumBrowseId = album?.browseId?.takeIf { it.isNotBlank() },
             )
         }
     }
