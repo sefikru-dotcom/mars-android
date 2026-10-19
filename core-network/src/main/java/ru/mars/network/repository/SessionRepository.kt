@@ -10,6 +10,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import ru.mars.network.export.SessionImportDocument
 import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ConsumedDeviceCredential
@@ -63,6 +64,45 @@ sealed interface SessionMutationOutcome {
 sealed interface SessionExportOutcome {
     data class Success(val detail: SessionDetail) : SessionExportOutcome
     data class Failure(val message: String) : SessionExportOutcome
+}
+
+/**
+ * Публичная ссылка диалога из `POST /api/share/create` (блок `share`).
+ *
+ * [path] — то, что вернул сервер: относительный путь `/share/<token>`. Абсолютный
+ * адрес собирает UI (у клиента свой BASE_URL и своя схема), поэтому транспорт не
+ * склеивает URL сам.
+ */
+data class SessionShareLink(
+    val token: String,
+    val path: String,
+    val title: String? = null,
+    val messageCount: Int = 0,
+    val createdAtEpochSeconds: Double? = null,
+)
+
+/**
+ * Исход `POST /api/share/create` / `POST /api/share/revoke`.
+ *
+ * Обе ручки входят в device-Bearer allowlist сервера (`api/auth.py`,
+ * `NATIVE_BEARER_EXACT_PATHS`), поэтому [Failure] — это настоящий отказ
+ * (нет сессии, пустой диалог, сеть), а не «фича недоступна на телефоне».
+ */
+sealed interface SessionShareOutcome {
+    data class Success(val share: SessionShareLink) : SessionShareOutcome
+    data class Failure(val message: String) : SessionShareOutcome
+}
+
+/**
+ * Исход `POST /api/session/import`.
+ *
+ * [Success] несёт строку списка, которую вернул сервер (у импортированного
+ * диалога НОВЫЙ id — старый id из файла сервер не переиспользует), поэтому UI
+ * кладёт в список именно её, а не догадку.
+ */
+sealed interface SessionImportOutcome {
+    data class Success(val session: SessionItem) : SessionImportOutcome
+    data class Failure(val message: String) : SessionImportOutcome
 }
 
 /**
@@ -296,9 +336,9 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
      * обёртки `{"session": …}` (в отличие от [getSessionDetail]), поэтому корень
      * берётся как есть, с фолбэком на вложенный `session` для устойчивости.
      *
-     * Источник для офлайн-экспорта в Markdown ([ru.mars.network.export.SessionMarkdownExporter]);
-     * серверные ручки `/api/share/create` и `/api/share/revoke` на device-токене отдают 401
-     * (серверный блокер), поэтому шаринг делается локально из этого документа.
+     * Источник для офлайн-экспорта в Markdown ([ru.mars.network.export.SessionMarkdownExporter]).
+     * Это НЕ публичная ссылка: шаринг-ссылка делает [createShare] через
+     * `POST /api/share/create` (ручка разрешена device-токену).
      */
     suspend fun exportSession(
         baseUrl: String,
@@ -326,6 +366,94 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             throw cancelled
         } catch (error: Exception) {
             SessionExportOutcome.Failure(error.message ?: "Network error")
+        }
+    }
+
+    /**
+     * Публичная ссылка диалога: `POST /api/share/create` тело `{"session_id": …}`
+     * → `{"ok": true, "share": {token, url, title, message_count, created_at, …},
+     * "session": {…}}`.
+     *
+     * Ручка идемпотентна по смыслу «поделиться»: сервер переиспользует уже
+     * выданный токен и обновляет снимок диалога, поэтому повторный вызов из меню
+     * не плодит ссылки. Строка сессии в ответе не нужна — снимок списка клиент
+     * перечитывает сам.
+     */
+    suspend fun createShare(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionShareOutcome {
+        if (sessionId.isBlank()) return SessionShareOutcome.Failure("Не указан диалог")
+        return when (val wire = sessionOp(baseUrl, credential, "api/share/create", mapOf("session_id" to sessionId))) {
+            is WireBody -> {
+                val share = wire.body["share"] as? Map<*, *>
+                val token = share?.let { string(it, "token", "share_token") }
+                if (token == null) {
+                    SessionShareOutcome.Failure("Сервер не вернул ссылку")
+                } else {
+                    SessionShareOutcome.Success(
+                        SessionShareLink(
+                            token = token,
+                            path = string(share, "url") ?: "/share/$token",
+                            title = string(share, "title"),
+                            messageCount = (share["message_count"] as? Number)?.toInt() ?: 0,
+                            createdAtEpochSeconds = (share["created_at"] as? Number)?.toDouble(),
+                        )
+                    )
+                }
+            }
+            is WireError -> SessionShareOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Отзыв публичной ссылки: `POST /api/share/revoke` тело `{"session_id": …}` →
+     * `{"ok": true, "session": {…}}`. Ответ — та же строка сессии, что у
+     * pin/archive/delete, поэтому исход один и тот же [SessionMutationOutcome].
+     *
+     * Отзыв у диалога без ссылки сервер называет `404 Session not found` (так
+     * устроена ручка, отдельного кода «ссылки нет» нет) — UI показывает этот
+     * текст и предлагает просто создать ссылку заново.
+     */
+    suspend fun revokeShare(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+    ): SessionMutationOutcome {
+        if (sessionId.isBlank()) return SessionMutationOutcome.Failure("Не указан диалог")
+        return when (val wire = sessionOp(baseUrl, credential, "api/share/revoke", mapOf("session_id" to sessionId))) {
+            is WireBody -> SessionMutationOutcome.Success((wire.body["session"] as? Map<*, *>)?.let(::sessionItem))
+            is WireError -> SessionMutationOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Импорт диалога из JSON-экспорта: `POST /api/session/import` телом самого
+     * документа → `{"ok": true, "session": {…}}`.
+     *
+     * Документ готовит [ru.mars.network.export.SessionImportDocument]: он же
+     * отсеивает файлы без массива `messages` (сервер ответил бы на них 400), так
+     * что отказ по форме файла приходит без лишнего запроса.
+     */
+    suspend fun importSession(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        rawJson: String,
+    ): SessionImportOutcome = when (val document = SessionImportDocument.prepare(rawJson)) {
+        is SessionImportDocument.Invalid -> SessionImportOutcome.Failure(document.reason)
+        is SessionImportDocument.Ready -> when (
+            val wire = sessionOp(baseUrl, credential, "api/session/import", document.fields)
+        ) {
+            is WireBody -> {
+                val session = (wire.body["session"] as? Map<*, *>)?.let(::sessionItem)
+                if (session == null) {
+                    SessionImportOutcome.Failure("Сервер не вернул импортированный диалог")
+                } else {
+                    SessionImportOutcome.Success(session)
+                }
+            }
+            is WireError -> SessionImportOutcome.Failure(wire.message)
         }
     }
 

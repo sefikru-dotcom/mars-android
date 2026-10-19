@@ -1,9 +1,12 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.mars.network.model.AssigneeStat
 import ru.mars.network.model.BoardSummary
@@ -301,15 +304,32 @@ class KanbanPresenter(
      * перезапуск WebUI) — это нормальная деградация до поллинга, поэтому отказ
      * снимает флаг [KanbanUiState.live] и НЕ переводит экран в ERROR: данные
      * пользователя остаются на экране.
+     *
+     * Пока экран на переднем плане, поток поднимается сам с паузой из
+     * [KanbanStreamReconnectPolicy]: без этого после первого же обрыва доска
+     * жила бы только на таймере до следующего onResume. [reconnect] = false
+     * оставлен для тестов, которым нужен один проход.
      */
-    fun bindLiveStream(scope: CoroutineScope): Job {
+    fun bindLiveStream(scope: CoroutineScope, reconnect: Boolean = true): Job {
         return scope.launch {
-            val since = state.latestEventId.takeIf { it > 0L }
-            runCatching {
-                events(since, selectedBoard).collect { frame -> applyStreamFrame(frame) }
+            var attempt = 0
+            while (isActive) {
+                val since = state.latestEventId.takeIf { it > 0L }
+                var failed = false
+                try {
+                    events(since, selectedBoard).collect { frame -> applyStreamFrame(frame) }
+                } catch (cancelled: CancellationException) {
+                    // Отмена = уход с экрана: гасить индикатор и планировать ретрай нечего.
+                    throw cancelled
+                } catch (_: Exception) {
+                    failed = true
+                }
+                // Поток закрылся или упал: индикатор гаснет, экран живёт на поллинге Activity.
+                if (state.live) publish(state.copy(live = false))
+                if (!reconnect) break
+                attempt = KanbanStreamReconnectPolicy.nextAttempt(attempt, failed)
+                delay(KanbanStreamReconnectPolicy.delayMs(attempt))
             }
-            // Поток закрылся или упал: экран живёт на поллинге Activity.
-            if (state.live) publish(state.copy(live = false))
         }
     }
 

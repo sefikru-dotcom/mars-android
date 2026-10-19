@@ -35,8 +35,10 @@ import ru.mars.network.export.SessionMarkdownExporter
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
 import ru.mars.network.repository.SessionExportOutcome
+import ru.mars.network.repository.SessionImportOutcome
 import ru.mars.network.repository.SessionMutationOutcome
 import ru.mars.network.repository.SessionRepository
+import ru.mars.network.repository.SessionShareOutcome
 import java.io.File
 
 /**
@@ -123,6 +125,22 @@ class ChatSessionsActivity : ComponentActivity() {
 
     /** Id раскрытых родительских карточек: дочерние сессии живут внутри родителя. */
     private val expandedParents: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Системный пикер JSON-файла для импорта диалога (O5).
+     *
+     * `OpenDocument` (а не `GetContent`) даёт стабильный `content://` uri, который
+     * живёт до конца задачи; текст читается через `contentResolver` — файл не
+     * копируется в кэш приложения. MIME-список широкий намеренно: экспорт может
+     * прийти как `application/json`, `text/plain` или вовсе без типа (файл из
+     * мессенджера), а форму документа всё равно проверяет
+     * [ru.mars.network.export.SessionImportDocument].
+     */
+    private val importDocument = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) importSessionFrom(uri)
+    }
 
     // Приватные хранилища общие с ChatActivity (ключи — ChatActivity companion):
     // кэш списка переживает обрыв связи, а удаление диалога стирает его черновик
@@ -643,14 +661,14 @@ class ChatSessionsActivity : ComponentActivity() {
     }
 
     /**
-     * Контекстное меню карточки диалога (A3): pin / archive / export.
+     * Контекстное меню карточки диалога (A3): pin / archive / export / share.
      *
      * Состав меню — чистая [SessionManagementPolicy.menu]; подписи берутся оттуда
      * же, чтобы состояние строки читалось однозначно («Закрепить» против
-     * «Открепить»). Пункт «поделиться» вынесен в отдельную кнопку, которая честно
-     * сообщает о недоступности: публичный share-эндпоинт сервера на device-токене
-     * отвечает 401, а обходить авторизацию клиент не должен. Вместо него экспорт
-     * уходит в системный share-sheet Android ([exportSession]) и работает офлайн.
+     * «Открепить»). «Поделиться» — публичная ссылка сервера
+     * (`POST /api/share/create`): ручка разрешена device-токену, поэтому пункт
+     * ходит в сервер, а не изображает недоступность ([shareSession]). Локальный
+     * Markdown-экспорт ([exportSession]) остаётся отдельным пунктом для файла.
      */
     private fun showSessionMenu(session: SessionItem) {
         val kinds = SessionManagementPolicy.menu(session)
@@ -660,34 +678,23 @@ class ChatSessionsActivity : ComponentActivity() {
                 SessionActionKind.PIN -> SessionManagementPolicy.pinLabel(session)
                 SessionActionKind.ARCHIVE -> SessionManagementPolicy.archiveLabel(session)
                 SessionActionKind.EXPORT -> "Экспорт в Markdown"
+                SessionActionKind.SHARE -> SessionManagementPolicy.shareLabel()
                 SessionActionKind.MOVE -> SessionManagementPolicy.moveLabel()
             }
         }
-        val builder = android.app.AlertDialog.Builder(this)
+        android.app.AlertDialog.Builder(this)
             .setTitle(session.title?.takeIf { it.isNotBlank() } ?: "Диалог")
             .setItems(labels.toTypedArray()) { _, index ->
                 when (kinds[index]) {
                     SessionActionKind.PIN -> togglePinned(session)
                     SessionActionKind.ARCHIVE -> toggleArchived(session)
                     SessionActionKind.EXPORT -> exportSession(session)
+                    SessionActionKind.SHARE -> shareSession(session)
                     SessionActionKind.MOVE -> pickMoveTarget(session)
                 }
             }
             .setNegativeButton("Отмена", null)
-        // Пункт «поделиться» осмыслен только рядом с экспортом: у субагента в меню
-        // один перенос, и кнопка-отказ ему не нужна.
-        if (kinds.contains(SessionActionKind.EXPORT)) {
-            builder.setNeutralButton("Поделиться (недоступно)") { _, _ ->
-                // Честный отказ вместо обхода 401: share-ссылка сервера требует
-                // session-cookie WebUI, на device-токене её нет.
-                android.widget.Toast.makeText(
-                    this,
-                    SessionManagementPolicy.SHARE_UNAVAILABLE_NOTE,
-                    android.widget.Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-        builder.show()
+            .show()
     }
 
     /**
@@ -888,6 +895,130 @@ class ChatSessionsActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Публичная ссылка диалога (O4): `POST /api/share/create`.
+     *
+     * Ручка разрешена device-токену (`api/auth.py`, `NATIVE_BEARER_EXACT_PATHS`),
+     * поэтому клиент получает ссылку у сервера, а не собирает её локально.
+     * Адрес в ответе относительный (`/share/<token>`) — абсолютный собирает
+     * [SessionSharePolicy.absoluteUrl] от [ChatActivity.BASE_URL].
+     *
+     * После успеха открывается диалог ссылки: «Скопировать» кладёт адрес в буфер
+     * обмена, «Отозвать» дёргает `POST /api/share/revoke` — то есть отзыв живёт
+     * ровно там, где пользователь видит саму ссылку.
+     */
+    private fun shareSession(session: SessionItem) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            when (val outcome = SessionRepository().createShare(ChatActivity.BASE_URL, c, session.id)) {
+                is SessionShareOutcome.Failure ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionSharePolicy.failureMessage(outcome.message),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+
+                is SessionShareOutcome.Success -> showShareLink(session, outcome.share)
+            }
+        }
+    }
+
+    /** Диалог готовой ссылки: текст, «Скопировать», «Отозвать ссылку». */
+    private fun showShareLink(session: SessionItem, link: ru.mars.network.repository.SessionShareLink) {
+        val url = SessionSharePolicy.clipboardText(ChatActivity.BASE_URL, link)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Публичная ссылка")
+            .setMessage("$url\n\n${SessionSharePolicy.dialogMessage(link)}")
+            .setPositiveButton("Скопировать") { _, _ -> copyToClipboard(url) }
+            .setNeutralButton(SessionManagementPolicy.revokeLabel()) { _, _ -> revokeShare(session) }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    /**
+     * Копирование адреса в буфер обмена. На Android 13+ система сама показывает
+     * подтверждение копирования, поэтому свой тост остаётся только там, где его нет
+     * (до Android 13) — иначе пользователь видит два сообщения подряд.
+     */
+    private fun copyToClipboard(text: String) {
+        val manager = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        manager.setPrimaryClip(android.content.ClipData.newPlainText("Публичная ссылка", text))
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            android.widget.Toast.makeText(this, SessionSharePolicy.copiedMessage(), android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Отзыв ссылки: `POST /api/share/revoke`; отказ показывается текстом сервера. */
+    private fun revokeShare(session: SessionItem) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            when (val outcome = SessionRepository().revokeShare(ChatActivity.BASE_URL, c, session.id)) {
+                is SessionMutationOutcome.Success ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionSharePolicy.revokeSuccessMessage(),
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+
+                is SessionMutationOutcome.Failure ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        SessionSharePolicy.revokeFailureMessage(outcome.message),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+            }
+        }
+    }
+
+    /**
+     * Импорт диалога из JSON-файла (O5): `POST /api/session/import`.
+     *
+     * Файл выбирается системным пикером (`ACTION_OPEN_DOCUMENT`), читается через
+     * `contentResolver` — копировать его в кэш не нужно. Документ проверяет
+     * [ru.mars.network.export.SessionImportDocument] до запроса, а сервер создаёт
+     * диалог с НОВЫМ id: в список кладётся строка из ответа, затем список
+     * перечитывается (импорт мог лечь в другую секцию — архив/закреплённые).
+     */
+    private fun importSessionFrom(uri: android.net.Uri) {
+        val c = store.read() ?: return
+        lifecycleScope.launch {
+            val raw = withContext(Dispatchers.IO) {
+                runCatching {
+                    contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                }.getOrNull()
+            }
+            if (raw == null) {
+                android.widget.Toast.makeText(
+                    this@ChatSessionsActivity,
+                    "Не удалось прочитать файл",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            when (val outcome = SessionRepository().importSession(ChatActivity.BASE_URL, c, raw)) {
+                is SessionImportOutcome.Failure ->
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        "Импорт не удался: ${outcome.message}",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+
+                is SessionImportOutcome.Success -> {
+                    sessions = listOf(outcome.session) + sessions.filterNot { it.id == outcome.session.id }
+                    withContext(Dispatchers.IO) { offlineCache.saveSessions(sessions) }
+                    renderSessionList()
+                    android.widget.Toast.makeText(
+                        this@ChatSessionsActivity,
+                        "Диалог импортирован",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    // Полный список — от сервера: импорт мог попасть в другую секцию.
+                    refreshScheduler.trigger()
+                }
+            }
+        }
+    }
+
     private fun deleteSession(session: SessionItem) {
         val c = store.read() ?: return
         lifecycleScope.launch {
@@ -1000,6 +1131,20 @@ class ChatSessionsActivity : ComponentActivity() {
             setTextColor(MarsTheme.TEXT_STRONG)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(12) })
+        // Импорт диалога из JSON (O5): системный пикер файла, дальше — /api/session/import.
+        val importBtn = MarsTheme.circleIconButton(
+            this,
+            R.drawable.ic_import,
+            "Импорт диалога",
+            bg = MarsTheme.SURFACE,
+            iconTint = MarsTheme.TEXT,
+            sizeDp = 40
+        ).apply {
+            setOnClickListener {
+                importDocument.launch(arrayOf("application/json", "text/plain", "*/*"))
+            }
+        }
+        header.addView(importBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(6) })
         val newChatBtn = MarsTheme.circleIconButton(
             this,
             R.drawable.ic_edit,

@@ -108,6 +108,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var todoWidgetContainer: LinearLayout
     private var todoWidgetExpanded: Boolean = false
 
+    /** Карточка неотправленных сообщений (OfflineQueuePresenter, долг O8). */
+    private lateinit var queuePlate: LinearLayout
+    private lateinit var queueTitle: TextView
+    private lateinit var queueRows: LinearLayout
+    private lateinit var queueDiscardAll: Button
+    private val offlineQueuePresenter = OfflineQueuePresenter()
+
+    /** Карточка статуса цели (/goal loop, долг O14): только то, что прислал живой поток. */
+    private lateinit var goalPlate: LinearLayout
+    private lateinit var goalDot: View
+    private lateinit var goalTitle: TextView
+    private lateinit var goalDetail: TextView
+    private var goalCard: GoalCardUi = GoalLoopPolicy.hidden()
+
     private lateinit var interactiveView: MarsInteractiveView
     private lateinit var interactiveController: InteractiveRequestController
 
@@ -835,6 +849,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         liveRunPlate = v.liveRun.plate
         liveRunLabel = v.liveRun.label
         liveRunDetail = v.liveRun.detail
+        queuePlate = v.queue.plate
+        queueTitle = v.queue.title
+        queueRows = v.queue.rows
+        queueDiscardAll = v.queue.discardAll
+        goalPlate = v.goal.plate
+        goalDot = v.goal.dot
+        goalTitle = v.goal.title
+        goalDetail = v.goal.detail
         composerQuoteView = v.composer.quoteView
         composerQuoteTitle = v.composer.quoteTitle
         composerQuoteExcerpt = v.composer.quoteExcerpt
@@ -914,6 +936,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         override fun toggleTodoWidget() {
             todoWidgetExpanded = !todoWidgetExpanded
             updateTodoWidget()
+        }
+
+        override fun retryQueuedMessage(messageId: String) {
+            this@ChatActivity.retryQueuedMessage(messageId)
+        }
+
+        override fun discardQueuedMessage(messageId: String) {
+            this@ChatActivity.requestDiscardQueued(messageId)
+        }
+
+        override fun discardAllQueuedMessages() {
+            this@ChatActivity.requestDiscardAllQueued()
+        }
+
+        override fun dismissGoalCard() {
+            goalCard = GoalLoopPolicy.hidden()
+            updateGoalCard()
         }
 
         override fun onComposerTextChanged(text: String) {
@@ -1016,6 +1055,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val rawInput = input.text.toString().trim()
         val text = composerLayoutPresenter.outgoingText(rawInput)
         val outgoingAttachments = attachments.toList()
+        // Команда `/goal` (O14) обслуживается локально: в модель как промпт не уходит,
+        // иначе сервер просто ответил бы текстом, а цель не изменилась бы.
+        if (GoalLoopPolicy.isCommand(text)) {
+            handleGoalCommand(text)
+            return
+        }
         // Офлайн-буферизация (OfflineMessageQueuePolicy): без сети обычный текст уходит в
         // персистентную очередь с локальным эхом и будет отправлен автоматически после
         // восстановления связи. Вложения не буферизуются — multipart-загрузку офлайн не
@@ -1061,6 +1106,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         targetSessionId: String?,
         credential: ConsumedDeviceCredential,
         onTurnFailed: (() -> Unit)? = null,
+        /** Ход доставлен и завершился без провала: очередь снимает строку (O8). */
+        onTurnSucceeded: (() -> Unit)? = null,
     ): Job {
         // Новый пользовательский ход: предыдущий recovery-job прерывается (generation
         // guard), курсор Last-Event-ID и серии отказов координатора сбрасываются.
@@ -1213,6 +1260,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // сообщения ждут следующего триггера (переход сети, открытие диалога, отправка).
             if (coroutineContext[Job]?.isCancelled != true) {
                 if (turnFailed && !credentialRejected) onTurnFailed?.invoke()
+                if (!turnFailed && !credentialRejected) onTurnSucceeded?.invoke()
                 flushOfflineQueue()
                 // A14: расход сессии меняется только ходами — обновляем счётчик по завершении.
                 refreshSessionUsage()
@@ -1242,6 +1290,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Баннер: решение (видимость/текст/тон) — чистая NetworkBannerPolicy; хост мапит тон на MarsTheme. */
     private fun updateNetworkBanner() {
         if (!::networkBanner.isInitialized) return
+        // Карточка очереди живёт по тем же триггерам, что и баннер (сеть + размер очереди),
+        // поэтому обновляется здесь же — до раннего выхода «баннер не нужен».
+        updateOfflineQueuePanel()
         val pendingCount = if (::offlineQueue.isInitialized) offlineQueue.size else 0
         val banner = bannerPolicy.bannerFor(networkPolicy.state, pendingCount)
         networkBanner.visibility = if (banner.visible) View.VISIBLE else View.GONE
@@ -1285,6 +1336,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         setStatus()
         updateControls()
         updateNetworkBanner()
+        // Строка карточки очереди переходит в SENDING (OfflineQueuePresenter).
+        offlineQueuePresenter.onSendStarted(queued.id)
+        updateOfflineQueuePanel()
         stream = startSendStream(
             text = queued.text,
             outgoingAttachments = emptyList(),
@@ -1297,7 +1351,17 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 if (!offlineQueue.requeue(retry)) {
                     explicitStatus = MESSAGE_NOT_DELIVERED_STATUS
                     setStatus()
+                    // Лимит попыток исчерпан: ход переезжает в карточку с ручным
+                    // повтором и удалением, а не теряется в FIFO.
+                    offlineQueuePresenter.onTurnFailed(retry)
+                } else {
+                    offlineQueuePresenter.onSendSucceeded(queued.id)
                 }
+                updateOfflineQueuePanel()
+            },
+            onTurnSucceeded = {
+                offlineQueuePresenter.onSendSucceeded(queued.id)
+                updateOfflineQueuePanel()
             },
         )
     }
@@ -1531,6 +1595,27 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (uiState.applySubagentUpdate(event.update)) scheduleStreamRender()
                 }
             }
+        } else if (event is ru.mars.network.model.GoalUpdate) {
+            // Карточка статуса цели (O14): состояние и текст кадра `goal` показываются
+            // над композером. Кадр чужой сессии карточку не трогает.
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    goalCard = GoalLoopPolicy.card(event)
+                    updateGoalCard()
+                }
+            }
+        } else if (event is ru.mars.network.model.GoalContinuation) {
+            // Кадр `goal_continue`: сервер поставил продолжение. WebUI отправляет его
+            // следующим пользовательским сообщением, отдавая приоритет вводу человека;
+            // здесь для этого переиспользуется офлайн-очередь (FIFO + эхо + автофлаш),
+            // а не второй путь отправки.
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    goalCard = GoalLoopPolicy.continuationCard(event)
+                    updateGoalCard()
+                    enqueueGoalContinuation(event.continuationPrompt)
+                }
+            }
         }
     }
 
@@ -1573,6 +1658,275 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         contextStatusJob?.cancel()
         contextStatusJob = null
         contextStatusLine = null
+        // Карточка цели принадлежит диалогу: при уходе с контекста она гаснет, иначе
+        // статус чужой цели остался бы висеть над композером.
+        if (goalCard.visible) {
+            goalCard = GoalLoopPolicy.hidden()
+            lastGoalContinuation = null
+            updateGoalCard()
+        }
+    }
+
+    // --- Карточка цели (/goal loop, O14) ---------------------------------------------------------
+
+    /**
+     * Отрисовка карточки статуса цели. Тон мапится на цвет темы: в работе — «бегущая»
+     * точка, пауза — предупреждение, закрытая цель — «онлайн». Карточка ничего не
+     * запрашивает у сервера: текст приходит кадрами `goal`/`goal_continue`.
+     */
+    private fun updateGoalCard() {
+        if (!::goalPlate.isInitialized) return
+        if (!goalCard.visible) {
+            goalPlate.visibility = View.GONE
+            return
+        }
+        goalPlate.visibility = View.VISIBLE
+        goalTitle.text = goalCard.title
+        val detail = goalCard.detail
+        goalDetail.visibility = if (detail.isNullOrBlank()) View.GONE else View.VISIBLE
+        goalDetail.text = detail.orEmpty()
+        val tone = when (goalCard.tone) {
+            GoalCardTone.ACTIVE -> MarsTheme.STATUS_RUNNING
+            GoalCardTone.PAUSED -> MarsTheme.STATUS_WARNING
+            GoalCardTone.DONE -> MarsTheme.STATUS_ONLINE
+        }
+        (goalDot.background as? android.graphics.drawable.GradientDrawable)?.setColor(tone)
+        goalPlate.contentDescription = goalCard.contentDescription
+    }
+
+    /** Последний поставленный в очередь промпт продолжения — защита от повторного кадра. */
+    private var lastGoalContinuation: String? = null
+
+    /**
+     * Промпт продолжения цели уходит в обычную очередь отправки: FIFO сохраняет
+     * приоритет введённого человеком текста, эхо сразу видно в транскрипте, а
+     * отправкой занимается тот же автофлаш, что и у офлайн-сообщений.
+     */
+    private fun enqueueGoalContinuation(prompt: String) {
+        val text = prompt.trim()
+        if (text.isEmpty() || !::offlineQueue.isInitialized) return
+        if (lastGoalContinuation == text) return
+        lastGoalContinuation = text
+        val queued = offlineQueue.enqueue(text, currentSessionId)
+        uiState.beginQueuedEcho(queued.text)
+        renderMessages()
+        updateNetworkBanner()
+        flushOfflineQueue()
+    }
+
+    /**
+     * Команда `/goal` в композере (O14).
+     *
+     * `/goal` и `/goal status` обслуживаются локально по последнему кадру карточки.
+     * Управляющие подкоманды требуют `POST /api/goal`, которого нет в device-Bearer
+     * allowlist: отправлять их обычным сообщением нельзя (сервер поймёт это как
+     * текст промпта и цель не изменится), поэтому отвечаем прямо и не тратим ход.
+     */
+    private fun handleGoalCommand(text: String) {
+        val args = GoalLoopPolicy.commandArgs(text)
+        val reply = if (GoalLoopPolicy.isStatusCommand(args)) {
+            GoalLoopPolicy.statusReply(goalCard)
+        } else {
+            GoalLoopPolicy.controlReply(args)
+        }
+        // Ответ идёт строкой статуса (а не пузырём транскрипта): это отклик команды,
+        // а не сообщение диалога. Статус цели уже виден на карточке, строке хватает
+        // короткой переформулировки и самоскрытия.
+        explicitStatus = reply
+        setStatus()
+        goalReplyJob?.cancel()
+        goalReplyJob = lifecycleScope.launch {
+            delay(GOAL_REPLY_TTL_MS)
+            if (explicitStatus == reply) {
+                explicitStatus = null
+                setStatus()
+            }
+        }
+        input.text.clear()
+        updateControls()
+    }
+
+    /** Автоскрытие ответа на `/goal`: строка статуса не должна жить до следующего хода. */
+    private var goalReplyJob: Job? = null
+    private val GOAL_REPLY_TTL_MS = 6_000L
+
+    // --- Карточка неотправленных (OfflineQueuePresenter, O8) --------------------------------------
+
+    /**
+     * Отрисовка карточки очереди: строки этого диалога (ждут отправки / отправляются /
+     * не доставлены) с ручным повтором и удалением. Состояние считает
+     * [OfflineQueuePresenter]; Activity только мапит его на view.
+     */
+    private fun updateOfflineQueuePanel() {
+        if (!::queuePlate.isInitialized || !::offlineQueue.isInitialized) return
+        val panel = offlineQueuePresenter.panelFor(
+            offlineQueue.snapshot(),
+            networkPolicy.state,
+            currentSessionId,
+        )
+        if (!panel.visible) {
+            queuePlate.visibility = View.GONE
+            queueRows.removeAllViews()
+            queueDiscardAll.visibility = View.GONE
+            return
+        }
+        queuePlate.visibility = View.VISIBLE
+        queueTitle.text = "${panel.title} · ${panel.badge.label}"
+        queueDiscardAll.visibility = if (panel.discardAllVisible) View.VISIBLE else View.GONE
+        queueRows.removeAllViews()
+        panel.rows.forEach { row ->
+            val line = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(3), 0, dp(3))
+            }
+            val text = TextView(this).apply {
+                textSize = 11.5f
+                setTextColor(
+                    when (row.status) {
+                        OfflineQueueRowStatus.FAILED -> MarsTheme.STATUS_ERROR
+                        OfflineQueueRowStatus.SENDING -> MarsTheme.TEXT_MUTED
+                        OfflineQueueRowStatus.WAITING -> MarsTheme.TEXT
+                    }
+                )
+                this.text = "${row.preview}\n${row.statusLabel}"
+            }
+            line.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+            if (row.retryAvailable) {
+                line.addView(queueActionButton("Повторить", MarsTheme.ACCENT_TEXT) {
+                    retryQueuedMessage(row.id)
+                }, LinearLayout.LayoutParams(-2, -2))
+            }
+            if (row.discardAvailable) {
+                line.addView(queueActionButton("Удалить", MarsTheme.STATUS_ERROR) {
+                    requestDiscardQueued(row.id)
+                }, LinearLayout.LayoutParams(-2, -2))
+            }
+            line.contentDescription = row.contentDescription
+            queueRows.addView(line)
+        }
+    }
+
+    private fun queueActionButton(label: String, color: Int, action: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            textSize = 11f
+            setTextColor(color)
+            background = null
+            setPadding(dp(6), 0, dp(6), 0)
+            setOnClickListener { action() }
+        }
+
+    /**
+     * Ручной повтор недоставленного сообщения. Ход возвращается в путь обычной
+     * отправки того же диалога: повторный провал снова попадёт в карточку, а успех
+     * снимет строку.
+     */
+    private fun retryQueuedMessage(messageId: String) {
+        // Попытка повтора берётся из записи презентера: requestRetry сразу снимает её
+        // из списка недоставленных и помечает ход как отправляемый.
+        val known = offlineQueuePresenter.failed.firstOrNull { it.id == messageId }
+        when (val outcome = offlineQueuePresenter.requestRetry(messageId)) {
+            is RetryOutcome.Rejected -> {
+                // Ход уже в полёте или его нет в списке недоставленных — карточка
+                // перерисовывается, чтобы состояние совпало с презентером.
+                updateOfflineQueuePanel()
+            }
+            is RetryOutcome.TriggerSend -> {
+                val credential = store.read() ?: run { updateOfflineQueuePanel(); return }
+                if (!uiState.beginQueuedSend(outcome.text)) {
+                    // Ход идёт: повтор вернём в недоставленные, чтобы кнопка не пропала.
+                    offlineQueuePresenter.onTurnFailed(
+                        QueuedMessage(
+                            id = outcome.messageId,
+                            text = outcome.text,
+                            sessionId = outcome.sessionId,
+                            enqueuedAtEpochMillis = known?.failedAtEpochMillis ?: System.currentTimeMillis(),
+                            attempts = known?.attempts ?: 0,
+                        )
+                    )
+                    updateOfflineQueuePanel()
+                    return
+                }
+                explicitStatus = null
+                autoScroll.pinToBottom()
+                renderMessages()
+                setStatus()
+                updateControls()
+                updateNetworkBanner()
+                stream = startSendStream(
+                    text = outcome.text,
+                    outgoingAttachments = emptyList(),
+                    targetSessionId = outcome.sessionId ?: currentSessionId,
+                    credential = credential,
+                    onTurnFailed = {
+                        offlineQueuePresenter.onTurnFailed(
+                            QueuedMessage(
+                                id = outcome.messageId,
+                                text = outcome.text,
+                                sessionId = currentSessionId ?: outcome.sessionId,
+                                enqueuedAtEpochMillis = known?.failedAtEpochMillis ?: System.currentTimeMillis(),
+                                attempts = (known?.attempts ?: 0) + 1,
+                            )
+                        )
+                        updateOfflineQueuePanel()
+                    },
+                    onTurnSucceeded = {
+                        offlineQueuePresenter.onSendSucceeded(outcome.messageId)
+                        updateOfflineQueuePanel()
+                    },
+                )
+            }
+        }
+    }
+
+    /** Удаление недоставленного сообщения: подтверждение — часть презентера. */
+    private fun requestDiscardQueued(messageId: String) {
+        val prompt = offlineQueuePresenter.requestDiscard(messageId) ?: return
+        showDiscardPrompt(prompt)
+    }
+
+    /** Удаление всех недоставленных (кнопка появляется при двух и более). */
+    private fun requestDiscardAllQueued() {
+        val prompt = offlineQueuePresenter.requestDiscardAll() ?: return
+        showDiscardPrompt(prompt)
+    }
+
+    private fun showDiscardPrompt(prompt: DiscardPromptUi) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(prompt.title)
+            .setMessage(prompt.message)
+            .setPositiveButton(prompt.confirmLabel) { _, _ -> applyDiscard() }
+            .setNegativeButton(prompt.cancelLabel) { _, _ ->
+                offlineQueuePresenter.cancelDiscard()
+                updateOfflineQueuePanel()
+            }
+            .setOnCancelListener {
+                offlineQueuePresenter.cancelDiscard()
+                updateOfflineQueuePanel()
+            }
+            .show()
+    }
+
+    /**
+     * Применение подтверждённого удаления: строки уходят из карточки, а локальные
+     * PENDING-эхо этих сообщений снимаются из транскрипта — удалённое не должно
+     * остаться в диалоге призраком.
+     */
+    private fun applyDiscard() {
+        when (val outcome = offlineQueuePresenter.confirmDiscard()) {
+            is DiscardOutcome.Discard -> {
+                uiState.dropQueuedEcho(outcome.turn.text)
+                renderMessages()
+            }
+            is DiscardOutcome.DiscardAll -> {
+                outcome.turns.forEach { uiState.dropQueuedEcho(it.text) }
+                renderMessages()
+            }
+            is DiscardOutcome.NothingToDiscard -> Unit
+        }
+        updateOfflineQueuePanel()
+        updateNetworkBanner()
     }
 
     private fun updateQuotePlate() {

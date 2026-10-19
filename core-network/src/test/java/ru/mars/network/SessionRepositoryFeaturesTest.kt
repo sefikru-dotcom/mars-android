@@ -9,8 +9,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.SessionExportOutcome
+import ru.mars.network.repository.SessionImportOutcome
 import ru.mars.network.repository.SessionMutationOutcome
 import ru.mars.network.repository.SessionRepository
+import ru.mars.network.repository.SessionShareOutcome
 
 class SessionRepositoryFeaturesTest {
     private val credential = ConsumedDeviceCredential("token", "Bearer", "device", emptyList(), 1)
@@ -196,6 +198,155 @@ class SessionRepositoryFeaturesTest {
             server.enqueue(MockResponse().setResponseCode(404).setBody("{\"error\":\"Session not found\"}"))
             val outcome = SessionRepository().exportSession(server.url("/").toString(), credential, "missing")
             assertEquals("Session not found", (outcome as SessionExportOutcome.Failure).message)
+        }
+    }
+
+    // --- O4: публичная share-ссылка (ручки уже в device-Bearer allowlist) ------------------------
+
+    @Test fun createSharePostsSessionIdAndParsesLink() = runBlocking {
+        MockWebServer().use { server ->
+            // Реальный ответ POST /api/share/create: {"ok":true,"share":{token,url,title,...},"session":{...}}
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    "{\"ok\":true,\"share\":{\"token\":\"tok123\",\"url\":\"/share/tok123\"," +
+                        "\"title\":\"Бюджет\",\"message_count\":7,\"created_at\":1712345678.0}," +
+                        "\"session\":{\"session_id\":\"s1\",\"title\":\"Бюджет\",\"share_token\":\"tok123\"}}"
+                )
+            )
+            val outcome = SessionRepository().createShare(server.url("/").toString(), credential, "s1")
+            val link = (outcome as SessionShareOutcome.Success).share
+            assertEquals("tok123", link.token)
+            assertEquals("/share/tok123", link.path)
+            assertEquals("Бюджет", link.title)
+            assertEquals(7, link.messageCount)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/share/create", request.path)
+            assertEquals("Bearer token", request.getHeader("Authorization"))
+            assertEquals("{\"session_id\":\"s1\"}", request.body.readUtf8())
+        }
+    }
+
+    @Test fun createShareWithoutTokenIsFailureNotEmptyLink() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{\"ok\":true,\"share\":{}}"))
+            val outcome = SessionRepository().createShare(server.url("/").toString(), credential, "s1")
+            assertEquals("Сервер не вернул ссылку", (outcome as SessionShareOutcome.Failure).message)
+        }
+    }
+
+    @Test fun createShareBlankSessionNeverTouchesNetwork() = runBlocking {
+        MockWebServer().use { server ->
+            val outcome = SessionRepository().createShare(server.url("/").toString(), credential, "  ")
+            assertTrue(outcome is SessionShareOutcome.Failure)
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test fun createShareErrorCarriesServerReason() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("{\"error\":\"Session not found\"}"))
+            val outcome = SessionRepository().createShare(server.url("/").toString(), credential, "missing")
+            assertEquals("Session not found", (outcome as SessionShareOutcome.Failure).message)
+        }
+    }
+
+    @Test fun revokeSharePostsSessionIdAndParsesSession() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    "{\"ok\":true,\"session\":{\"session_id\":\"s1\",\"title\":\"Бюджет\"}}"
+                )
+            )
+            val outcome = SessionRepository().revokeShare(server.url("/").toString(), credential, "s1")
+            assertEquals("s1", (outcome as SessionMutationOutcome.Success).session?.id)
+            val request = server.takeRequest()
+            assertEquals("/api/share/revoke", request.path)
+            assertEquals("{\"session_id\":\"s1\"}", request.body.readUtf8())
+        }
+    }
+
+    @Test fun revokeShareErrorCarriesServerReason() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("{\"error\":\"Session not found\"}"))
+            val outcome = SessionRepository().revokeShare(server.url("/").toString(), credential, "missing")
+            assertEquals("Session not found", (outcome as SessionMutationOutcome.Failure).message)
+        }
+    }
+
+    // --- O5: импорт диалога из JSON-экспорта -----------------------------------------------------
+
+    @Test fun importSessionPostsDocumentAsIs() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    "{\"ok\":true,\"session\":{\"session_id\":\"new1\",\"title\":\"Импорт\"}}"
+                )
+            )
+            val raw = "{\"title\":\"Импорт\",\"messages\":[{\"role\":\"user\",\"text\":\"привет\"}]}"
+            val outcome = SessionRepository().importSession(server.url("/").toString(), credential, raw)
+            assertEquals("new1", (outcome as SessionImportOutcome.Success).session.id)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/session/import", request.path)
+            assertEquals("Bearer token", request.getHeader("Authorization"))
+            // Документ уходит как есть: клиент не пересобирает поля по одному.
+            assertEquals(raw, request.body.readUtf8())
+        }
+    }
+
+    @Test fun importSessionUnwrapsNestedSessionForm() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    "{\"ok\":true,\"session\":{\"session_id\":\"new2\",\"title\":\"Вложенный\"}}"
+                )
+            )
+            val raw = "{\"session\":{\"title\":\"Вложенный\",\"messages\":[{\"role\":\"user\",\"text\":\"x\"}]}}"
+            val outcome = SessionRepository().importSession(server.url("/").toString(), credential, raw)
+            assertEquals("new2", (outcome as SessionImportOutcome.Success).session.id)
+            val body = server.takeRequest().body.readUtf8()
+            // Обёртка снята: сервер получает объект с массивом messages на верхнем уровне.
+            assertTrue(body.startsWith("{\"title\":\"Вложенный\""))
+            assertTrue(body.contains("\"messages\""))
+        }
+    }
+
+    @Test fun importSessionRejectsBadFileWithoutNetwork() = runBlocking {
+        MockWebServer().use { server ->
+            val outcome = SessionRepository().importSession(server.url("/").toString(), credential, "{\"title\":\"x\"}")
+            assertEquals("В файле нет массива messages", (outcome as SessionImportOutcome.Failure).message)
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test fun importSessionErrorCarriesServerReason() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(400).setBody("{\"error\":\"JSON must contain a \\\"messages\\\" array\"}"))
+            val outcome = SessionRepository().importSession(
+                server.url("/").toString(),
+                credential,
+                "{\"messages\":[]}",
+            )
+            assertEquals(
+                "JSON must contain a \"messages\" array",
+                (outcome as SessionImportOutcome.Failure).message,
+            )
+        }
+    }
+
+    @Test fun importSessionWithoutReturnedSessionIsFailure() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{\"ok\":true}"))
+            val outcome = SessionRepository().importSession(
+                server.url("/").toString(),
+                credential,
+                "{\"messages\":[]}",
+            )
+            assertEquals(
+                "Сервер не вернул импортированный диалог",
+                (outcome as SessionImportOutcome.Failure).message,
+            )
         }
     }
 }

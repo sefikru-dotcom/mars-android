@@ -254,6 +254,20 @@ class ChatUiState(
     }
 
     /**
+     * Снятие PENDING-эха сообщения, удалённого из офлайн-очереди или из карточки
+     * неотправленных: пузырь «ждёт связи» не должен остаться в транскрипте без
+     * самого сообщения. True, если эхо действительно нашлось.
+     */
+    fun dropQueuedEcho(text: String): Boolean {
+        val index = messages.indexOfLast {
+            it.role == "user" && it.status == MessageStatus.PENDING && it.text == text
+        }
+        if (index < 0) return false
+        messages.removeAt(index)
+        return true
+    }
+
+    /**
      * Начало отправки сообщения из офлайн-очереди после восстановления связи:
      * PENDING-эхо (если оно живо в транскрипте) становится COMPLETE — иначе пузырь
      * добавляется заново, — и открывается стримящийся assistant-пузырь. False при

@@ -96,6 +96,10 @@ class KanbanShellContractTest {
         assertTrue("onResume перезапускает pollJob", onResume.contains("pollJob?.cancel()") && onResume.contains("pollJob = lifecycleScope.launch"))
         assertTrue("Интервал polling прежний — POLL_INTERVAL_MS", onResume.contains("delay(POLL_INTERVAL_MS)"))
         assertTrue("Тик polling — presenter.refresh() (changed:false-конверт без мигания)", onResume.contains("presenter.refresh()"))
+        assertTrue(
+            "Пока живой SSE-поток открыт, polling молчит: иначе доска опрашивается дважды",
+            onResume.contains("if (!presenter.state.live) presenter.refresh()")
+        )
         assertTrue("onPause гасит polling", onPause.contains("pollJob?.cancel()") && onPause.contains("pollJob = null"))
         assertTrue("Интервал 30 с сохранён", kanban.contains("const val POLL_INTERVAL_MS = 30_000L"))
     }

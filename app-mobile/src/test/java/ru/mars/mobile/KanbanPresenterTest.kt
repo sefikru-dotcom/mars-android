@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -378,10 +379,25 @@ class KanbanPresenterTest {
     fun `an ended stream degrades to polling without an error phase`() = runBlocking {
         val p = presenter(BoardFake(listOf(board())), frames = emptyList())
         p.load()
-        p.bindLiveStream(this)
+        p.bindLiveStream(this, reconnect = false)
         // Поток закрылся: live снят, но данные и фаза READY остались на экране.
         assertFalse(p.state.live)
         assertEquals(KanbanPhase.READY, p.state.phase)
+        Unit
+    }
+
+    @Test
+    fun `stream stays bound after a drop so the board does not fall back to polling forever`() = runBlocking {
+        // Оборванный поток поднимается сам: job не завершается после первого обрыва
+        // (переподключение живёт до отмены экраном), а live снимается до реконнекта.
+        val p = presenter(BoardFake(listOf(board())), frames = emptyList())
+        p.load()
+        val job = p.bindLiveStream(this)
+        // Дать первому кругу закрыться и уйти в паузу перед реконнектом.
+        delay(50)
+        assertTrue(job.isActive)
+        assertFalse(p.state.live)
+        job.cancel()
         Unit
     }
 
