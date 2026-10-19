@@ -39,7 +39,11 @@ import java.util.concurrent.RejectedExecutionException
  * поэтому отменённая реплика не «догоняет» пользователя чужим голосом.
  */
 @OptIn(UnstableApi::class)
-class AndroidServerTtsPlayback(context: Context) : ServerTtsPlayback {
+class AndroidServerTtsPlayback(
+    context: Context,
+    /** Серверное аудио доиграло до конца: хост переводит hands-free-цикл в слушание. */
+    private val onFinished: () -> Unit = {},
+) : ServerTtsPlayback {
 
     private val appContext: Context = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -117,6 +121,9 @@ class AndroidServerTtsPlayback(context: Context) : ServerTtsPlayback {
                 if (playbackState == Player.STATE_ENDED && token == generation) {
                     releasePlayer()
                     file.delete()
+                    // Доиграло: только теперь цикл может снова слушать. Ошибки/стоп сюда не
+                    // приходят — их обрабатывает движок (фолбэк или стоп контроллера).
+                    runCatching { onFinished() }
                 }
             }
         }

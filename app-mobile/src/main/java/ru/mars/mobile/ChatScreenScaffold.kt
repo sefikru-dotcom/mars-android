@@ -128,6 +128,12 @@ object ChatScreenScaffold {
         /** Голосовой ввод. */
         fun startVoiceInput()
 
+        /**
+         * Переключить hands-free диалог (микрофон не закрывается между репликами);
+         * возвращает новое состояние. Привязка — долгое нажатие на микрофон.
+         */
+        fun toggleHandsFree(): Boolean
+
         /** Озвучить последний ответ. */
         fun speakLastMessage()
 
@@ -831,13 +837,24 @@ object ChatScreenScaffold {
         val voiceButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_mic,
-            "Голосовой ввод",
+            "Голосовой ввод, удержание — голосовой диалог",
             bg = Color.TRANSPARENT,
             iconTint = MarsTheme.TEXT_MUTED,
             sizeDp = 34,
             strokeColor = 0
         ).apply {
             setOnClickListener { host.startVoiceInput() }
+            // Долгое нажатие — hands-free диалог: тап остаётся одиночной репликой, а удержание
+            // включает режим, в котором микрофон не закрывается между вопросами.
+            setOnLongClickListener {
+                val enabled = host.toggleHandsFree()
+                Toast.makeText(
+                    context,
+                    if (enabled) "Голосовой диалог включён" else "Голосовой диалог выключен",
+                    Toast.LENGTH_SHORT
+                ).show()
+                true
+            }
         }
         actionsRow.addView(voiceButton, LinearLayout.LayoutParams(dp(34), dp(34)))
 

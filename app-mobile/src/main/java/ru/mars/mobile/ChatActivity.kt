@@ -225,6 +225,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var voiceSession: VoiceSessionController
     /** Своя запись с микрофона (WAV 16 кГц моно) — вход серверного распознавания. */
     private lateinit var voiceRecorder: VoiceRecorder
+    /**
+     * Hands-free цикл (idle → listening → thinking → speaking → listening). Чистая логика в
+     * [VoiceDialogLoop]: состояния, защита от дубля, очередь реплик, barge-in за флагом.
+     */
+    private lateinit var voiceLoop: VoiceDialogLoop
+    /** Непрерывный микрофон hands-free: сегментер режет поток на реплики (см. [HandsFreeCapture]). */
+    private lateinit var handsFreeCapture: HandsFreeCapture
+    /** Разрешение запросили из долгого нажатия на микрофон: после выдачи стартует hands-free. */
+    private var pendingHandsFree = false
     /** Распознавание уже записанного звука: повторный тап не запускает второе. */
     private var voiceTranscribeJob: Job? = null
     private var volumeBtn: ImageButton? = null
@@ -433,15 +442,28 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Voice-output wiring: the engine reports its async init here; the controller owns
         // every speak/stop decision. The sticky auto-speak toggle is persisted across launches.
         val voiceOutputPrefs = getSharedPreferences(VOICE_OUTPUT_PREFS, MODE_PRIVATE)
-        speechEngine = AndroidSpeechEngine(this) { available ->
-            if (::voiceOutput.isInitialized) voiceOutput.onEngineReady(available)
-            else speechEngineInitResult = available
-        }
+        speechEngine = AndroidSpeechEngine(
+            context = this,
+            onInitFinished = { available ->
+                if (::voiceOutput.isInitialized) voiceOutput.onEngineReady(available)
+                else speechEngineInitResult = available
+            },
+            // Движок дочитал: контроллер снимает флаг озвучки, hands-free-цикл снова слушает.
+            onSpeechFinished = {
+                runOnUiThread { if (::voiceOutput.isInitialized) voiceOutput.notifySpeakingFinished() }
+            },
+        )
         // Серверный TTS с прозрачным фолбэком на системный: контроллер видит один движок
         // (serverTtsEngine), платформенный speechEngine остаётся путём деградации. 401 на
         // device-Bearer — известный серверный блокер, клиент обходить его не должен: при
         // недоступности сервера голос уходит в системный TTS молча.
-        serverTtsPlayback = AndroidServerTtsPlayback(this)
+        serverTtsPlayback = AndroidServerTtsPlayback(
+            context = this,
+            // Серверное аудио доиграло — тот же сигнал, что и у системного TTS.
+            onFinished = {
+                runOnUiThread { if (::voiceOutput.isInitialized) voiceOutput.notifySpeakingFinished() }
+            },
+        )
         serverTtsEngine = ServerTtsSpeechEngine(
             fallback = speechEngine,
             client = RepositoryServerTtsClient(
@@ -471,6 +493,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         voiceRecorder = VoiceRecorder(
             onAutoStop = { recording -> runOnUiThread { onVoiceAutoStopped(recording) } },
         )
+        // Hands-free: микрофон не закрывается между репликами, а сегментер режет поток по
+        // тишине. Barge-in (L3) — за флагом и выключен по умолчанию: без AcousticEchoCanceler
+        // и AudioSource.VOICE_COMMUNICATION микрофон слышит собственный динамик, и цикл
+        // перебивал бы сам себя. Включать только после замеров на устройстве (POCO F5).
+        voiceLoop = VoiceDialogLoop(
+            listener = voiceLoopListener,
+            bargeInEnabled = voiceOutputPrefs.getBoolean(KEY_VOICE_BARGE_IN, false),
+        )
+        // Слушатель передаётся в start(): у захвата нет «постоянного» получателя.
+        handsFreeCapture = HandsFreeCapture()
+        // «Озвучка закончилась» приходит из движка (Android TTS — UtteranceProgressListener,
+        // серверный — конец воспроизведения). Только после этого цикл снова слушает.
+        voiceOutput.onSpeakingFinished = {
+            runOnUiThread {
+                if (::voiceLoop.isInitialized) voiceLoop.onAnswerFinished()
+            }
+        }
         // Voice-input state machine: guards the capture session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
@@ -576,6 +615,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         teardownLiveTurn()
         // Запись умирает вместе с экраном: AudioRecord освобождается, буфер не держится.
         if (::voiceRecorder.isInitialized) voiceRecorder.cancel()
+        // Hands-free-цикл тоже: микрофон не должен остаться открытым после закрытия экрана.
+        if (::handsFreeCapture.isInitialized) handsFreeCapture.cancel()
+        if (::voiceLoop.isInitialized) voiceLoop.stop()
         if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
         super.onDestroy()
     }
@@ -600,6 +642,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         persistComposerDraft()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
         if (::voiceOutput.isInitialized) voiceOutput.onPause()
+        // Hands-free в фоне не слушает: микрофон без foreground-сервиса всё равно отнимут,
+        // а «слушающий» в фоне цикл — это расход батареи и лишние запросы распознавания.
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
         super.onPause()
     }
 
@@ -703,6 +748,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recognizeVoice) return
         val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        // Разрешение просили для hands-free (долгое нажатие) — продолжаем именно его.
+        if (pendingHandsFree) {
+            pendingHandsFree = false
+            if (granted) startHandsFree() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
+            return
+        }
         if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
     }
 
@@ -1001,6 +1052,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             this@ChatActivity.startVoiceInput()
         }
 
+        override fun toggleHandsFree(): Boolean = this@ChatActivity.toggleHandsFree()
+
         override fun speakLastMessage() {
             this@ChatActivity.speakLastMessage()
         }
@@ -1174,6 +1227,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     // ответ (промежуточные Chunk/Thought/ToolCall сюда не попадают никогда).
                     if (event is ChatEvent.Done && ::voiceOutput.isInitialized) {
                         voiceOutput.onTurnComplete(latestAssistantAnswer())
+                        // Hands-free: ответ зазвучал → SPEAKING, иначе сразу снова слушаем.
+                        onVoiceTurnCompleted()
                     }
                     if (event is ChatEvent.Error) {
                         sawAppError = true
@@ -1214,6 +1269,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Стрим закрылся без терминального Done и без ухода в recovery: ход завершён
                 // здесь — голосовой режим озвучивает финальный ответ (Done-путь уже озвучил).
                 if (::voiceOutput.isInitialized) voiceOutput.onTurnComplete(latestAssistantAnswer())
+                onVoiceTurnCompleted()
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -2462,6 +2518,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (speakFinalAnswer && ::voiceOutput.isInitialized) {
             voiceOutput.onTurnComplete(latestAssistantAnswer())
         }
+        onVoiceTurnCompleted()
         renderMessages()
         setStatus()
         updateControls()
@@ -2626,6 +2683,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             statusView.text = VOICE_BUSY_STATUS
             return
         }
+        // Микрофон открывается — озвучка обязана замолчать: иначе TTS говорит в микрофон,
+        // серверное распознавание получает собственный голос Марса, а человек не слышит себя.
+        voiceOutput.stopSpeaking()
         // Микрофон не открылся (занят другим приложением, отозван на уровне системы, сломан
         // вход): сессия честно уходит в ERROR с причиной, а не молчит под «Слушаю…».
         if (!voiceRecorder.start()) voiceSession.onError(VOICE_MIC_UNAVAILABLE_STATUS)
@@ -2667,6 +2727,163 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (voiceSession.state != VoiceSessionController.State.LISTENING) return
         if (voiceTranscribeJob?.isActive == true) return
         transcribeVoiceRecording(recording)
+    }
+
+    // --- hands-free диалог ---------------------------------------------------------------------
+    //
+    // Отличие от ручного пути выше: микрофон НЕ закрывается после реплики. Сегментер режет
+    // непрерывный поток по тишине, каждая реплика уходит в распознавание, ответ Марса читается
+    // вслух, и после него цикл снова слушает — как в WebUI (static/boot.js:1590-1672).
+    // Все решения (что принять, что выбросить, когда снова слушать) — в [VoiceDialogLoop];
+    // здесь только побочные эффекты Android.
+
+    /** Состояния цикла → строка статуса. Вызывается с главного потока. */
+    private val voiceLoopListener = object : VoiceDialogLoop.Listener {
+        override fun onStateChanged(state: VoiceDialogLoop.State) {
+            statusView.text = when (state) {
+                VoiceDialogLoop.State.IDLE -> VOICE_IDLE_STATUS
+                VoiceDialogLoop.State.LISTENING -> VOICE_LISTENING_HANDS_FREE_STATUS
+                VoiceDialogLoop.State.THINKING -> VOICE_TRANSCRIBING_STATUS
+                VoiceDialogLoop.State.SPEAKING -> VOICE_SPEAKING_STATUS
+            }
+        }
+
+        override fun onTranscribeRequested(requestId: Long, recording: Recording) {
+            transcribeLoopSegment(requestId, recording)
+        }
+
+        override fun onSendRequested(requestId: Long, text: String, mode: VoiceDialogLoop.SendMode) {
+            input.setText(text)
+            input.setSelection(text.length)
+            // Голосом спросили — голосом и ответ: озвучиваем именно этот ответ (одноразовый
+            // arm, не глобальный тумблер), иначе hands-free превращается в переписку.
+            voiceOutput.armSpeakNextAnswer()
+            when (mode) {
+                // Ход уже идёт (в UI это TYPING): текст дописывается в живой ход через
+                // steerMessage. cancelStream() здесь НЕ вызывается — он убил бы ход, и ответ
+                // пришлось бы ждать заново; steer по конструкции не создаёт второго сообщения.
+                VoiceDialogLoop.SendMode.STEER -> steerMessage()
+                VoiceDialogLoop.SendMode.SEND -> sendMessage()
+            }
+        }
+
+        override fun onStopSpeaking() {
+            voiceOutput.stopSpeaking()
+        }
+
+        override fun onSegmentDropped() {
+            // Реплика пришла, пока Марс отвечал (barge-in выключен): говорим прямо, иначе
+            // человек решит, что его не услышали.
+            statusView.text = VOICE_SEGMENT_DROPPED_STATUS
+        }
+    }
+
+    /** Колбэки [HandsFreeCapture] приходят с потока чтения микрофона — на UI перекладываем. */
+    private val handsFreeListener = object : HandsFreeCapture.Listener {
+        override fun onSpeechStarted() {
+            runOnUiThread {
+                if (::voiceLoop.isInitialized) voiceLoop.onSpeechStarted()
+            }
+        }
+
+        override fun onSegment(recording: Recording) {
+            runOnUiThread {
+                if (!::voiceLoop.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+                voiceLoop.onSegment(recording)
+            }
+        }
+
+        override fun onCaptureFailed() {
+            runOnUiThread {
+                if (!::voiceLoop.isInitialized) return@runOnUiThread
+                voiceLoop.stop()
+                statusView.text = VOICE_MIC_UNAVAILABLE_STATUS
+            }
+        }
+    }
+
+    /** Долгое нажатие на микрофон: включить/выключить hands-free (возвращает новое состояние). */
+    private fun toggleHandsFree(): Boolean {
+        if (voiceLoop.isActive) {
+            stopHandsFree()
+            return false
+        }
+        startHandsFree()
+        return voiceLoop.isActive
+    }
+
+    private fun startHandsFree() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            // Разрешение спросим один раз: ответ придёт в onRequestPermissionsResult.
+            pendingHandsFree = true
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), recognizeVoice)
+            return
+        }
+        // Ручная запись уже идёт — второй микрофон не открываем (и не рвём текущую реплику).
+        if (voiceSession.state == VoiceSessionController.State.LISTENING) {
+            statusView.text = VOICE_BUSY_STATUS
+            return
+        }
+        if (!voiceLoop.start()) return
+        // Озвучка прошлого ответа не должна попасть в микрофон с первого же чанка.
+        voiceOutput.stopSpeaking()
+        if (!handsFreeCapture.start(handsFreeListener)) {
+            voiceLoop.stop()
+            statusView.text = VOICE_MIC_UNAVAILABLE_STATUS
+            return
+        }
+        voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    /**
+     * Выключить режим. Недоговорённая реплика НЕ отправляется ([HandsFreeCapture.cancel]):
+     * человек выключил микрофон — значит, слушать больше нечего.
+     */
+    private fun stopHandsFree() {
+        if (!::voiceLoop.isInitialized) return
+        voiceLoop.stop()
+        handsFreeCapture.cancel()
+        voiceOutput.stopSpeaking()
+    }
+
+    /**
+     * Ход закончился (Done / конец стрима / recovery-финиш). Если ответ зазвучал — цикл в
+     * SPEAKING и ждёт конца озвучки; если читать нечего — сразу снова слушаем.
+     */
+    private fun onVoiceTurnCompleted() {
+        if (!::voiceLoop.isInitialized || !voiceLoop.isActive) return
+        if (voiceOutput.speaking) voiceLoop.onAnswerStarted() else voiceLoop.onAnswerFinished()
+    }
+
+    /** Реплика из hands-free-цикла → `POST /api/transcribe` → [VoiceDialogLoop.onTranscript]. */
+    private fun transcribeLoopSegment(requestId: Long, recording: Recording) {
+        if (store.read() == null) {
+            statusView.text = VOICE_NO_CREDENTIAL_STATUS
+            voiceLoop.onTranscriptFailed(requestId)
+            return
+        }
+        statusView.text = VOICE_TRANSCRIBING_STATUS
+        lifecycleScope.launch {
+            val outcome = ChatRepository(credentialProvider = { store.read() })
+                .transcribePcmWav(recording.wav)
+            if (isFinishing || isDestroyed) return@launch
+            when (outcome) {
+                is TranscribeOutcome.Success ->
+                    // Ход ещё идёт (TYPING) — текст уходит steer, а не вторым сообщением.
+                    voiceLoop.onTranscript(
+                        requestId,
+                        outcome.transcript,
+                        turnActive = uiState.status == ChatStatus.TYPING,
+                    )
+                is TranscribeOutcome.Failure -> {
+                    statusView.text = transcribeFailureStatus(outcome)
+                    // Распознавание упало — цикл остаётся живым и снова слушает.
+                    voiceLoop.onTranscriptFailed(requestId)
+                }
+            }
+        }
     }
 
     /** WAV → `POST /api/transcribe` → композитор → [sendMessage]. Общий хвост тапа и авто-стопа. */
@@ -3816,5 +4033,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val VOICE_TOO_LONG_STATUS = "Запись слишком длинная — не удалось распознать"
         private const val VOICE_DISABLED_STATUS = "Распознавание речи выключено на сервере"
         private const val VOICE_FAILED_STATUS = "Не удалось распознать речь — попробуйте ещё раз"
+        /** Hands-free диалог: состояния цикла и отказы. */
+        private const val VOICE_IDLE_STATUS = "Голосовой диалог выключен"
+        private const val VOICE_LISTENING_HANDS_FREE_STATUS = "Слушаю… (долгое нажатие на микрофон — выключить)"
+        private const val VOICE_SPEAKING_STATUS = "Отвечаю вслух…"
+        private const val VOICE_SEGMENT_DROPPED_STATUS = "Ответ ещё звучит — реплика не отправлена"
+        /**
+         * L3 (перебивание озвучки голосом) — ВЫКЛЮЧЕНО по умолчанию и включается только руками.
+         * Без AcousticEchoCanceler и AudioSource.VOICE_COMMUNICATION микрофон слышит собственный
+         * динамик, поэтому при включённом флаге цикл перебивает сам себя на первом слове ответа.
+         * Флаг заведён для замеров на живом устройстве (POCO F5): менять значение в shared prefs
+         * вручную, UI-переключателя нет намеренно — пока не подтверждено AEC, включать нельзя.
+         */
+        private const val KEY_VOICE_BARGE_IN = "barge_in"
     }
 }
