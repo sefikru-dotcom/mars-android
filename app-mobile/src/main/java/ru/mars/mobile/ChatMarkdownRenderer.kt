@@ -1,7 +1,6 @@
 package ru.mars.mobile
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.method.LinkMovementMethod
@@ -60,7 +59,7 @@ object ChatMarkdownRenderer {
                     val line = unit.line
                     val tv = TextView(context).apply {
                         movementMethod = LinkMovementMethod.getInstance()
-                        setTextColor(if (user) Color.WHITE else MarsTheme.TEXT)
+                        setTextColor(if (user) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
                         textSize = 15f
                         setPadding(0, dp(2), 0, dp(2))
                         setLineSpacing(dp(2).toFloat(), 1f)
@@ -77,8 +76,17 @@ object ChatMarkdownRenderer {
                             appendInlineSpans(ssb, line.spans, openImage, openUrl)
                         }
                         is RichLine.Bullet -> {
-                            ssb.append("•  ")
+                            // Маркер списка рисует canvas (BulletSpan), а не глиф «•»: в шрифте
+                            // OEM он подменяется эмодзи-версией и съезжает по базовой линии.
+                            // Отступ держит gapWidth, а не пробелы в тексте.
+                            val bulletStart = ssb.length
                             appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                            ssb.setSpan(
+                                BulletSpan(dp(10), MarsTheme.TEXT_MUTED),
+                                bulletStart,
+                                ssb.length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
                         }
                         is RichLine.Numbered -> {
                             ssb.append("${line.number} ")

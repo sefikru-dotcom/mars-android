@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -121,6 +120,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // из core-network: список диалогов и последние сообщения переживают обрыв связи.
     private val networkPolicy = NetworkStatePolicy()
     private val bannerPolicy = NetworkBannerPolicy()
+    /**
+     * O7: защита композера от программных перезаписей. Решения (текст/фокус) — чистые,
+     * хост только применяет их к EditText/IME. Поток ответов и сеть текста не касаются.
+     */
+    private val composerGuard = ComposerInputGuardPolicy()
     private lateinit var networkObserver: NetworkConnectivityObserver
     private lateinit var offlineCache: SessionOfflineCache
     private lateinit var offlineQueue: OfflineMessageQueuePolicy
@@ -183,7 +187,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var activityModeBtn: Button? = null
     private lateinit var workspaceSelection: WorkspaceSelection
     private var workspaceBtn: Button? = null
-    private var contextIndicator: TextView? = null
+    private var contextRing: ContextRingView? = null
+    /** Живой заголовок диалога в шапке (SSE-кадр `title`, авто-титлинг на ходу). */
+    private var sessionTitleView: TextView? = null
     /** Пилюля расхода/стоимости сессии (A14, `GET /api/session/usage`); скрыта при 0/недоступности. */
     private var usageIndicator: TextView? = null
     /** Последний измеренный расход сессии; null — ещё не запрошен или недоступен. */
@@ -474,7 +480,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
 
             override fun onResult(text: String) {
-                input.setText(text)
+                // O7: диктовка — действие пользователя, а не программная перезапись.
+                setComposerTextProgrammatically(text, TextApplyOrigin.VOICE_INPUT)
                 input.setSelection(text.length)
                 // The user explicitly spoke — arm reading of this turn's completed answer.
                 voiceOutput.armSpeakNextAnswer()
@@ -814,6 +821,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun buildChatContent(): View {
         val v = ChatScreenScaffold.build(this, scaffoldHost)
         networkBanner = v.networkBanner
+        sessionTitleView = v.sessionTitle
         miniPlayerBox = v.miniPlayer.box
         miniPlayerTitle = v.miniPlayer.title
         miniPlayerPlayBtn = v.miniPlayer.playBtn
@@ -839,11 +847,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         composerQuoteTitle = v.composer.quoteTitle
         composerQuoteExcerpt = v.composer.quoteExcerpt
         input = v.composer.input
+        // O7: реальный фокус поля — вход в [ComposerInputGuardPolicy]. Без него политика
+        // не знает, был ли фокус у композера до обрыва связи, и не восстановит его.
+        input.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
+            composerGuard.onComposerFocusChanged(focused)
+        }
         modelBtn = v.composer.modelBtn
         reasoningBtn = v.composer.reasoningBtn
         activityModeBtn = v.composer.activityModeBtn
         workspaceBtn = v.composer.workspaceBtn
-        contextIndicator = v.composer.contextIndicator
+        contextRing = v.composer.contextRing
         usageIndicator = v.composer.usageIndicator
         toolsetsChip = v.composer.toolsetsChip
         quotaChip = v.composer.quotaChip
@@ -918,6 +931,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         override fun onComposerTextChanged(text: String) {
             if (composerTextProgrammatic) return
+            // O7: текст набран человеком — с этого момента программные черновики его не
+            // перезаписывают (решение принимает [ComposerInputGuardPolicy]).
+            composerGuard.onUserEdited()
             scheduleServerDraftSync(text)
         }
 
@@ -932,10 +948,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         override fun modelChipLabel(): String = modelSelection.buttonLabel() ?: "Модель"
 
-        override fun activityModeChipLabel(): String = "· ${activityModeSelection.buttonLabel()}"
+        override fun activityModeChipLabel(): String = activityModeSelection.buttonLabel()
 
         override fun workspaceChipLabel(): String =
-            workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+            workspaceSelection.buttonLabel() ?: "Workspace"
 
         override fun toolsetsChipLabel(): String = toolsetsPresenter.chipLabel()
 
@@ -1039,6 +1055,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val credential = store.read() ?: run { uiState.cancel(); leaveChat(); return }
         hideKeyboard()
         input.text.clear()
+        // O7: композер очищен отправкой — поле снова ничьё, следующий черновик применим.
+        composerGuard.onSendReset()
         // Отправка принята локально (текст ушёл в поток) — черновик диалога очищается.
         drafts.onSendAccepted(currentSessionId)
         explicitStatus = null
@@ -1226,6 +1244,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Обработчик перехода сети: баннер обновляется всегда, восстановление связи запускает флаш. */
     private fun onNetworkTransition(transition: NetworkTransition) {
         updateNetworkBanner()
+        // O7: сеть — не владелец композера: текст не трогаем, но фокус, потерянный на
+        // обрыве, возвращаем одноразово и только после того, как связь успокоилась.
+        composerGuard.onNetworkTransition(transition)
+        restoreComposerFocusIfNeeded()
         // Сеть кормится в recovery-цикл: offline → парковка (WaitForNetwork), online →
         // пробуждение и немедленный reattach. LOSING трактуется как offline (сеть сейчас умрёт).
         if (::recovery.isInitialized) recovery.onNetworkChanged(transition.current.sendAllowed)
@@ -1236,6 +1258,30 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Стартовый снимок сети (до первичного восстановления диалога) не триггерит:
             // onCreate сам грузит список — так же, как gated автофлаш очереди выше.
             if (initialRestoreDone) requestSessionListRefresh()
+        }
+    }
+
+    /**
+     * O7: возврат фокуса композеру после обрыва связи. Решение — [ComposerInputGuardPolicy]:
+     * во время флаппинга (серия drop/restore в коротком окне) восстановление откладывается
+     * до тишины, иначе клавиатура мигает на каждом переходе. Одноразовость — на политике.
+     */
+    private fun restoreComposerFocusIfNeeded() {
+        if (!::input.isInitialized) return
+        when (composerGuard.resolveFocusRestore(FocusRequestOrigin.NETWORK_SETTLED)) {
+            ComposerFocusDecision.RestoreWithKeyboard -> {
+                input.requestFocus()
+                (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                    ?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+            }
+            ComposerFocusDecision.DeferUntilQuiet -> {
+                val wait = composerGuard.quietMillisRemaining()
+                input.postDelayed(
+                    { if (!isFinishing && !isDestroyed) restoreComposerFocusIfNeeded() },
+                    wait,
+                )
+            }
+            ComposerFocusDecision.Keep, ComposerFocusDecision.Suppress -> Unit
         }
     }
 
@@ -1309,6 +1355,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         updateQuotePlate()
         hideKeyboard()
         input.text.clear()
+        // O7: буферизованное сообщение тоже очищает поле — текст снова ничей.
+        composerGuard.onSendReset()
         drafts.onSendAccepted(currentSessionId)
         explicitStatus = null
         autoScroll.pinToBottom()
@@ -1405,7 +1453,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         sendButton.setImageDrawable(
             ContextCompat.getDrawable(this, if (active) R.drawable.ic_stop else R.drawable.ic_send)
         )
-        sendButton.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        sendButton.imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
         // Доступность: подпись кнопки соответствует ДЕЙСТВИЮ клика (stop/send), а не иконке.
         sendButton.contentDescription = ChatA11yPolicy.sendButtonDescription(active)
         updateContextIndicator()
@@ -1443,10 +1491,36 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val hasReply = lastAssistant != null &&
             (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty())
         val lastTurnFailed = lastAssistant?.status == MessageStatus.ERROR
-        // Лента зависит только от этих трёх входов: тот же набор — перерисовка не нужна.
+        // O9: пустой диалог — стартовые подсказки [SmartSuggestionsPolicy.STARTER]
+        // (вход в разговор), дальше лента принадлежит [QuickChips] (реакция на ход).
+        val emptyChat = uiState.messages.isEmpty()
+        // Лента зависит только от этих входов: тот же набор — перерисовка не нужна.
         // Раньше на КАЖДОМ кадре стрима сносились и заново инфлейтились кнопки с фонами.
-        if (!chipsGate.shouldRender(QuickChipsRenderGate.Signature(uiState.status, hasReply, lastTurnFailed))) return
+        if (!chipsGate.shouldRender(
+                QuickChipsRenderGate.Signature(uiState.status, hasReply, lastTurnFailed, emptyChat)
+            )
+        ) return
         smartChipsRow.removeAllViews()
+        if (emptyChat) {
+            val starters = SmartSuggestionsPolicy.suggestionsFor(
+                status = uiState.status,
+                hasMessages = false,
+            )
+            smartChipsRow.visibility = if (starters.isEmpty()) View.GONE else View.VISIBLE
+            if (starters.isEmpty()) return
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            starters.forEach { s ->
+                row.addView(
+                    buildRibbonChip(s.label, starterIcon(s.id), s.message),
+                    LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) }
+                )
+            }
+            smartChipsRow.addView(row)
+            return
+        }
         val chips = QuickChips.visibleChips(
             status = uiState.status,
             hasAssistantReply = hasReply,
@@ -1467,22 +1541,35 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         smartChipsRow.addView(row)
     }
 
-    private fun buildSmartChip(chip: QuickChip): Button = Button(this).apply {
-        text = chip.label
+    private fun buildSmartChip(chip: QuickChip): Button =
+        buildRibbonChip(chip.label, smartChipIcon(chip.id), chip.message)
+
+    /** Одна кнопка ленты: монохромная иконка + подпись, без эмодзи и типографских глифов. */
+    private fun buildRibbonChip(label: String, iconRes: Int, message: String): Button = Button(this).apply {
+        text = label
         textSize = 12f
         isAllCaps = false
         setTextColor(MarsTheme.TEXT)
         background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE_SUBTLE, strokeColor = MarsTheme.BORDER_MUTED)
         setPadding(dp(12), dp(4), dp(14), dp(4))
-        setCompoundDrawablesRelativeWithIntrinsicBounds(smartChipIcon(chip.id), 0, 0, 0)
+        setCompoundDrawablesRelativeWithIntrinsicBounds(iconRes, 0, 0, 0)
         compoundDrawablePadding = dp(6)
         compoundDrawableTintList = ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
         gravity = Gravity.CENTER
         minimumHeight = 0
         minHeight = 0
         stateListAnimator = null
-        contentDescription = chip.label
-        setOnClickListener { quickSend(chip.message) }
+        contentDescription = label
+        setOnClickListener { quickSend(message) }
+    }
+
+    private fun starterIcon(id: SmartSuggestionId): Int = when (id) {
+        SmartSuggestionId.SERVER_STATUS -> R.drawable.ic_status
+        SmartSuggestionId.DAY_SUMMARY -> R.drawable.ic_insights
+        SmartSuggestionId.PROJECTS -> R.drawable.ic_projects
+        SmartSuggestionId.MUSIC -> R.drawable.ic_music
+        SmartSuggestionId.CONTINUE -> R.drawable.ic_play
+        SmartSuggestionId.EXPLAIN -> R.drawable.ic_help
     }
 
     private fun smartChipIcon(id: QuickChipId): Int = when (id) {
@@ -1531,7 +1618,42 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     if (uiState.applySubagentUpdate(event.update)) scheduleStreamRender()
                 }
             }
+        } else if (event is ru.mars.network.model.SessionTitleUpdate) {
+            // Авто-заголовок сессии приходит посреди хода: шапка диалога и строка в
+            // списке получают новый текст сразу, без перезапроса `GET /api/session`.
+            // Кому именно достаётся кадр (пустой текст, чужая сессия, повтор) —
+            // решает чистая [SessionTitlePolicy]; здесь только применение на UI-потоке.
+            runOnUiThread {
+                if (boundSessionId == null || currentSessionId == boundSessionId) {
+                    onSessionTitle(event, boundSessionId)
+                }
+            }
         }
+    }
+
+    /**
+     * Применение кадра `title` к экрану: обновляет шапку и (если список диалогов уже
+     * загружен) строку сессии в нём. Заголовок текущего чата не зависит от того,
+     * открыт ли список, поэтому шапка обновляется всегда.
+     */
+    private fun onSessionTitle(update: ru.mars.network.model.SessionTitleUpdate, boundSessionId: String?) {
+        val decision = SessionTitlePolicy.decide(
+            update = update,
+            boundSessionId = boundSessionId,
+            currentSessionId = currentSessionId,
+            currentTitle = uiState.sessionTitle,
+        ) ?: return
+        if (uiState.applySessionTitle(decision.sessionId, decision.title)) {
+            applySessionTitle(decision.title)
+        }
+    }
+
+    /** Единственная точка записи живого заголовка в шапку (пусто — строки нет). */
+    private fun applySessionTitle(title: String?) {
+        val view = sessionTitleView ?: return
+        val text = title?.trim().orEmpty()
+        view.text = text
+        view.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
     }
 
     /**
@@ -2101,7 +2223,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 // Текст, набранный ВО ВРЕМЯ загрузки, сохраняется в черновик старого диалога
                 // непосредственно перед присвоением нового session_id.
                 drafts.onSessionSwitch(currentSessionId, detail.id, input.text.toString())
+                // O7: новый диалог — свой черновик; текст прежнего поля не «принадлежит» ему.
+                composerGuard.onSessionSwitch()
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                applySessionTitle(uiState.sessionTitle)
                 modelSelection.setSessionModel(detail.model, detail.modelProvider)
                 // A9: набор инструментов приходит вместе с деталью сессии — привязываем
                 // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
@@ -2154,6 +2279,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         initialRestoreDone = true
         val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
         drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
+        composerGuard.onSessionSwitch()
         currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
         currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == sessionId }?.isSubagent == true
         modelSelection.setSessionModel(
@@ -2165,6 +2291,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             uiState.sessions.firstOrNull { it.id == sessionId }?.title,
             historyMessages(SessionDetail(sessionId, messages = cached)),
         )
+        applySessionTitle(uiState.sessionTitle)
         // Кэш намеренно не хранит active_turn: копия загружается idle-состоянием.
         uiState.setActiveTurn(ActiveTurnInfo())
         currentSessionId = sessionId
@@ -2396,6 +2523,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val detail = SessionRepository().getSessionDetail(BASE_URL, c, id)
             if (detail != null && currentSessionId == id) {
                 uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+                applySessionTitle(uiState.sessionTitle)
                 modelSelection.setSessionModel(detail.model, detail.modelProvider)
                 // A9: набор инструментов приходит вместе с деталью сессии — привязываем
                 // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
@@ -2711,7 +2839,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val target = outcome.newSessionId
             if (target != null) {
                 loadSessionById(target)
-                outcome.newTitle?.let { uiState.sessionTitle = it }
+                outcome.newTitle?.let {
+                    uiState.sessionTitle = it
+                    applySessionTitle(it)
+                }
             } else {
                 (outcome.reloadSessionId ?: sessionId).let { reloadCurrentSession() }
             }
@@ -2753,7 +2884,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             attachmentChips.addView(Button(this).apply {
                 text = a.name
                 textSize = 11f
-                setTextColor(Color.WHITE)
+                setTextColor(MarsTheme.TEXT_STRONG)
                 contentDescription = if (previewable) {
                     "Убрать вложение ${a.name}, долгое нажатие — просмотр"
                 } else {
@@ -2763,7 +2894,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 setCompoundDrawablesRelativeWithIntrinsicBounds(
                     null, null, ContextCompat.getDrawable(this@ChatActivity, R.drawable.ic_close), null
                 )
-                compoundDrawableTintList = ColorStateList.valueOf(Color.WHITE)
+                compoundDrawableTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
                 compoundDrawablePadding = dp(6)
                 background = MarsTheme.pill(this@ChatActivity, MarsTheme.SURFACE, strokeColor = MarsTheme.ACCENT)
                 setOnClickListener { attachments.removeAt(i); renderAttachmentChips() }
@@ -2916,7 +3047,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val label = reasoningSelection.buttonLabel()
         reasoningBtn?.apply {
             visibility = if (label == null) View.GONE else View.VISIBLE
-            text = "· $label"
+            text = label
         }
     }
 
@@ -2942,7 +3073,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun updateActivityModeButton() {
-        activityModeBtn?.text = "· ${activityModeSelection.buttonLabel()}"
+        activityModeBtn?.text = activityModeSelection.buttonLabel()
     }
 
     /**
@@ -2981,7 +3112,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun updateWorkspaceButton() {
-        workspaceBtn?.text = workspaceSelection.buttonLabel()?.let { "· $it" } ?: "· Workspace"
+        workspaceBtn?.text = workspaceSelection.buttonLabel() ?: "Workspace"
     }
 
     /**
@@ -2998,29 +3129,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * Composer context pill: `NN%` + used/total tokens, colored like the WebUI
-     * ring (green ≤50, orange ≤75, red above). Hidden while unknown — an
-     * unresolved window must not become a fake percentage (#1436 parity).
-     * Text, thresholds and visibility rules live in [ContextBudgetPolicy] (JVM-tested);
-     * this layer only maps the level to a theme color.
+     * Кольцо контекста в композере (паритет с `.ctx-ring-svg` WebUI): дуга + процент,
+     * цвет по порогам. Скрыто, пока замер неизвестен — нерешённое окно не превращается
+     * в фейковый процент (#1436 parity). Решение (видимость, процент, порог, описание)
+     * принимает [ContextBudgetPolicy] (JVM-тесты); этот слой только отдаёт его кольцу.
      */
     private fun updateContextIndicator() {
-        val view = contextIndicator ?: return
-        val pill = ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning)
-        if (!pill.visible) {
-            view.visibility = View.GONE
-            return
-        }
-        view.visibility = View.VISIBLE
-        view.text = pill.text
-        view.setTextColor(
-            when (pill.level) {
-                ContextBudgetLevel.CRITICAL -> MarsTheme.STATUS_ERROR
-                ContextBudgetLevel.WARNING -> MarsTheme.STATUS_WARNING
-                ContextBudgetLevel.NORMAL, null -> MarsTheme.STATUS_ONLINE
-            }
-        )
-        view.contentDescription = pill.contentDescription
+        val view = contextRing ?: return
+        view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))
     }
 
     /**
@@ -3034,18 +3150,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val config = autoCompressionStorage.load()
         val details = TextView(this).apply {
             text = ContextBudgetPolicy.detailsText(usage)
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
         }
         val topicInput = EditText(this).apply {
             hint = "Фокус сжатия (необязательно)"
             setSingleLine(true)
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
         }
         val autoBox = CheckBox(this).apply {
             text = "Автосжатие при ${config.thresholdPercent}% заполнения"
             isChecked = config.enabled
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
             setOnCheckedChangeListener { _, checked ->
                 autoCompressionStorage.save(autoCompressionStorage.load().copy(enabled = checked))
             }
@@ -3153,6 +3269,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         interactiveController.dismissAll()
         compressionController.onSessionChanged()
         uiState.startNewSession()
+        composerGuard.onSessionSwitch()
+        applySessionTitle(uiState.sessionTitle)
         modelSelection.clearSessionModel()
         modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
         currentSessionId = null
@@ -3197,8 +3315,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Вставляет текст в композитор без реакции вотчера на «ввод пользователя»:
      * без флага программная вставка немедленно ушла бы на сервер как черновик
      * и перетёрла бы более свежую серверную копию.
+     *
+     * O7: перед записью спрашиваем [ComposerInputGuardPolicy]. Пока пользователь набирал
+     * текст, [TextApplyOrigin.DRAFT_RESTORE] получает `Preserve` — восстановление
+     * черновика (возврат на экран, холодный старт) не затирает набранное.
      */
-    private fun setComposerTextProgrammatically(text: String) {
+    private fun setComposerTextProgrammatically(
+        text: String,
+        origin: TextApplyOrigin = TextApplyOrigin.DRAFT_RESTORE,
+    ) {
+        if (composerGuard.resolveTextApply(origin) == ComposerTextDecision.Preserve) return
         val previous = composerTextProgrammatic
         composerTextProgrammatic = true
         try {
@@ -3207,6 +3333,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         } finally {
             composerTextProgrammatic = previous
         }
+        composerGuard.onTextAppliedProgrammatically()
     }
 
     // --- A15: серверный черновик composer -------------------------------------------------------
@@ -3546,6 +3673,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         interactiveController.dismissAll()
         uiState.cancel()
         uiState.startNewSession()
+        composerGuard.onSessionSwitch()
+        applySessionTitle(uiState.sessionTitle)
         currentSessionId = null
         currentSessionReadOnly = false
         currentSessionIsSubagent = false

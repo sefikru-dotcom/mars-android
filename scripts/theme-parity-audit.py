@@ -6,9 +6,16 @@
     python3 theme-parity-audit.py app-mobile/src/main
     python3 theme-parity-audit.py app-tv/src/main
 
-Проверяет два бан-листа визуального паритета:
+Проверяет бан-листы визуального паритета:
   1. хардкод-цвета (`0xAARRGGBB` / `0xRRGGBB`, `Color.parseColor("#…")`) вне файла палитры;
-  2. запрещённые глифы (эмодзи и типографские символы: chevron, точки, звезда, `x`-счётчик) в строках.
+  2. именованные цвета Android (`Color.WHITE`/`Color.BLACK`) вне файла палитры — у них есть
+     токены `MarsTheme.TEXT_STRONG`/`MarsTheme.BG`, а `Color.WHITE` проходил мимо цветового
+     бан-листа и жил в 21 месте экранов (O11);
+  3. запрещённые глифы (эмодзи и типографские символы: chevron, точки, звезда, `x`-счётчик,
+     маркер списка `•`) в строках;
+  4. декоративная позиция разделителя `·` (U+00B7): в начале или в конце строки он изображает
+     потерянную иконку, а не разделяет два фрагмента (O12). Инлайн `a · b` — легален: это
+     принятая грамматика подписей (`DETAIL_SEPARATOR`, `42% · 84k/200k`).
 
 Комментарии и KDoc снимаются перед разбором: строка, ОБЪЯСНЯЮЩАЯ запрещённый глиф, — не дефект.
 Каталоги `*/build/` пропускаются (сгенерированные исходники).
@@ -30,10 +37,24 @@ DEFAULT_PALETTE_FILES = {"MarsTheme.kt", "MarsGradients.kt", "colors.xml"}
 
 COLOR_RE = re.compile(r"0x[0-9a-fA-F]{6,8}\b|parseColor\(\s*\"#[0-9a-fA-F]{6,8}\"")
 
+# Именованные цвета Android, у которых есть токен палитры. `Color.TRANSPARENT` не банится:
+# это «отсутствие цвета» (прозрачный фон кнопки), а не оттенок дизайн-системы.
+COLOR_NAME_RE = re.compile(r"\bColor\.(WHITE|BLACK)\b")
+
 # Типографские символы, которые эмодзи не считаются, но так же зависят от шрифта OEM.
+# `•` (U+2022) — маркер списка: он рисуется canvas'ом (BulletSpan), а не глифом строки.
 BANNED_SYMBOLS = set(
-    "✓✔✗✕×✖⚡⚙★☆●◉○◦▲▼◀▶⌃⌄▴▾▸☰➤■▢▪⌛⏳⚠✂✎✏🗑"
+    "✓✔✗✕×✖⚡⚙★☆●◉○◦▲▼◀▶⌃⌄▴▾▸☰➤■▢▪⌛⏳⚠✂✎✏🗑•"
 )
+
+# `·` (U+00B7) — принятый разделитель подписей, поэтому банится не символ, а его
+# ДЕКОРАТИВНАЯ ПОЗИЦИЯ: на краю строки он изображает потерянную иконку («· Авто»).
+# Инлайн-разделитель («42% · 84k/200k», `DETAIL_SEPARATOR = " · "`) остаётся легальным.
+BANNED_DECORATION_GLYPHS = "·"
+
+# Строковые литералы Kotlin/XML-атрибуты: содержимое нужно, чтобы отличить разделитель
+# внутри фразы от глифа на краю строки.
+STRING_RE = re.compile(r"\"((?:[^\"\\]|\\.)*)\"")
 EMOJI_RANGES = (
     (0x1F000, 0x1F2FF),
     (0x1F300, 0x1FAFF),
@@ -50,6 +71,27 @@ def is_banned_glyph(ch: str) -> bool:
         return True
     code = ord(ch)
     return any(lo <= code <= hi for lo, hi in EMOJI_RANGES)
+
+
+def decoration_hits(line: str) -> list[str]:
+    """Глифы-разделители в ДЕКОРАТИВНОЙ позиции строкового литерала.
+
+    Декорация — глиф ПЕРВЫМ символом литерала (`"· Авто"`) или последним (`"Авто ·"`):
+    в начале подписи он изображает потерянную иконку, в конце — висящий хвост.
+    Не декорация:
+      - литерал из одного разделителя (`joinToString("  ·  ")`, `DETAIL_SEPARATOR = " · "`);
+      - суффиксный join с ведущим пробелом (`" · поток остановлен"`) — он приклеивается
+        к уже набранному тексту, то есть разделяет два фрагмента;
+      - инлайн `a · b` внутри фразы.
+    """
+    hits: list[str] = []
+    for match in STRING_RE.finditer(line):
+        content = match.group(1)
+        if len(content.strip()) < 2:
+            continue
+        if content[0] in BANNED_DECORATION_GLYPHS or content[-1] in BANNED_DECORATION_GLYPHS:
+            hits.append(content)
+    return hits
 
 
 def strip_comments(text: str) -> str:
@@ -133,13 +175,20 @@ def main(argv: list[str]) -> int:
                 for m in COLOR_RE.finditer(line):
                     print(f"{path}:{idx + 1}: [цвет] {m.group(0)}   | {original.strip()[:90]}")
                     colors += 1
+                for m in COLOR_NAME_RE.finditer(line):
+                    print(f"{path}:{idx + 1}: [цвет-имя] {m.group(0)}   | {original.strip()[:90]}")
+                    colors += 1
             for ch in line:
                 if is_banned_glyph(ch):
                     print(f"{path}:{idx + 1}: [глиф {ch!r}] {original.strip()[:90]}")
                     glyphs += 1
+            for content in decoration_hits(line):
+                print(f"{path}:{idx + 1}: [глиф-декорация] {content[:40]!r}   | {original.strip()[:90]}")
+                glyphs += 1
     print(f"\nИтого: хардкод-цветов {colors}, глифов {glyphs} (палитра: {', '.join(sorted(palette))})")
     if colors or glyphs:
-        print("Вне файла палитры цветов быть не должно; глифы менять на монохромные векторные иконки.")
+        print("Вне файла палитры цветов быть не должно; глифы менять на монохромные векторные иконки;")
+        print("«·» не ставить на край подписи — это потерянная иконка, а не разделитель.")
         return 1
     print("Чисто.")
     return 0

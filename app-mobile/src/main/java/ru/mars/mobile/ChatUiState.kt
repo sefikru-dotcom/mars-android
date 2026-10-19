@@ -404,6 +404,20 @@ class ChatUiState(
     fun setSessions(value: List<SessionItem>) { sessions = value }
 
     /**
+     * Живой заголовок сессии (SSE-кадр `title`, авто-титлинг на ходу): шапка диалога
+     * получает новый текст, строка в уже загруженном списке — тоже, без
+     * `GET /api/session`. Возвращает true, если картинка реально изменилась —
+     * вызывающий перерисовывает шапку только в этом случае.
+     */
+    fun applySessionTitle(sessionId: String, title: String): Boolean {
+        // Шапка — только у активной сессии; чужой кадр правит лишь строку списка.
+        val headerChanged = sessionId == activeSessionId && sessionTitle != title
+        if (sessionId == activeSessionId) sessionTitle = title
+        sessions = SessionTitlePolicy.renamed(sessions, sessionId, title)
+        return headerChanged
+    }
+
+    /**
      * Rows for the sessions drawer (WebUI parity #5244/#5305): delegated
      * subagent children ([SessionItem.isSubagent]) are hidden from the main
      * list by default — the WebUI sidebar stacks them under the parent's

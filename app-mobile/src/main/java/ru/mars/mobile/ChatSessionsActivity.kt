@@ -911,7 +911,7 @@ class ChatSessionsActivity : ComponentActivity() {
         val nameInput = EditText(this).apply {
             setText(session.title.orEmpty())
             setSingleLine(true)
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
         }
         android.app.AlertDialog.Builder(this)
             .setTitle("Переименовать диалог")

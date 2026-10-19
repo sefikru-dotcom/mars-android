@@ -6,7 +6,6 @@ import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.app.Dialog
 import android.content.res.ColorStateList
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.LayerDrawable
 import android.os.Bundle
@@ -537,7 +536,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             R.drawable.ic_ui_search,
             "Найти",
             bg = MarsTheme.ACCENT,
-            iconTint = Color.WHITE,
+            iconTint = MarsTheme.TEXT_STRONG,
             sizeDp = 36
         ).apply {
             setOnClickListener { search(searchInput.text.toString()) }
@@ -718,7 +717,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             R.drawable.ic_play,
             MusicA11yPolicy.playPauseAction(isPlaying = false),
             bg = MarsTheme.ACCENT,
-            iconTint = Color.WHITE,
+            iconTint = MarsTheme.TEXT_STRONG,
             sizeDp = 50,
             strokeColor = 0
         ).apply {
@@ -1902,7 +1901,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 R.drawable.ic_play,
                 "Перейти к треку",
                 bg = if (active) MarsTheme.ACCENT else MarsTheme.SURFACE_SUBTLE,
-                iconTint = if (active) Color.WHITE else MarsTheme.ACCENT,
+                iconTint = if (active) MarsTheme.TEXT_STRONG else MarsTheme.ACCENT,
                 sizeDp = 34
             ).apply {
                 setOnClickListener { MarsMusicPlayer.playQueueAt(i) }
@@ -2090,12 +2089,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         playFlowBtn.addView(ImageView(this).apply {
             setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_play))
-            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
         }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
         playFlowBtn.addView(TextView(this).apply {
             text = "Включить поток"
             textSize = 14f
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
             typeface = Typeface.DEFAULT_BOLD
         })
         card.addView(playFlowBtn, LinearLayout.LayoutParams(-1, -2))

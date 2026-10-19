@@ -246,4 +246,93 @@ class ChatClickPathContractTest {
         assertTrue("После любого исхода чип перерисовывается", refresh.contains("updateReasoningButton()"))
         assertNotNull(refresh)
     }
+
+    // --- Шаг 7: контекст, живой заголовок, стартовые подсказки ---------------------------
+
+    /** Кольцо контекста вынесено из каркаса: своя View + чистая политика бюджета. */
+    private val contextRingView by lazy { source("src/main/java/ru/mars/mobile/ContextRingView.kt") }
+    private val sessionTitlePolicy by lazy { source("src/main/java/ru/mars/mobile/SessionTitlePolicy.kt") }
+
+    @Test
+    fun `context ring - tap opens usage details and arc comes from ContextBudgetPolicy`() {
+        assertTrue(
+            "Кольцо обязано строиться каркасом и открывать детали окна контекста",
+            scaffold.contains("ContextRingView(context)") &&
+                scaffold.contains("setOnClickListener { host.showContextUsageDetails() }")
+        )
+        assertTrue(
+            "Кольцо рисует только решение ContextBudgetPolicy.pill (никаких своих порогов)",
+            chat.contains("view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))")
+        )
+        assertTrue(
+            "View кольца обязана нести contentDescription из политики (TalkBack)",
+            contextRingView.contains("contentDescription = pill.contentDescription")
+        )
+        assertTrue(
+            "Кольцо обязано быть компактным (24dp), а не крупной кнопкой",
+            contextRingView.contains("RING_SIZE_DP = 24")
+        )
+    }
+
+    @Test
+    fun `live title - title frame renames header through SessionTitlePolicy`() {
+        assertTrue(
+            "Side-канал обязан принимать кадр title и отдавать его потребителю экрана",
+            chat.contains("event is ru.mars.network.model.SessionTitleUpdate") &&
+                chat.contains("onSessionTitle(event, boundSessionId)")
+        )
+        assertTrue(
+            "Кому достаётся кадр — решает чистая SessionTitlePolicy",
+            chat.contains("SessionTitlePolicy.decide(")
+        )
+        assertTrue(
+            "Заголовок обязан доезжать до шапки через единственную точку записи",
+            chat.contains("applySessionTitle(decision.title)")
+        )
+        assertTrue(
+            "Строка списка переименовывается тем же кадром (общая модель сессий)",
+            chat.contains("uiState.applySessionTitle(decision.sessionId, decision.title)")
+        )
+        assertTrue(
+            "Смена сессии/новый чат обязаны обновлять шапку, а не оставлять старый title",
+            chat.contains("applySessionTitle(uiState.sessionTitle)")
+        )
+        assertTrue(
+            "Строка списка переименовывается тем же решением",
+            sessionTitlePolicy.contains("fun renamed(sessions: List<SessionItem>")
+        )
+    }
+
+    @Test
+    fun `empty chat - starter suggestions render in the chips ribbon`() {
+        assertTrue(
+            "Пустой диалог обязан показывать стартовые подсказки SmartSuggestionsPolicy",
+            chat.contains("SmartSuggestionsPolicy.suggestionsFor(")
+        )
+        assertTrue(
+            "Стартеры живут в той же ленте и уходят при появлении сообщений",
+            chat.contains("val emptyChat = uiState.messages.isEmpty()")
+        )
+        assertTrue(
+            "Кнопка ленты обязана нести иконку и текст (без эмодзи)",
+            chat.contains("private fun buildRibbonChip(label: String, iconRes: Int, message: String)")
+        )
+    }
+
+    @Test
+    fun `composer - programmatic text and focus pass ComposerInputGuardPolicy`() {
+        assertTrue(
+            "Программная вставка обязана спрашивать политику, а не писать в поле напрямую",
+            chat.contains("composerGuard.resolveTextApply(origin)")
+        )
+        assertTrue(
+            "Фокус композера обязан транслироваться в политику",
+            chat.contains("composerGuard.onComposerFocusChanged(focused)")
+        )
+        assertTrue(
+            "Возврат фокуса после обрыва — по решению политики, с отложенным повтором",
+            chat.contains("composerGuard.resolveFocusRestore(FocusRequestOrigin.NETWORK_SETTLED)") &&
+                chat.contains("ComposerFocusDecision.DeferUntilQuiet")
+        )
+    }
 }

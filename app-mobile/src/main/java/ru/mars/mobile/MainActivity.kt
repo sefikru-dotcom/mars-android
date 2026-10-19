@@ -2,7 +2,6 @@ package ru.mars.mobile
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
@@ -130,7 +129,7 @@ class MainActivity : ComponentActivity() {
         loginButton = Button(this).apply {
             text = "Войти"
             textSize = 16f
-            setTextColor(Color.WHITE)
+            setTextColor(MarsTheme.TEXT_STRONG)
             typeface = Typeface.DEFAULT_BOLD
             background = MarsTheme.button(this@MainActivity, MarsTheme.ACCENT, radiusDp = 14)
             setOnClickListener { performLogin() }

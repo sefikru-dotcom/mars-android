@@ -16,6 +16,22 @@ class ChatUiStateTest {
         val state = ChatUiState(); state.setSessions(listOf(SessionItem("s1", "Работа"))); state.begin("hello"); state.onEvent(ChatEvent.SessionBound("s1")); assertEquals("s1", state.activeSessionId); assertEquals(1, state.sessions.size)
         state.startNewSession(); assertNull(state.activeSessionId); assertTrue(state.messages.isEmpty()); assertEquals(ChatStatus.IDLE, state.status)
     }
+    @Test fun liveTitleRenamesHeaderAndListRow() {
+        val state = ChatUiState()
+        state.setSessions(listOf(SessionItem("s1", "Новый чат"), SessionItem("s2", "Второй")))
+        state.bindSession("s1", "Новый чат", emptyList())
+        // Кадр активной сессии: шапка и строка списка получают новый текст.
+        assertTrue(state.applySessionTitle("s1", "Отладка сети"))
+        assertEquals("Отладка сети", state.sessionTitle)
+        assertEquals("Отладка сети", state.sessions.first { it.id == "s1" }.title)
+        // Повтор того же текста — не повод перерисовывать шапку.
+        assertFalse(state.applySessionTitle("s1", "Отладка сети"))
+        // Кадр чужой сессии: шапка не меняется, строка списка — да.
+        assertFalse(state.applySessionTitle("s2", "Другой диалог"))
+        assertEquals("Отладка сети", state.sessionTitle)
+        assertEquals("Другой диалог", state.sessions.first { it.id == "s2" }.title)
+    }
+
     @Test fun collapsibleRichBlocksToggle() {
         val state = ChatUiState(); state.begin("hello"); state.onEvent(ChatEvent.Thought("why")); state.onEvent(ChatEvent.ToolCall("1", "read_file", "x")); state.toggleThoughts(1)
         // STREAM_WINDOW keeps the still-running tool expanded; a manual toggle collapses it.
