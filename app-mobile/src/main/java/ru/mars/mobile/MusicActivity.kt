@@ -1183,6 +1183,28 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             setOnClickListener { onArtistClicked(t.artist) }
         }
         subRow.addView(artistLabel, LinearLayout.LayoutParams(0, -2, 1f))
+        // Альбом — отдельный кликабельный сегмент подписи. Строка трека теперь
+        // знает свой альбом (см. MusicTrack.albumBrowseId): тап открывает тот же
+        // альбомный диалог, что и карточка альбома на вкладке «Обзор». Если у
+        // трека нет browseId, имя остаётся просто подписью без перехода.
+        val albumBrowseId = t.albumBrowseId
+        val albumName = t.albumTitle
+        if (!albumName.isNullOrBlank()) {
+            val albumLabel = TextView(this).apply {
+                text = " · $albumName"
+                textSize = 12f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                if (!albumBrowseId.isNullOrBlank()) {
+                    isClickable = true
+                    isFocusable = true
+                    setTextColor(MarsTheme.ACCENT_TEXT)
+                    setOnClickListener { onAlbumClicked(albumBrowseId) }
+                }
+            }
+            subRow.addView(albumLabel, LinearLayout.LayoutParams(-2, -2).apply { maxWidth = dp(140) })
+        }
         val metaView = TextView(this).apply {
             text = " · ${t.duration}"
             textSize = 12f
@@ -2259,6 +2281,25 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     // ------------------------------------------------------------- исполнитель
+
+    /**
+     * Тап по имени альбома в строке трека открывает тот же альбомный диалог, что и
+     * карточка на вкладке «Обзор».
+     *
+     * Имя альбома без browseId (обычный случай для треков вне альбома и для выдач,
+     * где сервер не смог достать id) — это подпись, а не кнопка: обработчик видит
+     * пустой id и просто показывает статус, вместо того чтобы уйти в сеть за
+     * заведомо отвергаемым запросом.
+     */
+    private fun onAlbumClicked(rawBrowseId: String?) {
+        val target = MusicAlbumPolicy.requestTarget(rawBrowseId)
+        if (target == null) {
+            showStatus(MusicAlbumPolicy.NOT_FOUND)
+            return
+        }
+        if (!MusicArtistPolicy.canStartRequest(albumJob?.isActive == true)) return
+        openAlbumDialog(target)
+    }
 
     /**
      * Тап по имени исполнителя (строка трека или мини-плеер) открывает диалог

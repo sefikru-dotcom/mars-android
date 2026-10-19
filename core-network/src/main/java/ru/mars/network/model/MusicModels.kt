@@ -7,6 +7,8 @@ data class MusicTrack(
     val artist: String,
     val duration: String = "--:--",
     val thumbnail: String? = null,
+    val albumTitle: String? = null,
+    val albumBrowseId: String? = null,
 )
 
 enum class PlaybackStatus { PLAYING, PAUSED, STOPPED }

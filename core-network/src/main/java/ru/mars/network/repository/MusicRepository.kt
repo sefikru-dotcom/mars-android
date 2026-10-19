@@ -883,10 +883,40 @@ class MusicRepository(
     @JsonClass(generateAdapter = false)
     private data class SessionEnvelope(val type: String? = null, val session: Session? = null, val globalSession: Session? = null)
     @JsonClass(generateAdapter = false)
-    private data class TrackDto(val id: String, val title: String, val artist: String, val duration: String? = null, val thumbnail: String? = null) {
+    private data class TrackDto(
+        val id: String,
+        val title: String,
+        val artist: String,
+        val duration: String? = null,
+        val thumbnail: String? = null,
+        val album: AlbumRefDto? = null,
+    ) {
         // Favorites rows recorded without metadata carry an empty duration string.
-        fun toModel(): MusicTrack = MusicTrack(id, title, artist, duration?.takeIf { it.isNotBlank() } ?: "--:--", thumbnail)
+        fun toModel(): MusicTrack = MusicTrack(
+            id = id,
+            title = title,
+            artist = artist,
+            duration = duration?.takeIf { it.isNotBlank() } ?: "--:--",
+            thumbnail = thumbnail,
+            albumTitle = album?.name?.takeIf { it.isNotBlank() },
+            albumBrowseId = album?.browseId?.takeIf { it.isNotBlank() },
+        )
     }
+
+    /**
+     * Поле `album` из выдачи сервера — один и тот же объект во всех выдачах
+     * (`GET /api/search?type=songs`, страница исполнителя, чарты).
+     *
+     * Сервер нормализует две формы ytmusicapi (голое имя и `{name,id}`) в этот
+     * контракт, поэтому клиенту достаточно одной модели. `browseId` может быть
+     * пустым, если у трека нет альбома: такую карточку нельзя открыть, но имя
+     * альбома всё равно показывается в строке трека.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class AlbumRefDto(
+        val name: String? = null,
+        @Json(name = "browseId") val browseId: String? = null,
+    )
 
     /**
      * The live service reads `id` (server.py handle_toggle_favorite) while the documented
