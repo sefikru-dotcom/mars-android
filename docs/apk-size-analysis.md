@@ -207,3 +207,55 @@ CI (сборка `app-mobile-release-unsigned.apk` на версиях 26/27/31;
 - TV: **−514 749 байт (−8,83 %)** — 5 827 509 → **5 312 760**;
 - суммарно по обоим модулям — **−931 222 байта** APK, целиком за счёт dex, без
   потери функциональности и без изменения сериализации.
+
+## 8. Волна 20.10: локали, leanback, WebP (выполнено)
+
+Всё ниже — измерено на живых `assembleRelease`-файлах, не расчётом.
+Baseline — APK из раздачи (`/opt/hermes-webui/static/apk/`), подпись та же
+схема v3-only.
+
+| модуль | было, байт | стало, байт | Δ | Δ % |
+|---|---:|---:|---:|---:|
+| app-mobile | 5 697 152 | **4 828 428** | **−868 724** | **−15,2 %** |
+| app-tv | 5 384 439 | **4 410 393** | **−974 046** | **−18,1 %** |
+
+Разложение экономии:
+
+| рычаг | mobile | tv |
+|---|---:|---:|
+| `resourceConfigurations += listOf("ru")` (arsc) | −314 196 | −590 520 |
+| удаление `androidx.leanback` (dex) | 0 | −201 828 |
+| WebP + снятие дубля фона (res/) | −519 455 | −107 524 |
+
+Что сделано:
+
+1. **Локали.** В обоих модулях свои строки лежат только в `values/`
+   (каталогов `values-en` нет), поэтому в пакет идёт один `ru`:
+   `aapt2 dump badging` → `locales: '--_--' 'ru'` (было 86 локалей, из них
+   84 библиотечных). Фолбэк на `values/` не срезается никогда.
+2. **`androidx.leanback:leanback:1.0.0` удалён из `:app-tv`.** В dex не осталось
+   ни строки `leanback`, ни `recyclerview`; `lb_*`-ресурсов в arsc — 0 (было 737).
+   Категория `LEANBACK_LAUNCHER` в манифесте — системный intent-filter, а не
+   зависимость, поэтому осталась. `:app-tv:assembleDebug` и `assembleRelease`
+   зелёные, R8-контракт PASS.
+3. **Растры.** `mars_bg.jpg` и `mars_splash_bg.jpg` были байт-в-байт одним
+   кадром — оставлен один `mars_bg.webp` (WebP q80, 1080×2400: 184 452 → 36 702),
+   оба layer-list (`mars_window_bg.xml`, `splash_window_bg.xml`) ссылаются на
+   `@drawable/mars_bg`. `mars_splash_planet` 436×436 PNG → WebP q90
+   (172 950 → 28 320), `mars_planet` 192×192 PNG → WebP q90 (54 559 → 11 936).
+   `.9.png` не тронуты (NinePatch).
+4. **Мёртвый `mars_planet` в TV снят из генератора:** `shrinkResources` и раньше
+   срезал его до 0-байтовой заглушки, то есть файл в TV никто не рисовал.
+
+Отклонено осознанно:
+
+- **`mars_planet` 192 → 96 px.** Аудит обосновывал 96 px отрисовкой в 18 dp
+  (`AppSectionsBar`), но пропустил `MainActivity.kt:79` — логотип на экране
+  входа рисуется в 72 dp, это 288 px на xxxhdpi. 96 px дал бы апскейл 3×
+  ради 8 КБ. Экономия достигнута переходом на WebP при том же разрешении.
+
+Проверки: `apk-contract-check.py --signing-scheme v3-only` — PASS на обоих
+APK (R8: 1 имя `*.kt` в dex, Moshi-граф 9 классов, подпись v3), `apksigner
+verify` — Verifies, `theme-parity-audit.py` — «Чисто» на обоих модулях,
+`tests/test_gen_visual_assets.py` — 34 теста OK, `gen-visual-assets.py --verify`
+— 34 файла без расхождений.

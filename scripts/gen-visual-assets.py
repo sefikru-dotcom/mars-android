@@ -10,20 +10,20 @@ gen-visual-assets.py — воспроизводимый генератор ра�
 
 Что генерируется (обе цели — app-mobile и app-tv):
 
-  res/drawable-nodpi/mars_bg.jpg          обои окна (копия источника байт-в-байт)
-  res/drawable-nodpi/mars_planet.png      планета для шапки, прозрачный фон
-  res/drawable-nodpi/mars_splash_planet.png  планета заставки, прозрачный фон
-  res/drawable-nodpi/mars_splash_bg.jpg   фон заставки полной яркости (копия источника)
+  res/drawable-nodpi/mars_bg.webp         обои окна И фон заставки (один файл, WebP q80)
+  res/drawable-nodpi/mars_planet.webp     планета для шапки, прозрачный фон (WebP q90)
+  res/drawable-nodpi/mars_splash_planet.webp  планета заставки, прозрачный фон (WebP q90)
   res/mipmap-<d>/ic_launcher.png          квадратная legacy-иконка
   res/mipmap-<d>/ic_launcher_round.png    круглая legacy-иконка
   res/mipmap-<d>/ic_launcher_foreground.png  foreground adaptive-иконки (108dp)
   (только app-tv) res/drawable-xhdpi/tv_banner_render.png  TV-баннер 320x180
 
-Заставка (splash) — отдельная пара ресурсов, а не переиспользование окна:
-`mars_window_bg.xml` приглушает обои слоем alpha 0.40, и для чёрного старта
-это правильно, но SplashActivity нужен яркий кадр. Поэтому фон заставки —
-копия источника без какой-либо альфы (приглушение живёт в layer-list, а не
-в JPEG), а планета — нативный кроп рендера: 436px при источнике 512px.
+Заставка (splash) использует ТОТ ЖЕ фон, что и окно, — один файл на два
+layer-list: `mars_window_bg.xml` приглушает обои слоем alpha 0.40, а
+`splash_window_bg.xml` рисует их на полной яркости. Раньше это были две
+байт-в-байт копии источника (md5 совпадал), то есть APK вёз один кадр дважды;
+разница яркости живёт в атрибутах слоя, а не в отдельном файле. Планета
+заставки — нативный кроп рендера: 436px при источнике 512px.
 Потолок разрешения задаёт сам источник: апскейл выше нативного кропа
 (favicon-512.png — это 512px, лимб 358px) не добавил бы деталей, только
 размыл лимб, поэтому 1080px из него не рисуется. Пропорции фона сохраняются
@@ -78,8 +78,29 @@ FOREGROUND_LIMB_FRAC = FOREGROUND_LIMB_DP / FOREGROUND_DP
 assert FOREGROUND_LIMB_DP / 2 * HALO_SPAN <= SAFE_DP / 2, (
     "лимб foreground не влезает в safe zone: ореол срежется маской"
 )
-PLANET_LOGO_PX = 192         # логотип шапки
+PLANET_LOGO_PX = 192         # логотип шапки; НЕ 96: MainActivity рисует его в 72dp
+                             # (288 px на xxxhdpi), 96 px дал бы апскейл 3×. Экономия
+                             # от 96 px — 8 КБ, цена — мыло на экране входа.
 TV_BANNER_PX = (320, 180)
+
+# ── форматы растровых ресурсов (волна 20.10: слив веса APK) ───────────────────
+# Все крупные растры уезжают в WebP: платформа декодирует его нативно с API 14,
+# а minSdk здесь 28, поэтому поддержка не обсуждается. PNG/JPEG остаются только
+# там, где WebP запрещён форматом: .9.png (NinePatch) не конвертируется вообще —
+# чанк npTc живёт только в PNG, WebP сломает растяжение фона.
+#
+# mars_bg.webp — ЕДИНСТВЕННЫЙ файл обоев: в репозитории лежали две байт-в-байт
+# копии источника (mars_bg.jpg для окна и mars_splash_bg.jpg для заставки,
+# md5 совпадал), то есть APK вёз один и тот же кадр дважды. Оба layer-list
+# (mars_window_bg.xml и splash_window_bg.xml) ссылаются на @drawable/mars_bg;
+# разница «полная яркость vs alpha 0.40» живёт в XML, а не в файле.
+BG_ASSET = "mars_bg.webp"
+BG_WEBP_QUALITY = 80         # 1080x2400: 184 452 B JPEG → ~36.7 КБ WebP, PSNR 46 dB
+# 90, а не 80: планета — мелкий контрастный объект с резким лимбом, на q80 по
+# краю диска проступает «звон». Альфа в lossy-WebP кодируется БЕЗ потерь, поэтому
+# прозрачный ореол заставки от качества не страдает вовсе.
+PLANET_LOGO_WEBP_QUALITY = 90
+SPLASH_PLANET_WEBP_QUALITY = 90
 
 # ── заставка (splash) ────────────────────────────────────────────────────────
 # Планета заставки рендерится в НАТИВНОМ разрешении кропа keyed_planet
@@ -95,7 +116,6 @@ SPLASH_PLANET_UPSCALE = 1.0
 LUM_BG = 9.5
 LUM_HALO = 52.0
 
-JPEG_QUALITY = 92            # только для обоев, если источник не JPEG
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -115,9 +135,15 @@ def png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def jpeg_bytes(img: Image.Image) -> bytes:
+def webp_bytes(img: Image.Image, *, quality: int) -> bytes:
+    """WebP детерминированно: фиксированные quality/method, без метаданных.
+
+    method=6 — самый медленный и самый плотный режим libwebp: генератор гоняется
+    раз в жизни ассета, экономить на нём незачем. Альфа (если есть) остаётся
+    lossless — это свойство формата, а не настройка.
+    """
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True)
+    img.save(buf, format="WEBP", quality=quality, method=6)
     return buf.getvalue()
 
 
@@ -353,7 +379,13 @@ def build_plan(src_dir: Path, root: Path) -> list[dict]:
     )
 
     bg_src = src_dir / BG_SRC
-    bg_bytes = bg_src.read_bytes()
+    # Источник — JPEG 1080x2400. Декодируем и кодируем в WebP один раз: файл
+    # один на оба layer-list (см. BG_ASSET), альфа в фоне не нужна и не
+    # допускается (RGB), иначе приглушение в mars_window_bg.xml считалось бы
+    # дважды.
+    with Image.open(bg_src) as im:
+        bg_img = im.convert("RGB")
+    bg_data = webp_bytes(bg_img, quality=BG_WEBP_QUALITY)
     logo = render_planet(art, meta, canvas=(PLANET_LOGO_PX, PLANET_LOGO_PX),
                          limb_px=PLANET_LOGO_PX * meta["limb_frac"])
 
@@ -368,27 +400,20 @@ def build_plan(src_dir: Path, root: Path) -> list[dict]:
     out: list[dict] = []
     for module in modules:
         nodpi = module / "src/main/res/drawable-nodpi"
-        # Обои окна нужны только телефону: на TV фон — обсидиановая виньетка
-        # (bg_tv_root), и копия обоев лежала бы в APK мёртвым грузом.
+        # Растровые ассеты шапки и заставки нужны только телефону. В TV нет ни
+        # SplashActivity, ни шапки с планетой (фон — обсидиановая виньетка
+        # bg_tv_root), поэтому nodpi там пуст: раньше mars_planet лежал и в TV,
+        # где shrinkResources срезал его до 0-байтовой заглушки в APK.
         if module.name == "app-mobile":
-            out.append({"module": module.name, "path": nodpi / "mars_bg.jpg",
-                        "data": bg_bytes, "what": "обои окна"})
-        out.append({"module": module.name, "path": nodpi / "mars_planet.png",
-                    "data": png_bytes(logo), "what": "логотип-рендер"})
-        # Заставка — в обеих целях: SplashActivity есть и на телефоне, и на TV,
-        # имена ресурсов там одинаковые, поэтому паритет важнее экономии
-        # байтов (фон заставки на TV — тот же кадр, что и на телефоне).
-        out.append({"module": module.name,
-                    "path": nodpi / "mars_splash_planet.png",
-                    "data": png_bytes(splash_planet),
-                    "what": "планета заставки"})
-        # Копия источника байт-в-байт: приглушение до alpha 0.40 живёт в
-        # mars_window_bg.xml (layer-list), а не в JPEG, поэтому файл уже
-        # «полной яркости». Отдельный ресурс — чтобы SplashActivity не зависел
-        # от раскладки окна и её правок; пропорции не трогаем, поверх ничего
-        # не рисуем (неоновый ореол накладывает код).
-        out.append({"module": module.name, "path": nodpi / "mars_splash_bg.jpg",
-                    "data": bg_bytes, "what": "фон заставки"})
+            out.append({"module": module.name, "path": nodpi / BG_ASSET,
+                        "data": bg_data, "what": "обои окна и фон заставки"})
+            out.append({"module": module.name, "path": nodpi / "mars_planet.webp",
+                        "data": webp_bytes(logo, quality=PLANET_LOGO_WEBP_QUALITY),
+                        "what": "логотип-рендер"})
+            out.append({"module": module.name,
+                        "path": nodpi / "mars_splash_planet.webp",
+                        "data": webp_bytes(splash_planet, quality=SPLASH_PLANET_WEBP_QUALITY),
+                        "what": "планета заставки"})
         for density, px in DENSITIES.items():
             mip = module / "src/main/res" / f"mipmap-{density}"
             # legacy-иконка: весь рендер (с ореолом) занимает LEGACY_CONTENT_FRAC
