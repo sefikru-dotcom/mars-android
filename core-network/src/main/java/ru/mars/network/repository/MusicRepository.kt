@@ -60,6 +60,26 @@ data class MusicAlbum(
 )
 
 /**
+ * Карточка альбома из `GET /api/search?type=albums` — ровно то, что печатает
+ * строка списка, без треков.
+ *
+ * Почему отдельная модель, а не [MusicAlbum]: список альбомов исполнителя не
+ * должен тянуть `/api/album/{browseId}` на каждую карточку (это N запросов и
+ * N разборов треков). Треки приходят только при открытии конкретного альбома.
+ *
+ * [year] — как в ответе (`"2024"`), может отсутствовать; [thumbnail] уже
+ * абсолютный: сервер отдаёт относительный путь, который резолвится от корня
+ * сайта, а не от `baseUrl` музыкального API.
+ */
+data class MusicAlbumSummary(
+    val browseId: String,
+    val title: String,
+    val artist: String,
+    val year: String? = null,
+    val thumbnail: String? = null,
+)
+
+/**
  * Итог запроса альбома. Отказ «неверный browseId» — это ответ сервера по контракту
  * (`must start with MPRE`), а не сбой, поэтому он несёт собственный вариант
  * [InvalidBrowseId] и не превращается в исключение.
@@ -86,6 +106,7 @@ class MusicRepository(
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val envelopeAdapter = moshi.adapter(SessionEnvelope::class.java)
     private val listAdapter = moshi.adapter(TrackListEnvelope::class.java)
+    private val albumListAdapter = moshi.adapter(AlbumSummaryListEnvelope::class.java)
 
     suspend fun getStatus(): MusicPlayerState = connect(WsAction.Status)
     suspend fun play() { command("playPause") }
@@ -537,6 +558,29 @@ class MusicRepository(
         moshi.adapter(ErrorEnvelope::class.java).fromJson(body)?.error?.takeIf { it.isNotBlank() }
     }.getOrNull()
 
+    /**
+     * Абсолютный URL обложки альбома из серверного значения.
+     *
+     * Сервер музыки отдаёт относительный путь `/music/api/thumb?url=…`, который уже
+     * содержит префикс `/music`. Приклеивать его к [baseUrl] (`…/music`) нельзя —
+     * на выходе `/music/music/api/thumb`, сервер такого маршрута не знает. Поэтому
+     * относительный путь приклеивается к корню сайта ([SITE_ORIGIN]).
+     *
+     * Абсолютные http(s) и протокол-относительные (`//cdn…`) значения сохраняются;
+     * любые прочие схемы (`data:`, `file:`, `javascript:`…) отбрасываются — в
+     * загрузчик картинок не должна уезжать произвольная схема.
+     */
+    private fun resolveAlbumThumbnail(raw: String?): String? {
+        val value = raw?.trim().orEmpty()
+        if (value.isEmpty()) return null
+        if (value.startsWith("https://", ignoreCase = true) || value.startsWith("http://", ignoreCase = true)) {
+            return value
+        }
+        if (value.startsWith("//")) return "https:$value"
+        if (ANY_SCHEME.containsMatchIn(value)) return null
+        return SITE_ORIGIN + if (value.startsWith("/")) value else "/$value"
+    }
+
     /** GETs [path] with optional [query] parameters and maps the successful response through [parse]. */
     private suspend fun <T> getJson(path: String, query: List<Pair<String, String>> = emptyList(), parse: (ResponseBody) -> T): T =
         suspendCancellableCoroutine { continuation ->
@@ -579,6 +623,73 @@ class MusicRepository(
     suspend fun search(query: String): List<MusicTrack> {
         require(query.isNotBlank()) { "query must not be blank" }
         return fetchTracks("api/search", "q" to query)
+    }
+
+    /**
+     * GET /api/search?q=…&type=albums — альбомы по запросу (в UI: альбомы исполнителя).
+     *
+     * Почему поиск, а не `/api/artist/{…}`: страница исполнителя отдаёт только
+     * `name, channelId, radioId, description, subscribers, thumbnail, songs` —
+     * альбомов в ней нет (проверено на живом сервисе 2026-10-19). Ключ
+     * `type=albums` переключает выдачу на карточки
+     * `{type:"album", browseId:"MPRE…", title, artist, year, thumbnail}`.
+     *
+     * `thumbnail` в этой выдаче относительный (`/music/api/thumb?url=…`) и уже
+     * содержит префикс `/music`, поэтому резолвится от КОРНЯ сайта, а не от
+     * [baseUrl]: от baseUrl получился бы двойной `/music/music/api/thumb` и
+     * битая обложка.
+     *
+     * Строки без `browseId` и с чужим префиксом отбрасываются — такой альбом
+     * нельзя открыть ([getAlbum] ответит [AlbumResult.InvalidBrowseId]).
+     *
+     * Ошибки — как у [search]: исключение, а не пустой список, чтобы экран
+     * отличал «альбомов нет» от «сервис отказал» и мог предложить «Повторить».
+     */
+    suspend fun searchAlbums(query: String): List<MusicAlbumSummary> {
+        require(query.isNotBlank()) { "query must not be blank" }
+        return fetchAlbumSummaries("api/search", listOf("q" to query, "type" to ALBUM_SEARCH_TYPE))
+    }
+
+    /**
+     * Разбор выдачи альбомов: тот же конверт `{success, results}`, что у [fetchTracks],
+     * но элемент — карточка альбома, а не трек. Отдельный хелпер, чтобы не менять
+     * существующую сигнатуру [fetchTracks] (её читают другие экраны).
+     */
+    private suspend fun fetchAlbumSummaries(
+        path: String,
+        query: List<Pair<String, String>> = emptyList(),
+    ): List<MusicAlbumSummary> {
+        val request = Request.Builder()
+            .url(
+                baseUrl.toHttpUrl().newBuilder().addPathSegments(path).apply {
+                    query.forEach { (key, value) -> addQueryParameter(key, value) }
+                }.build(),
+            )
+            .get().build()
+        return suspendCancellableCoroutine { continuation ->
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    response.use {
+                        try {
+                            if (!it.isSuccessful) error("HTTP ${it.code}")
+                            val parsed = albumListAdapter.fromJson(it.body?.string().orEmpty())
+                                ?: error("Empty album search response")
+                            if (parsed.success == false) error(parsed.error ?: "Music request failed")
+                            continuation.resume(
+                                parsed.results.mapNotNull { dto -> dto.toModel() }
+                                    .map { album -> album.copy(thumbnail = resolveAlbumThumbnail(album.thumbnail)) },
+                            )
+                        } catch (e: Throwable) {
+                            if (continuation.isActive) continuation.resumeWithException(e)
+                        }
+                    }
+                }
+            })
+        }
     }
 
     private suspend fun fetchTracks(path: String, query: Pair<String, String>? = null): List<MusicTrack> {
@@ -1050,7 +1161,58 @@ class MusicRepository(
         }
     }
 
-    /** Тело серверной ошибки: `{"error": "…"}` (его же отдаёт отказ по browseId). */
+    /**
+     * Ответ GET /api/search?type=albums: тот же конверт `{success, results}`, что у
+     * поиска треков, но элемент — карточка альбома. `success:false` (с `error`) —
+     * исключение, а не пустой список.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class AlbumSummaryListEnvelope(
+        val success: Boolean? = null,
+        val results: List<AlbumSummaryDto> = emptyList(),
+        val error: String? = null,
+    )
+
+    /**
+     * Карточка альбома из выдачи поиска:
+     * `{type:"album", browseId:"MPREb_…", title, artist, year:"2024", thumbnail:"/music/api/thumb?…"}`.
+     *
+     * Все поля, кроме `browseId`, необязательны: сервер собирает выдачу из разных
+     * источников. Строка без `browseId` с префиксом `MPRE` неиграбельна и
+     * отбрасывается ([toModel] → null), пустые подписи получают те же фолбэки, что
+     * и в остальных моделях музыки. `type` проверяется только когда он есть:
+     * `type=albums` уже отфильтрован сервером, но карточка чужого типа в списке
+     * альбомов — это мусор, который не должен открываться как альбом.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class AlbumSummaryDto(
+        val type: String? = null,
+        val browseId: String? = null,
+        val title: String? = null,
+        val artist: String? = null,
+        val year: String? = null,
+        val thumbnail: String? = null,
+    ) {
+        fun toModel(): MusicAlbumSummary? {
+            val id = browseId?.trim().orEmpty()
+            if (!id.startsWith(ALBUM_BROWSE_ID_PREFIX)) return null
+            val kind = type?.trim()?.lowercase()
+            if (kind != null && kind.isNotEmpty() && kind != ALBUM_CARD_TYPE) return null
+            return MusicAlbumSummary(
+                browseId = id,
+                title = title?.takeIf { it.isNotBlank() } ?: "Без названия",
+                artist = artist?.takeIf { it.isNotBlank() } ?: "Неизвестный артист",
+                year = year?.trim()?.takeIf { it.isNotEmpty() },
+                // Резолвится в MusicRepository.fetchAlbumSummaries: origin живёт в
+                // companion, а не в DTO — так правило одно на весь модуль.
+                thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
+    /**
+     * Тело серверной ошибки: `{"error": "…"}` (его же отдаёт отказ по browseId).
+     */
     @JsonClass(generateAdapter = false)
     private data class ErrorEnvelope(val error: String? = null)
 
@@ -1069,6 +1231,21 @@ class MusicRepository(
 
         /** browseId альбома обязан начинаться с этого префикса (иначе сервер отвечает отказом). */
         const val ALBUM_BROWSE_ID_PREFIX = "MPRE"
+
+        /** Значение `type` у карточки альбома в выдаче `/api/search`. */
+        private const val ALBUM_CARD_TYPE = "album"
+
+        /** Значение query-параметра, переключающего поиск на альбомы. */
+        private const val ALBUM_SEARCH_TYPE = "albums"
+
+        /**
+         * Корень сайта музыки: от него резолвятся относительные thumbnail
+         * (`/music/api/thumb?…`), которые уже содержат префикс `/music`.
+         */
+        private const val SITE_ORIGIN = "https://marscore.ru"
+
+        /** Любая схема URL (`data:`, `file:`, `javascript:`…) — такие обложки отбрасываются. */
+        private val ANY_SCHEME = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
         /** Маркер серверного отказа «неверный browseId» в теле ответа. */
         private const val INVALID_BROWSE_ID_MARKER = "must start with MPRE"
