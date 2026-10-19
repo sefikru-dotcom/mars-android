@@ -191,6 +191,18 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
                     row.addView(back)
                 }
                 addView(row)
+                // D-pad в поле свободного ответа: тот же перенос музыки
+                // ([TvDpadTextInput]) — EditText сам съедает стрелки, поэтому без
+                // перехвата из поля нельзя было уйти вниз на «Ответить»/«Назад», и
+                // ответ на уточнение пультом был недостижим. Клавиатура — по нажатию,
+                // при открытом IME стрелки остаются её.
+                TvDpadTextInput.openImeOnClick(editor)
+                TvDpadTextInput.escapeArrows(
+                    editor,
+                    imeVisible = { TvDpadTextInput.isImeVisible(editor) },
+                    down = { TvDpadTextInput.focus(submit) },
+                    right = { TvDpadTextInput.focus(submit) },
+                )
                 // Free text is the only answer path for an open question — the editor takes focus.
                 post { editor.requestFocus() }
             }

@@ -61,8 +61,16 @@ object TvPushNotifications {
         if (!canPost(context)) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         val intent = Intent(context, TvChatActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             spec.url?.let { data = Uri.parse(it) }
+            // Диалог и вид события — из data-payload: тап по «требуется подтверждение»
+            // обязан открыть ИМЕННО тот чат, где ход ждёт решения (TvPushRouting).
+            // Старые extras сначала снимаются: FLAG_UPDATE_CURRENT переиспользует
+            // PendingIntent по notificationId, и «залипший» session_id увёл бы не туда.
+            removeExtra(TvPushRouting.EXTRA_SESSION_ID)
+            removeExtra(TvPushRouting.EXTRA_KIND)
+            spec.sessionId?.let { putExtra(TvPushRouting.EXTRA_SESSION_ID, it) }
+            spec.kind?.let { putExtra(TvPushRouting.EXTRA_KIND, it) }
         }
         val pending = PendingIntent.getActivity(
             context,

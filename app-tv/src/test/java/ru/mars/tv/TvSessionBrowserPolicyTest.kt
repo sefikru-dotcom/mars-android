@@ -7,9 +7,12 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.mars.network.model.ActiveTurnInfo
+import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.SessionMessage
+import ru.mars.network.model.WorkerStatusInfo
 import ru.mars.tv.TvSessionBrowserPolicy.ListOutcome
 import ru.mars.tv.TvSessionBrowserPolicy.LoadOutcome
 import ru.mars.tv.TvSessionBrowserPolicy.NO_SELECTION
@@ -35,12 +38,16 @@ class TvSessionBrowserPolicyTest {
         sourceTag: String? = null,
         sourceLabel: String? = null,
         readOnly: Boolean = false,
+        activeTurn: ActiveTurnInfo = ActiveTurnInfo(),
+        workerStatus: WorkerStatusInfo? = null,
     ) = SessionItem(
         id = id, title = title, preview = preview, messageCount = messageCount,
         sourceTag = sourceTag, sourceLabel = sourceLabel, readOnly = readOnly,
+        activeTurn = activeTurn, workerStatus = workerStatus,
     )
 
-    private fun message(role: String, content: String) = SessionMessage(role = role, content = content)
+    private fun message(role: String, content: String, toolName: String? = null) =
+        SessionMessage(role = role, content = content, toolName = toolName)
 
     // --- visible sessions (subagent suppression, mobile drawerSessions parity) -------------------
 
@@ -218,18 +225,77 @@ class TvSessionBrowserPolicyTest {
         SessionDetail(id = "s1", title = "T", messages = messages.toList())
 
     @Test
-    fun `user role reads Вы and everything else reads Марс`() {
+    fun `user role reads Вы and assistant reads Марс`() {
         val rows = TvSessionBrowserPolicy.transcript(
-            detail(message("user", "привет"), message("assistant", "здравствуй"), message("tool", "output"))
+            detail(message("user", "привет"), message("assistant", "здравствуй"))
         )
         assertEquals(
             listOf(
                 TvSessionBrowserPolicy.TranscriptRow("Вы", "привет", isUser = true),
                 TvSessionBrowserPolicy.TranscriptRow("Марс", "здравствуй", isUser = false),
-                TvSessionBrowserPolicy.TranscriptRow("Марс", "output", isUser = false),
             ),
             rows,
         )
+    }
+
+    @Test
+    fun `tool rows are folded into one tool card instead of Марс bubbles`() {
+        val rows = TvSessionBrowserPolicy.transcript(
+            detail(
+                message("assistant", "сейчас посмотрю"),
+                message("tool", "raw output 1", toolName = "read_file"),
+                message("tool", "raw output 2", toolName = "read_file"),
+                message("tool", "raw output 3", toolName = "grep"),
+                message("assistant", "готово"),
+            )
+        )
+        assertEquals(
+            listOf("сейчас посмотрю", "3 инструмента · Готово", "готово"),
+            rows.map { it.text },
+        )
+        val group = rows[1]
+        assertEquals(TvSessionBrowserPolicy.TranscriptKind.TOOL_GROUP, group.kind)
+        assertEquals(ru.mars.tv.chat.TvToolGroupPolicy.TOOL_AUTHOR, group.author)
+        assertEquals(listOf("read_file", "read_file", "grep"), group.toolNames)
+        // Сырой вывод инструмента на ТВ не показывается вовсе.
+        assertTrue(rows.none { it.text.contains("raw output") })
+    }
+
+    @Test
+    fun `separate tool runs stay separate groups and keep their place in the order`() {
+        val rows = TvSessionBrowserPolicy.transcript(
+            detail(
+                message("tool", "o1", toolName = "a"),
+                message("assistant", "между"),
+                message("tool", "o2", toolName = "b"),
+            )
+        )
+        assertEquals(
+            listOf(
+                TvSessionBrowserPolicy.TranscriptKind.TOOL_GROUP,
+                TvSessionBrowserPolicy.TranscriptKind.MESSAGE,
+                TvSessionBrowserPolicy.TranscriptKind.TOOL_GROUP,
+            ),
+            rows.map { it.kind },
+        )
+        assertEquals(listOf("1 инструмент · Готово", "между", "1 инструмент · Готово"), rows.map { it.text })
+    }
+
+    @Test
+    fun `a trailing tool run is not lost`() {
+        val rows = TvSessionBrowserPolicy.transcript(
+            detail(message("assistant", "думаю"), message("tool", "o", toolName = "bash"))
+        )
+        assertEquals(2, rows.size)
+        assertEquals(TvSessionBrowserPolicy.TranscriptKind.TOOL_GROUP, rows.last().kind)
+        assertEquals(listOf("bash"), rows.last().toolNames)
+    }
+
+    @Test
+    fun `a tool row without a name still produces a readable group`() {
+        val rows = TvSessionBrowserPolicy.transcript(detail(message("tool", "o")))
+        assertEquals("1 инструмент · Готово", rows.single().text)
+        assertEquals(listOf(ru.mars.tv.chat.TvToolGroupPolicy.UNKNOWN_TOOL), rows.single().toolNames)
     }
 
     @Test
@@ -407,6 +473,104 @@ class TvSessionBrowserPolicyTest {
         assertTrue(marker.isNotBlank())
         marker.codePoints().forEach { cp ->
             assertTrue("marker must stay in the Cyrillic/ASCII letter range", cp < 0x0500)
+        }
+    }
+
+    // --- badge состояния хода (mobile ChatSessionsActivity parity) -------------------------------
+
+    @Test
+    fun `a quiet session has no badge`() {
+        assertNull(TvSessionBrowserPolicy.rowOf(session("a")).badge)
+    }
+
+    @Test
+    fun `an approval-waiting session carries an attention badge`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session("a", activeTurn = ActiveTurnInfo(attention = SessionAttention(kind = "approval", count = 1)))
+        )
+        val badge = row.badge!!
+        assertEquals(TvSessionBrowserPolicy.BadgeTone.ATTENTION, badge.tone)
+        assertTrue(badge.text.contains("подтверждения"))
+    }
+
+    @Test
+    fun `several pending decisions are counted in the badge`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session("a", activeTurn = ActiveTurnInfo(attention = SessionAttention(kind = "approval", count = 3)))
+        )
+        assertTrue(row.badge!!.text.contains("3"))
+    }
+
+    @Test
+    fun `a critical attention is worded as critical`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session("a", activeTurn = ActiveTurnInfo(attention = SessionAttention(kind = "clarify", severity = "critical")))
+        )
+        assertTrue(row.badge!!.text.contains("Критично"))
+    }
+
+    @Test
+    fun `a streaming session reads as an active turn`() {
+        val row = TvSessionBrowserPolicy.rowOf(session("a", activeTurn = ActiveTurnInfo(isStreaming = true)))
+        assertEquals(TvSessionBrowserPolicy.BadgeTone.LIVE, row.badge!!.tone)
+        assertEquals(TvSessionBrowserPolicy.LIVE_TURN, row.badge!!.text)
+    }
+
+    @Test
+    fun `a queued message reads as queued`() {
+        val row = TvSessionBrowserPolicy.rowOf(session("a", activeTurn = ActiveTurnInfo(hasPendingUserMessage = true)))
+        assertEquals(TvSessionBrowserPolicy.BadgeTone.QUEUED, row.badge!!.tone)
+        assertEquals(TvSessionBrowserPolicy.QUEUED_TURN, row.badge!!.text)
+    }
+
+    @Test
+    fun `attention outranks the live badge in the list too`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session(
+                "a",
+                activeTurn = ActiveTurnInfo(
+                    isStreaming = true,
+                    attention = SessionAttention(kind = "approval"),
+                ),
+            )
+        )
+        assertEquals(TvSessionBrowserPolicy.BadgeTone.ATTENTION, row.badge!!.tone)
+    }
+
+    @Test
+    fun `a subagent row shows the work goal as its caption`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session("sub", sourceTag = "subagent", workerStatus = WorkerStatusInfo(goal = "правит парсер", status = "running"))
+        )
+        assertEquals("правит парсер", row.work)
+    }
+
+    @Test
+    fun `a blank goal is not a caption`() {
+        val row = TvSessionBrowserPolicy.rowOf(
+            session("sub", sourceTag = "subagent", workerStatus = WorkerStatusInfo(goal = "   "))
+        )
+        assertNull(row.work)
+    }
+
+    @Test
+    fun `a normal session never borrows a work caption`() {
+        val row = TvSessionBrowserPolicy.rowOf(session("a", workerStatus = WorkerStatusInfo(goal = "не моё")))
+        assertNull(row.work)
+    }
+
+    @Test
+    fun `badges are plain russian text - the tv design gate forbids glyphs`() {
+        listOf(
+            TvSessionBrowserPolicy.LIVE_TURN,
+            TvSessionBrowserPolicy.QUEUED_TURN,
+            TvSessionBrowserPolicy.rowOf(
+                session("a", activeTurn = ActiveTurnInfo(attention = SessionAttention(kind = "approval")))
+            ).badge!!.text,
+        ).forEach { text ->
+            text.codePoints().forEach { cp ->
+                assertTrue("badge must stay in the Cyrillic/ASCII range: $text", cp < 0x0500)
+            }
         }
     }
 }
