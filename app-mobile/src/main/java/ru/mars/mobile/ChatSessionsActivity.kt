@@ -411,16 +411,19 @@ class ChatSessionsActivity : ComponentActivity() {
                 })
             }
 
-            // Subagent marker for revealed delegated children (read-only on the
-            // server; hidden under the collapsed parent by default).
+            // Строка субагента: ТЕМА его работы из `worker_status.goal` (паритет с
+            // WebUI), статус и длительность — вместо безликой роли «субагент ·
+            // только чтение». Состав подписи и тон считает чистая
+            // SubagentWorkLabelPolicy; хост только красит по палитре.
             if (session.isSubagent) {
+                val work = SubagentWorkLabelPolicy.label(
+                    status = session.workerStatus,
+                    nowEpochSeconds = System.currentTimeMillis() / 1000.0,
+                )
                 card.addView(TextView(this).apply {
-                    text = buildString {
-                        append(session.sourceLabel?.takeIf { it.isNotBlank() } ?: "субагент")
-                        if (session.readOnly) append(" · только чтение")
-                    }
+                    text = work.text
                     textSize = 11f
-                    setTextColor(MarsTheme.TEXT_MUTED)
+                    setTextColor(subagentWorkColor(work.tone))
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
                     setPadding(dp(4), 0, dp(40), 0)
@@ -984,6 +987,17 @@ class ChatSessionsActivity : ComponentActivity() {
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) }
         )
         return panel
+    }
+
+    /**
+     * Цвет строки субагента по тону политики: палитра только из MarsTheme,
+     * хардкод-цветов здесь нет (дизайн-гейт).
+     */
+    private fun subagentWorkColor(tone: SubagentWorkTone): Int = when (tone) {
+        SubagentWorkTone.RUNNING -> MarsTheme.ACCENT
+        SubagentWorkTone.DONE -> MarsTheme.STATUS_ONLINE
+        SubagentWorkTone.ERROR -> MarsTheme.STATUS_ERROR
+        SubagentWorkTone.STOPPED, SubagentWorkTone.UNKNOWN -> MarsTheme.TEXT_MUTED
     }
 
     private fun dp(value: Int) = MarsTheme.dp(this, value)

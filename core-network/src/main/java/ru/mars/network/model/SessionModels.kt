@@ -95,6 +95,30 @@ data class TodoSnapshot(
 )
 
 /**
+ * Состояние исполнителя-субагента из `GET /api/sessions` (`worker_status`,
+ * hermes-webui api/worker_status.py `attach_worker_status`).
+ *
+ * [goal] — ТЕМА РАБОТЫ ребёнка: единственный её носитель, потому что `title`
+ * у субагентов в базе NULL. Все поля nullable: null значит «сервер не сообщил»,
+ * транспорт догадок не подставляет. Презентация (подпись, тон, длительность) —
+ * работа UI-слоя (`SubagentWorkLabelPolicy`), модель её не считает.
+ */
+data class WorkerStatusInfo(
+    /** Текст задачи субагента (`goal`); null/пусто — темы нет. */
+    val goal: String? = null,
+    /** Дословный серверный статус: `running`/`completed`/`failed`/`stopped`/`interrupted`/`unknown`. */
+    val status: String? = null,
+    /** Длительность работы в секундах (`duration_seconds`); null — не сообщена. */
+    val durationSeconds: Double? = null,
+    /** Момент старта, epoch-СЕКУНДЫ (`started_at`); null — не сообщён. */
+    val startedAtEpochSeconds: Double? = null,
+    /** Последний шаг ребёнка (`last_action`); null — не сообщён. */
+    val lastAction: String? = null,
+    /** Причина провала (`failure_reason`); null — не сообщена. */
+    val failureReason: String? = null,
+)
+
+/**
  * A session shown in the WebUI session list (`GET /api/sessions` rows,
  * `Session.compact()` wire contract).
  *
@@ -143,6 +167,13 @@ data class SessionItem(
      * list after the server confirms the mutation.
      */
     val archived: Boolean = false,
+    /**
+     * Состояние исполнителя-субагента (`worker_status`) — тема его работы, статус
+     * и длительность. null = сервер блок не прислал (обычные сессии его не имеют,
+     * старые серверы не отдают вовсе); подпись строки строит
+     * `SubagentWorkLabelPolicy`, догадок здесь нет.
+     */
+    val workerStatus: WorkerStatusInfo? = null,
 ) {
     /**
      * True for delegated subagent children (WebUI parity #5244/#5305): the

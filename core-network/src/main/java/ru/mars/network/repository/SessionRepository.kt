@@ -23,6 +23,7 @@ import ru.mars.network.model.SessionMessage
 import ru.mars.network.model.SessionTitleRegenerateResult
 import ru.mars.network.model.SessionTurnOpResult
 import ru.mars.network.model.SessionUsage
+import ru.mars.network.model.WorkerStatusInfo
 import ru.mars.network.model.WorkspacePrefix
 
 /**
@@ -842,6 +843,26 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             modelProvider = string(o, "model_provider", "provider"),
             pinned = o["pinned"] as? Boolean ?: false,
             archived = o["archived"] as? Boolean ?: false,
+            workerStatus = workerStatus(o["worker_status"]),
+        )
+    }
+
+    /**
+     * `worker_status` строки списка (hermes-webui api/worker_status.py
+     * `attach_worker_status`): объект есть — разбираем поля поимённо, нет объекта
+     * или он не Map — null. Lenient by contract: обычные сессии блока не имеют,
+     * старые серверы не отдают его вовсе, а частичный объект (например только
+     * `status`) не должен ронять разбор строки.
+     */
+    private fun workerStatus(raw: Any?): WorkerStatusInfo? {
+        val o = raw as? Map<*, *> ?: return null
+        return WorkerStatusInfo(
+            goal = string(o, "goal"),
+            status = string(o, "status"),
+            durationSeconds = number(o["duration_seconds"]),
+            startedAtEpochSeconds = number(o["started_at"]),
+            lastAction = string(o, "last_action"),
+            failureReason = string(o, "failure_reason"),
         )
     }
 

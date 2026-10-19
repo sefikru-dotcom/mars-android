@@ -141,4 +141,69 @@ class SessionRepositoryTest {
             assertTrue(!sessions.single().readOnly)
         }
     }
+
+    /**
+     * `worker_status` строки списка (hermes-webui api/worker_status.py
+     * `attach_worker_status`): тема работы субагента живёт ТОЛЬКО здесь (`title`
+     * у делегированных детей в базе NULL). Полный объект разбирается поимённо.
+     */
+    @Test fun parsesWorkerStatusGoalOfSubagentRow() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"sessions":[
+                   {"session_id":"sub1","title":null,"source_tag":"subagent","read_only":true,"parent_session_id":"p1",
+                    "worker_status":{"goal":"Починить парсер сессий","status":"running","duration_seconds":134.5,
+                     "started_at":1800000000.0,"last_action":"gradle test","failure_reason":null}}
+                ]}"""
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sub = repo.getSessions(server.url("/").toString(), c).single()
+            val ws = sub.workerStatus!!
+            assertEquals("Починить парсер сессий", ws.goal)
+            assertEquals("running", ws.status)
+            assertEquals(134.5, ws.durationSeconds!!, 0.001)
+            assertEquals(1800000000.0, ws.startedAtEpochSeconds!!, 0.001)
+            assertEquals("gradle test", ws.lastAction)
+            assertNull(ws.failureReason)
+        }
+    }
+
+    /** Без блока `worker_status` (обычные сессии, старые серверы) поле — null, строка не теряется. */
+    @Test fun absentWorkerStatusStaysNull() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"sessions":[
+                   {"session_id":"s1","title":"Chat"},
+                   {"session_id":"s2","title":"Chat 2","worker_status":"nonsense"}
+                ]}"""
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val sessions = repo.getSessions(server.url("/").toString(), c)
+            assertEquals(listOf("s1", "s2"), sessions.map { it.id })
+            assertNull(sessions[0].workerStatus)
+            // Не объект — тоже «сервер не сообщил», без исключения.
+            assertNull(sessions[1].workerStatus)
+        }
+    }
+
+    /**
+     * Частичный объект (сервер прислал только статус) разбирается без догадок:
+     * незаполненные поля — null, остальное сохраняется.
+     */
+    @Test fun partialWorkerStatusKeepsOnlyReportedFields() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """{"sessions":[{"session_id":"sub1","source_tag":"subagent","read_only":true,
+                   "worker_status":{"status":"failed","failure_reason":"exit code 1"}}]}"""
+            ))
+            val repo = SessionRepository(); val c = ConsumedDeviceCredential("t", "Bearer", "d", emptyList(), 1)
+            val ws = repo.getSessions(server.url("/").toString(), c).single().workerStatus!!
+            assertEquals("failed", ws.status)
+            assertEquals("exit code 1", ws.failureReason)
+            assertNull(ws.goal)
+            assertNull(ws.durationSeconds)
+            assertNull(ws.startedAtEpochSeconds)
+            assertNull(ws.lastAction)
+        }
+    }
 }
