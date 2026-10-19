@@ -61,6 +61,29 @@ class MusicHomeSuggestionsRepositoryTest {
         }
     }
 
+    /**
+     * Трек на полке — не только `TrackDto`: `ShelfTrackDto` разбирает `album` тем же
+     * `AlbumRefDto`. Без этого лента «Для тебя» показывала треки без альбома, хотя
+     * чарты и поиск его уже отдавали.
+     */
+    @Test
+    fun homeShelfTrackCarriesAlbumFromTheLiveContract() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"success":true,"shelf":{"sections":[{"id":"for_you","title":"Для тебя","items":[
+                       |{"id":"F9P_fIBfenk","title":"станция конечная","artist":"не меняет","duration":"1:31",
+                       |"thumbnail":"/music/api/thumb?v=F9P_fIBfenk",
+                       |"album":{"name":"двадцать два","browseId":"MPREb_4KOifxmY0Kc"}}
+                       |]}]}}""".trimMargin().replace("\n", ""),
+                ),
+            )
+            val track = repo(server).getHome().single().items.single()
+            assertEquals("двадцать два", track.albumTitle)
+            assertEquals("MPREb_4KOifxmY0Kc", track.albumBrowseId)
+        }
+    }
+
     @Test
     fun homeParsesTopLevelSectionsWhenShelfMissing() = runBlocking {
         // Форма из документированного контракта: полки прямо в верхнеуровневом `sections`.

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Альбом на TV (диалог): заголовок, мета, D-pad-список треков, «Закрыть».
+  Минимальный вариант брифа: полноценный экран не нужен, но список обязан листаться
+  пультом, поэтому треки живут в фокусируемом ScrollView, а состояния
+  «загрузка/нет сети/не найден» печатаются в том же теле (см. TvMusicActivity.renderAlbumPanel).
+  Цвета — только из темы (MarsTheme parity), без эмодзи.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="32dp"
+    android:background="@drawable/bg_tv_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:id="@+id/albumTitleText"
+        android:text="@string/tv_album_title"
+        android:textColor="@color/mars_text_strong"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <TextView
+        android:id="@+id/albumMetaText"
+        android:textColor="@color/mars_accent_text"
+        android:textSize="16sp"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:visibility="gone"
+        android:layout_marginTop="6dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- Состояние запроса (загрузка / отказ / пусто) — то же место, что тело текста песни. -->
+    <TextView
+        android:id="@+id/albumStateText"
+        android:textColor="@color/mars_muted"
+        android:textSize="18sp"
+        android:visibility="gone"
+        android:layout_marginTop="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- D-pad-скролл треков: сам ScrollView фокусируемый, строки внутри — тоже. -->
+    <ScrollView
+        android:id="@+id/albumScroll"
+        android:scrollbars="none"
+        android:focusable="true"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="0dp">
+
+        <LinearLayout
+            android:id="@+id/albumTrackList"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </ScrollView>
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="16dp"
+        android:layout_width="match_parent"
+        android:layout_height="64dp">
+
+        <!-- «Повторить» живёт только у сетевого отказа: у «не найден» повтор бессмыслен
+             (TvAlbumPolicy.retryVisible), и мёртвая кнопка не должна ловить фокус. -->
+        <Button
+            android:id="@+id/albumRetryButton"
+            android:text="@string/tv_album_retry"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="28dp"
+            android:paddingEnd="28dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:visibility="gone"
+            android:layout_marginEnd="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent" />
+
+        <Button
+            android:id="@+id/albumCloseButton"
+            android:text="@string/tv_album_close"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="28dp"
+            android:paddingEnd="28dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent" />
+    </LinearLayout>
+</LinearLayout>

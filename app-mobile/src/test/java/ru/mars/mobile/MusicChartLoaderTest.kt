@@ -66,4 +66,54 @@ class MusicChartLoaderTest {
         )
         assertEquals(listOf(track), parsed)
     }
+
+    /**
+     * Живой ответ сервера (`GET /music/api/search?type=songs`): чарт/главная идут через
+     * этот ручной парсер, а не через репозиторий, и до правки трек терял альбом —
+     * сервер поле отдаёт, строка на экране показывает только исполнителя.
+     */
+    @Test
+    fun `home payload keeps album name and browseId`() {
+        val parsed = MusicChartLoader.parseHomePayload(
+            """{"success":true,"results":[{"type":"song","id":"F9P_fIBfenk","title":"станция конечная",
+               "artist":"не меняет","duration":"1:31","thumbnail":"/music/api/thumb?v=F9P_fIBfenk",
+               "album":{"name":"двадцать два","browseId":"MPREb_4KOifxmY0Kc"}}]}""",
+        ).single()
+        assertEquals("двадцать два", parsed.albumTitle)
+        assertEquals("MPREb_4KOifxmY0Kc", parsed.albumBrowseId)
+    }
+
+    @Test
+    fun `home payload without album keeps both album fields null`() {
+        val parsed = MusicChartLoader.parseHomePayload(
+            """{"success":true,"tracks":[{"id":"v1","title":"Song","artist":"Artist","duration":"3:24"}]}""",
+        ).single()
+        assertEquals(null, parsed.albumTitle)
+        assertEquals(null, parsed.albumBrowseId)
+    }
+
+    /** `browseId` может быть пустым (сервер не нашёл альбом) — имя всё равно показываем. */
+    @Test
+    fun `album with empty browseId keeps the name and stays unopenable`() {
+        val parsed = MusicChartLoader.parseHomePayload(
+            """{"success":true,"results":[{"id":"v1","title":"Song","artist":"Artist","duration":"3:24",
+               "album":{"name":"двадцать два","browseId":""}}]}""",
+        ).single()
+        assertEquals("двадцать два", parsed.albumTitle)
+        assertEquals(null, parsed.albumBrowseId)
+    }
+
+    /**
+     * Старая форма ytmusicapi — голая строка названия. Сервер её нормализует, но
+     * парсер обязан понимать и её: иначе сборка сервера без `resolve_album()` снова
+     * даст треки без альбома.
+     */
+    @Test
+    fun `album given as a bare string still yields the name`() {
+        val parsed = MusicChartLoader.parseHomePayload(
+            """{"success":true,"results":[{"id":"v1","title":"Song","artist":"Artist","album":"двадцать два"}]}""",
+        ).single()
+        assertEquals("двадцать два", parsed.albumTitle)
+        assertEquals(null, parsed.albumBrowseId)
+    }
 }
