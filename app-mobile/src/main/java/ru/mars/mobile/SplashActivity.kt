@@ -130,7 +130,7 @@ class SplashActivity : ComponentActivity() {
         }
         val planetSize = dp(PLANET_SIZE_DP)
         planetBox.addView(ImageView(this).apply {
-            setImageResource(R.drawable.mars_planet)
+            setImageResource(R.drawable.mars_splash_planet)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }, FrameLayout.LayoutParams(planetSize, planetSize, Gravity.CENTER))
         column.addView(planetBox, LinearLayout.LayoutParams(haloSize, haloSize))
@@ -312,10 +312,10 @@ class SplashActivity : ComponentActivity() {
 
     private companion object {
         /** Диаметр ореола: планета занимает примерно треть — «мягкое свечение». */
-        const val HALO_SIZE_DP = 280
+        const val HALO_SIZE_DP = 320
 
         /** Диаметр планеты внутри ореола. */
-        const val PLANET_SIZE_DP = 108
+        const val PLANET_SIZE_DP = 200
 
         /** Отступ слова «МАРС» от планеты. */
         const val WORD_TOP_MARGIN_DP = 18

@@ -8,7 +8,7 @@
     <item android:drawable="@color/mars_background" />
     <item>
         <bitmap
-            android:src="@drawable/mars_bg"
+            android:src="@drawable/mars_splash_bg"
             android:gravity="center"
             android:filter="true" />
     </item>
