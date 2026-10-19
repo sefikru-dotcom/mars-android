@@ -15,7 +15,7 @@ package ru.mars.tv.chat
  * - серия подряд идущих `role:"tool"` строк — одна группа (порядок сохраняется);
  * - в группе только имена инструментов и счётчик, текст вывода не показывается
  *   вовсе (это не речь Марса и не текст для дивана);
- * - одинаковые имена не повторяются: `read_file ×4`, `grep`;
+ * - одинаковые имена не повторяются: `read_file x4`, `grep`;
  * - больше [MAX_NAMES] имён — хвост сворачивается в «и ещё N»;
  * - статус в истории всегда «Готово»: персистентный транскрипт — это уже
  *   завершённые вызовы (живой ход показывает статус отдельной строкой активности).
@@ -53,7 +53,7 @@ object TvToolGroupPolicy {
     }
 
     /**
-     * Строка имён: `read_file ×4, grep, write_file и ещё 2`.
+     * Строка имён: `read_file x4, grep, write_file и ещё 2`.
      * Пустые имена схлопываются в [UNKNOWN_TOOL], чтобы группа не выглядела пустой.
      */
     fun namesLine(names: List<String>, maxShown: Int = MAX_NAMES): String {
@@ -64,7 +64,7 @@ object TvToolGroupPolicy {
             counts[name] = (counts[name] ?: 0) + 1
         }
         val shown = counts.entries.take(maxShown.coerceAtLeast(1)).map { (name, times) ->
-            if (times > 1) "$name ×$times" else name
+            if (times > 1) "$name x$times" else name
         }
         val hidden = counts.size - shown.size
         return if (hidden > 0) shown.joinToString(", ") + " и ещё $hidden" else shown.joinToString(", ")

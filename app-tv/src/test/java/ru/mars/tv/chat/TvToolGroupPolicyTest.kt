@@ -27,7 +27,7 @@ class TvToolGroupPolicyTest {
 
     @Test
     fun `repeated tools collapse into a counter`() {
-        assertEquals("read_file ×4, grep", TvToolGroupPolicy.namesLine(listOf("read_file", "read_file", "read_file", "read_file", "grep")))
+        assertEquals("read_file x4, grep", TvToolGroupPolicy.namesLine(listOf("read_file", "read_file", "read_file", "read_file", "grep")))
     }
 
     @Test
