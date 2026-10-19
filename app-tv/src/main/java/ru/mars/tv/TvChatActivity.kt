@@ -38,6 +38,9 @@ import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
 import ru.mars.network.model.StreamSideEvent
+import ru.mars.network.model.SubagentState
+import ru.mars.network.model.SubagentStatus
+import ru.mars.network.model.SubagentStatusUpdate
 import ru.mars.network.repository.ChatRepository
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.MidTurnRecoveryCoordinator
@@ -47,6 +50,7 @@ import ru.mars.network.repository.ReasoningRepository
 import ru.mars.network.repository.ReasoningStatusResult
 import ru.mars.network.repository.SessionRepository
 import ru.mars.network.repository.StreamResumeTracker
+import ru.mars.network.repository.SubagentStatusPolicy
 import ru.mars.tv.chat.TvActivityDisplayMode
 import ru.mars.tv.chat.TvActivityDisplayPolicy
 import ru.mars.tv.chat.TvActivityModePrefs
@@ -70,8 +74,12 @@ import ru.mars.tv.chat.TvQuotaTone
 import ru.mars.tv.chat.TvReasoningChoicePrefs
 import ru.mars.tv.chat.TvReasoningSelection
 import ru.mars.tv.chat.TvSteerPolicy
+import ru.mars.tv.chat.TvSubagentBoardPolicy
+import ru.mars.tv.chat.TvToolGroupPolicy
 import ru.mars.tv.chat.TvTranscriptRetentionPolicy
 import ru.mars.tv.chat.TvTurnParamsPolicy
+import ru.mars.tv.chat.TvTurnStatePolicy
+import ru.mars.tv.push.TvPushRouting
 
 /**
  * TV chat screen: transcript, composer and the live turn status strip.
@@ -122,6 +130,9 @@ class TvChatActivity : AppCompatActivity() {
      * он не сливается с мелкой статус-цепочкой хода.
      */
     private lateinit var contextStatusBadge: TextView
+
+    /** Доска живых субагентов в шапке (SubagentStatusUpdate); скрыта, когда детей нет. */
+    private lateinit var subagentBoard: TextView
 
     /**
      * Чип квоты провайдера (mobile A10 parity) — статус-строка рядом с индикатором
@@ -302,6 +313,35 @@ class TvChatActivity : AppCompatActivity() {
     private var hiddenMarkerView: TextView? = null
 
     /**
+     * Сколько строк истории рисуется от конца (окно рендера). Растёт страницами по
+     * нажатию на маркер «…ранее скрыто»: голова длинного диалога достижима пультом
+     * ([TvTranscriptRetentionPolicy.nextWindow]). Сбрасывается при открытии другого
+     * диалога и «Новом чате».
+     */
+    private var historyPageRows = TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES
+
+    /** Полный список строк открытого диалога — источник для догрузки страниц. */
+    private var fullHistoryRows: List<TvSessionBrowserPolicy.TranscriptRow> = emptyList()
+
+    /**
+     * Баннер состояния хода, который НЕЛЬЗЯ переподключить
+     * ([TvTurnStatePolicy.notice]): «требуется подтверждение», «ход идёт», «в очереди».
+     * null — терять нечего. Живёт в ленте (первым ребёнком) и сам является действием:
+     * нажатие перечитывает диалог.
+     */
+    private var turnNoticeView: TextView? = null
+    private var currentNotice: TvTurnStatePolicy.Notice? = null
+
+    /** Фоновая перепроверка состояния невидимого хода (bounded backoff, TV-политика). */
+    private var turnWatchJob: Job? = null
+
+    /** Доска субагентов: childId -> снимок (редьюсер core [SubagentStatusPolicy]). */
+    private var subagentBoardState: Map<String, SubagentStatus> = emptyMap()
+
+    /** Диалог, на который уже переключил push-интент (повторная доставка не перечитывает). */
+    private var routedPushSessionId: String? = null
+
+    /**
      * Снимок строк, РЕАЛЬНО нарисованных в ленте из истории (после среза
      * [TvTranscriptRetentionPolicy.historySlice]): база для инкрементальной
      * перезагрузки ([TvHistoryReloadPolicy]) — неизменившиеся пузыри
@@ -341,6 +381,7 @@ class TvChatActivity : AppCompatActivity() {
         statusView = findViewById(R.id.statusText)
         contextView = findViewById(R.id.contextText)
         contextStatusBadge = findViewById(R.id.contextStatusBadge)
+        subagentBoard = findViewById(R.id.subagentBoard)
         quotaChip = findViewById(R.id.quotaChip)
         // Чип квоты интерактивен только там, где повтор осмыслен (политика решает это в
         // canRefresh); клик — повторное чтение квоты, ничего не пишем.
@@ -428,6 +469,21 @@ class TvChatActivity : AppCompatActivity() {
         displayModeButton.setOnClickListener { onDisplayModeClicked() }
         send.setOnClickListener { dispatchSend() }
         input.setOnEditorActionListener { _, _, _ -> dispatchSend(); true }
+        // D-pad в композере: Android EditText сам потребляет стрелки (LEFT/RIGHT —
+        // курсор, UP/DOWN — строки), поэтому nextFocusRight на «Отправить» не срабатывал
+        // и кнопка была недостижима пультом. Паттерн — ровно как в поиске
+        // TvMusicActivity: клавиатура только по явному нажатию, стрелки уводят фокус,
+        // при открытой клавиатуре не вмешиваемся (TvDpadTextInput).
+        TvDpadTextInput.openImeOnClick(input)
+        TvDpadTextInput.escapeArrows(
+            input,
+            imeVisible = { TvDpadTextInput.isImeVisible(input) },
+            up = {
+                TvDpadTextInput.focus(quickChipsRow.getChildAt(0)) ||
+                    TvDpadTextInput.focus(displayModeButton)
+            },
+            right = { TvDpadTextInput.focus(send) },
+        )
         // While a turn is live the primary button flips between «Остановить» and «Уточнить»
         // as the composer gains/loses text — the label must follow every keystroke.
         input.addTextChangedListener(object : TextWatcher {
@@ -449,10 +505,49 @@ class TvChatActivity : AppCompatActivity() {
         // Technical recreate: restore the transcript via a LIVE GET /api/session and
         // reattach the turn when it is still streaming server-side (never cancel it).
         // Runs AFTER wireInteractive so the reattached turn's cards have their surface.
-        if (savedInstanceState != null) {
+        // Пуш важнее восстановленного биндинга: пользователь только что нажал
+        // «требуется подтверждение» и ждёт ИМЕННО тот диалог (TvPushRouting).
+        if (!routePushIntent(intent) && savedInstanceState != null) {
             sessionFlow.sessionId?.let { restored -> openSession(restored) }
         }
         input.requestFocus()
+    }
+
+    /**
+     * Тап по push-уведомлению при уже открытом экране (`launchMode="singleTop"`):
+     * интент приходит сюда, а не в [onCreate]. Маршрут тот же — [routePushIntent].
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        routePushIntent(intent)
+    }
+
+    /**
+     * Маршрутизация подтверждения из push: открывает диалог, к которому относится
+     * уведомление, и (для `kind=approval|clarify`) перечитывает его состояние, чтобы
+     * ожидающий решения ход был виден сразу — баннером [TvTurnStatePolicy] либо
+     * карточкой подтверждения из reattach.
+     *
+     * @return true, если интент был про диалог и экран уже переключён на него.
+     */
+    private fun routePushIntent(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val route = TvPushRouting.resolve(
+            extraSessionId = intent.getStringExtra(TvPushRouting.EXTRA_SESSION_ID),
+            extraKind = intent.getStringExtra(TvPushRouting.EXTRA_KIND),
+            dataUri = intent.dataString,
+        )
+        val sessionId = route.sessionId ?: return false
+        // Один и тот же интент не должен перечитывать диалог повторно (recreate,
+        // повторная доставка): маршрут считается обработанным один раз.
+        if (sessionId == routedPushSessionId) return true
+        routedPushSessionId = sessionId
+        if (::sessionsOverlay.isInitialized && sessionsOverlay.visibility == View.VISIBLE) {
+            closeSessionBrowser()
+        }
+        openSession(sessionId)
+        return true
     }
 
     /**
@@ -513,6 +608,8 @@ class TvChatActivity : AppCompatActivity() {
         // Activity (утечка окна через Runnable в main-looper).
         uiHandler.removeCallbacksAndMessages(null)
         pendingLiveRender = null
+        turnWatchJob?.cancel()
+        turnWatchJob = null
         activityLineViews.clear()
         hiddenMarkerView = null
         browserReturnFocus = null
@@ -892,6 +989,14 @@ class TvChatActivity : AppCompatActivity() {
         liveAccumulator = null
         lastLiveEvent = null
         explicitStatus = null
+        // Состояние хода и доска детей принадлежат ТЕКУЩЕМУ ходу: новый ход/другой
+        // диалог не должны показывать чужие «ждёт подтверждения» и живых детей.
+        turnWatchJob?.cancel()
+        turnWatchJob = null
+        currentNotice = null
+        subagentBoardState = emptyMap()
+        applyTurnNotice()
+        renderSubagentBoard()
     }
 
     /**
@@ -1666,11 +1771,48 @@ class TvChatActivity : AppCompatActivity() {
         boundSessionId: String?,
         boundGeneration: Int,
     ): (StreamSideEvent) -> Unit = { event ->
-        if (event is ContextStatusUpdate) {
-            runOnUiThread {
+        when (event) {
+            is ContextStatusUpdate -> runOnUiThread {
                 if (boundGeneration == streamGeneration) onContextStatus(event, boundSessionId)
             }
+            // Доска субагентов (P0-2): раньше кадры детей доезжали только трейсом
+            // «Мыслей», и с дивана было не понять, работает ли делегирование вообще.
+            is SubagentStatusUpdate -> runOnUiThread {
+                if (boundGeneration == streamGeneration) onSubagentUpdate(event, boundSessionId)
+            }
+            else -> Unit
         }
+    }
+
+    /**
+     * Один кадр жизненного цикла ребёнка -> редьюсер core [SubagentStatusPolicy] ->
+     * строка доски ([TvSubagentBoardPolicy]). Кадр чужой сессии игнорируется: доска
+     * не протекает между диалогами.
+     */
+    private fun onSubagentUpdate(update: SubagentStatusUpdate, boundSessionId: String?) {
+        if (!::subagentBoard.isInitialized) return
+        val activeSessionId = sessionFlow.sessionId
+        if (boundSessionId != null && activeSessionId != boundSessionId) return
+        subagentBoardState = SubagentStatusPolicy.apply(subagentBoardState, update.update)
+        renderSubagentBoard()
+    }
+
+    /** Строка доски (текст и тон — из чистой политики); пустая доска прячет View. */
+    private fun renderSubagentBoard() {
+        if (!::subagentBoard.isInitialized) return
+        val board = TvSubagentBoardPolicy.present(subagentBoardState)
+        if (!board.visible) {
+            subagentBoard.visibility = View.GONE
+            return
+        }
+        subagentBoard.text = board.text
+        subagentBoard.setTextColor(ContextCompat.getColor(this, when (board.tone) {
+            TvSubagentBoardPolicy.Tone.RUNNING -> R.color.mars_status_online
+            TvSubagentBoardPolicy.Tone.WARNING -> R.color.mars_status_warning
+            TvSubagentBoardPolicy.Tone.ERROR -> R.color.mars_status_error
+            TvSubagentBoardPolicy.Tone.DONE -> R.color.mars_muted
+        }))
+        subagentBoard.visibility = View.VISIBLE
     }
 
     /**
@@ -1891,6 +2033,7 @@ class TvChatActivity : AppCompatActivity() {
     private fun kindOf(child: View): TvTranscriptRetentionPolicy.Kind = when {
         child is TvInteractiveCard -> TvTranscriptRetentionPolicy.Kind.PROTECTED
         child === hiddenMarkerView -> TvTranscriptRetentionPolicy.Kind.PROTECTED
+        child === turnNoticeView -> TvTranscriptRetentionPolicy.Kind.PROTECTED
         child === liveAnswer -> TvTranscriptRetentionPolicy.Kind.PROTECTED
         child.tag == TAG_ACTIVITY_LINE -> TvTranscriptRetentionPolicy.Kind.ACTIVITY_LINE
         else -> TvTranscriptRetentionPolicy.Kind.MESSAGE
@@ -1920,6 +2063,10 @@ class TvChatActivity : AppCompatActivity() {
         hiddenActivity = 0
         hiddenMarkerView = null
         renderedRows = emptyList()
+        // Новая лента — новое окно рендера: «Показать ещё» не должно наследовать
+        // разросшуюся страницу прежнего диалога.
+        historyPageRows = TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES
+        fullHistoryRows = emptyList()
         clearContextStatus()
         resetLiveAnswerState()
     }
@@ -1941,7 +2088,8 @@ class TvChatActivity : AppCompatActivity() {
      * «…ранее скрыто» (чистое решение — [TvTranscriptRetentionPolicy.historySlice]).
      */
     private fun renderTranscriptRows(rows: List<TvSessionBrowserPolicy.TranscriptRow>) {
-        val slice = TvTranscriptRetentionPolicy.historySlice(rows.size)
+        fullHistoryRows = rows
+        val slice = TvTranscriptRetentionPolicy.historySlice(rows.size, historyPageRows)
         val target = rows.drop(slice.firstRowIndex)
         val plan = TvHistoryReloadPolicy.plan(renderedRows, target)
         if (plan is TvHistoryReloadPlan.NoChange && slice.hiddenMessages == hiddenMessages) return
@@ -1967,6 +2115,9 @@ class TvChatActivity : AppCompatActivity() {
         hiddenMessages = slice.hiddenMessages
         hiddenActivity = 0
         updateHiddenMarker()
+        // Баннер хода живёт в ленте первым ребёнком: полная пересборка снимает его
+        // вместе с пузырями, поэтому состояние восстанавливается из [currentNotice].
+        applyTurnNotice()
     }
 
     /**
@@ -2021,8 +2172,46 @@ class TvChatActivity : AppCompatActivity() {
     }
 
     /** Пузырь строки истории с меткой переиспользования ([TAG_HISTORY_ROW]). */
-    private fun buildHistoryRow(row: TvSessionBrowserPolicy.TranscriptRow): View =
-        buildBubble(row.author, row.text, row.isUser).apply { tag = TAG_HISTORY_ROW }
+    private fun buildHistoryRow(row: TvSessionBrowserPolicy.TranscriptRow): View {
+        val view = if (row.kind == TvSessionBrowserPolicy.TranscriptKind.TOOL_GROUP) {
+            buildToolGroupRow(row)
+        } else {
+            buildBubble(row.author, row.text, row.isUser)
+        }
+        view.tag = TAG_HISTORY_ROW
+        return view
+    }
+
+    /**
+     * Свёрнутая карточка серии вызовов инструментов: одна плашка вместо дюжины
+     * «Марс»-пузырей с сырым выводом. Сводка («4 инструмента · Готово») — из чистой
+     * [TvToolGroupPolicy], вторая строка — имена вызовов. Не фокусируется: это
+     * информационная строка, обход D-pad она не удлиняет.
+     */
+    private fun buildToolGroupRow(row: TvSessionBrowserPolicy.TranscriptRow): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_focus_card)
+            isFocusable = false
+            setPadding(dp(22), dp(12), dp(22), dp(12))
+            addView(TextView(this@TvChatActivity).apply {
+                text = row.text
+                textSize = 17f
+                setTextColor(ContextCompat.getColor(context, R.color.mars_status_online))
+                isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            TvToolGroupPolicy.namesLine(row.toolNames).takeIf { it.isNotEmpty() }?.let { names ->
+                addView(TextView(this@TvChatActivity).apply {
+                    text = names
+                    textSize = 15f
+                    setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(0, dp(4), 0, 0)
+                })
+            }
+        }
 
     /** Атомарная подмена содержимого ленты: фокус сохраняется, пустого кадра нет. */
     private fun swapTranscript(prepared: LinearLayout) {
@@ -2042,18 +2231,47 @@ class TvChatActivity : AppCompatActivity() {
         }
     }
 
-    /** Маркер «…ранее скрыто»: приглушённая незафокусируемая строка в начале ленты. */
+    /**
+     * Маркер «…ранее скрыто»: приглушённая строка в начале ленты. Когда сверху есть
+     * что догрузить, он становится ФОКУСИРУЕМЫМ действием — иначе голова длинного
+     * диалога (>[TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES]) была недостижима
+     * пультом вовсе.
+     */
     private fun buildHiddenMarker(text: String?): TextView = TextView(this).apply {
         this.text = text.orEmpty()
         textSize = 15f
         setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
         setPadding(dp(24), dp(10), dp(24), dp(4))
         isFocusable = false
+        tag = TAG_HIDDEN_MARKER
+    }
+
+    /**
+     * Нажатие на маркер: окно рендера растёт на страницу
+     * ([TvTranscriptRetentionPolicy.nextWindow]) и история перерисовывается. Фокус
+     * остаётся на маркере, пока сверху ещё есть скрытое, иначе уходит на первую
+     * показанную строку — пульт не «проваливается» в никуда.
+     */
+    private fun loadMoreHistory() {
+        if (fullHistoryRows.isEmpty()) return
+        val next = TvTranscriptRetentionPolicy.nextWindow(historyPageRows, fullHistoryRows.size)
+        if (next <= historyPageRows) return
+        historyPageRows = next
+        renderTranscriptRows(fullHistoryRows)
+        val marker = hiddenMarkerView
+        if (marker != null && TvTranscriptRetentionPolicy.canLoadMore(hiddenMessages)) {
+            marker.requestFocus()
+        } else {
+            val firstRow = (0 until messages.childCount)
+                .map { messages.getChildAt(it) }
+                .firstOrNull { it.tag == TAG_HISTORY_ROW && it.isFocusable }
+            firstRow?.requestFocus() ?: input.requestFocus()
+        }
     }
 
     /** Перерисовка/снятие маркера по счётчикам скрытого. */
     private fun updateHiddenMarker() {
-        val text = TvTranscriptRetentionPolicy.hiddenMarkerText(hiddenMessages, hiddenActivity)
+        val text = TvTranscriptRetentionPolicy.pagerText(hiddenMessages, hiddenActivity)
         if (text == null) {
             hiddenMarkerView?.let { marker ->
                 detachTranscriptView(marker)
@@ -2062,14 +2280,25 @@ class TvChatActivity : AppCompatActivity() {
             hiddenMarkerView = null
             return
         }
+        val loadMore = TvTranscriptRetentionPolicy.canLoadMore(hiddenMessages)
         val existing = hiddenMarkerView
         if (existing != null && messages.indexOfChild(existing) >= 0) {
             existing.text = text
+            existing.isFocusable = loadMore
+            existing.setOnClickListener(if (loadMore) View.OnClickListener { loadMoreHistory() } else null)
+            if (loadMore) TvFocusLift.attach(existing, reducedMotion)
             return
         }
         val marker = buildHiddenMarker(text)
+        marker.isFocusable = loadMore
+        if (loadMore) {
+            marker.setOnClickListener { loadMoreHistory() }
+            TvFocusLift.attach(marker, reducedMotion)
+        }
         hiddenMarkerView = marker
-        messages.addView(marker, 0, LinearLayout.LayoutParams(-1, -2))
+        // Баннер хода (если он есть) остаётся самым верхним: маркер идёт за ним.
+        val index = if (turnNoticeView?.parent === messages) 1 else 0
+        messages.addView(marker, index, LinearLayout.LayoutParams(-1, -2))
         // Маркер добавлен — общий cap проверяется заново (рекурсия ограничена: повторный
         // проход маркер уже находит и только обновляет текст).
         enforceTranscriptCap()
@@ -2327,6 +2556,32 @@ class TvChatActivity : AppCompatActivity() {
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
         })
+        row.badge?.let { badge ->
+            card.addView(TextView(this).apply {
+                text = badge.text
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(context, when (badge.tone) {
+                    TvSessionBrowserPolicy.BadgeTone.ATTENTION -> R.color.mars_status_warning
+                    TvSessionBrowserPolicy.BadgeTone.LIVE -> R.color.mars_status_online
+                    TvSessionBrowserPolicy.BadgeTone.QUEUED -> R.color.mars_status_info
+                }))
+                isSingleLine = true
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+        // Подпись доски: тема работы субагента (worker_status.goal) — по ней с дивана
+        // видно, ЧЕМ занят ребёнок, а не только что он существует.
+        row.work?.let { work ->
+            card.addView(TextView(this).apply {
+                text = work
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(context, R.color.mars_text))
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(2), 0, 0)
+            })
+        }
         row.subtitle?.let { subtitle ->
             card.addView(TextView(this).apply {
                 text = subtitle
@@ -2404,6 +2659,7 @@ class TvChatActivity : AppCompatActivity() {
                     resetLiveAnswerState()
                     // Внеэкранная сборка + подмена одним проходом (renderTranscriptRows):
                     // длинная история не блокирует главный поток и не даёт пустого кадра.
+                    historyPageRows = TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES
                     renderTranscriptRows(TvSessionBrowserPolicy.transcript(outcome.detail))
                     input.text.clear()
                     // A live server turn is reattached (never cancelled): the recreated
@@ -2411,12 +2667,97 @@ class TvChatActivity : AppCompatActivity() {
                     if (outcome.detail.activeTurn.canReattach) {
                         reattachActiveTurn(outcome.detail.id, outcome.detail.activeTurn, streamGeneration)
                     }
+                    // Ход, к которому переподключиться нечем, но который ЖДЁТ решения,
+                    // больше не теряется молча: баннер + фоновая перепроверка.
+                    renderTurnNotice(outcome.detail.id, outcome.detail.activeTurn)
                     renderSendControl()
                     renderStatus()
                     input.requestFocus()
                     pinAndScrollToBottom()
                 }
             }
+        }
+    }
+
+    // --- состояние невидимого хода (TvTurnStatePolicy) -------------------------------------
+
+    /**
+     * Показывает баннер непереподключаемого хода ([TvTurnStatePolicy.notice]) и, если
+     * ход чего-то ждёт, ставит ограниченную фоновую перепроверку: пользователь может
+     * ответить на подтверждение с телефона, и ТВ обязан это увидеть сам, без пульта.
+     *
+     * `null` от политики — терять нечего: баннер снимается, перепроверка гасится.
+     */
+    private fun renderTurnNotice(sessionId: String, activeTurn: ActiveTurnInfo) {
+        turnWatchJob?.cancel()
+        turnWatchJob = null
+        currentNotice = TvTurnStatePolicy.notice(activeTurn)
+        applyTurnNotice()
+        if (currentNotice != null) scheduleTurnWatch(sessionId, attempt = 1)
+    }
+
+    /**
+     * Ограниченный backoff перепроверки (`GET /api/session`): задержки — из
+     * [TvTurnStatePolicy.watchDelayMs] (переиспользован [TvStreamRecoveryPolicy]),
+     * после [TvTurnStatePolicy.MAX_WATCH_ATTEMPTS] экран ждёт ручного нажатия на баннер.
+     */
+    private fun scheduleTurnWatch(sessionId: String, attempt: Int) {
+        val delayMs = TvTurnStatePolicy.watchDelayMs(attempt) ?: return
+        turnWatchJob = lifecycleScope.launch {
+            delay(delayMs)
+            val credential = store.read() ?: return@launch
+            val detail = runCatching {
+                SessionRepository().getSessionDetail(BASE_URL, credential, sessionId)
+            }.getOrNull() ?: return@launch
+            // Пока ждали, экран мог уйти в другой диалог — чужое состояние не красим.
+            if (sessionFlow.sessionId != sessionId) return@launch
+            currentNotice = TvTurnStatePolicy.notice(detail.activeTurn)
+            applyTurnNotice()
+            if (currentNotice != null) scheduleTurnWatch(sessionId, attempt + 1)
+        }
+    }
+
+    /**
+     * Баннер — первый ребёнок ленты (выше истории и маркера): с дивана он читается
+     * до текста. Фокусируемый и кликабельный: нажатие перечитывает диалог, поэтому
+     * «требуется подтверждение» достижимо пультом даже без reattach.
+     */
+    private fun applyTurnNotice() {
+        if (!::messages.isInitialized) return
+        val notice = currentNotice
+        if (notice == null) {
+            turnNoticeView?.let { view ->
+                detachTranscriptView(view)
+                messages.removeView(view)
+            }
+            turnNoticeView = null
+            return
+        }
+        val color = ContextCompat.getColor(this, when (notice.tone) {
+            TvTurnStatePolicy.Tone.ATTENTION -> R.color.mars_status_warning
+            TvTurnStatePolicy.Tone.LIVE -> R.color.mars_status_online
+            TvTurnStatePolicy.Tone.QUEUED -> R.color.mars_status_info
+        })
+        val view = turnNoticeView ?: TextView(this).apply {
+            textSize = 20f
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            setBackgroundResource(R.drawable.bg_focus_card)
+            isFocusable = true
+            isClickable = true
+            tag = TAG_TURN_NOTICE
+            TvFocusLift.attach(this, reducedMotion)
+            turnNoticeView = this
+        }
+        view.text = notice.text
+        view.setTextColor(color)
+        view.setOnClickListener {
+            sessionFlow.sessionId?.let { current -> openSession(current) }
+        }
+        if (view.parent == null) {
+            messages.addView(view, 0, LinearLayout.LayoutParams(-1, -2))
+        } else if (messages.indexOfChild(view) != 0) {
+            messages.removeView(view)
+            messages.addView(view, 0, LinearLayout.LayoutParams(-1, -2))
         }
     }
 
@@ -2436,6 +2777,12 @@ class TvChatActivity : AppCompatActivity() {
          * ([TvHistoryReloadPolicy]) понимает, что View можно переиспользовать как есть.
          */
         private const val TAG_HISTORY_ROW = "tv-transcript-history-row"
+
+        /** Тег баннера непереподключаемого хода: защищён от подрезки ленты. */
+        private const val TAG_TURN_NOTICE = "tv-transcript-turn-notice"
+
+        /** Тег маркера «…ранее скрыто» (фокусируемое действие догрузки страницы). */
+        private const val TAG_HIDDEN_MARKER = "tv-transcript-hidden-marker"
 
         /** Recovery give-up label of a dead credential ([MidTurnRecoveryCoordinator.giveUpReason]). */
         private const val GIVE_UP_AUTH_PREFIX = "auth rejected"

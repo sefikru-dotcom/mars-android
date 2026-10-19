@@ -26,6 +26,12 @@ object TvTranscriptRetentionPolicy {
     /** Сколько последних сообщений истории рисуется при открытии/перезагрузке диалога. */
     const val MAX_RENDERED_MESSAGES = 200
 
+    /** Сколько сообщений добавляет одно нажатие «Показать ещё» (страница). */
+    const val PAGE_SIZE = MAX_RENDERED_MESSAGES
+
+    /** Хвост строки маркера, когда скрытое можно догрузить пультом. */
+    const val LOAD_MORE_SUFFIX = " — нажмите, чтобы показать"
+
     /** Потолок строк активности («Всё») в ленте; самые старые снимаются. */
     const val ACTIVITY_LINE_CAP = 200
 
@@ -90,6 +96,27 @@ object TvTranscriptRetentionPolicy {
         if (parts.isEmpty()) return null
         return HIDDEN_PREFIX + parts.joinToString(" и ")
     }
+
+    /**
+     * Текст маркера для ПУЛЬТА: к [hiddenMarkerText] добавляется подсказка действия,
+     * когда скрытые сообщения истории можно догрузить ([canLoadMore]). Голова
+     * длинного диалога раньше была недостижима: маркер был `isFocusable = false`,
+     * и с пульта в него нельзя было попасть вовсе.
+     */
+    fun pagerText(hiddenMessages: Int, hiddenActivity: Int): String? {
+        val base = hiddenMarkerText(hiddenMessages, hiddenActivity) ?: return null
+        return if (canLoadMore(hiddenMessages)) base + LOAD_MORE_SUFFIX else base
+    }
+
+    /** Есть ли что догружать сверху (маркер становится фокусируемым действием). */
+    fun canLoadMore(hiddenMessages: Int): Boolean = hiddenMessages > 0
+
+    /**
+     * Сколько строк рисовать после нажатия «Показать ещё»: текущее окно плюс одна
+     * страница, но не больше всей истории. Возвращает окно рендера (не индекс).
+     */
+    fun nextWindow(renderedRows: Int, totalRows: Int, page: Int = PAGE_SIZE): Int =
+        (renderedRows.coerceAtLeast(0) + page.coerceAtLeast(1)).coerceAtMost(totalRows.coerceAtLeast(0))
 
     /** Русская плюрализация счётчика (1 сообщение / 2 сообщения / 5 сообщений). */
     private fun plural(count: Int, one: String, few: String, many: String): String {

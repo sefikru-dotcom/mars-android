@@ -1,7 +1,9 @@
 package ru.mars.tv
 
+import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
+import ru.mars.tv.chat.TvToolGroupPolicy
 
 /**
  * Pure session-browser policy of the TV chat screen (no Android, no I/O — JVM-testable).
@@ -60,6 +62,12 @@ object TvSessionBrowserPolicy {
      */
     const val CURRENT_MARKER = "текущий диалог"
 
+    /** Бейдж строки: ход идёт прямо сейчас (mobile «Активный ход»). */
+    const val LIVE_TURN = "Активный ход"
+
+    /** Бейдж строки: сообщение в очереди, ход ещё не стартовал. */
+    const val QUEUED_TURN = "Сообщение в очереди"
+
     /** One focusable row of the dialog: everything the TV renders, nothing it computes. */
     data class SessionRow(
         val id: String,
@@ -68,10 +76,46 @@ object TvSessionBrowserPolicy {
         val subtitle: String?,
         /** «N сообщений · субагент · только чтение» — `null` when nothing applies. */
         val meta: String?,
+        /**
+         * Бейдж состояния хода/внимания (`attention` / `is_streaming` /
+         * `has_pending_user_message` строки `GET /api/sessions`). `null` — ход
+         * спокойный. Мобильный паритет: `ChatSessionsActivity` рисует ту же тройку.
+         */
+        val badge: RowBadge? = null,
+        /**
+         * Тема работы субагента (`worker_status.goal`) — подпись строки. `null` —
+         * сервер блок не прислал либо строка не субагент.
+         */
+        val work: String? = null,
     )
 
+    /** Бейдж строки: [text] готов к выводу, [tone] — тон из палитры. */
+    data class RowBadge(val text: String, val tone: BadgeTone)
+
+    /** Тон бейджа: цвет выбирает хост, в тексте глифов нет (design-гейт). */
+    enum class BadgeTone {
+        /** Ход ждёт решения пользователя — самый важный сигнал. */
+        ATTENTION,
+
+        /** Ход идёт прямо сейчас. */
+        LIVE,
+
+        /** Сообщение в очереди, ход ещё не стартовал. */
+        QUEUED,
+    }
+
+    /** Вид строки транскрипта: обычный пузырь или свёрнутая карточка инструментов. */
+    enum class TranscriptKind { MESSAGE, TOOL_GROUP }
+
     /** One rendered bubble of a loaded transcript. */
-    data class TranscriptRow(val author: String, val text: String, val isUser: Boolean)
+    data class TranscriptRow(
+        val author: String,
+        val text: String,
+        val isUser: Boolean,
+        /** Для [TranscriptKind.TOOL_GROUP] — имена вызовов серии (для строки имён). */
+        val toolNames: List<String> = emptyList(),
+        val kind: TranscriptKind = TranscriptKind.MESSAGE,
+    )
 
     /** What opening a session produced: the loaded detail or an honest failure line. */
     sealed interface LoadOutcome {
@@ -93,9 +137,10 @@ object TvSessionBrowserPolicy {
         visibleSessions(sessions, currentSessionId).map(::rowOf)
 
     /**
-     * Display model of one session: title fallback, preview and the «count · source ·
-     * read-only» meta line. No glyph symbols — the TV design system guard
-     * (TvDesignSystemTest) bans them module-wide.
+     * Display model of one session: title fallback, preview, the «count · source ·
+     * read-only» meta line, the live/attention badge and the subagent work goal.
+     * No glyph symbols — the TV design system guard (TvDesignSystemTest) bans them
+     * module-wide.
      */
     fun rowOf(item: SessionItem): SessionRow {
         val meta = buildList {
@@ -108,7 +153,47 @@ object TvSessionBrowserPolicy {
             title = item.title?.trim()?.takeIf { it.isNotEmpty() } ?: UNTITLED,
             subtitle = item.preview?.trim()?.takeIf { it.isNotEmpty() },
             meta = meta,
+            badge = badgeOf(item),
+            work = if (item.isSubagent) {
+                item.workerStatus?.goal?.trim()?.takeIf { it.isNotEmpty() }
+            } else {
+                null
+            },
         )
+    }
+
+    /**
+     * Бейдж строки — ровно та тройка, что рисует мобильный список
+     * (`ChatSessionsActivity`): ожидание решения важнее живого хода, живой ход —
+     * важнее очереди. Порядок не случаен: на ТВ видно одну строку, и «требуется
+     * подтверждение» — единственное состояние, где от пользователя ЧТО-ТО нужно.
+     */
+    fun badgeOf(item: SessionItem): RowBadge? {
+        val turn = item.activeTurn
+        turn.attention?.let { attention ->
+            return RowBadge(
+                text = attentionLabel(attention),
+                tone = BadgeTone.ATTENTION,
+            )
+        }
+        if (turn.isStreaming) return RowBadge(LIVE_TURN, BadgeTone.LIVE)
+        if (turn.hasPendingUserMessage) return RowBadge(QUEUED_TURN, BadgeTone.QUEUED)
+        return null
+    }
+
+    /** Человекочитаемая подпись ожидания (`attention` строки), мобильный паритет. */
+    fun attentionLabel(attention: SessionAttention): String {
+        val kind = when (attention.kind.trim().lowercase()) {
+            "approval" -> "подтверждения"
+            "clarify" -> "уточнения"
+            else -> attention.kind.trim()
+        }
+        val count = if (attention.count > 1) " x${attention.count}" else ""
+        return if (attention.severity?.trim()?.lowercase() == "critical") {
+            "Критично — ожидает $kind$count"
+        } else {
+            "Ожидает $kind$count"
+        }
     }
 
     /** Russian plural of «сообщение» for the meta line (1 сообщение, 2 сообщения, 5 сообщений, 11/21…). */
@@ -165,21 +250,52 @@ object TvSessionBrowserPolicy {
     }
 
     /**
-     * Transcript of a loaded session, oldest first (server order): every persisted
-     * message with non-blank content becomes one bubble; `user` reads «Вы», all other
-     * roles (assistant/tool/system leftovers) read «Марс» — mobile `historyMessages` parity.
+     * Transcript of a loaded session, oldest first (server order).
+     *
+     * `role:"tool"` строки НЕ становятся пузырями «Марс»: непрерывная серия таких
+     * строк сворачивается в ОДНУ карточку [TranscriptKind.TOOL_GROUP] со сводкой
+     * ([TvToolGroupPolicy] — мобильный паритет `ToolGroupPresenter`). Сырой вывод
+     * инструмента на ТВ не показывается: это не речь модели, а на 10 футов — шум,
+     * в котором теряется настоящий ответ.
+     *
+     * Всё остальное: `user` читает «Вы», прочие роли (assistant/system) — «Марс»;
+     * пустые сообщения отбрасываются (пустой пузырь — визуальный мусор).
      */
-    fun transcript(detail: SessionDetail): List<TranscriptRow> =
-        detail.messages
-            .filter { it.content.isNotBlank() }
-            .map { message ->
-                val isUser = message.role == "user"
-                TranscriptRow(
-                    author = if (isUser) USER_AUTHOR else BOT_AUTHOR,
-                    text = message.content,
-                    isUser = isUser,
-                )
+    fun transcript(detail: SessionDetail): List<TranscriptRow> {
+        val rows = mutableListOf<TranscriptRow>()
+        // Имена вызовов текущей непрерывной серии tool-строк.
+        var pendingTools = mutableListOf<String>()
+
+        fun flushTools() {
+            if (pendingTools.isEmpty()) return
+            val names = pendingTools.toList()
+            pendingTools = mutableListOf()
+            rows += TranscriptRow(
+                author = TvToolGroupPolicy.TOOL_AUTHOR,
+                text = TvToolGroupPolicy.summary(names.size),
+                isUser = false,
+                toolNames = names,
+                kind = TranscriptKind.TOOL_GROUP,
+            )
+        }
+
+        detail.messages.forEach { message ->
+            if (message.role.trim().lowercase() == "tool") {
+                pendingTools += TvToolGroupPolicy.toolName(message.toolName) ?: TvToolGroupPolicy.UNKNOWN_TOOL
+                return@forEach
             }
+            flushTools()
+            if (message.content.isBlank()) return@forEach
+            val isUser = message.role == "user"
+            rows += TranscriptRow(
+                author = if (isUser) USER_AUTHOR else BOT_AUTHOR,
+                text = message.content,
+                isUser = isUser,
+            )
+        }
+        flushTools()
+        return rows
+    }
 
     /**
      * Outcome of `getSessionDetail`: [LoadOutcome.Open] only for a detail with a real id

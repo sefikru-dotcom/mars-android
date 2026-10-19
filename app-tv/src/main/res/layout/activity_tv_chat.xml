@@ -247,6 +247,26 @@
                 android:layout_height="wrap_content" />
         </LinearLayout>
 
+        <!-- Доска живых субагентов (SubagentStatusUpdate side-канала): одна строка,
+             читаемая с дистанции. Не фокусируется — это состояние, а не действие,
+             поэтому порядок обхода D-pad не меняется. Текст и тон считает
+             TvSubagentBoardPolicy. -->
+        <TextView
+            android:id="@+id/subagentBoard"
+            android:textColor="@color/mars_status_info"
+            android:textSize="17sp"
+            android:maxLines="4"
+            android:ellipsize="end"
+            android:lineSpacingExtra="2dp"
+            android:focusable="false"
+            android:visibility="gone"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="2dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
         <!-- Transcript + floating «К последнему» jump control. Auto-scroll is pin-aware
              (TvAutoScrollPolicy): the control appears only while the reader is away from
              the live edge and hides again on the jump/back-to-bottom (focus moves to the

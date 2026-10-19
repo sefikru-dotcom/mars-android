@@ -30,4 +30,16 @@ data class PushNotificationSpec(
     val tag: String?,
     val channel: PushChannelSpec,
     val notificationId: Int,
+    /**
+     * Сессия, к которой относится событие (`session_id` data-payload). null — сервер
+     * её не прислал. Нужна клиенту для маршрутизации тапа: уведомление «требуется
+     * подтверждение» обязано открыть ИМЕННО тот диалог, а не последний открытый.
+     */
+    val sessionId: String? = null,
+    /**
+     * Тип события (`kind` data-payload: `approval`/`clarify`/`chat`/`turn`/`cron`),
+     * дословно с сервера. null — не прислан. Решение «это запрос подтверждения»
+     * принимает UI-слой ([ru.mars.tv.push.TvPushRouting] на ТВ), а не транспорт.
+     */
+    val kind: String? = null,
 )

@@ -177,4 +177,69 @@ class TvTranscriptRetentionPolicyTest {
             TvTranscriptRetentionPolicy.hiddenMarkerText(5, -2),
         )
     }
+
+    // --- пагинация головы истории (D-pad «Показать ещё») --------------------------------
+
+    @Test
+    fun `the pager adds one page to the render window`() {
+        assertEquals(
+            TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES + TvTranscriptRetentionPolicy.PAGE_SIZE,
+            TvTranscriptRetentionPolicy.nextWindow(
+                TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES,
+                totalRows = 1_000,
+            ),
+        )
+    }
+
+    @Test
+    fun `the pager never grows past the whole history`() {
+        assertEquals(210, TvTranscriptRetentionPolicy.nextWindow(200, totalRows = 210))
+    }
+
+    @Test
+    fun `the pager is idempotent when everything is already rendered`() {
+        assertEquals(200, TvTranscriptRetentionPolicy.nextWindow(200, totalRows = 200))
+        assertEquals(0, TvTranscriptRetentionPolicy.nextWindow(0, totalRows = 0))
+    }
+
+    @Test
+    fun `a zero page still advances by one row - the action never becomes a no-op`() {
+        assertEquals(201, TvTranscriptRetentionPolicy.nextWindow(200, totalRows = 500, page = 0))
+    }
+
+    @Test
+    fun `load more is offered only while something is hidden`() {
+        assertTrue(TvTranscriptRetentionPolicy.canLoadMore(1))
+        assertTrue(!TvTranscriptRetentionPolicy.canLoadMore(0))
+        assertTrue(!TvTranscriptRetentionPolicy.canLoadMore(-5))
+    }
+
+    @Test
+    fun `the pager text tells the user the marker is pressable`() {
+        assertEquals(
+            "…ранее скрыто: 300 сообщений — нажмите, чтобы показать",
+            TvTranscriptRetentionPolicy.pagerText(300, 0),
+        )
+    }
+
+    @Test
+    fun `the pager text stays plain when only activity lines are hidden`() {
+        assertEquals(
+            "…ранее скрыто: 12 строк активности",
+            TvTranscriptRetentionPolicy.pagerText(0, 12),
+        )
+        assertNull(TvTranscriptRetentionPolicy.pagerText(0, 0))
+    }
+
+    @Test
+    fun `a second page reveals the head of the history`() {
+        val total = 450
+        val first = TvTranscriptRetentionPolicy.historySlice(total, TvTranscriptRetentionPolicy.MAX_RENDERED_MESSAGES)
+        assertEquals(250, first.firstRowIndex)
+        val window = TvTranscriptRetentionPolicy.nextWindow(first.renderedRows, total)
+        val second = TvTranscriptRetentionPolicy.historySlice(total, window)
+        assertEquals(50, second.firstRowIndex)
+        assertEquals(400, second.renderedRows)
+        assertTrue(second.hiddenMessages < first.hiddenMessages)
+    }
 }

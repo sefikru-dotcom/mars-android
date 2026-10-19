@@ -87,6 +87,8 @@ object PushMessagePolicy {
             tag = data[KEY_TAG]?.trim()?.takeIf { it.isNotEmpty() },
             channel = channel,
             notificationId = notificationId,
+            sessionId = data[KEY_SESSION_ID]?.trim()?.takeIf { it.isNotEmpty() },
+            kind = kind.takeIf { it.isNotEmpty() },
         )
     }
 
