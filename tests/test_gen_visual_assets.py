@@ -4,12 +4,15 @@
 
 Проверяется контракт, на который опирается SplashActivity, а не «красивость»
 картинки:
-  * mars_splash_planet.png — квадрат в НАТИВНОМ разрешении кропа (никакого
+  * mars_splash_planet.webp — квадрат в НАТИВНОМ разрешении кропа (никакого
     апскейла выше источника), RGBA, углы прозрачны, центр непрозрачен,
     ореол полупрозрачный, заметно крупнее логотипа шапки;
-  * mars_splash_bg.jpg — байт-в-байт копия источника (приглушение до alpha
-    0.40 живёт в layer-list окна, а не в файле), пропорции сохранены;
-  * оба ресурса есть в ОБОИХ модулях (app-mobile и app-tv) — паритет целей;
+  * mars_bg.webp — WebP q80 из источника: приглушение до alpha 0.40 живёт в
+    layer-list окна, а не в файле, поэтому яркость полная, альфы нет, размеры
+    источника сохранены;
+  * фон ОДИН: оба layer-list (окно и заставка) ссылаются на @drawable/mars_bg,
+    отдельного mars_splash_bg нет — раньше это были две байт-в-байт копии;
+  * ассеты есть в ОБОИХ модулях (app-mobile и app-tv) — паритет целей;
   * --write идемпотентен (повторные байты те же), --verify ловит подмену.
 
 Часть тестов герметична: источник рисуется тут же (диск на обсидиане), потому
@@ -28,7 +31,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageStat
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "scripts", "gen-visual-assets.py")
@@ -40,8 +43,21 @@ _spec.loader.exec_module(gen)
 
 MODULES = ("app-mobile", "app-tv")
 NODPI = os.path.join("src", "main", "res", "drawable-nodpi")
-SPLASH_PLANET = "mars_splash_planet.png"
-SPLASH_BG = "mars_splash_bg.jpg"
+SPLASH_PLANET = "mars_splash_planet.webp"
+BG = "mars_bg.webp"
+
+
+def asset_size(data):
+    """Размер растра из байтов: PNG читаем по IHDR, остальное — через PIL."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return gen.ihdr_size(data)
+    with Image.open(io.BytesIO(data)) as im:
+        return im.size
+
+
+def mean_lum(img):
+    """Средняя яркость кадра — проверка «фон не приглушён в файле»."""
+    return sum(ImageStat.Stat(img.convert("L")).mean) / 1.0
 
 
 def module_path(root, module, name):
@@ -107,11 +123,26 @@ class TestSplashPlanHermetic(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def test_splash_assets_in_both_modules(self):
-        """Заставка генерируется в app-mobile И app-tv — паритет целей."""
-        for module in MODULES:
-            for name in (SPLASH_PLANET, SPLASH_BG):
-                self.assertEqual(plan_item(self.plan, module, name)["module"], module)
+    def test_splash_assets_where_they_are_used(self):
+        """Все растры шапки/заставки — только в app-mobile: в TV их никто не рисует.
+
+        В TV нет SplashActivity и шапки с планетой, а shrinkResources срезал
+        mars_planet до 0-байтовой заглушки — то есть файл был мёртвым.
+        """
+        for name in (SPLASH_PLANET, BG, "mars_planet.webp"):
+            self.assertEqual(plan_item(self.plan, "app-mobile", name)["module"],
+                             "app-mobile")
+            self.assertNotIn(os.path.join("app-tv", NODPI, name),
+                             [os.path.relpath(i["path"], Path(self.src) / "repo")
+                              for i in self.plan])
+
+    def test_single_bg_asset_in_plan(self):
+        """Дубль фона слит: в плане ровно один файл обоев, splash-копии нет."""
+        names = [i["path"].name for i in self.plan if i["module"] == "app-mobile"]
+        self.assertEqual(sum(1 for n in names if n.startswith("mars_bg")), 1,
+                         "обоев должно быть ровно один файл: %s" % names)
+        self.assertNotIn("mars_splash_bg.jpg", names)
+        self.assertNotIn("mars_bg.jpg", names)
 
     def test_planet_is_native_crop_not_upscaled(self):
         """Планета заставки = 2*HALO_SPAN*r (нативный кроп), не больше источника."""
@@ -119,7 +150,7 @@ class TestSplashPlanHermetic(unittest.TestCase):
             r = gen.detect_geometry(src)[2]
             src_size = src.size
         item = plan_item(self.plan, "app-mobile", SPLASH_PLANET)
-        w, h = gen.ihdr_size(item["data"])
+        w, h = asset_size(item["data"])
         self.assertEqual(w, h, "планета заставки обязана быть квадратной")
         self.assertEqual(w, 2 * round(gen.HALO_SPAN * r),
                          "размер должен быть нативным кропом, а не выдуманным числом")
@@ -140,32 +171,44 @@ class TestSplashPlanHermetic(unittest.TestCase):
         self.assertGreater(halo, 0, "нет полупрозрачного ореола вокруг лимба")
         self.assertGreater(alphas[0], 0, "нет прозрачной зоны вокруг лимба")
 
-    def test_bg_is_source_copy_full_brightness(self):
-        """Фон заставки — копия источника байт-в-байт: без перекодирования и альфы."""
+    def test_bg_is_webp_q80_of_source(self):
+        """Фон — WebP q80 из источника: без альфы, размеры и яркость источника.
+
+        Раньше здесь проверялась байт-в-байт копия источника. Контракт сменён
+        намеренно (волна 20.10, слив веса APK): копия стоила 184 452 B, а WebP
+        q80 того же кадра — ~36.7 КБ при PSNR 46 dB, то есть без видимой
+        разницы на градиенте. Яркость обязана остаться полной: приглушение до
+        alpha 0.40 живёт в layer-list окна, поэтому сравниваем среднюю яркость
+        файла с источником, а не байты.
+        """
         with open(os.path.join(self.src, gen.BG_SRC), "rb") as fh:
             src_bytes = fh.read()
-        item = plan_item(self.plan, "app-mobile", SPLASH_BG)
-        self.assertEqual(item["data"], src_bytes, "фон заставки изменён (приглушён?)")
+        item = plan_item(self.plan, "app-mobile", BG)
+        self.assertLess(len(item["data"]), len(src_bytes) // 3,
+                        "WebP q80 обязан быть втрое легче исходного JPEG")
         with Image.open(io.BytesIO(item["data"])) as im:
-            self.assertEqual(im.format, "JPEG")
+            self.assertEqual(im.format, "WEBP")
             self.assertEqual(im.mode, "RGB", "в фоне заставки не должно быть альфы")
             with Image.open(os.path.join(self.src, gen.BG_SRC)) as src:
                 self.assertEqual(im.size, src.size, "пропорции/размер источника потеряны")
+                self.assertAlmostEqual(mean_lum(im), mean_lum(src), delta=1.5,
+                                       msg="фон приглушён в файле, а не в layer-list")
 
 
 class TestCommittedSplashAssets(unittest.TestCase):
     """Уже сгенерированные и закоммиченные ассеты заставки в обоих модулях."""
 
-    def test_files_exist_in_both_modules(self):
-        for module in MODULES:
-            for name in (SPLASH_PLANET, SPLASH_BG):
-                p = module_path(REPO, module, name)
-                self.assertTrue(os.path.isfile(p), "нет файла %s" % p)
+    def test_files_exist_where_used(self):
+        for name in ("mars_planet.webp", SPLASH_PLANET, BG):
+            p = module_path(REPO, "app-mobile", name)
+            self.assertTrue(os.path.isfile(p), "нет файла %s" % p)
+            self.assertFalse(os.path.isfile(module_path(REPO, "app-tv", name)),
+                             "TV не рисует %s — файл там мёртвый" % name)
 
     def test_planet_larger_than_header_logo(self):
         """Планета заставки заметно крупнее логотипа шапки (192px)."""
         with Image.open(module_path(REPO, "app-mobile", SPLASH_PLANET)) as splash:
-            with Image.open(module_path(REPO, "app-mobile", "mars_planet.png")) as logo:
+            with Image.open(module_path(REPO, "app-mobile", "mars_planet.webp")) as logo:
                 self.assertGreater(splash.size[0], logo.size[0] * 2)
                 self.assertEqual(splash.size[0], splash.size[1])
                 self.assertEqual(splash.mode, "RGBA")
@@ -175,19 +218,42 @@ class TestCommittedSplashAssets(unittest.TestCase):
                 self.assertEqual(splash.getpixel((w // 2, h // 2))[3], 255)
 
     def test_bg_full_resolution_no_alpha(self):
-        """Фон заставки: JPEG без альфы, размеры как у источника 1080x2400."""
-        with Image.open(module_path(REPO, "app-mobile", SPLASH_BG)) as im:
-            self.assertEqual(im.format, "JPEG")
+        """Фон: WebP без альфы, размеры как у источника 1080x2400."""
+        with Image.open(module_path(REPO, "app-mobile", BG)) as im:
+            self.assertEqual(im.format, "WEBP")
             self.assertEqual(im.mode, "RGB")
             self.assertEqual(im.size, (1080, 2400))
 
-    def test_bg_not_dimmed_relative_to_window_wallpaper(self):
-        """Байты фона заставки совпадают с обоями окна: приглушение — в layer-list."""
-        with open(module_path(REPO, "app-mobile", SPLASH_BG), "rb") as fh:
-            splash = fh.read()
-        with open(module_path(REPO, "app-mobile", "mars_bg.jpg"), "rb") as fh:
-            wall = fh.read()
-        self.assertEqual(splash, wall, "фон заставки отличается от источника яркости")
+    def test_single_bg_resource_shared_by_both_layers(self):
+        """Оба layer-list ссылаются на @drawable/mars_bg; второго файла нет.
+
+        Это и есть проверка «дубль слит»: раньше mars_bg.jpg и mars_splash_bg.jpg
+        были байт-в-байт копиями (md5 a7015cdd…), то есть APK вёз один кадр
+        дважды. Яркость/приглушение задаются в XML, а не вторым файлом.
+        """
+        res = os.path.join(REPO, "app-mobile", "src", "main", "res")
+        for layer in ("mars_window_bg.xml", "splash_window_bg.xml"):
+            path = os.path.join(res, "drawable", layer)
+            with open(path, encoding="utf-8") as fh:
+                body = fh.read()
+            self.assertIn("@drawable/mars_bg", body,
+                          "%s не ссылается на общий фон" % layer)
+            self.assertNotIn("@drawable/mars_splash_bg", body,
+                             "%s всё ещё ссылается на удалённый дубль" % layer)
+        nodpi = os.path.join(res, "drawable-nodpi")
+        bgs = sorted(f for f in os.listdir(nodpi) if f.startswith("mars_bg"))
+        self.assertEqual(bgs, [gen.BG_ASSET], "дубль фона вернулся: %s" % bgs)
+
+    def test_nodpi_holds_only_webp(self):
+        """В drawable-nodpi не осталось .jpg/.png: крупные растры уехали в WebP.
+
+        .9.png (NinePatch) сюда не попадает — они лежат в drawable/, где
+        конвертация запрещена: чанк npTc есть только в PNG.
+        """
+        nodpi = os.path.join(REPO, "app-mobile", "src", "main", "res", "drawable-nodpi")
+        for name in sorted(os.listdir(nodpi)):
+            self.assertTrue(name.endswith(".webp"),
+                            "не WebP в drawable-nodpi: %s" % name)
 
 
 class TestWriteVerifyIdempotency(unittest.TestCase):
@@ -208,7 +274,8 @@ class TestWriteVerifyIdempotency(unittest.TestCase):
         self.assertEqual(self.run_main("--write"), 0)
         first = file_hashes(self.root)
         self.assertIn(os.path.join("app-mobile", NODPI, SPLASH_PLANET), first)
-        self.assertIn(os.path.join("app-tv", NODPI, SPLASH_BG), first)
+        self.assertIn(os.path.join("app-mobile", NODPI, BG), first)
+        self.assertNotIn(os.path.join("app-tv", NODPI, BG), first)
         self.assertEqual(self.run_main("--write"), 0)
         self.assertEqual(first, file_hashes(self.root), "повторный --write изменил байты")
         self.assertEqual(self.run_main("--verify"), 0)

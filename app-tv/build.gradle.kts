@@ -26,7 +26,12 @@ if (!hasReleaseSigning) {
 }
 
 android { namespace = "ru.mars.tv"; compileSdk = 34
-    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 30; versionName = "1.5.6" }
+    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 30; versionName = "1.5.6"
+        // Локали: свои строки только в values/ (ru), каталогов других локалей в
+        // модуле нет. Библиотечные локали срезаются так же, как в app-mobile:
+        // 196 КБ локализованных строк + 262 КБ уникальных строковых данных,
+        // которые TV-клиент не показывает никогда.
+        resourceConfigurations += listOf("ru") }
 
     signingConfigs {
         if (hasReleaseSigning) {
@@ -67,7 +72,14 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.leanback:leanback:1.0.0")
+    // androidx.leanback:leanback удалён: библиотека была мертва (волна 20.10).
+    // Доказательства из аудита перфа: 0 ссылок `androidx.leanback` из ru/mars
+    // (проверено по dex: ни одного const-class/invoke/superclass), 0 наследований
+    // от leanback-классов, 559 ресурсов lb_* не использовались ни одним layout.
+    // Категория LEANBACK_LAUNCHER в манифесте библиотеку не требует — это
+    // системный intent-filter, а не зависимость. В APK зависимость держала
+    // 90 классов (46 КБ кода) + 83 КБ ресурсов + записи arsc только потому,
+    // что consumer-keep-правила AAR не давали R8 доказать недостижимость.
     // Media3/ExoPlayer вместо android.media.MediaPlayer: на Mi TV (Android 9, MSSP1)
     // MediaPlayer с AAC-стримом уходит в compressed-offload ветку AudioFlinger
     // («Offload request, forcing to Direct Output», flags #10 COMPRESS_OFFLOAD) и вывод

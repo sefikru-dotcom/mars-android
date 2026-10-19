@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Фон окна: фирменный рендер Марса поверх обсидианового #07080B.
-     Приглушён до alpha 0.40, чтобы текст и карточки (они непрозрачны) читались. -->
+     Приглушён до alpha 0.40, чтобы текст и карточки (они непрозрачны) читались.
+     Файл тот же, что у заставки (@drawable/mars_bg): раньше здесь лежала
+     байт-в-байт копия mars_splash_bg.jpg, и APK вёз кадр дважды. Приглушение —
+     атрибут слоя, поэтому общий файл не мешает разной яркости экранов. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/mars_background" />
     <item android:alpha="0.40">
