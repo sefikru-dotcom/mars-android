@@ -458,7 +458,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         // Голосовой ввод: своя запись (16 кГц моно WAV) → серверное распознавание.
         // Микрофон открывается только по явному тапу (и только с разрешения).
-        voiceRecorder = VoiceRecorder()
+        // Авто-стоп по тишине: человек говорит, запись закрывается сама после паузы, и дальше
+        // идёт тот же путь, что у второго тапа (transcribe → sendMessage). Колбэк приходит с
+        // потока чтения рекордера — на главный поток его перекладываем здесь, чтобы весь UI и
+        // voiceSession жили в одном потоке.
+        voiceRecorder = VoiceRecorder(
+            onAutoStop = { recording -> runOnUiThread { onVoiceAutoStopped(recording) } },
+        )
         // Voice-input state machine: guards the capture session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
@@ -2503,13 +2509,40 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * отказ распознавания ([TranscribeOutcome.Failure]) показываются в статусе.
      */
     private fun stopVoiceInputAndTranscribe() {
+        // Распознавание уже идёт (в том числе начатое авто-стопом): второй раз не запускаем.
+        if (voiceTranscribeJob?.isActive == true) {
+            statusView.text = VOICE_TRANSCRIBING_STATUS
+            return
+        }
         voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         val recording = voiceRecorder.stop()
         if (recording == null) {
+            // Тап пришёл в момент авто-стопа: запись уже забрал onAutoStop, и отменять сессию
+            // здесь нельзя — иначе распознавание вернётся в IDLE и текст потеряется.
+            if (voiceRecorder.autoStopTaken) return
             voiceSession.cancel()
             statusView.text = VOICE_EMPTY_STATUS
             return
         }
+        transcribeVoiceRecording(recording)
+    }
+
+    /**
+     * Запись закончилась сама по тишине ([VoiceRecorder.onAutoStop]): второй тап не нужен.
+     *
+     * Путь тот же, что у ручного тапа ([transcribeVoiceRecording]); отличается только вход.
+     * Поздний колбэк (сессию уже закрыли тапом или отменой) игнорируется — иначе он отправил бы
+     * сообщение из записи, которую человек сознательно отменил.
+     */
+    private fun onVoiceAutoStopped(recording: Recording) {
+        if (isFinishing || isDestroyed) return
+        if (voiceSession.state != VoiceSessionController.State.LISTENING) return
+        if (voiceTranscribeJob?.isActive == true) return
+        transcribeVoiceRecording(recording)
+    }
+
+    /** WAV → `POST /api/transcribe` → композитор → [sendMessage]. Общий хвост тапа и авто-стопа. */
+    private fun transcribeVoiceRecording(recording: Recording) {
         if (store.read() == null) {
             // Тот же отказ, что вернул бы репозиторий, — но без сетевого вызова и понятнее.
             voiceSession.onError(VOICE_NO_CREDENTIAL_STATUS)
