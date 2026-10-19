@@ -412,16 +412,20 @@ class MusicRepositoryTest {
         MockWebServer().use { server ->
             val received = LinkedBlockingQueue<String>()
             val serverDone = CountDownLatch(1)
-            // REGISTER отправляет клиент на открытии сокета. Если play() падает раньше
-            // подключения, кадра быть не может — это не нарушение контракта.
-            val socketOpened = java.util.concurrent.atomic.AtomicBoolean(false)
+            // REGISTER отправляет клиент на открытии сокета. Ответ SESSION_RESTORE шлём
+            // не сразу, а only после прихода REGISTER: иначе клиент успевал упасть и
+            // закрыть сокет раньше, чем его кадр доходил до сервера, и проверка ниже
+            // превращалась в гонку (флак на нагруженном раннере).
+            val restored = java.util.concurrent.atomic.AtomicBoolean(false)
             server.enqueue(MockResponse().withWebSocketUpgrade(object : okhttp3.WebSocketListener() {
-                override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) {
-                    socketOpened.set(true)
-                    // Restored session without activeDeviceId.
-                    webSocket.send("{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[]}}")
+                override fun onOpen(webSocket: okhttp3.WebSocket, response: okhttp3.Response) = Unit
+                override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
+                    received.offer(text)
+                    // Restored session without activeDeviceId — только после REGISTER.
+                    if (text.contains("REGISTER") && restored.compareAndSet(false, true)) {
+                        webSocket.send("{\"type\":\"SESSION_RESTORE\",\"session\":{\"queue\":[]}}")
+                    }
                 }
-                override fun onMessage(webSocket: okhttp3.WebSocket, text: String) { received.offer(text) }
                 override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
                 override fun onClosed(webSocket: okhttp3.WebSocket, code: Int, reason: String) { serverDone.countDown() }
                 override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) { serverDone.countDown() }
@@ -436,20 +440,19 @@ class MusicRepositoryTest {
 
             serverDone.await(5, TimeUnit.SECONDS)
             val texts = mutableListOf<String>()
-            if (socketOpened.get()) {
-                // Кадры приходят по отдельности: собираем их с окном ожидания.
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-                while (System.nanoTime() < deadline) {
-                    val frame = received.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                    texts.add(frame)
-                    if (texts.any { it.contains("REGISTER") }) {
-                        // Даём шанс прийти лишнему CONTROL_CMD, если он вообще отправлялся.
-                        received.drainTo(texts)
-                        break
-                    }
+            // Сервер отвечает SESSION_RESTORE только после REGISTER, поэтому кадр обязан
+            // присутствовать — проверка безусловная и строже прежней.
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline) {
+                val frame = received.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                texts.add(frame)
+                if (texts.any { it.contains("REGISTER") }) {
+                    // Даём шанс прийти лишнему CONTROL_CMD, если он вообще отправлялся.
+                    received.drainTo(texts)
+                    break
                 }
-                assertTrue("REGISTER must be sent once the socket is open", texts.any { it.contains("REGISTER") })
             }
+            assertTrue("REGISTER must be sent once the socket is open", texts.any { it.contains("REGISTER") })
             received.drainTo(texts)
             assertFalse("no CONTROL_CMD may be sent without an active device", texts.any { it.contains("CONTROL_CMD") })
             assertFalse(texts.any { it.contains("\"targetDeviceId\":\"all\"") })
