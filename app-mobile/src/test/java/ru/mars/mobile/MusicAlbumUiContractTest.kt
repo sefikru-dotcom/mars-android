@@ -57,6 +57,10 @@ class MusicAlbumUiContractTest {
             "Карточки альбомов строит albumCard, тап открывает диалог альбома",
             artistDialog.contains("albumCard(album) { openAlbumDialog(album.browseId) }"),
         )
+        assertTrue(
+            "Чужие альбомы из выдачи поиска не показываются первыми: порядок доводит rankForArtist",
+            artistDialog.contains("MusicAlbumPolicy.rankForArtist("),
+        )
     }
 
     @Test

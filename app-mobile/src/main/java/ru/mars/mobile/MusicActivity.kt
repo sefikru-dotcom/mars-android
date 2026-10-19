@@ -2411,6 +2411,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
          *
          * [shownAlbums] помнит уже показанные карточки: повторный запрос после
          * сбоя может вернуть неполную выдачу, и список не должен «схлопнуться».
+         * Порядок карточек доводит [MusicAlbumPolicy.rankForArtist]: поиск отдаёт
+         * релевантную выдачу целиком, поэтому альбомы самого исполнителя идут
+         * первыми, чужие — следом и не теряются.
          */
         var shownAlbums = emptyList<MusicAlbumSummary>()
 
@@ -2433,7 +2436,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     albumsRetry.visibility = View.VISIBLE
                     return@launch
                 }
-                shownAlbums = MusicAlbumPolicy.mergeSummaries(remote, shownAlbums)
+                // Поиск отдаёт всю релевантную выдачу, а не альбомы этого
+                // исполнителя: свои карточки поднимаем наверх, чужие оставляем
+                // следом (и не выбрасываем — иначе латиница/кириллица в имени
+                // даёт «Альбомов нет» на корректной выдаче).
+                shownAlbums = MusicAlbumPolicy.rankForArtist(
+                    MusicAlbumPolicy.mergeSummaries(remote, shownAlbums),
+                    target,
+                )
                 if (!MusicAlbumPolicy.hasAlbums(shownAlbums)) {
                     albumsStatus.text = MusicAlbumPolicy.EMPTY
                     albumsStatus.setTextColor(MarsTheme.TEXT_MUTED)
