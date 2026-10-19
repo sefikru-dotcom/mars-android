@@ -4,6 +4,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -85,6 +86,41 @@ class ChatSessionsActivity : ComponentActivity() {
     /** Джоб отложенного серверного поиска: новый ввод отменяет предыдущий. */
     private var searchJob: Job? = null
 
+    /**
+     * Джоб отложенного рендера списка: ввод в фильтре не должен ждать полной сборки
+     * карточек на каждый символ, а отменённое обновление не должно попадать на экран.
+     */
+    private var renderJob: Job? = null
+
+    /** Джоб отложенного (Later-ветка throttle) обновления: новый триггер отменяет предыдущий. */
+    private var refreshJob: Job? = null
+
+    /**
+     * Отпечаток отрисованного состояния: если входное состояние не изменилось, список
+     * не снимается и не строится заново (см. [SessionListRenderPolicy]).
+     */
+    private val renderPolicy = SessionListRenderPolicy()
+
+    /**
+     * Схлопывание триггеров обновления списка: восстановление сети и подтверждённые
+     * мутации могут приходить серией, а каждый триггер — это `GET /api/sessions`.
+     * Правила и догоняющий refresh — [SessionListRefreshThrottle]; цикл — в чистом
+     * [SessionListRefreshScheduler], поэтому шторм проверяется JVM-тестом.
+     */
+    private val refreshScheduler by lazy {
+        SessionListRefreshScheduler(
+            nowMs = { SystemClock.elapsedRealtime() },
+            startLoad = { onFinished -> loadSessions(onFinished) },
+            scheduleLater = { delayMs, run ->
+                refreshJob?.cancel()
+                refreshJob = lifecycleScope.launch {
+                    delay(delayMs)
+                    run()
+                }
+            },
+        )
+    }
+
     /** Id раскрытых родительских карточек: дочерние сессии живут внутри родителя. */
     private val expandedParents: MutableSet<String> = mutableSetOf()
 
@@ -135,8 +171,20 @@ class ChatSessionsActivity : ComponentActivity() {
             finish()
             return
         }
-        // Список освежается при каждом возврате на корень раздела CHAT.
-        loadSessions()
+        // Список освежается при каждом возврате на корень раздела CHAT. Через
+        // throttle: возврат с чата сразу после мутации не должен давать второй
+        // запрос поверх только что завершённого — он схлопывается/откладывается.
+        refreshScheduler.trigger()
+    }
+
+    override fun onDestroy() {
+        // Отложенные запуски не должны пережить экран: иначе рендер/запрос прилетит
+        // в уже снятое view-дерево (lifecycleScope отменит корутину, но джобы,
+        // ждущие delay, снимаем явно — так снимается и ожидание, и его результат).
+        renderJob?.cancel()
+        searchJob?.cancel()
+        refreshJob?.cancel()
+        super.onDestroy()
     }
 
     // --- Навигация (живая модель) ---------------------------------------------------------------
@@ -203,16 +251,48 @@ class ChatSessionsActivity : ComponentActivity() {
 
     // --- Данные и список --------------------------------------------------------------------------
 
-    private fun loadSessions() {
-        val c = store.read() ?: return
+    /**
+     * Загрузка списка с сервера (при сбое — снимок офлайн-кэша) и рендер.
+     *
+     * [onFinished] вызывается на ЛЮБОМ исходе — это часть контракта
+     * [SessionListRefreshScheduler]: без него throttle навсегда остался бы «в полёте»
+     * и список перестал бы обновляться.
+     */
+    private fun loadSessions(onFinished: () -> Unit = {}) {
+        val c = store.read()
+        if (c == null) {
+            onFinished()
+            return
+        }
         lifecycleScope.launch {
-            val fresh = SessionRepository().getSessions(ChatActivity.BASE_URL, c)
-            // Пустой ответ (сбой сети или диалогов действительно нет) сверяется с
-            // офлайн-кэшем: на сбое уровень показывает последний сохранённый снимок.
-            sessions = withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) }
-            // Обновлённый список может уже содержать серверные совпадения —
-            // секция серверного поиска пересчитывается от нового списка.
-            if (remoteMatches.isNotEmpty()) remoteMatches = emptyList()
+            try {
+                val fresh = SessionRepository().getSessions(ChatActivity.BASE_URL, c)
+                // Пустой ответ (сбой сети или диалогов действительно нет) сверяется с
+                // офлайн-кэшем: на сбое уровень показывает последний сохранённый снимок.
+                sessions = withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) }
+                // Обновлённый список может уже содержать серверные совпадения —
+                // секция серверного поиска пересчитывается от нового списка.
+                if (remoteMatches.isNotEmpty()) remoteMatches = emptyList()
+                renderSessionList()
+            } finally {
+                onFinished()
+            }
+        }
+    }
+
+    /**
+     * Отложенный рендер списка (ввод в фильтре).
+     *
+     * Полная сборка карточек на каждый символ — самая дорогая часть экрана (снятие
+     * всех view + новая карточка на строку), поэтому она снимается с пути ввода:
+     * символы только пишут [filterQuery], а рендер идёт после паузы
+     * [RENDER_DEBOUNCE_MS]. Новый ввод отменяет предыдущий джоб — отменённое
+     * обновление на экран не попадает (как у серверного поиска).
+     */
+    private fun scheduleRender() {
+        renderJob?.cancel()
+        renderJob = lifecycleScope.launch {
+            delay(RENDER_DEBOUNCE_MS)
             renderSessionList()
         }
     }
@@ -222,11 +302,11 @@ class ChatSessionsActivity : ComponentActivity() {
     /**
      * Отложенный серверный поиск по вводу в строке фильтра.
      *
-     * Локальный фильтр ([SessionTreePolicy]) отрабатывает синхронно в том же
-     * `onTextChanged` — ввод остаётся мгновенным. Серверный запрос уходит с
-     * задержкой [SEARCH_DEBOUNCE_MS], чтобы не дёргать `GET /api/sessions/search`
-     * на каждую букву; новый ввод отменяет предыдущий Джоб, поэтому ответ
-     * устаревшего запроса на экран не попадает.
+     * Локальный фильтр ([SessionTreePolicy]) применяется в том же `onTextChanged`,
+     * но рендер списка отложен ([scheduleRender]) — ввод не ждёт сборки карточек.
+     * Серверный запрос уходит с задержкой [SEARCH_DEBOUNCE_MS], чтобы не дёргать
+     * `GET /api/sessions/search` на каждую букву; новый ввод отменяет предыдущий
+     * Джоб, поэтому ответ устаревшего запроса на экран не попадает.
      */
     private fun scheduleServerSearch(query: String) {
         searchJob?.cancel()
@@ -235,7 +315,7 @@ class ChatSessionsActivity : ComponentActivity() {
             // Запрос короче порога: серверная секция гаснет, локальный фильтр живёт.
             if (remoteMatches.isNotEmpty()) {
                 remoteMatches = emptyList()
-                renderSessionList()
+                scheduleRender()
             }
             return
         }
@@ -255,9 +335,21 @@ class ChatSessionsActivity : ComponentActivity() {
      * Список диалогов: дерево [SessionTreePolicy] (поиск → группировка детей
      * внутри родителей → раскрытые строки), семантика карточек — паритет с
      * прежней смешанной шторкой ChatActivity.
+     *
+     * Рендер идемпотентен по входному состоянию: если фильтр, раскрытие, строки и
+     * серверные совпадения те же, что и у уже построенного списка, метод выходит
+     * сразу ([SessionListRenderPolicy]) — раньше здесь на каждый вызов снимались
+     * ВСЕ карточки и собирались заново.
      */
     private fun renderSessionList() {
         if (!::sessionList.isInitialized) return
+        val state = SessionListRenderState(
+            filterQuery = filterQuery,
+            expandedParents = expandedParents,
+            sessions = sessions,
+            remoteMatches = remoteMatches,
+        )
+        if (renderPolicy.decide(state) == SessionListRenderDecision.Reuse) return
         sessionList.removeAllViews()
         val tree = SessionTreePolicy.tree(
             sessions = sessions,
@@ -268,7 +360,10 @@ class ChatSessionsActivity : ComponentActivity() {
         // Локальное дерево непусто — значит есть что показать; пусто — но серверная
         // секция может ещё содержать совпадения (см. ниже), поэтому «Ничего не
         // найдено» показывается только когда пусто И там.
-        val serverOnly = SessionSearchPolicy.serverOnly(remoteMatches, filtered.map { it.session.id }.toSet())
+        // Видимые id — одним проходом: `map{}.toSet()` давал промежуточный список.
+        val visibleIds = HashSet<String>(filtered.size * 2)
+        for (i in filtered.indices) visibleIds.add(filtered[i].session.id)
+        val serverOnly = SessionSearchPolicy.serverOnly(remoteMatches, visibleIds)
         if (filtered.isEmpty() && serverOnly.isEmpty()) {
             sessionList.addView(TextView(this).apply {
                 text = if (filterQuery.isNotBlank()) {
@@ -282,9 +377,21 @@ class ChatSessionsActivity : ComponentActivity() {
             })
             return
         }
+        // dp() и текущее время — ОДИН раз на рендер, а не на каждую строку:
+        // density-пересчёт и часы в цикле строк это чистая потеря на длинном списке.
+        val dp4 = dp(4)
+        val dp2 = dp(2)
+        val dp6 = dp(6)
+        val dp8 = dp(8)
+        val dp32 = dp(32)
+        val dp40 = dp(40)
+        val nowMillis = System.currentTimeMillis()
+        val nowEpochSeconds = nowMillis / 1000.0
         filtered.forEach { node ->
             val session = node.session
             val isCurrent = node.isCurrent
+            // Раскрытие нужно и для иконки, и для подписи кнопки — считается один раз.
+            val expanded = node.hasChildren && session.id in expandedParents
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 background = if (isCurrent) {
@@ -292,7 +399,7 @@ class ChatSessionsActivity : ComponentActivity() {
                 } else {
                     MarsTheme.card(this@ChatSessionsActivity, MarsTheme.SURFACE, radiusDp = 12, strokeColor = MarsTheme.BORDER_SUBTLE)
                 }
-                setPadding(dp(12 + node.depth * 16), dp(8), dp(8), dp(8))
+                setPadding(dp(12 + node.depth * 16), dp8, dp8, dp8)
                 isClickable = true
                 isFocusable = true
             }
@@ -300,26 +407,24 @@ class ChatSessionsActivity : ComponentActivity() {
             // выполняется отдельной кнопкой, чтобы родительский чат нельзя было
             // случайно сделать недоступным.
             val openRow: () -> Unit = { openSession(session.id) }
-            val toggleChildren: () -> Unit = {
-                if (node.hasChildren) {
-                    if (!expandedParents.remove(session.id)) expandedParents.add(session.id)
-                    renderSessionList()
-                }
-            }
             card.setOnClickListener { openRow() }
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
             if (node.hasChildren) {
+                val toggleChildren: () -> Unit = {
+                    if (!expandedParents.remove(session.id)) expandedParents.add(session.id)
+                    renderSessionList()
+                }
                 row.addView(MarsTheme.circleIconButton(
                     this,
-                    if (expandedParents.contains(session.id)) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
-                    if (expandedParents.contains(session.id)) "Свернуть воркеры" else "Развернуть воркеры",
+                    if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                    if (expanded) "Свернуть воркеры" else "Развернуть воркеры",
                     bg = Color.TRANSPARENT,
                     iconTint = MarsTheme.TEXT_MUTED,
                     sizeDp = 32,
                     strokeColor = 0,
                 ).apply {
                     setOnClickListener { toggleChildren() }
-                }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(4) })
+                }, LinearLayout.LayoutParams(dp32, dp32).apply { marginEnd = dp4 })
             }
             row.addView(android.widget.Button(this).apply {
                 text = session.title ?: "Новый диалог"
@@ -346,7 +451,7 @@ class ChatSessionsActivity : ComponentActivity() {
                 ).apply {
                     setOnClickListener { renameSession(session) }
                 }
-                row.addView(renameBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+                row.addView(renameBtn, LinearLayout.LayoutParams(dp32, dp32))
 
                 val deleteBtn = MarsTheme.circleIconButton(
                     this,
@@ -359,7 +464,7 @@ class ChatSessionsActivity : ComponentActivity() {
                 ).apply {
                     setOnClickListener { deleteSession(session) }
                 }
-                row.addView(deleteBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+                row.addView(deleteBtn, LinearLayout.LayoutParams(dp32, dp32))
             }
 
             // Контекстное меню карточки: pin / archive / export для управляемых строк
@@ -378,7 +483,7 @@ class ChatSessionsActivity : ComponentActivity() {
                 ).apply {
                     setOnClickListener { showSessionMenu(session) }
                 }
-                row.addView(moreBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
+                row.addView(moreBtn, LinearLayout.LayoutParams(dp32, dp32))
             }
             card.addView(row)
 
@@ -387,7 +492,7 @@ class ChatSessionsActivity : ComponentActivity() {
             val metaLine = SessionMetaPolicy.metaLine(
                 updatedAtMillis = MessageTimePolicy.parseServerTimestamp(session.updatedAt ?: session.createdAt),
                 messageCount = session.messageCount,
-                nowMillis = System.currentTimeMillis(),
+                nowMillis = nowMillis,
             )
             if (metaLine != null) {
                 card.addView(TextView(this).apply {
@@ -396,7 +501,7 @@ class ChatSessionsActivity : ComponentActivity() {
                     setTextColor(MarsTheme.TEXT_MUTED)
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), dp(2))
+                    setPadding(dp4, 0, dp40, dp2)
                 })
             }
 
@@ -407,7 +512,7 @@ class ChatSessionsActivity : ComponentActivity() {
                     setTextColor(MarsTheme.TEXT_MUTED)
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), dp(2))
+                    setPadding(dp4, 0, dp40, dp2)
                 })
             }
 
@@ -418,7 +523,7 @@ class ChatSessionsActivity : ComponentActivity() {
             if (session.isSubagent) {
                 val work = SubagentWorkLabelPolicy.label(
                     status = session.workerStatus,
-                    nowEpochSeconds = System.currentTimeMillis() / 1000.0,
+                    nowEpochSeconds = nowEpochSeconds,
                 )
                 card.addView(TextView(this).apply {
                     text = work.text
@@ -426,7 +531,7 @@ class ChatSessionsActivity : ComponentActivity() {
                     setTextColor(subagentWorkColor(work.tone))
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), 0)
+                    setPadding(dp4, 0, dp40, 0)
                 })
             }
 
@@ -443,7 +548,7 @@ class ChatSessionsActivity : ComponentActivity() {
                     setTextColor(if (session.pinned) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), 0)
+                    setPadding(dp4, 0, dp40, 0)
                 })
             }
 
@@ -464,10 +569,10 @@ class ChatSessionsActivity : ComponentActivity() {
                     setTextColor(badge.second)
                     isSingleLine = true
                     ellipsize = android.text.TextUtils.TruncateAt.END
-                    setPadding(dp(4), 0, dp(40), 0)
+                    setPadding(dp4, 0, dp40, 0)
                 })
             }
-            sessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+            sessionList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp6 })
         }
 
         // Секция серверного поиска (A2): совпадения вне локального списка —
@@ -626,7 +731,8 @@ class ChatSessionsActivity : ComponentActivity() {
                     }
                     // Дерево и порядок строк — по серверу: перенос меняет родителя,
                     // поэтому список перечитывается, а не правится на месте.
-                    loadSessions()
+                    // Через throttle: серия переносов схлопывается в один запрос.
+                    refreshScheduler.trigger()
                     android.widget.Toast.makeText(
                         this@ChatSessionsActivity,
                         SessionMovePolicy.successMessage(target),
@@ -651,7 +757,7 @@ class ChatSessionsActivity : ComponentActivity() {
      */
     private fun togglePinned(session: SessionItem) {
         mutateSession(session, pinned = SessionManagementPolicy.nextPinned(session)) { confirmed ->
-            loadSessions()
+            refreshScheduler.trigger()
             android.widget.Toast.makeText(
                 this,
                 if (confirmed.pinned) "Диалог закреплён" else "Диалог откреплён",
@@ -667,7 +773,7 @@ class ChatSessionsActivity : ComponentActivity() {
      */
     private fun toggleArchived(session: SessionItem) {
         mutateSession(session, archived = SessionManagementPolicy.nextArchived(session)) { confirmed ->
-            loadSessions()
+            refreshScheduler.trigger()
             android.widget.Toast.makeText(
                 this,
                 if (confirmed.archived) "Диалог в архиве" else "Диалог возвращён из архива",
@@ -699,6 +805,10 @@ class ChatSessionsActivity : ComponentActivity() {
                         ?: session.copy(pinned = pinned ?: session.pinned, archived = archived ?: session.archived)
                     sessions = sessions.map { if (it.id == confirmed.id) confirmed else it }
                     withContext(Dispatchers.IO) { offlineCache.saveSessions(sessions) }
+                    // Подтверждённая строка уже в списке — карточка перерисовывается
+                    // сразу, не ожидая перезагрузки (она идёт через throttle и может
+                    // быть отложена). Повторный рендер после загрузки — Reuse.
+                    renderSessionList()
                     onSuccess(confirmed)
                 }
                 is SessionMutationOutcome.Failure ->
@@ -811,7 +921,12 @@ class ChatSessionsActivity : ComponentActivity() {
                 if (title.isNotBlank()) {
                     lifecycleScope.launch {
                         if (SessionRepository().renameSession(ChatActivity.BASE_URL, c, session.id, title)) {
-                            loadSessions()
+                            // Подтверждённое имя кладётся в строку сразу: перезагрузка
+                            // идёт через throttle и может быть отложена, а заголовок
+                            // в карточке не должен ждать сети.
+                            sessions = sessions.map { if (it.id == session.id) it.copy(title = title) else it }
+                            renderSessionList()
+                            refreshScheduler.trigger()
                         }
                     }
                 }
@@ -921,9 +1036,10 @@ class ChatSessionsActivity : ComponentActivity() {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     filterQuery = s?.toString().orEmpty()
-                    renderSessionList()
-                    // Локальный фильтр уже отработал строкой выше — серверный поиск
-                    // идёт следом, отложенно (A2), и не блокирует ввод.
+                    // Ввод только пишет состояние: рендер отложен на паузу набора,
+                    // поэтому карточки не пересобираются на каждый символ.
+                    scheduleRender()
+                    // Серверный поиск идёт следом, отложенно (A2), и не блокирует ввод.
                     scheduleServerSearch(filterQuery)
                 }
 
@@ -938,6 +1054,8 @@ class ChatSessionsActivity : ComponentActivity() {
             addView(sessionList, ViewGroup.LayoutParams(-1, -2))
         }
         root.addView(listScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        // Новое дерево view — отпечаток предыдущего рендера недействителен.
+        renderPolicy.reset()
         renderSessionList()
         return root
     }
@@ -1009,5 +1127,12 @@ class ChatSessionsActivity : ComponentActivity() {
          * набор слова порождал бы запрос на каждую букву.
          */
         const val SEARCH_DEBOUNCE_MS = 300L
+
+        /**
+         * Задержка рендера списка по вводу в фильтре. Тот же ритм, что у серверного
+         * поиска: пауза набора даёт ОДНУ пересборку карточек вместо одной на символ
+         * (каждый рендер — снятие всех view и inflate строк на весь список).
+         */
+        const val RENDER_DEBOUNCE_MS = 300L
     }
 }
