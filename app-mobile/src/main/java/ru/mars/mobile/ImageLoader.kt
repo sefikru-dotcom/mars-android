@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
@@ -39,10 +40,22 @@ import java.util.concurrent.ConcurrentHashMap
  *   ([DetachWatcher]), so recycled/detached views don't schedule pointless
  *   main-thread hops; the shared fetch itself keeps running to fill the cache.
  *
- * Known limitation: there is no disk cache — adding one means owning eviction, journaling
- * and cache-dir lifecycle, a rewrite out of scope here; refetch happens after process death
- * or LRU eviction. Cached bitmaps are keyed by URL only: the first requested target size
- * wins for subsequent differently-sized views of the same URL.
+ * Covers are cached on three levels — memory, disk, network ([load] order):
+ * - memory: the byte-based [LruCache] above, the only level [trimMemoryCache] touches;
+ * - disk: [ImageDiskCache] under `cacheDir/covers`, keyed by `sha256(url)` and bounded by
+ *   [ImageDiskCachePolicy] (32 MB, 14-day TTL, LRU eviction). It survives process death,
+ *   LRU eviction and system trims, so a cold start no longer re-downloads the whole music
+ *   list over mobile data. Disk reads happen inside the shared fetch, i.e. behind the
+ *   in-flight dedup, so N views of one URL still cause one disk read and at most one request;
+ * - network: only when the disk has no fresh copy; a successful response is written to disk
+ *   before it is decoded, so the next cold start finds it.
+ *
+ * Disk cache is attached from [MarsApplication.onCreate] via [attachContext]. Without it
+ * (unit tests, instrumentation without Application) the loader degrades to memory+network —
+ * caching is an optimisation and must never break the image path.
+ *
+ * Cached bitmaps are keyed by URL only: the first requested target size wins for subsequent
+ * differently-sized views of the same URL.
  */
 object ImageLoader {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -56,9 +69,23 @@ object ImageLoader {
     private val inFlight = ConcurrentHashMap<String, Deferred<Bitmap?>>()
 
     /**
+     * Привязывает дисковый кэш обложек к процессу. Вызывается один раз из
+     * [MarsApplication.onCreate] — раньше любого экрана, который может показать обложку.
+     * Идемпотентно: повторный вызов ничего не делает.
+     */
+    fun attachContext(context: Context) {
+        ImageDiskCache.attach(context)
+    }
+
+    /**
      * Полная очистка кэша миниатюр под системным давлением памяти
      * (вызывает [MarsApplication] из onTrimMemory/onLowMemory). Битмапы
      * перезагружаются по URL при следующем показе — корректность не страдает.
+     *
+     * Чистится ТОЛЬКО память: дисковый кэш ([ImageDiskCache]) trim переживает осознанно.
+     * Давление памяти — это про кучу процесса, а не про место на диске; стереть диск
+     * значило бы после каждого trim снова качать обложки по мобильной сети, то есть
+     * чинить проблему, ради которой диск и появился.
      */
     fun trimMemoryCache() {
         cache.evictAll()
@@ -134,27 +161,52 @@ object ImageLoader {
         }
     }
 
+    /**
+     * Память → диск → сеть. Диск читается внутри общего fetch, то есть уже за дедупом
+     * in-flight: N вьюх одного URL дают одно чтение диска и максимум один запрос.
+     *
+     * Сетевой ответ пишется на диск только после УСПЕШНОГО декодирования: иначе битые
+     * байты (обрезанный ответ, HTML ошибки) осели бы в кэше на весь TTL и ломали показ
+     * обложки до его истечения. Байты, которые не декодировались из кэша, удаляются —
+     * запись считается испорченной и перезапрашивается.
+     */
     private fun fetch(url: String, targetPx: Int): Bitmap? = runCatching {
-        val bytes = download(url) ?: return@runCatching null
-        // Two-pass decode over the in-memory payload: bounds first, then downsampled decode.
+        val cached = ImageDiskCache.read(url)
+        if (cached != null) {
+            val fromDisk = decode(cached, targetPx)
+            if (fromDisk != null) return@runCatching fromDisk
+            ImageDiskCache.remove(url)
+        }
+        val downloaded = download(url) ?: return@runCatching null
+        val bitmap = decode(downloaded.bytes, targetPx) ?: return@runCatching null
+        ImageDiskCache.write(url, downloaded.contentType, downloaded.bytes)
+        bitmap
+    }.getOrNull()
+
+    /** Двухпроходное декодирование in-memory payload: сначала bounds, затем downsampling. */
+    private fun decode(bytes: ByteArray, targetPx: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         val options = BitmapFactory.Options().apply {
             inSampleSize = ImageLoaderPolicy.sampleSize(bounds.outWidth, bounds.outHeight, targetPx)
         }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-    }.getOrNull()
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    /** Сетевой ответ: байты плюс `Content-Type` — по нему дисковый кэш выбирает расширение. */
+    private class Downloaded(val bytes: ByteArray, val contentType: String?)
 
     /**
      * Streams the response into memory with a hard [ImageLoaderPolicy.MAX_DOWNLOAD_BYTES]
      * cap; returns null when the server advertises or actually sends more than the cap.
      */
-    private fun download(url: String): ByteArray? {
+    private fun download(url: String): Downloaded? {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 8000
             connection.readTimeout = 10000
             if (!ImageLoaderPolicy.acceptDownload(connection.contentLengthLong)) return null
+            val contentType = connection.contentType
             val cap = ImageLoaderPolicy.MAX_DOWNLOAD_BYTES
             val out = ByteArrayOutputStream()
             connection.inputStream.use { input ->
@@ -168,7 +220,7 @@ object ImageLoader {
                     out.write(buffer, 0, read)
                 }
             }
-            return out.toByteArray()
+            return Downloaded(out.toByteArray(), contentType)
         } finally {
             connection.disconnect()
         }
