@@ -43,8 +43,8 @@ android {
         applicationId = "ru.mars.mobile"
         minSdk = 28
         targetSdk = 34
-        versionCode = 36
-        versionName = "1.7.3"
+        versionCode = 37
+        versionName = "1.7.4"
         // Локали: свои строки живут ТОЛЬКО в values/ (ru) — каталогов values-en/
         // и других локалей в модуле нет, поэтому весь UI-текст и так русский.
         // Библиотеки (appcompat, firebase, core) тянут ~84 локали: без среза в APK
