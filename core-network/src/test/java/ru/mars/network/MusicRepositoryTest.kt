@@ -197,6 +197,56 @@ class MusicRepositoryTest {
             assertTrue(body.contains("\"artist\":\"Artist\""))
             assertTrue(body.contains("\"duration\":\"3:24\""))
             assertTrue(body.contains("\"thumbnail\":\"thumb\""))
+            // A track without an album must not send an album object at all.
+            assertFalse(body.contains("\"album\""))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteSendsAlbumAsNameAndBrowseIdWhenTrackCarriesOne() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val track = MusicTrack(
+                id = "v1",
+                title = "Song",
+                artist = "Artist",
+                duration = "3:24",
+                thumbnail = "thumb",
+                albumTitle = "One-X",
+                albumBrowseId = "MPREb_3vrgtNoMEJi",
+            )
+            assertEquals(true, repo.toggleFavorite("v1", track))
+            val body = server.takeRequest().body.readUtf8()
+            // Wire shape is the service contract: name + browseId, not albumTitle/albumBrowseId.
+            assertTrue(body.contains("\"album\":{\"name\":\"One-X\",\"browseId\":\"MPREb_3vrgtNoMEJi\"}"))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteSendsAlbumWithEmptyBrowseIdWhenOnlyNameIsKnown() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            // /api/album returns the album as a bare string, so a track taken from an album
+            // page knows its name but has no browse id. The name must still be stored.
+            val track = MusicTrack("v1", "Song", "Artist", albumTitle = "Hajime, Pt. 1")
+            assertEquals(true, repo.toggleFavorite("v1", track))
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"album\":{\"name\":\"Hajime, Pt. 1\",\"browseId\":\"\"}"))
+        }
+    }
+
+    @Test
+    fun toggleFavoriteOmitsAlbumWhenNameIsBlank() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
+            val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
+            val track = MusicTrack("v1", "Song", "Artist", albumTitle = "   ", albumBrowseId = "MPREb_x")
+            assertEquals(true, repo.toggleFavorite("v1", track))
+            val body = server.takeRequest().body.readUtf8()
+            // A blank name would be stored as a real album title; better an honest NULL.
+            assertFalse(body.contains("\"album\""))
         }
     }
 

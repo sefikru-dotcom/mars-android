@@ -281,6 +281,11 @@ class MusicRepository(
                 artist = track?.artist,
                 duration = track?.duration,
                 thumbnail = track?.thumbnail,
+                // Only send an album when the track really carries one; a name without a
+                // browse id would make the server store a half-filled album.
+                album = track?.albumTitle?.takeIf { it.isNotBlank() }?.let { name ->
+                    FavoriteAlbumPayload(name = name, browseId = track.albumBrowseId.orEmpty())
+                },
             ),
         )
         val parsed = postJson("api/favorite/toggle", json) { body ->
@@ -931,7 +936,22 @@ class MusicRepository(
         val artist: String? = null,
         val duration: String? = null,
         val thumbnail: String? = null,
+        /**
+         * Album of the track as `{name, browseId}`, i.e. exactly the shape the service writes
+         * into `favorites.album_name` / `album_browse_id` via `album_db_values()`.
+         * Omitted (null) when the track carries no album: the server then stores an honest
+         * NULL instead of an empty object, so old favourites stay distinguishable from
+         * favourites whose album is genuinely unknown.
+         */
+        val album: FavoriteAlbumPayload? = null,
     )
+
+    /**
+     * Wire shape of the album inside [FavoriteToggleRequest]. Field names follow the service
+     * contract (`name`, `browseId`) — not the local `albumTitle`/`albumBrowseId` model names.
+     */
+    @JsonClass(generateAdapter = false)
+    private data class FavoriteAlbumPayload(val name: String, val browseId: String)
 
     @JsonClass(generateAdapter = false)
     private data class FavoriteToggleResponse(val status: String? = null, val favorited: Boolean? = null)
