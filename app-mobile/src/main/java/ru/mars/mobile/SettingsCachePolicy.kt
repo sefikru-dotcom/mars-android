@@ -39,6 +39,7 @@ object SettingsCachePolicy {
         AuthExitStores.TODOS_OFFLINE_PREFS,
         AuthExitStores.PROJECTS_OFFLINE_PREFS,
         AuthExitStores.KNOWLEDGE_OFFLINE_PREFS,
+        AuthExitStores.MUSIC_OFFLINE_PREFS,
         AuthExitStores.PENDING_QUEUE_PREFS,
     )
 
