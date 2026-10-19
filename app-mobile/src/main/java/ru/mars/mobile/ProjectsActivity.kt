@@ -2,7 +2,6 @@ package ru.mars.mobile
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -453,7 +452,7 @@ class ProjectsActivity : ComponentActivity() {
             val openBtn = Button(this).apply {
                 text = "Открыть сервис"
                 textSize = 13f
-                setTextColor(Color.WHITE)
+                setTextColor(MarsTheme.TEXT_STRONG)
                 background = MarsTheme.button(this@ProjectsActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 10, strokeColor = MarsTheme.BORDER)
                 setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             }

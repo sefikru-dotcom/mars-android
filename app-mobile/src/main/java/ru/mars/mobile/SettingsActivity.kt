@@ -3,7 +3,6 @@ package ru.mars.mobile
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -193,7 +192,7 @@ class SettingsActivity : ComponentActivity() {
             val clearCacheBtn = Button(this@SettingsActivity).apply {
                 text = "Очистить кэш"
                 textSize = 13f
-                setTextColor(Color.WHITE)
+                setTextColor(MarsTheme.TEXT_STRONG)
                 background = MarsTheme.button(this@SettingsActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 8, strokeColor = MarsTheme.BORDER)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
                 setOnClickListener { clearCache() }

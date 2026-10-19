@@ -1,7 +1,6 @@
 package ru.mars.mobile
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.SpannableStringBuilder
@@ -281,7 +280,7 @@ class TodosActivity : ComponentActivity() {
             radiusDp = 10,
             strokeColor = if (selected) 0 else MarsTheme.BORDER
         )
-        chip.setTextColor(if (selected) Color.WHITE else MarsTheme.TEXT)
+        chip.setTextColor(if (selected) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
     }
 
     private fun renderTodos() {

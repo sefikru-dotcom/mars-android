@@ -11,11 +11,15 @@ package ru.mars.mobile
  */
 class QuickChipsRenderGate {
 
-    /** Подпись входов ленты: статус хода, есть ли ответ ассистента, упал ли ход. */
+    /**
+     * Подпись входов ленты: статус хода, есть ли ответ ассистента, упал ли ход,
+     * пуст ли диалог (пустой чат показывает стартовые подсказки, а не чипы-реакции).
+     */
     data class Signature(
         val status: ChatStatus,
         val hasAssistantReply: Boolean,
         val lastTurnFailed: Boolean,
+        val emptyChat: Boolean = false,
     )
 
     private var last: Signature? = null

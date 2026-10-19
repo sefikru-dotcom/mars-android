@@ -2,7 +2,6 @@ package ru.mars.mobile
 
 import android.content.Context
 import android.content.res.ColorStateList
-import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
@@ -174,7 +173,7 @@ object MarsTheme {
             if (strokeColor != 0) setStroke(dp(context, 1), strokeColor)
         }
         val mask = GradientDrawable().apply {
-            setColor(Color.WHITE)
+            setColor(TEXT_STRONG)
             cornerRadius = dp(context, radiusDp).toFloat()
         }
         val rippleColor = ColorStateList.valueOf(RIPPLE)
@@ -200,7 +199,7 @@ object MarsTheme {
             }
             val mask = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.WHITE)
+                setColor(TEXT_STRONG)
             }
             background = RippleDrawable(ColorStateList.valueOf(RIPPLE), normal, mask)
             setImageDrawable(ContextCompat.getDrawable(context, drawableRes))

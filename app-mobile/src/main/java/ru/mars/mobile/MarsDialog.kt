@@ -244,7 +244,7 @@ object MarsDialog {
 
     /** Primary ruby action button (approve once / submit answer). */
     fun primaryButton(context: Context, label: String, onClick: () -> Unit): Button =
-        button(context, label, MarsTheme.ACCENT, Color.WHITE, onClick)
+        button(context, label, MarsTheme.ACCENT, MarsTheme.TEXT_STRONG, onClick)
 
     /** Secondary quiet button (allow-for-session / always grants). */
     fun secondaryButton(context: Context, label: String, onClick: () -> Unit): Button =
@@ -383,7 +383,7 @@ object MarsDialog {
 
     private fun ripple(context: Context, radiusDp: Int = 999): RippleDrawable {
         val mask = GradientDrawable().apply {
-            setColor(Color.WHITE)
+            setColor(MarsTheme.TEXT_STRONG)
             cornerRadius = MarsTheme.dp(context, radiusDp).toFloat()
         }
         return RippleDrawable(ColorStateList.valueOf(MarsTheme.RIPPLE), null, mask)

@@ -172,7 +172,7 @@ object ChatScreenScaffold {
         val reasoningBtn: Button,
         val activityModeBtn: Button,
         val workspaceBtn: Button,
-        val contextIndicator: TextView,
+        val contextRing: ContextRingView,
         val usageIndicator: TextView,
         val toolsetsChip: Button,
         val quotaChip: TextView,
@@ -185,6 +185,7 @@ object ChatScreenScaffold {
     class Scaffold(
         val root: View,
         val networkBanner: TextView,
+        val sessionTitle: TextView,
         val miniPlayer: MiniPlayerViews,
         val statusView: TextView,
         val search: SearchViews,
@@ -254,6 +255,19 @@ object ChatScreenScaffold {
         })
         val headerStatusDot = MarsTheme.glowingStatusDot(context, MarsTheme.STATUS_ONLINE)
         titleBox.addView(headerStatusDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginStart = dp(8) })
+
+        // Живой заголовок диалога (SSE-кадр `title`): одна строка справа от марки,
+        // 11sp TEXT_MUTED. Шапка не растёт и не спорит с «МАРС» — при пустом
+        // заголовке строки просто нет.
+        val sessionTitle = TextView(context).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.END
+            visibility = View.GONE
+        }
+        titleBox.addView(sessionTitle, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
 
         val newChatBtn = MarsTheme.circleIconButton(
@@ -322,7 +336,7 @@ object ChatScreenScaffold {
             R.drawable.ic_play,
             "Воспроизведение",
             bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = Color.WHITE,
+            iconTint = MarsTheme.TEXT_STRONG,
             sizeDp = 34
         ).apply {
             setOnClickListener { MarsMusicPlayer.togglePlay() }
@@ -681,7 +695,7 @@ object ChatScreenScaffold {
         chipsRow.addView(modelBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
 
         val reasoningBtn = Button(context).apply {
-            text = "· Авто"
+            text = "Авто"
             textSize = 10.5f
             contentDescription = "Уровень размышлений"
             background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
@@ -729,14 +743,11 @@ object ChatScreenScaffold {
         }
         chipsRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
 
-        val contextIndicator = TextView(context).apply {
-            textSize = 9.5f
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
+        val contextRing = ContextRingView(context).apply {
             visibility = View.GONE
             setOnClickListener { host.showContextUsageDetails() }
         }
-        chipsRow.addView(contextIndicator, LinearLayout.LayoutParams(-2, -2))
+        chipsRow.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(2) })
 
         // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
         // первый показывает кумулятивные токены и деньги (`GET api/session/usage`),
@@ -860,7 +871,7 @@ object ChatScreenScaffold {
             R.drawable.ic_send,
             "Отправить",
             bg = MarsTheme.ACCENT,
-            iconTint = Color.WHITE,
+            iconTint = MarsTheme.TEXT_STRONG,
             sizeDp = 36,
             strokeColor = 0
         ).apply {
@@ -882,6 +893,7 @@ object ChatScreenScaffold {
         return Scaffold(
             root = root,
             networkBanner = networkBanner,
+            sessionTitle = sessionTitle,
             miniPlayer = MiniPlayerViews(miniPlayerBox, miniPlayerTitle, miniPlayerPlayBtn),
             statusView = statusView,
             search = SearchViews(searchPlate, searchInput, searchCounter),
@@ -900,7 +912,7 @@ object ChatScreenScaffold {
                 reasoningBtn = reasoningBtn,
                 activityModeBtn = activityModeBtn,
                 workspaceBtn = workspaceBtn,
-                contextIndicator = contextIndicator,
+                contextRing = contextRing,
                 usageIndicator = usageIndicator,
                 toolsetsChip = toolsetsChip,
                 quotaChip = quotaChip,

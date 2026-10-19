@@ -55,6 +55,17 @@ class ContextBudgetPolicyTest {
     }
 
     @Test
+    fun `pill carries the ring percent for the composer ring`() {
+        // Кольцо в композере рисует дугу по этому числу; текст `NN% · used/total`
+        // остался для деталей и тестов паритета.
+        assertEquals(6, ContextBudgetPolicy.pill(usage(12_345, 200_000, 6), false).percent)
+        assertEquals(77, ContextBudgetPolicy.pill(usage(154_000, 200_000, 77), false).percent)
+        // Сжатие не имеет процента: кольцо показывает полную дугу с многоточием.
+        assertNull(ContextBudgetPolicy.pill(usage(10, 100, 10), true).percent)
+        assertNull(ContextBudgetPolicy.pill(null, false).percent)
+    }
+
+    @Test
     fun `pill carries the level for coloring`() {
         assertEquals(
             ContextBudgetLevel.NORMAL,

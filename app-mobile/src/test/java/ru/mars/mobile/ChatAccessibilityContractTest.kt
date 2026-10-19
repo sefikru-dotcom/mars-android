@@ -184,4 +184,57 @@ class ChatAccessibilityContractTest {
             chat.contains("miniPlayerPlayBtn.contentDescription = state.statusLabel")
         )
     }
+
+    // --- Кольцо контекста, живой заголовок, лента чипов ---------------------------------
+
+    private val contextRingView by lazy { source("src/main/java/ru/mars/mobile/ContextRingView.kt") }
+
+    @Test
+    fun `context ring announces fill percent and stays a touch target`() {
+        // Кольцо — не картинка: без contentDescription TalkBack прочитает «View».
+        assertTrue(
+            "Кольцо обязано озвучивать заполнение окна из политики",
+            contextRingView.contains("contentDescription = pill.contentDescription")
+        )
+        // Число в центре — только визуальный акцент; смысл несёт описание.
+        assertTrue(
+            "Видимый процент обязан совпадать с озвученным (percent из ContextPillView)",
+            contextRingView.contains("label = percent.toString()")
+        )
+        assertTrue(
+            "Кольцо обязано иметь минимальный размер 24dp (тап не по 8dp точке)",
+            contextRingView.contains("minimumWidth = sizePx.toInt()")
+        )
+    }
+
+    @Test
+    fun `session title in header is a real text view with the session name`() {
+        assertTrue(
+            "Шапка обязана отдавать title наружу, а не прятать его в локальной переменной",
+            scaffold.contains("val sessionTitle: TextView")
+        )
+        assertTrue(
+            "Живой заголовок пишется в шапку одной точкой (текст + видимость)",
+            chat.contains("view.text = text") && chat.contains("view.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE")
+        )
+    }
+
+    @Test
+    fun `chip captions carry no typographic glyphs`() {
+        // «·»/«•» в подписи — это потерянная иконка: на OEM-шрифте глиф подменяется
+        // или рендерится эмодзи. Подпись чипа — только текст.
+        val banned = listOf('\u00B7', '\u2022')
+        val sources = listOf(
+            "src/main/java/ru/mars/mobile/QuickChips.kt",
+            "src/main/java/ru/mars/mobile/SmartSuggestionsPolicy.kt",
+        ).map { source(it) }
+        sources.forEach { src ->
+            banned.forEach { glyph ->
+                assertTrue(
+                    "Подписи чипов не должны содержать глиф U+%04X".format(glyph.code),
+                    !src.contains(glyph)
+                )
+            }
+        }
+    }
 }

@@ -15,6 +15,8 @@ data class ContextPillView(
     val level: ContextBudgetLevel?,
     val contentDescription: String?,
     val compression: Boolean = false,
+    /** Процент заполнения окна — дуга кольца ([ContextRingView]); null при сжатии. */
+    val percent: Int? = null,
 )
 
 /**
@@ -62,6 +64,7 @@ object ContextBudgetPolicy {
             text = "${usage.percent}% · ${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.maxTokens)}",
             level = level(usage.percent),
             contentDescription = "Заполнение контекста: ${usage.percent}%",
+            percent = usage.percent,
         )
     }
 

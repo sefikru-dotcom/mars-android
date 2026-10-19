@@ -99,7 +99,9 @@ jobs:
           python3 scripts/theme-parity-audit.py app-tv/src/main
 
       - name: Unit tests for release-gate scripts (pure python3, no SDK)
-        run: python3 tests/test_apk_contract_check.py
+        run: |
+          python3 tests/test_apk_contract_check.py
+          python3 tests/test_theme_parity_audit.py
 
       - name: Verify signing contract with apksigner
         run: |

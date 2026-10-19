@@ -11,6 +11,7 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
+import android.text.style.BulletSpan
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.ImageSpan
@@ -263,8 +264,15 @@ class MemoryActivity : ComponentActivity() {
                             appendInlineSpans(ssb, line.spans)
                         }
                         is RichLine.Bullet -> {
-                            ssb.append("•  ")
+                            // Маркер рисует canvas (BulletSpan) — глиф «•» из строки убран.
+                            val bulletStart = ssb.length
                             appendInlineSpans(ssb, line.spans)
+                            ssb.setSpan(
+                                BulletSpan(dp(10), MarsTheme.TEXT_MUTED),
+                                bulletStart,
+                                ssb.length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
                         }
                         is RichLine.Numbered -> {
                             ssb.append("${line.number} ")
