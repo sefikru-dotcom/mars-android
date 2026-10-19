@@ -45,6 +45,9 @@ import ru.mars.network.model.MusicPlayerState
 import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.Playlist
+import ru.mars.network.repository.AlbumResult
+import ru.mars.network.repository.MusicAlbum
+import ru.mars.network.repository.MusicAlbumSummary
 import ru.mars.network.repository.MusicArtist
 import ru.mars.network.repository.MusicRepository
 import java.io.Closeable
@@ -147,6 +150,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * полёте, повторный тап по имени не запускает второй (см. [MusicArtistPolicy.canStartRequest]).
      */
     private var artistJob: Job? = null
+    /**
+     * Запрос альбомов исполнителя (`GET /api/search?type=albums`). Отдельный от
+     * [artistJob]: песни и альбомы грузятся параллельно, и медленный поиск не
+     * задерживает страницу исполнителя. Гейт тот же — [MusicArtistPolicy.canStartRequest].
+     */
+    private var albumsJob: Job? = null
+    /** Запрос содержимого альбома (`GET /api/album/{browseId}`); один на диалог. */
+    private var albumJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
@@ -2309,6 +2320,26 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val retryBtn = MarsDialog.quietButton(this, MusicArtistPolicy.RETRY) {}
         retryBtn.visibility = View.GONE
 
+        // --- секция «Альбомы»: отдельный запрос к поиску (страница исполнителя
+        // альбомов не отдаёт), поэтому у неё свои состояние, ошибка и повтор.
+        val albumsTitle = TextView(this).apply {
+            text = MusicAlbumPolicy.SECTION_TITLE
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(16), 0, dp(4))
+            visibility = View.GONE
+        }
+        val albumsStatus = TextView(this).apply {
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(4), 0, dp(6))
+            visibility = View.GONE
+        }
+        val albumsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val albumsRetry = MarsDialog.quietButton(this, MusicAlbumPolicy.RETRY) {}
+        albumsRetry.visibility = View.GONE
+
         /** Обратная связь по действию — в строке статуса диалога (за ним ничего не видно). */
         fun feedback(message: String) {
             statusView.text = message
@@ -2370,6 +2401,54 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
 
+        /**
+         * Альбомы исполнителя: `GET /api/search?q=<имя>&type=albums` (страница
+         * исполнителя их не отдаёт — проверено на живом сервисе).
+         *
+         * Показ «Загружаем…» → карточки, «Альбомов нет» или «Проверьте сеть» +
+         * «Повторить». Повтор гейтится тем же [MusicArtistPolicy.canStartRequest]:
+         * серия тапов по «Повторить» не плодит запросы.
+         *
+         * [shownAlbums] помнит уже показанные карточки: повторный запрос после
+         * сбоя может вернуть неполную выдачу, и список не должен «схлопнуться».
+         */
+        var shownAlbums = emptyList<MusicAlbumSummary>()
+
+        fun loadAlbums() {
+            if (!MusicArtistPolicy.canStartRequest(albumsJob?.isActive == true)) return
+            albumsTitle.visibility = View.VISIBLE
+            albumsStatus.visibility = View.VISIBLE
+            albumsStatus.text = MusicAlbumPolicy.LOADING
+            albumsStatus.setTextColor(MarsTheme.TEXT_MUTED)
+            albumsRetry.visibility = View.GONE
+            albumsBox.removeAllViews()
+            albumsJob = lifecycleScope.launch {
+                val remote = try {
+                    withContext(Dispatchers.IO) { repository.searchAlbums(target) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    albumsStatus.text = MusicAlbumPolicy.NETWORK_FAILURE
+                    albumsStatus.setTextColor(MarsTheme.ACCENT_TEXT)
+                    albumsRetry.visibility = View.VISIBLE
+                    return@launch
+                }
+                shownAlbums = MusicAlbumPolicy.mergeSummaries(remote, shownAlbums)
+                if (!MusicAlbumPolicy.hasAlbums(shownAlbums)) {
+                    albumsStatus.text = MusicAlbumPolicy.EMPTY
+                    albumsStatus.setTextColor(MarsTheme.TEXT_MUTED)
+                    return@launch
+                }
+                albumsStatus.visibility = View.GONE
+                shownAlbums.forEach { album ->
+                    albumsBox.addView(
+                        albumCard(album) { openAlbumDialog(album.browseId) },
+                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
+                    )
+                }
+            }
+        }
+
         var dialogRef: Dialog? = null
         dialogRef = MarsDialog.show(this) { root ->
             root.addView(MarsDialog.header(this, MusicArtistPolicy.TITLE, null))
@@ -2390,13 +2469,22 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             root.addView(statusView)
             root.addView(songsBox, LinearLayout.LayoutParams(-1, -2))
             root.addView(retryBtn)
+            root.addView(albumsTitle)
+            root.addView(albumsStatus)
+            root.addView(albumsBox, LinearLayout.LayoutParams(-1, -2))
+            root.addView(albumsRetry)
             root.addView(MarsDialog.quietButton(this, MusicArtistPolicy.CLOSE) { dialogRef?.dismiss() })
             retryBtn.setOnClickListener { load() }
+            albumsRetry.setOnClickListener { loadAlbums() }
             emptyList()
         }
-        // Закрыли диалог — незавершённый запрос больше не нужен.
-        dialogRef?.setOnDismissListener { artistJob?.cancel() }
+        // Закрыли диалог — незавершённые запросы (песни и альбомы) больше не нужны.
+        dialogRef?.setOnDismissListener {
+            artistJob?.cancel()
+            albumsJob?.cancel()
+        }
         load()
+        loadAlbums()
     }
 
     /**
@@ -2462,6 +2550,218 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
         row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(32), dp(32)))
         return row
+    }
+
+    /**
+     * Карточка альбома в секции «Альбомы»: обложка 48dp, название, исполнитель и год.
+     *
+     * Треки здесь не тянутся: карточка открывает диалог альбома, поэтому список из
+     * N альбомов — это один запрос, а не N запросов за треками.
+     */
+    private fun albumCard(album: MusicAlbumSummary, onClick: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 12)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            isClickable = true
+            isFocusable = true
+            // TalkBack читает ДЕЙСТВИЕ тапа — как у строк треков («Играть: …»).
+            contentDescription = MusicAlbumPolicy.cardDescription(album)
+            setOnClickListener { onClick() }
+        }
+        val cover = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 6)
+            clipToOutline = true
+        }
+        album.thumbnail?.takeIf { it.isNotBlank() }?.let { ImageLoader.load(it, cover) }
+        row.addView(cover, LinearLayout.LayoutParams(dp(48), dp(48)))
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+        info.addView(TextView(this).apply {
+            text = album.title
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        val subtitle = MusicAlbumPolicy.subtitle(album)
+        if (subtitle.isNotEmpty()) {
+            info.addView(TextView(this).apply {
+                text = subtitle
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+        }
+        row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+        return row
+    }
+
+    /**
+     * Диалог альбома: обложка, название, исполнитель, год/число треков и треки из
+     * `GET /api/album/{browseId}`.
+     *
+     * browseId проверяется здесь ещё раз: секция «Альбомы» берёт его из выдачи
+     * поиска, но диалог — отдельная точка входа, а сервер на чужой префикс отвечает
+     * кодом 500 (`must start with MPRE`). Локальная проверка не даёт показать
+     * «проверьте сеть» там, где виноват id.
+     *
+     * Состояния честные, как у диалога исполнителя: «Загружаем…» → треки, либо
+     * «Альбом не найден» (это ответ сервера, повтор не поможет), либо «проверьте
+     * сеть» + «Повторить» (повтор гейтится [MusicArtistPolicy.canStartRequest], так
+     * что серия тапов не плодит запросы). Тап по треку играет весь альбом с этой
+     * песни ([MarsMusicPlayer.playTrack]), «В очередь» — добавляет одну
+     * ([MarsMusicPlayer.enqueue]); мини-плеер и вкладка «Очередь» не затрагиваются.
+     */
+    private fun openAlbumDialog(rawBrowseId: String) {
+        val browseId = MusicAlbumPolicy.requestTarget(rawBrowseId)
+        if (browseId == null) {
+            showStatus(MusicAlbumPolicy.NOT_FOUND)
+            return
+        }
+        if (!MusicArtistPolicy.canStartRequest(albumJob?.isActive == true)) return
+
+        val cover = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 8)
+            clipToOutline = true
+            visibility = View.GONE
+        }
+        val titleView = TextView(this).apply {
+            textSize = 17f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val artistView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(2), 0, 0)
+            visibility = View.GONE
+        }
+        val metaView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(2), 0, 0)
+            visibility = View.GONE
+        }
+        val statusView = TextView(this).apply {
+            text = MusicAlbumPolicy.LOADING_ALBUM
+            textSize = 13f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(12), 0, dp(10))
+        }
+        val tracksBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val retryBtn = MarsDialog.quietButton(this, MusicAlbumPolicy.RETRY) {}
+        retryBtn.visibility = View.GONE
+
+        /** Обратная связь по действию — в строке статуса (за диалогом ничего не видно). */
+        fun feedback(message: String) {
+            statusView.visibility = View.VISIBLE
+            statusView.text = message
+            statusView.setTextColor(MarsTheme.ACCENT_TEXT)
+        }
+
+        fun load() {
+            if (!MusicArtistPolicy.canStartRequest(albumJob?.isActive == true)) return
+            statusView.visibility = View.VISIBLE
+            statusView.text = MusicAlbumPolicy.LOADING_ALBUM
+            statusView.setTextColor(MarsTheme.TEXT_MUTED)
+            retryBtn.visibility = View.GONE
+            tracksBox.removeAllViews()
+
+            fun renderFailure(notFound: Boolean) {
+                statusView.text = MusicAlbumPolicy.failureText(notFound = notFound)
+                statusView.setTextColor(MarsTheme.ACCENT_TEXT)
+                retryBtn.visibility =
+                    if (MusicAlbumPolicy.retryAvailable(notFound = notFound)) View.VISIBLE else View.GONE
+            }
+
+            fun renderAlbum(album: MusicAlbum) {
+                titleView.text = album.title
+                if (album.artist.isNotBlank()) {
+                    artistView.text = album.artist
+                    artistView.visibility = View.VISIBLE
+                }
+                val meta = MusicAlbumPolicy.meta(album.year, album.trackCount)
+                if (meta.isNotEmpty()) {
+                    metaView.text = meta
+                    metaView.visibility = View.VISIBLE
+                }
+                album.thumbnail?.let { url ->
+                    cover.visibility = View.VISIBLE
+                    ImageLoader.load(url, cover)
+                }
+                if (album.tracks.isEmpty()) {
+                    statusView.text = MusicAlbumPolicy.EMPTY_TRACKS
+                    statusView.setTextColor(MarsTheme.TEXT_MUTED)
+                    return
+                }
+                statusView.visibility = View.GONE
+                album.tracks.forEachIndexed { index, track ->
+                    // Тот же ряд, что в диалоге исполнителя: тап играет альбом с этой
+                    // песни, кнопка добавляет одну в очередь.
+                    tracksBox.addView(
+                        artistSongRow(track, index, album.tracks, ::feedback),
+                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
+                    )
+                }
+            }
+
+            albumJob = lifecycleScope.launch {
+                // Отмена (диалог закрыли) — не «сбой сети»: пробрасываем, чтобы не
+                // трогать вьюхи уже закрытого диалога.
+                val result = try {
+                    withContext(Dispatchers.IO) { repository.getAlbum(browseId) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    renderFailure(notFound = false)
+                    return@launch
+                }
+                when (result) {
+                    is AlbumResult.Loaded -> renderAlbum(result.album)
+                    AlbumResult.InvalidBrowseId -> renderFailure(notFound = true)
+                    is AlbumResult.Failed -> renderFailure(notFound = false)
+                }
+            }
+        }
+
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, MusicAlbumPolicy.TITLE, null))
+            val identity = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(12), 0, 0)
+            }
+            identity.addView(cover, LinearLayout.LayoutParams(dp(96), dp(96)))
+            val names = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), 0, 0, 0)
+            }
+            names.addView(titleView)
+            names.addView(artistView)
+            names.addView(metaView)
+            identity.addView(names, LinearLayout.LayoutParams(0, -2, 1f))
+            root.addView(identity)
+            root.addView(statusView)
+            root.addView(tracksBox, LinearLayout.LayoutParams(-1, -2))
+            root.addView(retryBtn)
+            root.addView(MarsDialog.quietButton(this, MusicAlbumPolicy.CLOSE) { dialogRef?.dismiss() })
+            retryBtn.setOnClickListener { load() }
+            emptyList()
+        }
+        // Закрыли диалог — незавершённый запрос больше не нужен.
+        dialogRef?.setOnDismissListener { albumJob?.cancel() }
+        load()
     }
 
     /** Radio/lyrics act on the current track only: dim and disable both without one. */
