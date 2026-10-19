@@ -96,6 +96,38 @@ object MusicAlbumPolicy {
         return merged
     }
 
+    /**
+     * Порядок карточек в секции «Альбомы»: сначала альбомы самого исполнителя,
+     * затем остальная выдача — внутри каждой группы сохраняется серверный порядок.
+     *
+     * Зачем перестановка: `GET /api/search?q=…&type=albums` — поиск по релевантности,
+     * а не «альбомы исполнителя». По «Linkin Park» из 40 карточек своя одна
+     * (`Hybrid Theory`), остальные — трибьюты и каверы вида «Mano DJ — Mtg Linkin
+     * Park»; без перестановки чужие альбомы стоят первыми.
+     *
+     * Почему это НЕ фильтр: выдача бывает полностью корректной, не имея ни одного
+     * совпадения строки. Запрос `Zemfira` возвращает альбомы «Земфира» — латиница
+     * против кириллицы; транслитерацию здесь делать нельзя (на коротких именах она
+     * даёт ложные срабатывания, это отдельная задача). Поэтому чужие карточки не
+     * выбрасываются, а уезжают вниз, и если своих не нашлось ни одной — список
+     * возвращается как есть: «Альбомов нет» на корректной выдаче был бы регрессом.
+     *
+     * Пустое имя исполнителя — фильтровать не по чему, список не трогаем.
+     */
+    fun rankForArtist(albums: List<MusicAlbumSummary>, artistName: String): List<MusicAlbumSummary> {
+        val needle = normalizeArtist(artistName)
+        if (needle.isEmpty() || albums.isEmpty()) return albums
+        val own = ArrayList<MusicAlbumSummary>(albums.size)
+        val foreign = ArrayList<MusicAlbumSummary>(albums.size)
+        albums.forEach { album ->
+            if (sameArtist(normalizeArtist(album.artist), needle)) own += album else foreign += album
+        }
+        // Своих нет — значит, совпадать нечему (другой алфавит/написание): порядок
+        // сервера остаётся единственным осмысленным. Свои все — переставлять нечего.
+        if (own.isEmpty() || foreign.isEmpty()) return albums
+        return own + foreign
+    }
+
     /** Есть ли что показывать: пустой список и список из пустых id — одно и то же. */
     fun hasAlbums(albums: List<MusicAlbumSummary>): Boolean =
         albums.any { it.browseId.isNotBlank() }
@@ -149,6 +181,50 @@ object MusicAlbumPolicy {
     fun retryAvailable(notFound: Boolean): Boolean = !notFound
 
     // ------------------------------------------------------------ внутреннее
+
+    /**
+     * Приведение имени исполнителя к сравнимому виду: регистр, пунктуация,
+     * кавычки и лишние пробелы не должны решать, «свой» это альбом или нет.
+     * Всё, что не буква и не цифра, считается разделителем слов — так
+     * «Linkin Park», «LINKIN PARK» и «Linkin-Park» дают одну строку, а
+     * «Mano DJ — Mtg Linkin Park» остаётся четырьмя словами.
+     *
+     * `lowercase()` без локали — намеренно: турецкая локаль превратила бы
+     * «I» в «ı» и развалила бы сравнение латиницы.
+     */
+    private fun normalizeArtist(raw: String): String {
+        val builder = StringBuilder(raw.length)
+        var pendingSpace = false
+        raw.lowercase().forEach { ch ->
+            if (ch.isLetterOrDigit()) {
+                if (pendingSpace && builder.isNotEmpty()) builder.append(' ')
+                pendingSpace = false
+                builder.append(ch)
+            } else {
+                pendingSpace = true
+            }
+        }
+        return builder.toString()
+    }
+
+    /**
+     * Совпал ли исполнитель альбома с искомым.
+     *
+     * Сравнение — равенство или вхождение ЦЕЛЫМ словом с начала строки:
+     * «linkin park» и «linkin park feat x» — свои, «mano dj mtg linkin park» —
+     * чужой (имя лишь встречается внутри, но альбом не его). Наивный поиск
+     * подстроки здесь дал бы «своим» любой кавер, у которого имя исполнителя
+     * приписано в хвосте, — ровно тот дефект, который чиним.
+     */
+    private fun sameArtist(candidate: String, needle: String): Boolean {
+        if (candidate.isEmpty()) return false
+        if (candidate == needle) return true
+        return candidate.startsWithWord(needle) || needle.startsWithWord(candidate)
+    }
+
+    /** [this] начинается с [prefix] и граница проходит по слову, а не по букве. */
+    private fun String.startsWithWord(prefix: String): Boolean =
+        length > prefix.length && startsWith(prefix) && this[prefix.length] == ' '
 
     /** Русская форма числительного: 1 → one, 2..4 → few, остальное → many. */
     private fun plural(count: Long, one: String, few: String, many: String): String {

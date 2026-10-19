@@ -88,6 +88,122 @@ class MusicAlbumPolicyTest {
         assertEquals("Альбомов нет", MusicAlbumPolicy.EMPTY)
     }
 
+    // ------------------------------------------------------- чужие в выдаче
+
+    @Test
+    fun rankPutsOwnAlbumsFirstKeepingServerOrderInsideGroups() {
+        // Порядок и состав — как в живой выдаче по «Linkin Park»: своя одна,
+        // остальные — трибьюты и каверы.
+        val albums = listOf(
+            album("MPREb_tribute", "Tribute to Linkin Park", artist = "Various Artists"),
+            album("MPREb_hybrid", "Hybrid Theory", artist = "Linkin Park"),
+            album("MPREb_mtg", "Mtg Linkin Park", artist = "Mano DJ — Mtg Linkin Park"),
+            album("MPREb_meteora", "Meteora", artist = "linkin park"),
+        )
+        val ranked = MusicAlbumPolicy.rankForArtist(albums, "Linkin Park")
+        assertEquals(
+            listOf("MPREb_hybrid", "MPREb_meteora", "MPREb_tribute", "MPREb_mtg"),
+            ranked.map { it.browseId },
+        )
+        // Ничего не потеряно и не добавлено: перестановка, а не фильтр.
+        assertEquals(albums.size, ranked.size)
+        assertEquals(albums.map { it.browseId }.toSet(), ranked.map { it.browseId }.toSet())
+    }
+
+    @Test
+    fun rankReturnsWholeListWhenNothingMatches() {
+        // Живой кейс: запрос `Zemfira` отдаёт альбомы «Земфира» — точных
+        // совпадений строки 0. Строгий фильтр показал бы «Альбомов нет».
+        val albums = listOf(
+            album("MPREb_z1", "ПРОСТИ МЕНЯ МОЯ ЛЮБОВЬ", artist = "Земфира"),
+            album("MPREb_z2", "Вендетта", artist = "Земфира"),
+            album("MPREb_z3", "Zemfira Tribute", artist = "Various Artists"),
+        )
+        val ranked = MusicAlbumPolicy.rankForArtist(albums, "Zemfira")
+        assertEquals(listOf("MPREb_z1", "MPREb_z2", "MPREb_z3"), ranked.map { it.browseId })
+    }
+
+    @Test
+    fun rankTreatsCoverWithNameInTheTailAsForeignButKeepsIt() {
+        // «Mano DJ — Mtg Linkin Park»: имя исполнителя лишь встречается внутри,
+        // альбом не его — но из списка не исчезает.
+        val albums = listOf(
+            album("MPREb_mtg", "Mtg Linkin Park", artist = "Mano DJ — Mtg Linkin Park"),
+            album("MPREb_hybrid", "Hybrid Theory", artist = "Linkin Park"),
+        )
+        val ranked = MusicAlbumPolicy.rankForArtist(albums, "Linkin Park")
+        assertEquals(listOf("MPREb_hybrid", "MPREb_mtg"), ranked.map { it.browseId })
+    }
+
+    @Test
+    fun rankDoesNotMatchPartialWord() {
+        // «Кинотеатр» не «Кино»: совпадение по буквам, а не по слову, — чужой.
+        val albums = listOf(
+            album("MPREb_other", "Чужое", artist = "Кинотеатр"),
+            album("MPREb_kino", "Группа крови", artist = "Кино"),
+        )
+        assertEquals(
+            listOf("MPREb_kino", "MPREb_other"),
+            MusicAlbumPolicy.rankForArtist(albums, "Кино").map { it.browseId },
+        )
+    }
+
+    @Test
+    fun rankCountsFeatInArtistNameAsOwn() {
+        // Обе стороны: на странице «Linkin Park», у альбома «Linkin Park feat. X» —
+        // и наоборот, когда страница открыта по полному имени.
+        val albums = listOf(
+            album("MPREb_tribute", "Tribute", artist = "Various Artists"),
+            album("MPREb_collab", "Collision Course", artist = "Linkin Park feat. Jay-Z"),
+        )
+        assertEquals(
+            listOf("MPREb_collab", "MPREb_tribute"),
+            MusicAlbumPolicy.rankForArtist(albums, "Linkin Park").map { it.browseId },
+        )
+        assertEquals(
+            listOf("MPREb_collab", "MPREb_tribute"),
+            MusicAlbumPolicy.rankForArtist(albums, "Linkin Park feat. Jay-Z").map { it.browseId },
+        )
+    }
+
+    @Test
+    fun rankIgnoresCasePunctuationAndSpaces() {
+        val albums = listOf(
+            album("MPREb_other", "Чужое", artist = "Volika — Жизнь - кино"),
+            album("MPREb_kino", "Группа крови", artist = "  КИНО! "),
+        )
+        assertEquals(
+            listOf("MPREb_kino", "MPREb_other"),
+            MusicAlbumPolicy.rankForArtist(albums, "Кино").map { it.browseId },
+        )
+    }
+
+    @Test
+    fun rankLeavesListAloneForBlankArtistName() {
+        val albums = listOf(
+            album("MPREb_a", "Первый", artist = "Кто-то"),
+            album("MPREb_b", "Второй", artist = "Другой"),
+        )
+        assertEquals(listOf("MPREb_a", "MPREb_b"), MusicAlbumPolicy.rankForArtist(albums, "").map { it.browseId })
+        assertEquals(listOf("MPREb_a", "MPREb_b"), MusicAlbumPolicy.rankForArtist(albums, "   ").map { it.browseId })
+        assertEquals(albums, MusicAlbumPolicy.rankForArtist(albums, "  "))
+    }
+
+    @Test
+    fun rankKeepsOrderWhenAllAlbumsAreOwn() {
+        val albums = listOf(
+            album("MPREb_a", "Первый"),
+            album("MPREb_b", "Второй"),
+            album("MPREb_c", "Третий"),
+        )
+        assertEquals(albums, MusicAlbumPolicy.rankForArtist(albums, "не меняет"))
+    }
+
+    @Test
+    fun rankOfEmptyListIsEmpty() {
+        assertEquals(emptyList<MusicAlbumSummary>(), MusicAlbumPolicy.rankForArtist(emptyList(), "Linkin Park"))
+    }
+
     // -------------------------------------------------------------- подписи
 
     @Test
