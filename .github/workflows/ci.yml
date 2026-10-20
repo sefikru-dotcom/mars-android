@@ -13,6 +13,21 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Пин отпечатка сертификата боевого ключа Марса. Один и тот же ключ подписывает
+# и mobile, и TV. Значение — SHA-256 сертификата (не ключа): оно публично, не
+# секрет, и однозначно отличает наш ключ от любого чужого debug-ключа.
+#
+# Почему пин, а не текст DN: боевой ключ Марса — это debug-сертификат Android
+# (DN `C=US, O=Android, CN=Android Debug`), поэтому проверка «в сертификате нет
+# androiddebugkey» валила каждый боевой релиз и выпуск ушёл на ручную публикацию
+# с хоста. Ключ НЕ перегенерировать: смена ключа ломает обновление поверх
+# установленного приложения.
+env:
+  MARS_EXPECTED_CERT_SHA256: 15da3b0219edc2b82a7ae20c73b18497d9034e4c745d842390451b0cb7f3d311
+  MARS_PUBLISH_USER: root
+  MARS_PUBLISH_HOST: marscore.ru
+  MARS_PUBLISH_DIR: /opt/hermes-webui/static/apk
+
 # Один job вместо трёх. Раньше wrapper-validation, android и release-signing
 # шли отдельными job'ами: каждый job тарифицируется минимум как 1 минута, и
 # wrapper-validation (16 с реальной работы) съедал по минуте за прогон.
@@ -107,6 +122,7 @@ jobs:
         run: |
           set -eu
           APKSIGNER="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/build-tools -type f -name apksigner | sort -V | tail -1)"
+          export APKSIGNER
           for m in app-mobile app-tv; do
             dir="$m/build/outputs/apk/release"
             if [ "$SIGNING_EXPECTED" = signed ]; then
@@ -115,9 +131,13 @@ jobs:
               out="$("$APKSIGNER" verify --verbose --print-certs "$apk")"
               echo "$out"
               echo "$out" | grep -q '^Verifies' || { echo "FAIL: $m release APK does not verify"; exit 1; }
-              if echo "$out" | grep -qi 'androiddebugkey\|CN=Android Debug'; then
-                echo "FAIL: $m release signed with DEBUG key — not production"; exit 1
-              fi
+              # Подпись проверяется ПИНОМ отпечатка сертификата, а не текстом DN:
+              # боевой ключ Марса сам является debug-сертификатом Android
+              # (C=US, O=Android, CN=Android Debug), поэтому старая текстовая
+              # проверка валила каждый боевой релиз. Если MARS_EXPECTED_CERT_SHA256
+              # не задан, скрипт откатывается на старое поведение (запрет
+              # debug-ключа по DN) — обратная совместимость.
+              python3 scripts/apk-cert-pin-check.py "$apk" --apksigner "$APKSIGNER"
             else
               apk="$dir/$m-release-unsigned.apk"
               test -f "$apk" || { echo "FAIL: no unsigned release APK for $m"; exit 1; }
@@ -125,6 +145,9 @@ jobs:
                 echo "FAIL: $m 'unsigned' APK is actually signed — signing must come only from CI secrets"; exit 1
               fi
               echo "$m: unsigned release OK (signing secrets not configured)"
+              if [ -n "${MARS_EXPECTED_CERT_SHA256:-}" ]; then
+                echo "::warning title=cert pin skipped::$m release is unsigned (no keystore secrets) — MARS_EXPECTED_CERT_SHA256 was not verified for this build"
+              fi
             fi
           done
 
@@ -194,3 +217,110 @@ jobs:
             build/ci-artifacts/SHA256SUMS
           if-no-files-found: warn
           retention-days: 7
+
+  # Публикация боевого релиза ИЗ CI (раньше выпуск делали руками с хоста).
+  # Условия запуска жёсткие: только push в main и только при зелёном android.
+  # Ветки run/** и wave/** собираются, но НЕ публикуются.
+  release-publish:
+    name: Publish release APKs
+    needs: android
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      # Публикация настоящая только на main; на остальных событиях — план (--dry-run).
+      PUBLISH_DRY_RUN: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'false' || 'true' }}
+      MARS_PUBLISH_SSH_KEY_FILE: ${{ runner.temp }}/mars_publish_key
+    steps:
+      - uses: actions/checkout@v4
+
+      # Секрет не печатается: проверяется только факт его наличия. Без секрета
+      # job не падает (иначе любой форк/новичок ломает main), а печатает
+      # «publish skipped» и выходит с кодом 0.
+      - name: Check publish prerequisites
+        id: prereq
+        env:
+          MARS_PUBLISH_SSH_KEY: ${{ secrets.MARS_PUBLISH_SSH_KEY }}
+        run: |
+          set -eu
+          if [ -z "${MARS_PUBLISH_SSH_KEY:-}" ]; then
+            echo "publish skipped: secret MARS_PUBLISH_SSH_KEY is not configured"
+            echo "publish skipped: секрет MARS_PUBLISH_SSH_KEY не задан — релиз собран, но не опубликован" >> "$GITHUB_STEP_SUMMARY"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish enabled (dry-run=${PUBLISH_DRY_RUN})"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install publish SSH key
+        if: steps.prereq.outputs.enabled == 'true'
+        env:
+          MARS_PUBLISH_SSH_KEY: ${{ secrets.MARS_PUBLISH_SSH_KEY }}
+        run: |
+          set -eu
+          install -m 700 -d "$(dirname "$MARS_PUBLISH_SSH_KEY_FILE")"
+          key="${MARS_PUBLISH_SSH_KEY%$'\n'}"
+          printf '%s\n' "$key" > "$MARS_PUBLISH_SSH_KEY_FILE"
+          chmod 600 "$MARS_PUBLISH_SSH_KEY_FILE"
+          # Проверяем, что ключ парсится, не печатая его (публичная часть -> /dev/null).
+          ssh-keygen -y -f "$MARS_PUBLISH_SSH_KEY_FILE" > /dev/null \
+            || { echo "FAIL: MARS_PUBLISH_SSH_KEY не читается как приватный SSH-ключ"; exit 1; }
+          echo "publish key installed (содержимое не выводится)"
+
+      - name: Download release APK artifacts
+        if: steps.prereq.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build-${{ github.sha }}
+          path: ci-apk
+
+      # Перепроверка СКАЧАННОГО артефакта, а не только собранного в этом же
+      # workspace: публикуется ровно то, что прошло контракт (R8 + v3-only +
+      # пин отпечатка сертификата).
+      - name: Re-verify downloaded release APKs
+        if: steps.prereq.outputs.enabled == 'true'
+        run: |
+          set -eu
+          APKSIGNER="$(find "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"/build-tools -type f -name apksigner 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$APKSIGNER" ]; then APKSIGNER="$(command -v apksigner || true)"; fi
+          test -n "$APKSIGNER" || { echo "FAIL: apksigner не найден в раннере"; exit 1; }
+          for m in app-mobile app-tv; do
+            apk="ci-apk/$m/build/outputs/apk/release/$m-release.apk"
+            test -f "$apk" || { echo "FAIL: в артефактах нет $apk"; exit 1; }
+            python3 scripts/apk-contract-check.py "$apk" --signing-scheme v3-only --apksigner "$APKSIGNER"
+            python3 scripts/apk-cert-pin-check.py "$apk" --apksigner "$APKSIGNER"
+          done
+
+      - name: Publish APKs to distribution host
+        if: steps.prereq.outputs.enabled == 'true'
+        run: |
+          set -eu
+          extra=()
+          if [ "$PUBLISH_DRY_RUN" = "true" ]; then extra+=(--dry-run); fi
+          for pair in app-mobile:mars-mobile.apk app-tv:mars-tv.apk; do
+            m="${pair%%:*}"; name="${pair##*:}"
+            apk="ci-apk/$m/build/outputs/apk/release/$m-release.apk"
+            echo "--- $m -> $name"
+            python3 scripts/apk-publish-ci.py \
+              --apk "$apk" \
+              --name "$name" \
+              --remote-user "$MARS_PUBLISH_USER" \
+              --remote-host "$MARS_PUBLISH_HOST" \
+              --remote-dir "$MARS_PUBLISH_DIR" \
+              --ssh-key "$MARS_PUBLISH_SSH_KEY_FILE" \
+              ${extra[@]+"${extra[@]}"}
+          done
+
+      - name: Publish summary
+        if: always()
+        run: |
+          set -eu
+          if [ "${{ steps.prereq.outputs.enabled }}" != "true" ]; then
+            echo "publish skipped (нет секрета MARS_PUBLISH_SSH_KEY)" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$PUBLISH_DRY_RUN" = "true" ]; then
+            echo "publish dry-run: план проверен, раздача не изменялась" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "publish: см. шаг «Publish APKs to distribution host»" >> "$GITHUB_STEP_SUMMARY"
+          fi
