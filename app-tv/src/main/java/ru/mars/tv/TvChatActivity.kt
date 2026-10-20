@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -35,8 +36,11 @@ import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ContextStatusUpdate
+import ru.mars.network.model.GoalContinuation
+import ru.mars.network.model.GoalUpdate
 import ru.mars.network.model.SessionDetail
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.SessionTitleUpdate
 import ru.mars.network.model.StreamSideEvent
 import ru.mars.network.model.SubagentState
 import ru.mars.network.model.SubagentStatus
@@ -770,8 +774,26 @@ class TvChatActivity : AppCompatActivity() {
             // tail Error after Done no longer overwrites it. null = ignore.
             // Отрисовка батчится (TvLiveRenderBatchPolicy): не чаще одного обновления
             // текста в интервал — частота чанков не превращается в частоту релayout'ов.
-            is ChatEvent.Chunk -> liveAccumulator?.onChunk(event.text)?.let { rendered ->
-                onLiveAnswerText(rendered)
+            // Зона ответа: сюда доезжают и токены финального ответа, и промежуточная
+            // реплика `interim_assistant` — транспорт отдаёт её тем же [ChatEvent.Chunk]
+            // (`StreamEventMapper.interimAssistant`, дубль с `already_streamed=true`
+            // отбрасывается транспортом), поэтому мобильный контракт переиспользуется
+            // как есть: текст копится в том же пузыре, а [ChatEvent.Done] фиксирует его
+            // финальным (`finalizeLiveAnswerRich`) — промежуточная реплика не остаётся
+            // отдельным залипшим пузырём.
+            is ChatEvent.Chunk -> {
+                val accumulator = liveAccumulator
+                val rendered = accumulator?.onChunk(event.text)
+                if (rendered != null) {
+                    onLiveAnswerText(rendered)
+                } else {
+                    // Некуда положить текст — это НЕ норма: пузырь уже терминален
+                    // (Done/Error) либо лента перезагружена. Раньше кадр исчезал молча.
+                    Log.d(
+                        TvSseFrameTrace.TAG,
+                        TvSseFrameTrace.droppedChunk(accumulator != null, event.text.length),
+                    )
+                }
             }
             is ChatEvent.Error -> {
                 // Недорисованный текст отбрасывается: ошибка заменяет пузырь ЦЕЛИКОМ.
@@ -796,7 +818,11 @@ class TvChatActivity : AppCompatActivity() {
                 bindTurnModel(event)
                 renderSendControl()
             }
-            else -> Unit
+            // Незнакомое событие больше НЕ глотается молча: тип уходит в logcat
+            // на debug-уровне, поведение UI не меняется ([TvSseFrameTrace]).
+            else -> TvSseFrameTrace.unhandledChatEvent(event)?.let { line ->
+                Log.d(TvSseFrameTrace.TAG, line)
+            }
         }
         renderStatus()
     }
@@ -1760,8 +1786,12 @@ class TvChatActivity : AppCompatActivity() {
 
     /**
      * Side-канал SSE-метаданных ([StreamSideEvent]) живого хода: ТВ-чат реагирует
-     * только на `context_status` (статус префилл-контекста) — остальные носители
-     * доставляются, но остаются без реакции (паритет с мобильным чатом).
+     * на `context_status` (бейдж префилл-контекста) и на жизненный цикл субагентов.
+     * `title`/`goal`/`goal_continue` доставляются, но остаются без реакции (паритет
+     * с мобильным чатом) — и именно поэтому они ПИШУТСЯ в лог на debug-уровне:
+     * side-канал намеренно не sealed, сервер может добавить кадр без правки
+     * транспорта, и молчаливый `else` сделал бы «на ТВ не работает» неотличимым
+     * от «сервер не прислал».
      *
      * Кадр приходит на IO-контексте потока — прыжок на UI-поток здесь.
      * [boundSessionId] фиксирует сессию на момент старта хода, [boundGeneration] —
@@ -1780,7 +1810,9 @@ class TvChatActivity : AppCompatActivity() {
             is SubagentStatusUpdate -> runOnUiThread {
                 if (boundGeneration == streamGeneration) onSubagentUpdate(event, boundSessionId)
             }
-            else -> Unit
+            else -> TvSseFrameTrace.unhandledSideEvent(event)?.let { line ->
+                Log.d(TvSseFrameTrace.TAG, line)
+            }
         }
     }
 
@@ -2790,4 +2822,125 @@ class TvChatActivity : AppCompatActivity() {
         /** Process-wide scope for fire-and-forget server cancels that must outlive the Activity. */
         private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
+}
+
+/**
+ * Трассировка SSE-кадров ТВ-чата: «неизвестный кадр не теряется молча».
+ *
+ * До этой политики оба диспетчера живого хода заканчивались `else -> Unit`, и любой
+ * кадр, которого ТВ-чат не ждал, исчезал без единой строки в logcat. Для sealed-потока
+ * [ChatEvent] это страховка на будущее (новый вариант приедет из core-network), а для
+ * side-канала [StreamSideEvent] — реальный сегодняшний риск: интерфейс намеренно НЕ
+ * sealed, сервер добавляет кадр без правки транспорта, и без трассы «на ТВ не работает»
+ * неотличимо от «сервер не прислал».
+ *
+ * Контракт двух кадров, ради которых политика появилась:
+ * - `context_status` -> [ContextStatusUpdate] в side-канале -> бейдж
+ *   [TvContextStatusPresenter] (явная ветка диспетчера, трассы не требует);
+ * - `interim_assistant` -> транспорт отдаёт его как [ChatEvent.Chunk]
+ *   (`StreamEventMapper.interimAssistant`; кадр с `already_streamed=true` отбрасывается
+ *   транспортом как дубль уже стримленного текста), поэтому промежуточная реплика
+ *   доезжает в зону ответа тем же путём, что и токены, и фиксируется финальным ответом
+ *   на [ChatEvent.Done] — контракт мобильного чата (`ChatUiState` + appendChunk)
+ *   переиспользован дословно, свой формат не изобретается.
+ *
+ * Логика чистая (без android.*): диспетчеры только печатают готовую строку через
+ * [android.util.Log.d], поэтому таблица «что обработано / что нет» проверяется
+ * юнит-тестами на JVM.
+ */
+internal object TvSseFrameTrace {
+
+    /** Тег logcat живого хода ТВ-чата. */
+    const val TAG = "MarsTvChat"
+
+    /**
+     * Имена событий sealed-потока, которые ТВ-чат действительно обрабатывает: явными
+     * ветками диспетчера, слоем сессии ([TvChatSessionFlow]), интерактивными карточками
+     * или режимом показа хода ([TvActivityDisplayPolicy]). Список — не «красивый», а
+     * проверяемый: тест сверяет его с фактическим набором [ChatEvent], чтобы новый
+     * вариант не оказался «обработанным» по недоразумению.
+     */
+    val HANDLED_CHAT_EVENTS: Set<String> = setOf(
+        "session_bound",
+        "stream_started",
+        "chunk/interim_assistant",
+        "thought",
+        "tool_call",
+        "tool_result",
+        "phase",
+        "approval",
+        "clarify",
+        "metering",
+        "pending_steer_leftover",
+        "done",
+        "error",
+    )
+
+    /**
+     * Имя кадра для лога. Для `interim_assistant` имя двойное намеренно: на уровне
+     * транспорта это [ChatEvent.Chunk], и по логу должно быть видно, что зона ответа
+     * показывает именно промежуточную реплику, а не токены финального ответа.
+     */
+    fun chatEventName(event: ChatEvent): String = when (event) {
+        is ChatEvent.SessionBound -> "session_bound"
+        is ChatEvent.StreamStarted -> "stream_started"
+        is ChatEvent.Chunk -> "chunk/interim_assistant"
+        is ChatEvent.Thought -> "thought"
+        is ChatEvent.ToolCall -> "tool_call"
+        is ChatEvent.ToolResult -> "tool_result"
+        is ChatEvent.Phase -> "phase"
+        is ChatEvent.ApprovalRequired -> "approval"
+        is ChatEvent.ClarifyRequired -> "clarify"
+        is ChatEvent.ContextUsage -> "metering"
+        is ChatEvent.SteerLeftover -> "pending_steer_leftover"
+        ChatEvent.Done -> "done"
+        is ChatEvent.Error -> "error"
+        // sealed-интерфейс расширяется только правкой core-network: сюда попадёт
+        // новый вариант, добавленный без ведома ТВ-чата.
+        else -> "unknown:${event.javaClass.simpleName}"
+    }
+
+    /**
+     * Строка для события sealed-потока, которое ТВ-чат не отрисовал; null — событие
+     * обработано, шуметь не о чем.
+     */
+    fun unhandledChatEvent(event: ChatEvent): String? {
+        val name = chatEventName(event)
+        if (name in HANDLED_CHAT_EVENTS) return null
+        return "SSE-событие без реакции ТВ-чата: $name — тип доставлен транспортом, но не разобран"
+    }
+
+    /** Имя кадра side-канала; для незнакомого носителя — его класс (тип важнее содержимого). */
+    fun sideEventName(event: StreamSideEvent): String = when (event) {
+        is ContextStatusUpdate -> "context_status"
+        is SubagentStatusUpdate -> "subagent"
+        is SessionTitleUpdate -> "title"
+        is GoalUpdate -> "goal"
+        is GoalContinuation -> "goal_continue"
+        else -> "unknown:${event.javaClass.simpleName}"
+    }
+
+    /**
+     * Строка для кадра side-канала, на который ТВ-чат не реагирует; null — кадр обработан
+     * (`context_status` -> бейдж, `subagent` -> доска). Известные-но-без-реакции кадры
+     * (`title`/`goal`/`goal_continue`) логируются отдельной формулировкой: это осознанный
+     * паритет с мобильным чатом, а не пропущенная фича.
+     */
+    fun unhandledSideEvent(event: StreamSideEvent): String? = when (event) {
+        is ContextStatusUpdate, is SubagentStatusUpdate -> null
+        is SessionTitleUpdate, is GoalUpdate, is GoalContinuation ->
+            "side-кадр доставлен без реакции ТВ-чата: ${sideEventName(event)} (паритет с мобильным)"
+        else ->
+            "side-кадр неизвестного типа: ${sideEventName(event)} — сервер прислал кадр, " +
+                "которого ТВ-чат не знает"
+    }
+
+    /**
+     * Чанк, который некуда положить: живого пузыря нет (лента перезагружена) или он уже
+     * терминален (Done/Error). Текст такого кадра не показывается — раньше это
+     * происходило без следа, теперь видно в logcat.
+     */
+    fun droppedChunk(hasAccumulator: Boolean, chars: Int): String =
+        "чанк $chars симв. не показан: " +
+            if (hasAccumulator) "ответ уже терминален (Done/Error)" else "живого пузыря нет"
 }
