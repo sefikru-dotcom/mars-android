@@ -2021,6 +2021,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Колбэки [HandsFreeCapture] приходят с потока чтения микрофона — на UI перекладываем. */
     private val handsFreeListener = object : HandsFreeCapture.Listener {
         override fun onSpeechStarted() {
+            // Колбэки захвата приходят с потока чтения микрофона, а дальше цикл меняет
+            // состояние и трогает TextView — только на главном потоке.
             runOnUiThread {
                 if (::voiceLoop.isInitialized) voiceLoop.onSpeechStarted()
             }

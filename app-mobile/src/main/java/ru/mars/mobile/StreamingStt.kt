@@ -1,5 +1,8 @@
 package ru.mars.mobile
 
+import android.os.Handler
+import android.os.Looper
+
 /**
  * Потоковый ASR на устройстве: тонкая обёртка над движком ([AsrEnginePort]).
  *
@@ -39,18 +42,36 @@ class StreamingStt(
 
     override var events: SpeechToText.Events? = null
 
-    /** Мост «события движка → события цикла». Один объект на всю жизнь обёртки. */
+    /**
+     * Мост «события движка → события цикла». Один объект на всю жизнь обёртки.
+     *
+     * ВАЖНО: движок зовёт эти колбэки с потока чтения микрофона (`mars-voice-hands-free`),
+     * а подписчик ([VoiceDialogLoop]) меняет состояние и трогает TextView. Без перекладки
+     * на главный поток Android бросает CalledFromWrongThreadException, и реплика теряется.
+     */
     private val engineEvents = object : AsrEnginePort.Events {
-        override fun onSpeechStarted() {
-            events?.onSpeechStarted()
-        }
+        override fun onSpeechStarted() = postToMain { events?.onSpeechStarted() }
 
-        override fun onPartial(text: String) {
-            events?.onPartial(text)
-        }
+        override fun onPartial(text: String) = postToMain { events?.onPartial(text) }
 
-        override fun onFinal(text: String) {
-            events?.onFinal(text)
+        override fun onFinal(text: String) = postToMain { events?.onFinal(text) }
+    }
+
+    /** Главный Looper: создаётся лениво, чтобы обёртка не требовала Android в JVM-тестах. */
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    /**
+     * Выполнить на главном потоке. В JVM-тестах Looper'а нет — выполняем сразу, иначе
+     * события не дошли бы вообще (тесты гоняют чтение и проверку в одном потоке).
+     */
+    private fun postToMain(block: () -> Unit) {
+        val looper = runCatching { Looper.getMainLooper() }.getOrNull()
+        if (looper == null) {
+            block()
+        } else if (Looper.myLooper() == looper) {
+            block()
+        } else {
+            mainHandler.post(block)
         }
     }
 

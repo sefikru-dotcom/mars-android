@@ -10,12 +10,18 @@ package ru.mars.mobile.asr
  */
 data class AsrConfig(
     /**
-     * Слова-подсказки для контекстного биасинга. Пустой список — обычный `greedy_search`
-     * (быстрее и точнее на числах). Непустой список переключает декодер на
-     * `modified_beam_search`: только в этом режиме sherpa-onnx вообще читает hotwords
-     * (см. комментарий в [SherpaAsrBackend]).
+     * Слова-подсказки для контекстного биасинга.
+     *
+     * ПО УМОЛЧАНИЮ ПУСТО, и это не забывчивость. Hotwords в sherpa-onnx требуют
+     * `modified_beam_search` + `modeling_unit=bpe` + текстовый BPE-словарь. У модели
+     * `zipformer-small-ru-vosk-int8` рядом лежит `bpe.model` — БИНАРНЫЙ, а native ждёт
+     * текстовый файл «токен пробел score» на каждой строке. При несовпадении формата
+     * C++-инициализатор вызывает `SHERPA_ONNX_EXIT(-1)`: процесс умирает сигналом 6
+     * (SIGABRT) без исключения, без tombstone от приложения. Проверено на POCO F5:
+     * `attention_dims does not exist in the metadata` в логе и мгновенная смерть процесса.
+     * Поэтому включать hotwords можно только вместе с подготовленным текстовым словарём.
      */
-    val hotwords: List<String> = DEFAULT_HOTWORDS,
+    val hotwords: List<String> = emptyList(),
 
     /** Вес подсказки: больше — сильнее тянет к hotword, но растёт риск «услышать» его в шуме. */
     val hotwordsScore: Float = 1.5f,

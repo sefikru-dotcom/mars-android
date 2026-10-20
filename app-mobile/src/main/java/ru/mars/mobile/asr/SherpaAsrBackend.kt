@@ -28,6 +28,12 @@ import java.io.File
  *    и `modeling_unit = "bpe"` включаются строго вместе и только под modified_beam_search.
  * 3. Для BPE-модели слова кодируются в токены через `bpe.model`, который лежит рядом
  *    с моделью; без него контекстный биасинг не собрать.
+ * 4. `modelType` ОБЯЗАН совпадать с метаданными модели. У `zipformer-small-ru-vosk-int8`
+ *    в метаданных `comment = streaming zipformer2`, и при `modelType = "zipformer"` native
+ *    читает `attention_dims`, которых у zipformer2 нет, после чего вызывает
+ *    `SHERPA_ONNX_EXIT(-1)` — процесс умирает с exit 255 (в logcat: status=ff00,
+ *    "'attention_dims' does not exist in the metadata"). Исключения нет, откат в Kotlin
+ *    не срабатывает. Проверять `comment` модели при смене модели.
  */
 class SherpaAsrBackend : AsrBackend {
 
@@ -58,7 +64,7 @@ class SherpaAsrBackend : AsrBackend {
             numThreads = config.numThreads,
             debug = false,
             provider = "cpu",
-            modelType = "zipformer",
+            modelType = "zipformer2",
             // Пустые строки, когда hotwords выключены: native-слой тогда не пытается
             // читать bpe.model и не валидирует modeling_unit.
             modelingUnit = if (useHotwords) "bpe" else "",
