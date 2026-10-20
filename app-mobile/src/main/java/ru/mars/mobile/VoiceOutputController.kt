@@ -64,6 +64,23 @@ class VoiceOutputController(
     private var speakNextAnswer = false
 
     /**
+     * Ответ этого хода будет озвучен: включён авторежим или взведён одноразовый
+     * [armSpeakNextAnswer]. Хост спрашивает это в НАЧАЛЕ хода, чтобы решить, отдавать ли
+     * дельты стрима потоковой озвучке ([StreamingSpeechController]) — ждать терминального
+     * Done значило бы потерять всю экономию задержки.
+     */
+    val wantsSpeech: Boolean
+        get() = engineAvailable && foreground && (autoSpeakEnabled || speakNextAnswer)
+
+    /**
+     * Ход озвучен потоковым путём: одноразовое взведение израсходовано, иначе следующий
+     * обычный ход зазвучал бы без просьбы пользователя.
+     */
+    fun consumeSpeakNextAnswer() {
+        speakNextAnswer = false
+    }
+
+    /**
      * Хост узнаёт, что озвучка реально закончилась (или оборвалась). Нужен только
      * hands-free-циклу: пока TTS говорит, микрофон не должен приниматься за ответ пользователя,
      * а как только звук стих — цикл снова слушает. Движок сообщает об этом сам (Android TTS —
@@ -76,6 +93,11 @@ class VoiceOutputController(
     /** Озвучка сейчас звучит: ставится при принятом [speakInternal], снимается любым стопом. */
     var speaking: Boolean = false
         private set
+
+    /** Хост сообщил, что звук идёт из ДРУГОГО пути (потоковая озвучка фраз). */
+    fun setExternalSpeaking(value: Boolean) {
+        speaking = value
+    }
 
     /** Platform engine init result (async). `false` disables all output gracefully. */
     fun onEngineReady(available: Boolean) {

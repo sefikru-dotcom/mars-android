@@ -240,6 +240,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Серверный TTS (POST /api/tts) с фолбэком на [speechEngine] — движок контроллера. */
     private lateinit var serverTtsEngine: ServerTtsSpeechEngine
     private lateinit var serverTtsPlayback: AndroidServerTtsPlayback
+    /**
+     * Потоковая озвучка: дельты ответа → фразы → звук, не дожидаясь конца хода. Живёт
+     * параллельно [voiceOutput] (он остаётся путём для готового сообщения и фолбэка), но
+     * при активном стриме звучит только она — две озвучки одного текста исключены флагом
+     * [streamSpeechActive].
+     */
+    internal lateinit var streamingSpeech: StreamingSpeechController
+    /** Ход сейчас озвучивается потоково: терминальный Done не должен озвучивать его второй раз. */
+    private var streamSpeechActive = false
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     private var speechEngineInitResult: Boolean? = null
     private lateinit var voiceSession: VoiceSessionController
@@ -491,6 +500,20 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             autoSpeakInitially = voiceOutputPrefs.getBoolean(KEY_AUTO_SPEAK, false),
             onAutoSpeakChanged = { enabled -> voiceOutputPrefs.edit().putBoolean(KEY_AUTO_SPEAK, enabled).apply() },
         )
+        // Потоковая озвучка ответа: фразы уходят в синтез по мере прихода дельт, первый
+        // звук не ждёт конца хода. Тот же серверный синтез и свой плеер — очередь фраз
+        // управляет воспроизведением строго по порядку, поэтому общий плеер с
+        // serverTtsPlayback ей не годится.
+        streamingSpeech = StreamingSpeechController.forAndroid(
+            context = this,
+            client = RepositoryServerTtsClient(
+                baseUrl = BASE_URL,
+                credentialProvider = { store.read() },
+            ),
+            scope = lifecycleScope,
+            onFirstAudio = { runOnUiThread { onStreamSpeechStarted() } },
+            onDrained = { runOnUiThread { onStreamSpeechDrained() } },
+        )
         speechEngineInitResult?.let { available ->
             speechEngineInitResult = null
             voiceOutput.onEngineReady(available)
@@ -630,6 +653,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (::handsFreeCapture.isInitialized) handsFreeCapture.cancel()
         if (::voiceLoop.isInitialized) voiceLoop.stop()
         if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
+        // Потоковая озвучка владеет своим плеером и временными файлами — освобождается тоже.
+        if (::streamingSpeech.isInitialized) streamingSpeech.release()
         super.onDestroy()
     }
 
@@ -653,6 +678,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         persistComposerDraft()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
         if (::voiceOutput.isInitialized) voiceOutput.onPause()
+        /*
+         * Потоковая озвучка тоже молчит в фоне: это речь по ходу генерации, и дочитывать
+         * её из кармана — не то, чего ждёт пользователь. Ход при этом продолжается, а
+         * остаток ответа беззвучен, поэтому следующая реплика снова соберётся с нуля.
+         */
+        cancelStreamSpeech()
         // Hands-free в фоне не слушает: микрофон без foreground-сервиса всё равно отнимут,
         // а «слушающий» в фоне цикл — это расход батареи и лишние запросы распознавания.
         if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
@@ -1226,6 +1257,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // только внутри самого класса, поэтому хост отдаёт готовые предикаты. Поведение то же:
     // false — поле ещё не инициализировано (экран не до конца поднят / контроллер не создан).
     internal fun isVoiceOutputReady(): Boolean = ::voiceOutput.isInitialized
+    internal fun isStreamSpeechReady(): Boolean = ::streamingSpeech.isInitialized
     internal fun isRecoveryReady(): Boolean = ::recovery.isInitialized
     internal fun isOfflineQueueReady(): Boolean = ::offlineQueue.isInitialized
     internal fun isMessagesReady(): Boolean = ::messages.isInitialized
@@ -1991,6 +2023,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         override fun onStopSpeaking() {
             voiceOutput.stopSpeaking()
+            // Перебивание: потоковая очередь фраз тоже глохнет, иначе первое предложение
+            // нового вопроса прозвучало бы поверх дочитываемого ответа.
+            cancelStreamSpeech()
         }
 
         override fun onSegmentDropped() {
@@ -2079,6 +2114,63 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (voiceOutput.speaking) voiceLoop.onAnswerStarted() else voiceLoop.onAnswerFinished()
     }
 
+    // --- потоковая озвучка ответа -------------------------------------------------------------
+
+    /**
+     * Ход надо озвучивать потоково: авторежим или одноразовое взведение голосового ввода, и
+     * микрофонный цикл при этом не в диалоге (иначе озвучка накладывалась бы на запись).
+     */
+    internal fun streamSpeechEnabled(): Boolean =
+        ::streamingSpeech.isInitialized && isVoiceOutputReady() && voiceOutput.wantsSpeech
+
+    /**
+     * Начало хода: взять решение об озвучке ОДИН раз. Дальше все дельты этого хода идут в
+     * [streamingSpeech] либо не озвучиваются вовсе — переключение на середине дало бы
+     * полуфразу в динамике и вторую половину в конце.
+     */
+    internal fun beginStreamSpeech() {
+        streamSpeechActive = streamSpeechEnabled()
+        if (streamSpeechActive) voiceOutput.consumeSpeakNextAnswer()
+        streamingSpeech.stop()
+    }
+
+    /** Дельта ответа (только текст ассистента, не размышления и не инструменты). */
+    internal fun onAssistantDelta(text: String) {
+        if (!streamSpeechActive || text.isEmpty()) return
+        streamingSpeech.onDelta(text)
+    }
+
+    /** Ход завершён: остаток буфера тоже должен прозвучать. */
+    internal fun endStreamSpeech() {
+        if (!streamSpeechActive) return
+        streamingSpeech.onTurnFinished()
+        // Стрим закрылся, а новых фраз нет — сигнал «доиграло» может не прийти вовсе.
+        if (!streamingSpeech.isSpeaking) onStreamSpeechDrained()
+    }
+
+    /** Ход отменён/прерван/экран ушёл: тишина немедленно, хвост ответа не догоняет. */
+    internal fun cancelStreamSpeech() {
+        streamSpeechActive = false
+        if (!::streamingSpeech.isInitialized) return
+        streamingSpeech.stop()
+        if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
+    }
+
+    /** Зазвучала первая фраза: цикл в SPEAKING, микрофон не принимает собственный динамик. */
+    private fun onStreamSpeechStarted() {
+        if (!streamSpeechActive) { streamingSpeech.stop(); return }
+        if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(true)
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerStarted()
+    }
+
+    /** Очередь фраз пуста и всё доиграно: цикл снова слушает. */
+    private fun onStreamSpeechDrained() {
+        if (!streamSpeechActive) return
+        if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
+        streamSpeechActive = false
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerFinished()
+    }
+
     /** Реплика из hands-free-цикла → `POST /api/transcribe` → [VoiceDialogLoop.onTranscript]. */
     private fun transcribeLoopSegment(requestId: Long, recording: Recording) {
         if (store.read() == null) {
@@ -2148,6 +2240,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Speak a message through [VoiceOutputController] (markdown is filtered inside). */
     private fun speakMessage(text: String) {
+        // Ручная озвучка готового сообщения — тот же речевой путь, что у стрима: разметка,
+        // код и таблицы фильтруются, фразы синтезируются очередью.
+        if (isStreamSpeechReady()) {
+            cancelStreamSpeech()
+            // Ручная озвучка тоже проходит через цикл хода (SPEAKING → снова слушание),
+            // поэтому помечается активной: иначе первый же звук был бы заглушён как «чужой».
+            streamSpeechActive = true
+            streamingSpeech.speakWhole(text)
+            return
+        }
         when (voiceOutput.speakNow(text)) {
             VoiceOutputController.SpeakOutcome.NOTHING_TO_SPEAK ->
                 statusView.text = "В сообщении нет текста для озвучивания"
