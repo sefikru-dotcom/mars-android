@@ -1,6 +1,7 @@
 package ru.mars.mobile
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
@@ -45,6 +46,17 @@ class AndroidSpeechEngine(
             val result = engine.setLanguage(Locale.getDefault())
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 engine.setLanguage(Locale.forLanguageTag("ru-RU"))
+            }
+            // Речь ассистента, а не «медиа»: на этом маршруте платформа связывает вывод с
+            // микрофонным AEC, и озвучка не попадает в захват как голос человека. Часть
+            // платформенных движков атрибуты игнорирует — отказ не фатален, озвучка важнее.
+            runCatching {
+                engine.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
             }
             // Единственный способ узнать, что синтез реально дочитал: без этого слушателя
             // hands-free-цикл не смог бы отличить свой голос от ответа пользователя.

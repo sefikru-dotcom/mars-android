@@ -37,6 +37,10 @@ import java.util.concurrent.RejectedExecutionException
  * `onFailed`. Оба случая означают для движка одно: тот же текст уходит в системный TTS.
  * Устаревшие колбэки (после [stop]/[release] или новой реплики) не доставляются —
  * поэтому отменённая реплика не «догоняет» пользователя чужим голосом.
+ *
+ * Вывод помечен как речь ассистента (`USAGE_ASSISTANT` + `AUDIO_CONTENT_TYPE_SPEECH`): платформа
+ * должна трактовать озвучку как голос самого приложения, а не как медиа — иначе микрофонный AEC
+ * не гасит её, и перебивание слышит собственный динамик.
  */
 @OptIn(UnstableApi::class)
 class AndroidServerTtsPlayback(
@@ -129,9 +133,14 @@ class AndroidServerTtsPlayback(
         }
         val built = runCatching {
             ExoPlayer.Builder(appContext, DefaultMediaSourceFactory(appContext)).build().also {
+                // USAGE_ASSISTANT, а не USAGE_MEDIA: платформа обязана видеть в этом выводе речь
+                // ассистента. На медиа-маршруте она не считает звук «своим» для микрофона, и
+                // эхоподавление захвата (VOICE_COMMUNICATION + AcousticEchoCanceler) не гасит
+                // озвучку — при включённом перебивании цикл слышит сам себя. Content type —
+                // речь, чтобы не включался музыкальный профиль обработки.
                 it.setAudioAttributes(
                     androidx.media3.common.AudioAttributes.Builder()
-                        .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                        .setUsage(androidx.media3.common.C.USAGE_ASSISTANT)
                         .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_SPEECH)
                         .build(),
                     /* handleAudioFocus= */ false,
