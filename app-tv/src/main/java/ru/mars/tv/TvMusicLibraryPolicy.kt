@@ -94,7 +94,12 @@ object TvMusicLibraryPolicy {
         val today = dayStamp(nowMillis, zone) ?: return ""
         val yesterday = dayStamp(nowMillis - DAY_MILLIS, zone) ?: return ""
         val day = dayStamp(moment.timeInMillis, zone) ?: return ""
-        val clock = String.format(Locale.US, "%02d:%02d", moment.hourOfDay, moment.minute)
+        val clock = String.format(
+            Locale.US,
+            "%02d:%02d",
+            moment.get(Calendar.HOUR_OF_DAY),
+            moment.get(Calendar.MINUTE),
+        )
         return when (day) {
             today -> "сегодня, $clock"
             yesterday -> "вчера, $clock"
