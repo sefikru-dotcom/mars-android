@@ -30,7 +30,21 @@ class DataParityWiringContractTest {
     }
 
     private val sessions by lazy { source("src/main/java/ru/mars/mobile/ChatSessionsActivity.kt") }
-    private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+    private val chat by lazy {
+        source("src/main/java/ru/mars/mobile/ChatActivity.kt") + "\n" +
+            // Секции-расширения Activity (разбиение файла W2): тот же production-код экрана,
+            // поэтому проводка проверяется по Activity + секциям, а не только по одному файлу.
+            listOf(
+                "ChatTurnSection.kt",
+                "ChatOfflineQueueSection.kt",
+                "ChatSessionSection.kt",
+                "ChatTranscriptSection.kt",
+                "ChatDraftSection.kt",
+                "ChatUsageSection.kt",
+                "ChatTodoSection.kt",
+                "ChatMessageActionsSection.kt",
+            ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
     private val kanban by lazy { source("src/main/java/ru/mars/mobile/KanbanActivity.kt") }
     private val presenter by lazy { source("src/main/java/ru/mars/mobile/KanbanPresenter.kt") }
 
