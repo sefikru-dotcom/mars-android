@@ -232,7 +232,6 @@ jobs:
     env:
       # Публикация настоящая только на main; на остальных событиях — план (--dry-run).
       PUBLISH_DRY_RUN: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'false' || 'true' }}
-      MARS_PUBLISH_SSH_KEY_FILE: ${{ runner.temp }}/mars_publish_key
     steps:
       - uses: actions/checkout@v4
 
@@ -258,6 +257,7 @@ jobs:
         if: steps.prereq.outputs.enabled == 'true'
         env:
           MARS_PUBLISH_SSH_KEY: ${{ secrets.MARS_PUBLISH_SSH_KEY }}
+          MARS_PUBLISH_SSH_KEY_FILE: ${{ runner.temp }}/mars_publish_key
         run: |
           set -eu
           install -m 700 -d "$(dirname "$MARS_PUBLISH_SSH_KEY_FILE")"
@@ -295,6 +295,8 @@ jobs:
 
       - name: Publish APKs to distribution host
         if: steps.prereq.outputs.enabled == 'true'
+        env:
+          MARS_PUBLISH_SSH_KEY_FILE: ${{ runner.temp }}/mars_publish_key
         run: |
           set -eu
           extra=()
