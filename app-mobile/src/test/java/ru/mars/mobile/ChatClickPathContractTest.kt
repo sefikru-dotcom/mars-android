@@ -36,6 +36,25 @@ class ChatClickPathContractTest {
 
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
 
+    /**
+     * Секции-расширения Activity после разбиения файла (W2): вынесенный код остаётся тем же
+     * production-кодом, поэтому контракт читает его вместе с Activity, а не сужается до
+     * одного файла. Ни один шаг пути не ослаблен — те же строки просто ищутся шире.
+     */
+    private val chatSections by lazy {
+        listOf(
+            "ChatTurnSection.kt",
+            "ChatOfflineQueueSection.kt",
+            "ChatSessionSection.kt",
+            "ChatTranscriptSection.kt",
+            "ChatDraftSection.kt",
+            "ChatUsageSection.kt",
+            "ChatTodoSection.kt",
+            "ChatMessageActionsSection.kt",
+        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
+
+
     /** Каркас экрана чата: шапка, баннеры, поиск, чипы и композер собираются здесь. */
     private val scaffold by lazy { source("src/main/java/ru/mars/mobile/ChatScreenScaffold.kt") }
 
@@ -44,7 +63,7 @@ class ChatClickPathContractTest {
      * Проверки кликпутей те же — они читают оба файла, чтобы контракт не зависел от того,
      * в каком файле физически собирается view.
      */
-    private val chatUi by lazy { chat + "\n" + scaffold }
+    private val chatUi by lazy { chat + "\n" + scaffold + "\n" + chatSections }
     private val searchController by lazy { source("src/main/java/ru/mars/mobile/TranscriptSearchHighlightController.kt") }
     private val main by lazy { source("src/main/java/ru/mars/mobile/MainActivity.kt") }
     private val manifest by lazy { source("src/main/AndroidManifest.xml") }
@@ -323,7 +342,7 @@ class ChatClickPathContractTest {
     fun `composer - programmatic text and focus pass ComposerInputGuardPolicy`() {
         assertTrue(
             "Программная вставка обязана спрашивать политику, а не писать в поле напрямую",
-            chat.contains("composerGuard.resolveTextApply(origin)")
+            chatUi.contains("composerGuard.resolveTextApply(origin)")
         )
         assertTrue(
             "Фокус композера обязан транслироваться в политику",

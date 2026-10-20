@@ -35,6 +35,25 @@ class ChatAccessibilityContractTest {
 
     private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
 
+    /**
+     * Секции-расширения Activity после разбиения файла (W2). Вынесенный код — тот же
+     * production-код экрана, поэтому проверки доступности читают его вместе с Activity
+     * и каркасом: набор требований не сужен, а расширен на новые файлы.
+     */
+    private val chatSections by lazy {
+        listOf(
+            "ChatTurnSection.kt",
+            "ChatOfflineQueueSection.kt",
+            "ChatSessionSection.kt",
+            "ChatTranscriptSection.kt",
+            "ChatDraftSection.kt",
+            "ChatUsageSection.kt",
+            "ChatTodoSection.kt",
+            "ChatMessageActionsSection.kt",
+        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
+
+
     /** Карточку сообщения собирает вынесенный рендерер — заголовки thinking/tool/группы живут там. */
     private val messageCard by lazy { source("src/main/java/ru/mars/mobile/ChatMessageCardRenderer.kt") }
 
@@ -46,7 +65,7 @@ class ChatAccessibilityContractTest {
      * view). Live-регионы проверяются теми же регулярками, но читаются оба файла: контракт
      * не должен зависеть от того, в каком файле физически собирается view.
      */
-    private val chatUi by lazy { chat + "\n" + scaffold }
+    private val chatUi by lazy { chat + "\n" + scaffold + "\n" + chatSections }
 
 
     /**
@@ -54,7 +73,7 @@ class ChatAccessibilityContractTest {
      * + рендерер карточки (thinking/tool/группа инструментов). Проверки те же, но покрывают
      * место, куда код переехал при разбиении ChatActivity.
      */
-    private val transcriptSources by lazy { chat + "\n" + messageCard }
+    private val transcriptSources by lazy { chat + "\n" + messageCard + "\n" + chatSections }
     private val dialog by lazy { source("src/main/java/ru/mars/mobile/MarsDialog.kt") }
     private val interactive by lazy { source("src/main/java/ru/mars/mobile/MarsInteractiveView.kt") }
 
@@ -142,13 +161,20 @@ class ChatAccessibilityContractTest {
         // Заголовков со сворачиванием четыре: thinking / tool / todo / группа инструментов.
         // Группа — тоже раскрываемый заголовок, поэтому обязана идти через тот же хелпер;
         // считаем вызовы, чтобы новый сворачиваемый заголовок не проскочил без подписи.
-        // 6 = 4 заголовка + объявление хелпера + делегат [ChatMessageCardRenderer.Host.a11yHeader]
+        // 6 = 3 вызова в рендерере карточки (thinking/tool/группа) + объявление хелпера
+        // + делегат [ChatMessageCardRenderer.Host.a11yHeader] + тело делегата Activity
         // (Activity пробрасывает хелпер в рендерер карточки, сам делегат заголовком не является).
         val calls = Regex("applyExpandableHeaderA11y\\(").findAll(transcriptSources).count()
         assertEquals(
             "Хелпер обязан вызываться в 4 заголовках (+1 объявление +1 делегат хоста)",
             6,
             calls
+        )
+        // Todo-заголовок после разбиения файла (W2) живёт в ChatTodoSection и попадает в тот
+        // же приватный хелпер через делегат Activity: требование «через общий хелпер» сохранено.
+        assertTrue(
+            "Todo-заголовок обязан идти через общий a11y-хелпер (делегат Activity)",
+            transcriptSources.contains("applyExpandableHeaderA11yFromSection(")
         )
     }
 
