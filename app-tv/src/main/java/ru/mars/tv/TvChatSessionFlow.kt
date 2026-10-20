@@ -42,6 +42,19 @@ class TvChatSessionFlow(
     var sessionId: String? = null
         private set
 
+    /**
+     * Профиль, в котором создаётся НОВАЯ сессия этого чата (переход с TV-экрана
+     * «Профили», [ru.mars.tv.profiles.TvProfilesRouting.EXTRA_PROFILE]). null —
+     * профиль по умолчанию сервера (обычный запуск чата с дашборда).
+     *
+     * Аргумент уходит в `POST /api/session/new` как `profile` — сервер уже
+     * принимает его (`SessionRepository.createSession`). Уже привязанная сессия
+     * профиль не меняет: переключение живого профиля WebUI — мутация чужого
+     * состояния, её TV-клиент не делает.
+     */
+    var profile: String? = null
+        private set
+
     /** Compact status line for the TV status strip; empty string hides the strip. */
     var statusText: String = ""
         private set
@@ -72,7 +85,7 @@ class TvChatSessionFlow(
     suspend fun ensureSession(credential: ConsumedDeviceCredential): TvSessionResult {
         sessionId?.takeIf { it.isNotBlank() }?.let { return TvSessionResult.Ready(it) }
         statusText = CREATING_SESSION
-        return when (val outcome = creator.createSession(baseUrl, credential)) {
+        return when (val outcome = creator.createSession(baseUrl, credential, sessionArgs())) {
             is CreateSessionOutcome.Success -> {
                 sessionId = outcome.session.id
                 statusText = TYPING
@@ -84,6 +97,20 @@ class TvChatSessionFlow(
             }
         }
     }
+
+    /**
+     * Привязка профиля из интента экрана «Профили». Пустое имя игнорируется, а
+     * уже привязанная сессия приоритетнее: смена профиля существующего чата —
+     * мутация состояния WebUI, её TV-клиент не делает.
+     */
+    fun bindProfile(name: String?) {
+        val clean = name?.trim()?.takeIf(String::isNotBlank) ?: return
+        if (sessionId == null) profile = clean
+    }
+
+    /** Тело `POST /api/session/new`: `profile` только когда экран его назвал. */
+    private fun sessionArgs(): Map<String, Any?> =
+        profile?.let { mapOf(ARG_PROFILE to it) } ?: emptyMap()
 
     /** Called when the user message hits the screen, before the preflight/network work. */
     fun beginTurn() {
@@ -179,6 +206,9 @@ class TvChatSessionFlow(
     }
 
     companion object {
+        /** Аргумент `POST /api/session/new`: профиль, в котором создаётся сессия. */
+        const val ARG_PROFILE = "profile"
+
         const val CREATING_SESSION = "Создаю сессию…"
         const val TYPING = "Марс печатает…"
         const val STOPPED = "Остановлено"

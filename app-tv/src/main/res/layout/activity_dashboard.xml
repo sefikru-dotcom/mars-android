@@ -352,7 +352,7 @@
             android:focusable="true"
             android:nextFocusLeft="@id/insightsButton"
             android:nextFocusUp="@id/settingsButton"
-            android:nextFocusDown="@id/skillsButton"
+            android:nextFocusDown="@id/profilesButton"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="match_parent" />
@@ -405,14 +405,30 @@
             android:minHeight="@dimen/tv_dash_btn_min_h"
             android:focusable="true"
             android:nextFocusLeft="@id/memoryButton"
+            android:nextFocusRight="@id/profilesButton"
             android:nextFocusUp="@id/insightsButton"
             android:layout_marginEnd="@dimen/tv_dash_btn_col_gap"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="match_parent" />
 
-        <!-- Balance cell: keeps the grid rhythm of three equal columns. -->
-        <View
+        <Button
+            android:id="@+id/profilesButton"
+            android:text="Профили"
+            android:textColor="@color/mars_text"
+            android:textSize="22sp"
+            android:background="@drawable/bg_focus_card"
+            android:drawableStart="@drawable/ic_profiles"
+            android:drawableTint="@color/icon_focus_tint"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="@dimen/tv_dash_btn_min_h"
+            android:focusable="true"
+            android:nextFocusLeft="@id/skillsButton"
+            android:nextFocusUp="@id/spacesButton"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="match_parent" />

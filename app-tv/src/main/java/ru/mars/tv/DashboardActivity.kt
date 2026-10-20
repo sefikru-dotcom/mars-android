@@ -15,6 +15,7 @@ import ru.mars.tv.cron.TvCronActivity
 import ru.mars.tv.insights.TvInsightsActivity
 import ru.mars.tv.kanban.TvKanbanActivity
 import ru.mars.tv.memory.TvMemoryActivity
+import ru.mars.tv.profiles.TvProfilesActivity
 import ru.mars.tv.projects.TvProjectsActivity
 import ru.mars.tv.skills.TvSkillsActivity
 import ru.mars.tv.spaces.TvSpacesActivity
@@ -102,6 +103,9 @@ class DashboardActivity : AppCompatActivity() {
         findViewById<Button>(R.id.spacesButton).setOnClickListener {
             startActivity(Intent(this, TvSpacesActivity::class.java))
         }
+        findViewById<Button>(R.id.profilesButton).setOnClickListener {
+            startActivity(Intent(this, TvProfilesActivity::class.java))
+        }
         findViewById<Button>(R.id.memoryButton).setOnClickListener {
             startActivity(Intent(this, TvMemoryActivity::class.java))
         }
@@ -119,6 +123,7 @@ class DashboardActivity : AppCompatActivity() {
             findViewById(R.id.kanbanButton),
             findViewById(R.id.insightsButton),
             findViewById(R.id.spacesButton),
+            findViewById(R.id.profilesButton),
             findViewById(R.id.memoryButton),
             findViewById(R.id.skillsButton),
             findViewById(R.id.settingsButton),
