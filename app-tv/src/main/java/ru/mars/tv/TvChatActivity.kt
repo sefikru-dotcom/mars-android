@@ -499,6 +499,10 @@ class TvChatActivity : AppCompatActivity() {
         })
         wireInteractive()
         buildQuickChips()
+        // Переход с TV-экрана «Профили»: новая сессия этого чата создаётся в
+        // выбранном профиле (SessionRepository.createSession принимает `profile`).
+        // Уже привязанная сессия профиль не меняет — см. TvChatSessionFlow.bindProfile.
+        sessionFlow.bindProfile(intent?.getStringExtra(ru.mars.tv.profiles.TvProfilesRouting.EXTRA_PROFILE))
         // Чипы параметров хода: восстановленный выбор рисуется сразу, затем тихая
         // синхронизация с сервером (каталог моделей и лестница размышлений).
         renderModelChip()
