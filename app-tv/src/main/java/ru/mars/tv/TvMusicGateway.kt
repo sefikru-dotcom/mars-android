@@ -7,20 +7,22 @@ import ru.mars.network.repository.AlbumResult
 import ru.mars.network.repository.MusicRepository
 
 /**
- * Production [TvMusicGateway] + [TvLyricsGateway] + [TvAlbumGateway]: binds the REAL
- * core-network [MusicRepository]
- * (`GET {baseUrl}/api/charts`, `GET {baseUrl}/api/search?q=…` and the personal feed
- * `GET {baseUrl}/api/home`, baseUrl = [MUSIC_BASE_URL], mobile MusicActivity parity) into
- * the TV controller's blocking seam.
+ * Production [TvMusicGateway] + [TvLyricsGateway] + [TvAlbumGateway] + [TvMusicLibraryGateway]:
+ * binds the REAL core-network [MusicRepository]
+ * (`GET {baseUrl}/api/charts`, `GET {baseUrl}/api/search?q=…`, the personal feed
+ * `GET {baseUrl}/api/home`, the library `GET {baseUrl}/api/playlists`,
+ * `GET {baseUrl}/api/playlist/{id}`, `GET {baseUrl}/api/history` and
+ * `POST {baseUrl}/api/history/record`, baseUrl = [MUSIC_BASE_URL], mobile MusicActivity parity)
+ * into the TV controller's blocking seam.
  * All HTTP, envelope normalization, id cleanup and error mapping stay in core-network —
- * the TV layer only bridges suspend to blocking (the controller runs this on its
+ * the TV layer only bridges suspend to blocking (the controllers run this on their
  * background executor) and guarantees that no exception ever escapes: every outcome lands
  * as an explicit [TvMusicChartsResult] / [TvMusicHomeResult] / [TvLyricsResult] /
- * [TvAlbumResult].
+ * [TvAlbumResult] / [TvPlaylistsResult] / [TvPlaylistTracksResult] / [TvHistoryResult].
  */
 class RepositoryTvMusicGateway(
     private val repository: MusicRepository,
-) : TvMusicGateway, TvLyricsGateway, TvLyricsTranslationGateway, TvAlbumGateway {
+) : TvMusicGateway, TvLyricsGateway, TvLyricsTranslationGateway, TvAlbumGateway, TvMusicLibraryGateway {
 
     override fun fetchCharts(): TvMusicChartsResult = fetch { repository.getCharts() }
 
@@ -83,6 +85,52 @@ class RepositoryTvMusicGateway(
         TvMusicChartsResult.Loaded(runBlocking { block() })
     } catch (error: Throwable) {
         TvMusicChartsResult.Failed(reasonOf(error))
+    }
+
+    // ------------------------------------------------------------------ library
+
+    /**
+     * `GET {baseUrl}/api/playlists` -> [TvPlaylistsResult]. Пустой список — валидный ответ
+     * («плейлистов ещё нет»), поэтому он доезжает как `Loaded(emptyList())`, а решение
+     * «пусто или контент» принимает [TvMusicLibraryPolicy].
+     */
+    override fun fetchPlaylists(): TvPlaylistsResult = try {
+        TvPlaylistsResult.Loaded(runBlocking { repository.getPlaylists() })
+    } catch (error: Throwable) {
+        TvPlaylistsResult.Failed(reasonOf(error))
+    }
+
+    /**
+     * `GET {baseUrl}/api/playlist/{id}` -> [TvPlaylistTracksResult]. Тот же конверт, что у
+     * чартов; пустой id отвергается core-network (`require`) и приезжает как `Failed`, а не
+     * как исключение в контроллер.
+     */
+    override fun fetchPlaylistTracks(playlistId: String): TvPlaylistTracksResult = try {
+        TvPlaylistTracksResult.Loaded(runBlocking { repository.getPlaylistTracks(playlistId) })
+    } catch (error: Throwable) {
+        TvPlaylistTracksResult.Failed(reasonOf(error))
+    }
+
+    /**
+     * `GET {baseUrl}/api/history` -> [TvHistoryResult]. Записи играбельны (`id` — video id),
+     * а `thumbnail` внутри них относительный: резолвится [TvThumbnailUrlResolver] от origin
+     * сайта, а не от `/music` ([TvMusicLibraryPolicy] строит по ним очередь и подписи).
+     */
+    override fun fetchHistory(): TvHistoryResult = try {
+        TvHistoryResult.Loaded(runBlocking { repository.getHistory() })
+    } catch (error: Throwable) {
+        TvHistoryResult.Failed(reasonOf(error))
+    }
+
+    /**
+     * `POST {baseUrl}/api/history/record`: `false` вместо исключения — запись истории
+     * вспомогательная, из-за неё воспроизведение на приставке ломаться не должно.
+     */
+    override fun recordHistory(track: MusicTrack): Boolean = try {
+        runBlocking { repository.recordHistory(track) }
+        true
+    } catch (error: Throwable) {
+        false
     }
 
     /** Причина сбоя для показа пользователю: сообщение сервера, иначе имя класса ошибки. */

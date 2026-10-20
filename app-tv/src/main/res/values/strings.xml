@@ -43,9 +43,12 @@
     <string name="tv_status_reasoning_saved">Уровень размышлений: %1$s</string>
     <string name="tv_status_reasoning_save_failed">Не удалось изменить уровень размышлений: %1$s</string>
 
-    <!-- Вкладки ТВ-музыки: персональная лента «Для тебя» (/api/home) и каталог «Чарты». -->
+    <!-- Вкладки ТВ-музыки: персональная лента «Для тебя» (/api/home), каталог «Чарты»,
+         серверные плейлисты и история прослушивания (паритет с mobile MusicActivity). -->
     <string name="tv_music_tab_for_you">Для тебя</string>
     <string name="tv_music_tab_charts">Чарты</string>
+    <string name="tv_music_tab_playlists">Плейлисты</string>
+    <string name="tv_music_tab_history">История</string>
     <!-- TalkBack: подпись активной вкладки (MUS-M3 parity мобильного клиента). -->
     <string name="tv_music_tab_active">%1$s, открытая вкладка</string>
 
