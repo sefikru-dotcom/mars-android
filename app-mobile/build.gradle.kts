@@ -60,6 +60,15 @@ android {
         // устройстве ДО выполнения любого теста (UiTestHarness дополнительно
         // дублирует guard в каждом изменяющем методе).
         testInstrumentationRunner = "ru.mars.mobile.EmulatorOnlyTestRunner"
+
+        // Локальный ASR (sherpa-onnx): AAR несёт .so для 4 ABI (~50 МБ), а устройства
+        // Марса — только arm64. Без фильтра APK раздувается на ~80 МБ мёртвого кода
+        // (x86/x86_64 нужны лишь эмулятору, armeabi-v7a — ни одному целевому телефону).
+        // Инструментальные UI-тесты идут на arm64-эмуляторе; x86-эмулятор ASR не увидит,
+        // но UI-тесты ASR не трогают.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -151,6 +160,17 @@ dependencies {
     // (более новые BoM требуют compileSdk 35+).
     implementation(platform("com.google.firebase:firebase-bom:32.8.1"))
     implementation("com.google.firebase:firebase-messaging")
+    // --- Локальный ASR (sherpa-onnx) ---
+    // Координата именно артефакта AAR (`com.github.k2-fsa.sherpa-onnx:sherpa-onnx`), а НЕ
+    // агрегатора `com.github.k2-fsa:sherpa-onnx`: агрегатор тянет ещё `sherpa-onnx-jvm`
+    // и native-lib для linux/osx/win, а jvm-модуль содержит те же классы
+    // com.k2fsa.sherpa.onnx → duplicate class на мерже dex и +десятки МБ в APK.
+    // ABI срезаны abiFilters (defaultConfig).
+    implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.8")
+    // Распаковка .tar.bz2 модели на устройстве: в Android нет bz2 в stdlib, а тащить
+    // нативную libbz2 ради одного раза при первом запуске — лишний .so. commons-compress
+    // — чистая Java, ~1 МБ, покрывает bz2+tar.
+    implementation("org.apache.commons:commons-compress:1.26.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 
