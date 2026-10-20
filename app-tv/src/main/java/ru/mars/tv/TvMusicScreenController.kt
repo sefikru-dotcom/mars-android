@@ -95,9 +95,25 @@ sealed interface TvMusicUiState {
 /**
  * Which branch the TV music screen shows. «Для тебя» renders the personal feed shelves
  * ([TvMusicHomeState]); «Чарты» renders [TvMusicUiState] (charts *and* search results —
- * a search happens in the catalog branch, so submitting one selects [CHARTS]).
+ * a search happens in the catalog branch, so submitting one selects [CHARTS]);
+ * «Плейлисты» and «История» render the server library ([TvPlaylistsState] /
+ * [TvPlaylistTracksState] / [TvHistoryState], loaded by [TvMusicLibraryController] —
+ * mobile MusicActivity tab parity).
  */
-enum class TvMusicTab { FOR_YOU, CHARTS }
+enum class TvMusicTab {
+    FOR_YOU,
+    CHARTS,
+    PLAYLISTS,
+    HISTORY,
+    ;
+
+    /**
+     * True for the branches owned by the library controller: this controller only switches
+     * to them ([selectTab]) and never fetches — «Повторить» on them repeats the library
+     * request, not a charts/search one.
+     */
+    val isLibrary: Boolean get() = this == PLAYLISTS || this == HISTORY
+}
 
 /**
  * State of the «Для тебя» personal feed (`GET /api/home`), independent of the charts list
@@ -234,12 +250,19 @@ class TvMusicScreenController(
         }
     }
 
-    /** D-pad switch between the two branches: the selected one is always (re)loaded. */
+    /** D-pad switch between the branches: the selected one is always (re)loaded. */
     fun selectTab(next: TvMusicTab) {
         if (destroyed) return
         when (next) {
             TvMusicTab.FOR_YOU -> loadHome()
             TvMusicTab.CHARTS -> load()
+            // Библиотеку грузит свой контроллер ([TvMusicLibraryController]): здесь только
+            // переключение ветки, но ответы ленты/каталога в пути уже неактуальны.
+            TvMusicTab.PLAYLISTS, TvMusicTab.HISTORY -> {
+                generation++
+                homeGeneration++
+                setTab(next)
+            }
         }
     }
 
@@ -274,6 +297,9 @@ class TvMusicScreenController(
      */
     fun retry() {
         if (destroyed) return
+        // Библиотечные вкладки повторяет их контроллер: «Повторить» не должно молча
+        // перезагружать чарты под вкладкой «Плейлисты».
+        if (tab.isLibrary) return
         if (TvMusicHomePolicy.retryRepeatsFeed(tab)) {
             loadHome()
             return

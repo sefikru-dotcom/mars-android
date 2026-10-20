@@ -23,8 +23,10 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import ru.mars.network.repository.MusicAlbum
+import ru.mars.network.model.HistoryEntry
 import ru.mars.network.model.MusicShelf
 import ru.mars.network.model.MusicTrack
+import ru.mars.network.model.Playlist
 
 /**
  * Pure D-pad focus policy of the TV music screen (no Android, no I/O — JVM-testable,
@@ -176,6 +178,18 @@ class TvMusicActivity : AppCompatActivity() {
      */
     private val albumFlow = TvAlbumFlow(gateway = musicGateway)
 
+    /**
+     * Контроллер библиотеки — вкладки «Плейлисты» и «История» (паритет mobile
+     * MusicActivity): `GET /api/playlists`, `GET /api/playlist/{id}`, `GET /api/history`
+     * и запись прослушивания `POST /api/history/record`. Состояния чистой политики
+     * [TvMusicLibraryPolicy], Android здесь — только рендер.
+     */
+    private val libraryController = TvMusicLibraryController(
+        gateway = musicGateway,
+        transport = TvMusicPlayer,
+        uiDispatcher = MainThreadTvDispatcher(),
+    )
+
     private lateinit var stateText: TextView
     private lateinit var retryButton: Button
     private lateinit var stopButton: Button
@@ -190,6 +204,8 @@ class TvMusicActivity : AppCompatActivity() {
     private lateinit var searchButton: Button
     private lateinit var chartsButton: Button
     private lateinit var forYouButton: Button
+    private lateinit var playlistsButton: Button
+    private lateinit var historyButton: Button
 
     /** Открытый диалог текста песни (один на экран; пересоздаётся на каждый показ). */
     private var lyricsDialog: Dialog? = null
@@ -252,9 +268,13 @@ class TvMusicActivity : AppCompatActivity() {
         searchButton = findViewById(R.id.searchButton)
         chartsButton = findViewById(R.id.chartsButton)
         forYouButton = findViewById(R.id.forYouButton)
+        playlistsButton = findViewById(R.id.playlistsButton)
+        historyButton = findViewById(R.id.historyButton)
         backButton.setOnClickListener { finish() }
-        // Retry repeats the LAST operation (charts or the failed search query).
-        retryButton.setOnClickListener { controller.retry() }
+        // Retry repeats the LAST operation of the ACTIVE branch: charts/search and the feed
+        // are the screen controller's, playlists and history belong to the library
+        // controller — «Повторить» under «Плейлисты» must never reload the charts.
+        retryButton.setOnClickListener { retryActiveBranch() }
         stopButton.setOnClickListener { controller.stopPlayback() }
         // D-pad play/pause toggle: the non-destructive way to quiet the audio — the
         // playlist binding survives, «Играть» resumes the same queue. Same transport
@@ -296,6 +316,11 @@ class TvMusicActivity : AppCompatActivity() {
             controller.selectTab(TvMusicTab.CHARTS)
         }
         forYouButton.setOnClickListener { controller.selectTab(TvMusicTab.FOR_YOU) }
+        // Библиотечные вкладки (mobile parity): переключение ветки + первая загрузка.
+        // Повторный вход на уже загруженную вкладку ничего не перезапрашивает — D-pad
+        // не должен каждый раз дёргать сеть.
+        playlistsButton.setOnClickListener { openLibraryTab(TvMusicTab.PLAYLISTS) }
+        historyButton.setOnClickListener { openLibraryTab(TvMusicTab.HISTORY) }
         // Клавиатура НЕ всплывает на фокус сама (setShowSoftInputOnFocus(false), у XML-
         // атрибута нет публичного статуса): D-pad проходит через поле поиска вниз к
         // трекам без залипания. Открываем её только явным нажатием (DPAD_CENTER/клик).
@@ -332,6 +357,16 @@ class TvMusicActivity : AppCompatActivity() {
         window.decorView.viewTreeObserver.addOnGlobalLayoutListener(globalLayoutListener)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                // Открытый плейлист — это ещё не экран, а его drill-down: BACK сначала
+                // возвращает к списку плейлистов (как «Все плейлисты»), и только следующий
+                // BACK закрывает экран. Правило живёт здесь, чистая политика не меняется.
+                if (!imeVisible &&
+                    controller.tab == TvMusicTab.PLAYLISTS &&
+                    libraryController.openPlaylist != null
+                ) {
+                    libraryController.closePlaylist()
+                    return
+                }
                 when (TvMusicFocusPolicy.backAction(imeVisible)) {
                     TvMusicFocusPolicy.BackAction.HIDE_IME -> {
                         hideIme()
@@ -356,6 +391,8 @@ class TvMusicActivity : AppCompatActivity() {
         TvFocusLift.attach(searchButton, reducedMotion)
         TvFocusLift.attach(chartsButton, reducedMotion)
         TvFocusLift.attach(forYouButton, reducedMotion)
+        TvFocusLift.attach(playlistsButton, reducedMotion)
+        TvFocusLift.attach(historyButton, reducedMotion)
         // Одна точка рендера на все три наблюдателя: ветку выбирает активная вкладка,
         // поэтому переключение вкладки, лента и чартовый список рисуются одинаково.
         controller.onStateChanged = { renderCurrent() }
@@ -369,12 +406,58 @@ class TvMusicActivity : AppCompatActivity() {
         lyricsTranslationFlow.onStateChanged = { renderLyricsPanel(lyricsFlow.state, focusText = false) }
         // Диалог альбома: каждое состояние автомата сразу становится кадром окна.
         albumFlow.onStateChanged = { renderAlbumPanel(it) }
-        TvMusicPlayer.onTransportChanged = ::renderTransportState
+        // Библиотека (плейлисты/история): свои хуки, но рендер тот же — ветку выбирает
+        // активная вкладка, поэтому поздний ответ закрытой ветки экран не перерисует.
+        libraryController.onPlaylistsChanged = { renderCurrent() }
+        libraryController.onPlaylistTracksChanged = { renderCurrent() }
+        libraryController.onHistoryChanged = { renderCurrent() }
+        // Кадр транспорта: шапка/строки + запись прослушивания в серверную историю
+        // (паритет с mobile). Дедупликацию по треку держит контроллер библиотеки, поэтому
+        // пауза/возобновление не плодят записи.
+        TvMusicPlayer.onTransportChanged = {
+            renderTransportState()
+            libraryController.onTrackStarted(TvMusicPlayer.currentTrack)
+        }
         // Стартовая ветка — персональная лента «Для тебя»; пустая лента сама откатит
         // экран на чарты, поэтому старт без ленты не оставляет пустое окно.
         controller.loadHome()
         renderCurrent()
         backButton.requestFocus()
+    }
+
+    /**
+     * Вход на библиотечную вкладку: переключение ветки + ПЕРВАЯ загрузка. Повторный вход на
+     * уже загруженную вкладку ничего не перезапрашивает — D-pad не должен дёргать сеть на
+     * каждом нажатии; «Повторить» на сбое повторяет именно эту ветку ([retryActiveBranch]).
+     */
+    private fun openLibraryTab(tab: TvMusicTab) {
+        if (controller.tab != tab) controller.selectTab(tab)
+        when (tab) {
+            TvMusicTab.PLAYLISTS ->
+                if (libraryController.playlistsState is TvPlaylistsState.Idle) {
+                    libraryController.loadPlaylists()
+                }
+
+            TvMusicTab.HISTORY ->
+                if (libraryController.historyState is TvHistoryState.Idle) {
+                    libraryController.loadHistory()
+                }
+
+            else -> Unit
+        }
+    }
+
+    /**
+     * «Повторить» повторяет операцию АКТИВНОЙ ветки: чарты/поиск и лента — контроллер
+     * экрана, плейлисты и история — контроллер библиотеки. Иначе кнопка под «Плейлистами»
+     * молча перезагружала бы чарты, а вкладка оставалась бы пустой.
+     */
+    private fun retryActiveBranch() {
+        when (controller.tab) {
+            TvMusicTab.PLAYLISTS -> libraryController.retryPlaylists()
+            TvMusicTab.HISTORY -> libraryController.retryHistory()
+            else -> controller.retry()
+        }
     }
 
     /** Submits the field text as a search and dismisses the IME so results stay visible. */
@@ -410,6 +493,11 @@ class TvMusicActivity : AppCompatActivity() {
         // Диалог альбома: гасим запрос в пути и снимаем хук рендера.
         albumFlow.destroy()
         albumFlow.onStateChanged = null
+        // Библиотека: гасим запросы в пути и снимаем хуки рендера.
+        libraryController.destroy()
+        libraryController.onPlaylistsChanged = null
+        libraryController.onPlaylistTracksChanged = null
+        libraryController.onHistoryChanged = null
         albumDialog?.dismiss()
         albumDialog = null
         lyricsDialog?.dismiss()
@@ -434,6 +522,8 @@ class TvMusicActivity : AppCompatActivity() {
         when (controller.tab) {
             TvMusicTab.FOR_YOU -> renderHome(controller.homeState)
             TvMusicTab.CHARTS -> renderCharts(controller.state)
+            TvMusicTab.PLAYLISTS -> renderPlaylists()
+            TvMusicTab.HISTORY -> renderHistory(libraryController.historyState)
         }
         renderTabStyles()
         renderTransportState()
@@ -547,11 +637,207 @@ class TvMusicActivity : AppCompatActivity() {
         isFocusable = false
     }
 
-    /** Вкладки: активная — акцентная рамка и яркий текст, вторая — карточка и обычный. */
+    /**
+     * Ветка «Плейлисты» (mobile parity): список серверных плейлистов, а после выбора строки —
+     * drill-down в треки открытого плейлиста с фокусируемой кнопкой возврата. Обе части
+     * живут в одном [trackList], поэтому D-pad-цепочка строк собирается одинаково.
+     */
+    private fun renderPlaylists() {
+        val open = libraryController.openPlaylist
+        if (open != null) {
+            renderPlaylistTracks(open, libraryController.playlistTracksState)
+            return
+        }
+        when (val state = libraryController.playlistsState) {
+            is TvPlaylistsState.Idle, is TvPlaylistsState.Loading -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_playlists_loading)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvPlaylistsState.Failed -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = state.message
+                retryButton.visibility = View.VISIBLE
+                if (currentFocus == null) retryButton.requestFocus()
+            }
+            is TvPlaylistsState.Empty -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_playlists_empty)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvPlaylistsState.Content -> {
+                stateText.visibility = View.GONE
+                state.playlists.forEach { addPlaylistRow(it) }
+                focusFirstRow()
+            }
+        }
+    }
+
+    /**
+     * Drill-down открытого плейлиста: «Все плейлисты» сверху (единственный выход назад,
+     * кроме BACK), затем строки треков. Очередь воспроизведения — весь плейлист
+     * ([TvMusicLibraryController.onPlaylistTrackActivated]), индекс строки совпадает с
+     * позицией в нём.
+     */
+    private fun renderPlaylistTracks(playlist: Playlist, state: TvPlaylistTracksState) {
+        trackList.addView(
+            playlistBackChip(playlist),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(48),
+            ).apply { bottomMargin = dp(14) },
+        )
+        when (state) {
+            is TvPlaylistTracksState.Loading -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_playlist_tracks_loading)
+                focusFirstRow()
+            }
+            is TvPlaylistTracksState.Failed -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = state.message
+                retryButton.visibility = View.VISIBLE
+                focusFirstRow()
+            }
+            is TvPlaylistTracksState.Empty -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_playlist_tracks_empty)
+                focusFirstRow()
+            }
+            is TvPlaylistTracksState.Content -> {
+                stateText.visibility = View.GONE
+                state.tracks.forEachIndexed { index, track ->
+                    addTrackRow(track, index) { libraryController.onPlaylistTrackActivated(it) }
+                }
+                focusFirstRow()
+            }
+            TvPlaylistTracksState.Idle -> Unit
+        }
+    }
+
+    /** Кнопка «Все плейлисты»: возврат из drill-down без повторного запроса списка. */
+    private fun playlistBackChip(playlist: Playlist): TextView = TextView(this).apply {
+        text = getString(R.string.tv_music_playlist_back)
+        textSize = 18f
+        gravity = Gravity.CENTER
+        setPadding(dp(20), 0, dp(20), 0)
+        setTextColor(ContextCompat.getColor(context, R.color.mars_text))
+        setBackgroundResource(R.drawable.bg_focus_card)
+        isFocusable = true
+        isClickable = true
+        id = View.generateViewId()
+        // TalkBack: и из какого плейлиста возвращаемся, и что кнопка делает.
+        contentDescription = getString(R.string.tv_music_playlist_open, TvMusicLibraryPolicy.playlistTitle(playlist))
+        setOnClickListener { libraryController.closePlaylist() }
+        TvFocusLift.attach(this, reducedMotion)
+    }
+
+    /**
+     * Строка плейлиста: заголовок и подпись «N треков · создан DD.MM.YYYY»
+     * ([TvMusicLibraryPolicy.playlistMeta] — правило языка, не вёрстки). Обложки у плейлиста
+     * сервер не отдаёт, поэтому строка текстовая; клик открывает drill-down.
+     */
+    private fun addPlaylistRow(playlist: Playlist) {
+        val title = TextView(this).apply {
+            text = TvMusicLibraryPolicy.playlistTitle(playlist)
+            textSize = 20f
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
+        }
+        val meta = TextView(this).apply {
+            text = TvMusicLibraryPolicy.playlistMeta(playlist)
+            textSize = 16f
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            setTextColor(ContextCompat.getColor(context, R.color.mars_text))
+            visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+            setBackgroundResource(R.drawable.bg_focus_card)
+            isFocusable = true
+            isClickable = true
+            id = View.generateViewId()
+            setOnClickListener { libraryController.openPlaylist(playlist) }
+        }
+        row.addView(title, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        row.addView(meta, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        TvFocusLift.attach(row, reducedMotion)
+        trackList.addView(
+            row,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(72)).apply {
+                bottomMargin = dp(12)
+            },
+        )
+    }
+
+    /**
+     * Ветка «История» (mobile parity): записи прослушивания сверху вниз от новых к старым.
+     * Строка играбельна ([HistoryEntry.toTrack]) и стартует очередь из ВСЕЙ истории;
+     * подпись — [TvMusicLibraryPolicy.historyMeta] («ELMAN · 2:45 · вчера, 04:30»).
+     */
+    private fun renderHistory(state: TvHistoryState) {
+        when (state) {
+            is TvHistoryState.Idle, is TvHistoryState.Loading -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_history_loading)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvHistoryState.Failed -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = state.message
+                retryButton.visibility = View.VISIBLE
+                if (currentFocus == null) retryButton.requestFocus()
+            }
+            is TvHistoryState.Empty -> {
+                stateText.visibility = View.VISIBLE
+                stateText.text = getString(R.string.tv_music_history_empty)
+                if (currentFocus == null) backButton.requestFocus()
+            }
+            is TvHistoryState.Content -> {
+                stateText.visibility = View.GONE
+                val now = System.currentTimeMillis()
+                state.entries.forEachIndexed { index, entry ->
+                    val track = entry.toTrack()
+                    val meta = TvMusicLibraryPolicy.historyMeta(entry, now)
+                    addTrackRow(
+                        track,
+                        index,
+                        label = listOf(track.title, meta).filter { it.isNotBlank() }
+                            .joinToString(TvMusicLibraryPolicy.DETAIL_SEPARATOR),
+                    ) { libraryController.onHistoryTrackActivated(it) }
+                }
+                focusFirstRow()
+            }
+        }
+    }
+
+    /**
+     * Фокус после рендера библиотечной ветки: первой фокусируемой строке (drill-down отдаёт
+     * его кнопке «Все плейлисты»). Если строк нет — «Повторить» или устойчивая шапка, чтобы
+     * окно никогда не осталось без фокуса.
+     */
+    private fun focusFirstRow() {
+        val first = firstTrackRow()
+        if (first != null) {
+            if (currentFocus == null || currentFocus === retryButton) first.requestFocus()
+            return
+        }
+        if (currentFocus == null) {
+            if (retryButton.visibility == View.VISIBLE) retryButton.requestFocus() else backButton.requestFocus()
+        }
+    }
+
+    /** Вкладки: активная — акцентная рамка и яркий текст, остальные — карточка и обычный. */
     private fun renderTabStyles() {
-        val onFeed = controller.tab == TvMusicTab.FOR_YOU
-        styleTab(forYouButton, R.string.tv_music_tab_for_you, active = onFeed)
-        styleTab(chartsButton, R.string.tv_music_tab_charts, active = !onFeed)
+        val tab = controller.tab
+        styleTab(forYouButton, R.string.tv_music_tab_for_you, active = tab == TvMusicTab.FOR_YOU)
+        styleTab(chartsButton, R.string.tv_music_tab_charts, active = tab == TvMusicTab.CHARTS)
+        styleTab(playlistsButton, R.string.tv_music_tab_playlists, active = tab == TvMusicTab.PLAYLISTS)
+        styleTab(historyButton, R.string.tv_music_tab_history, active = tab == TvMusicTab.HISTORY)
     }
 
     /**
@@ -598,7 +884,12 @@ class TvMusicActivity : AppCompatActivity() {
      * текущего трека и [onActivate] с индексом строки (в ленте — позиция в плоской
      * очереди полок, [TvMusicHomePolicy.playbackQueue]).
      */
-    private fun addTrackRow(track: MusicTrack, index: Int, onActivate: (Int) -> Unit) {
+    private fun addTrackRow(
+        track: MusicTrack,
+        index: Int,
+        label: String = trackLabel(track),
+        onActivate: (Int) -> Unit,
+    ) {
         // Обложка трека: серверный thumbnail грузит TvImageLoader; при пустом/нерезолвящемся
         // URL или ошибке загрузки вьюха остаётся GONE (строка читается как раньше).
         val cover = ImageView(this).apply {
@@ -606,8 +897,8 @@ class TvMusicActivity : AppCompatActivity() {
             visibility = View.GONE
             contentDescription = null
         }
-        val label = TextView(this).apply {
-            text = trackLabel(track)
+        val labelView = TextView(this).apply {
+            text = label
             textSize = 20f
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
@@ -640,7 +931,7 @@ class TvMusicActivity : AppCompatActivity() {
             },
         )
         row.addView(
-            label,
+            labelView,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 gravity = Gravity.CENTER_VERTICAL
             },
@@ -680,7 +971,7 @@ class TvMusicActivity : AppCompatActivity() {
         )
         TvFocusLift.attach(row, reducedMotion)
         TvFocusLift.attach(albumChip, reducedMotion)
-        val trackRow = TrackRow(track.id, label, marker)
+        val trackRow = TrackRow(track.id, labelView, marker)
         applyRowState(trackRow)
         trackRows += trackRow
         trackList.addView(
@@ -767,6 +1058,8 @@ class TvMusicActivity : AppCompatActivity() {
         searchButton.nextFocusUpId = repeatButton.id
         forYouButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
         chartsButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
+        playlistsButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
+        historyButton.nextFocusUpId = (visible.lastOrNull() ?: backButton).id
     }
 
     /**
@@ -788,6 +1081,8 @@ class TvMusicActivity : AppCompatActivity() {
         searchButton.nextFocusDownId = target
         forYouButton.nextFocusDownId = target
         chartsButton.nextFocusDownId = target
+        playlistsButton.nextFocusDownId = target
+        historyButton.nextFocusDownId = target
         // «Повторить» вниз — в первый трек, а без треков цели нет (фокус остаётся на месте;
         // самопетлю GONE-кнопке не ставим, чтобы чужой focusSearch не зациклился о невидимое).
         retryButton.nextFocusDownId = firstRow?.id ?: TvMusicFocusPolicy.NO_FOCUS

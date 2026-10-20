@@ -232,7 +232,45 @@
             android:gravity="center"
             android:focusable="true"
             android:nextFocusLeft="@+id/forYouButton"
-            android:nextFocusRight="@+id/chartsButton"
+            android:nextFocusRight="@+id/playlistsButton"
+            android:nextFocusUp="@+id/stopButton"
+            android:nextFocusDown="@+id/trackList"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/tv_music_control_h" />
+
+        <!-- Вкладка «Плейлисты»: серверные плейлисты /api/playlists + drill-down в треки. -->
+        <Button
+            android:id="@+id/playlistsButton"
+            android:text="@string/tv_music_tab_playlists"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/chartsButton"
+            android:nextFocusRight="@+id/historyButton"
+            android:nextFocusUp="@+id/stopButton"
+            android:nextFocusDown="@+id/trackList"
+            android:layout_marginStart="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/tv_music_control_h" />
+
+        <!-- Вкладка «История»: история прослушивания /api/history, играется как очередь. -->
+        <Button
+            android:id="@+id/historyButton"
+            android:text="@string/tv_music_tab_history"
+            android:textSize="18sp"
+            android:textColor="@color/mars_text"
+            android:background="@drawable/bg_focus_card"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:gravity="center"
+            android:focusable="true"
+            android:nextFocusLeft="@+id/playlistsButton"
+            android:nextFocusRight="@+id/forYouButton"
             android:nextFocusUp="@+id/stopButton"
             android:nextFocusDown="@+id/trackList"
             android:layout_marginStart="16dp"

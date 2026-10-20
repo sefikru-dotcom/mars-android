@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Библиотека TV-музыки: вкладки «Плейлисты» и «История» (паритет мобильных вкладок
+     MusicActivity — /api/playlists, /api/playlist/{id}, /api/history). Тексты сбоев и
+     подписи строк живут в чистой TvMusicLibraryPolicy, поэтому здесь только статусы
+     загрузки/пустоты и подписи кнопок. Отдельный файл — как strings_tv_lyrics.xml и
+     strings_tv_album.xml: параллельные ветки добавляют ключи без add/add-конфликта. -->
+<resources>
+    <string name="tv_music_playlists_loading">Загружаю плейлисты…</string>
+    <string name="tv_music_playlists_empty">Плейлистов пока нет</string>
+    <string name="tv_music_playlist_tracks_loading">Загружаю треки плейлиста…</string>
+    <string name="tv_music_playlist_tracks_empty">В плейлисте пока нет треков</string>
+    <!-- Возврат из открытого плейлиста к списку плейлистов (фокусируемая кнопка). -->
+    <string name="tv_music_playlist_back">Все плейлисты</string>
+    <string name="tv_music_playlist_open">Плейлист: %1$s</string>
+    <string name="tv_music_history_loading">Загружаю историю прослушивания…</string>
+    <string name="tv_music_history_empty">История прослушивания пуста</string>
+    <string name="tv_music_history_recorded">Прослушивание записано в историю</string>
+</resources>
