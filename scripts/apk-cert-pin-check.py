@@ -49,11 +49,18 @@ EXIT_INPUT = 2
 
 ENV_EXPECTED = "MARS_EXPECTED_CERT_SHA256"
 
-# "Signer #1 certificate SHA-256 digest: 15da3b02...d311" (в т.ч. с двоеточиями)
+# apksigner меняет формат между версиями: старый печатает
+#   "Signer #1 certificate SHA-256 digest: 15da3b02...d311"
+# новый (build-tools 34+) — по схеме подписи:
+#   "V3.0 Signer: certificate SHA-256 digest: 15da3b02...d311"
+# Оба обязаны разбираться, иначе гейт подписи ложноположительно валит релиз.
 DIGEST_RE = re.compile(
-    r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F:]+)", re.MULTILINE
+    r"(?:Signer #\d+|V[\d.]+\s+Signer):?\s*certificate SHA-256 digest:\s*([0-9a-fA-F:]+)",
+    re.MULTILINE,
 )
-DN_RE = re.compile(r"Signer #1 certificate DN:\s*(.+)", re.MULTILINE)
+DN_RE = re.compile(
+    r"(?:Signer #\d+|V[\d.]+\s+Signer):?\s*certificate DN:\s*(.+)", re.MULTILINE
+)
 SIGNERS_RE = re.compile(r"Number of signers:\s*(\d+)", re.MULTILINE)
 # Строгое начало строки, как в apksigner: "Verifies" / "Does not verify: ..."
 VERIFIES_RE = re.compile(r"^Verifies\b", re.MULTILINE)
