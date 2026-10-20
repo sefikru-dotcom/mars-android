@@ -42,6 +42,22 @@ class HandsFreeCapture(
         fun onCaptureFailed() {}
     }
 
+    /**
+     * Сырой поток PCM, ДО нарезки на реплики: каждый буфер, прочитанный из микрофона.
+     *
+     * Нужен потоковому ASR: движку требуется непрерывный звук и он сам определяет конец реплики,
+     * поэтому отдавать ему сегменты после [VoiceSegmenter] поздно (это +hangover тишины к каждой
+     * фразе) и мало (сегмент уже склеен). Колбэк вызывается С ПОТОКА ЧТЕНИЯ, до
+     * [Listener.onSegment], поэтому звук уходит в движок с минимальной задержкой.
+     *
+     * Контракт: [pcm] — тот же буфер, что читается из источника, и он ПЕРЕИСПОЛЬЗУЕТСЯ следующим
+     * чтением. Сохранять ссылку нельзя; если реализация не успевает обработать звук синхронно,
+     * она обязана скопировать нужные байты. Исключение из колбэка не рвёт захват: микрофон важнее.
+     */
+    fun interface RawPcmListener {
+        fun onRawPcm(pcm: ByteArray, length: Int)
+    }
+
     private val lock = Any()
 
     private var worker: Thread? = null
@@ -53,15 +69,20 @@ class HandsFreeCapture(
     /** Слушатель текущей сессии: нужен и потоку чтения, и [finish] (хвост реплики). */
     @Volatile private var listener: Listener? = null
 
+    /** Потребитель сырого потока (потоковый ASR); `null` — движка нет, звук идёт только в сегментер. */
+    @Volatile private var rawListener: RawPcmListener? = null
+
     /** true, пока микрофон открыт (между успешным [start] и выходом потока чтения). */
     val isCapturing: Boolean get() = running
 
     /**
      * Открыть микрофон и начать резать поток на реплики.
      *
+     * @param rawPcm необязательный потребитель НЕнарезанного потока (потоковый ASR). Вызывается с
+     *   потока чтения перед [Listener.onSegment]; `null` — только whisper-путь.
      * @return false без побочных эффектов, если захват уже идёт или источник не открылся.
      */
-    fun start(listener: Listener): Boolean {
+    fun start(listener: Listener, rawPcm: RawPcmListener? = null): Boolean {
         val thread: Thread
         synchronized(lock) {
             if (running || worker != null) return false
@@ -77,6 +98,7 @@ class HandsFreeCapture(
             cancelRequested = false
             running = true
             this.listener = listener
+            this.rawListener = rawPcm
             thread = Thread({ readLoop(source) }, THREAD_NAME).apply {
                 isDaemon = true
                 priority = Thread.NORM_PRIORITY
@@ -117,6 +139,7 @@ class HandsFreeCapture(
             if (worker === thread) {
                 worker = null
                 listener = null
+                rawListener = null
             }
         }
         // Хвост отдаём здесь, а не в потоке чтения: [stop] обязан вернуть управление только
@@ -134,11 +157,22 @@ class HandsFreeCapture(
                     break
                 }
                 if (read <= 0) break
+                feedRaw(buf, read)
                 deliver(segmenter.onChunk(buf, nowMs(), read))
             }
         } finally {
             running = false
             releaseQuietly(source)
+        }
+    }
+
+    /** Сырой поток — до нарезки: движку нужен непрерывный звук и минимальная задержка. */
+    private fun feedRaw(buf: ByteArray, read: Int) {
+        val sink = rawListener ?: return
+        try {
+            sink.onRawPcm(buf, read)
+        } catch (ignored: Exception) {
+            // Движок упал на этом буфере — микрофон и whisper-путь должны пережить это.
         }
     }
 
