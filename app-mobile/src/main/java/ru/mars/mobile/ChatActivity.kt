@@ -252,6 +252,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var voiceLoop: VoiceDialogLoop
     /** Непрерывный микрофон hands-free: сегментер режет поток на реплики (см. [HandsFreeCapture]). */
     private lateinit var handsFreeCapture: HandsFreeCapture
+
+    /**
+     * Потоковый ASR на устройстве (sherpa-onnx). Создаётся один раз, модель догружается в фоне
+     * при первом hands-free запуске. `null` — движок недоступен, диалог идёт через whisper.
+     */
+    private var streamingStt: StreamingStt? = null
+
+    /** Порт движка: то, что видит [StreamingStt]. Отдельно — чтобы освободить модель в onDestroy. */
+    private var asrPort: AsrEnginePort? = null
     /** Разрешение запросили из долгого нажатия на микрофон: после выдачи стартует hands-free. */
     private var pendingHandsFree = false
     /** Распознавание уже записанного звука: повторный тап не запускает второе. */
@@ -508,9 +517,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // тишине. Barge-in (L3) — за флагом и выключен по умолчанию: без AcousticEchoCanceler
         // и AudioSource.VOICE_COMMUNICATION микрофон слышит собственный динамик, и цикл
         // перебивал бы сам себя. Включать только после замеров на устройстве (POCO F5).
+        // Потоковый ASR на устройстве: если движок не загрузится, цикл сам уйдёт на whisper
+        // (StreamingStt.isReady останется false) — диалог не ломается.
+        createAsrPort()
         voiceLoop = VoiceDialogLoop(
             listener = voiceLoopListener,
             bargeInEnabled = voiceOutputPrefs.getBoolean(KEY_VOICE_BARGE_IN, false),
+            stt = streamingStt,
+            // Ход уже идёт: вторая реплика уходит steer-ом, а не новым сообщением.
+            turnActive = { uiState.status == ChatStatus.TYPING },
         )
         // Слушатель передаётся в start(): у захвата нет «постоянного» получателя.
         handsFreeCapture = HandsFreeCapture()
@@ -629,6 +644,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Hands-free-цикл тоже: микрофон не должен остаться открытым после закрытия экрана.
         if (::handsFreeCapture.isInitialized) handsFreeCapture.cancel()
         if (::voiceLoop.isInitialized) voiceLoop.stop()
+        // Нативный движок ASR держит модель в памяти (~50 МБ RSS): освобождаем явно.
+        runCatching { streamingStt?.release() }
+        runCatching { asrPort?.release() }
         if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
         super.onDestroy()
     }
@@ -2051,12 +2069,57 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (!voiceLoop.start()) return
         // Озвучка прошлого ответа не должна попасть в микрофон с первого же чанка.
         voiceOutput.stopSpeaking()
-        if (!handsFreeCapture.start(handsFreeListener)) {
+        // Модель ASR (23 МиБ) качается при первом запуске: в фоне, чтобы не задерживать
+        // открытие микрофона. Пока её нет, цикл уже слушает через whisper — диалог не стоит.
+        asrPort?.let { port ->
+            if (!port.isReady) {
+                Thread({
+                    val loaded = runCatching { port.load() }.getOrDefault(false)
+                    // После загрузки цикл переключается на потоковый путь со следующей реплики.
+                    if (loaded) runOnUiThread { voiceLoop.refreshSttMode() }
+                }, "mars-asr-load").start()
+            }
+        }
+        if (!handsFreeCapture.start(
+                handsFreeListener,
+                // Сырой поток идёт в потоковый ASR параллельно с сегментером: сегментер нужен
+                // только для whisper-пути (деградация), движок режет реплики сам по endpoint.
+                rawPcm = rawPcmSink(),
+            )
+        ) {
             voiceLoop.stop()
             statusView.text = VOICE_MIC_UNAVAILABLE_STATUS
             return
         }
         voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    /**
+     * Потребитель сырого PCM для потокового ASR: обёртка над [StreamingStt.acceptPcm].
+     *
+     * Возвращает `null`, если движка нет — тогда [HandsFreeCapture] работает ровно как раньше
+     * (только сегменты), и whisper-путь остаётся нетронутым.
+     *
+     * Колбэк вызывается с потока чтения микрофона: сам [StreamingStt] потокобезопасен и держит
+     * свой lock, поэтому перекладывать на главный поток здесь не нужно и вредно (потеря кадров).
+     */
+    private fun rawPcmSink(): HandsFreeCapture.RawPcmListener? {
+        val stt = streamingStt ?: return null
+        return HandsFreeCapture.RawPcmListener { pcm, length -> stt.acceptPcm(pcm, length) }
+    }
+
+    /**
+     * Создать порт потокового ASR (один раз за жизнь Activity).
+     *
+     * Модель (23 МиБ) НЕ лежит в APK: движок скачивает её при первом [AsrEnginePort.load].
+     * Загрузку зовём в фоне при старте hands-free, чтобы не блокировать открытие микрофона.
+     */
+    private fun createAsrPort(): AsrEnginePort? {
+        asrPort?.let { return it }
+        val port = runCatching { StreamingAsrEnginePort.create(applicationContext) }.getOrNull()
+        asrPort = port
+        streamingStt = port?.let { StreamingStt(it) }
+        return port
     }
 
     /**
