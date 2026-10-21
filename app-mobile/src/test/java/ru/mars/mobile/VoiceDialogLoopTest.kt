@@ -51,9 +51,20 @@ class VoiceDialogLoopTest {
 
     private fun recording(ms: Long = 1_000L) = Recording(ByteArray(8), 16_000, ms)
 
-    private fun hostAndLoop(bargeIn: Boolean = false): Pair<RecordingHost, VoiceDialogLoop> {
+    /** Часы цикла: окно эхо-успокоения не должно зависеть от реального времени в тестах. */
+    private var clock = 1_000_000L
+
+    private fun hostAndLoop(
+        bargeIn: Boolean = false,
+        route: AudioRoute = AudioRoute.UNKNOWN,
+    ): Pair<RecordingHost, VoiceDialogLoop> {
         val host = RecordingHost()
-        return host to VoiceDialogLoop(host, bargeInEnabled = bargeIn)
+        return host to VoiceDialogLoop(
+            listener = host,
+            bargeInEnabled = bargeIn,
+            audioRoute = { route },
+            nowMs = { clock },
+        )
     }
 
     // --- 1. полный цикл -------------------------------------------------------------------------
@@ -181,14 +192,18 @@ class VoiceDialogLoopTest {
     }
 
     @Test
-    fun `с флагом barge-in останавливает озвучку и не отменяет ход`() {
-        val (host, loop) = hostAndLoop(bargeIn = true)
+    fun `с флагом barge-in на наушниках перебивает и не отменяет ход`() {
+        val (host, loop) = hostAndLoop(bargeIn = true, route = AudioRoute.HEADPHONES)
         loop.start()
         loop.onSegment(recording())
         loop.onTranscript(1L, "вопрос", turnActive = false)
         loop.onAnswerStarted()
+        clock += 1_000L
 
-        assertTrue("перебивание сработало", loop.onSpeechStarted())
+        assertFalse("одного SpeechStarted мало: нужно подтверждение", loop.onSpeechStarted())
+        assertEquals("озвучка ещё звучит", 0, host.stopSpeakingCalls)
+
+        assertTrue("подтверждённая речь перебивает", loop.onSpeechProgress(260))
         assertEquals("озвучка остановлена", 1, host.stopSpeakingCalls)
         assertEquals("цикл снова слушает", VoiceDialogLoop.State.LISTENING, loop.state)
         assertEquals("ход не отменяется: сообщений не добавилось", 1, host.sent.size)
@@ -196,6 +211,23 @@ class VoiceDialogLoopTest {
         // Перебитая реплика принимается как новая и уходит в распознавание.
         assertTrue(loop.onSegment(recording()))
         assertEquals(listOf(1L, 2L), host.transcribeIds)
+    }
+
+    @Test
+    fun `на динамике сегмент во время озвучки не перебивает — текста нет, длительность ничего не доказывает`() {
+        val (host, loop) = hostAndLoop(bargeIn = true, route = AudioRoute.SPEAKER)
+        loop.start()
+        loop.onSegment(recording())
+        loop.onTranscript(1L, "вопрос", turnActive = false)
+        loop.onAnswerStarted("длинный ответ про погоду")
+        clock += 1_000L
+
+        assertFalse(loop.onSpeechStarted())
+        assertFalse("сегмент отброшен", loop.onSegment(recording(ms = 4_000L)))
+        assertFalse(loop.onSpeechProgress(4_000))
+        assertEquals("озвучка не остановлена", 0, host.stopSpeakingCalls)
+        assertEquals(VoiceDialogLoop.State.SPEAKING, loop.state)
+        assertEquals("сегмент без текста на динамике не подтверждает перебивание", 1, loop.bargeInRejected)
     }
 
     @Test

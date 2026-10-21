@@ -76,7 +76,11 @@ class AndroidAudioSourceFactory(
         val activation = AudioCapturePolicy.activateEffects(
             AudioCapturePolicy.effectPlan(echoCancellation, noiseSuppression),
         ) { kind -> acquireEffect(kind, record.audioSessionId) }
-        record.attachEffects(activation.effects)
+        record.attachEffects(
+            activation.effects,
+            aecEnabled = activation.decision(CaptureEffectKind.ACOUSTIC_ECHO_CANCELER) ==
+                EffectDecision.ENABLED,
+        )
 
         Log.i(
             TAG,
@@ -217,12 +221,19 @@ class AndroidAudioSourceFactory(
         @Volatile
         private var effects: AudioCaptureEffects = AudioCaptureEffects()
 
+        /** Реально включённый AEC этой сессии: читается barge-in'ом через [AudioSource.echoCanceled]. */
+        @Volatile
+        private var aecEnabled: Boolean = false
+
         val audioSessionId: Int get() = record.audioSessionId
 
-        fun attachEffects(activated: AudioCaptureEffects) {
+        fun attachEffects(activated: AudioCaptureEffects, aecEnabled: Boolean) {
             effects = activated
+            this.aecEnabled = aecEnabled
             if (released.get()) activated.release()
         }
+
+        override fun echoCanceled(): Boolean = aecEnabled
 
         override fun read(buf: ByteArray): Int = record.read(buf, 0, buf.size)
 
