@@ -57,6 +57,12 @@ class ChatVoiceUiWiringContractTest {
         var start = src.indexOf("private fun $name(")
         if (start < 0) start = src.indexOf("internal fun $name(")
         if (start < 0) start = src.indexOf("fun $name(")
+        if (start < 0) {
+            // Функция-расширение: `internal fun ChatActivity.name(`. Ищем по сигнатуре, а не по
+            // подстроке, иначе `fun name(` не находится вовсе.
+            val match = Regex("""fun\s+(?:[\w.]+\.)?${Regex.escape(name)}\s*\(""").find(src)
+            if (match != null) start = match.range.first
+        }
         assertTrue("функция $name не найдена", start >= 0)
         val open = src.indexOf('{', start)
         assertTrue("у $name нет тела", open > start)
@@ -214,10 +220,32 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `voice dialog flag in the request is explicit and backward compatible`() {
-        assertEquals("voice_dialog", VoiceDialogRequestMode.FIELD)
+        // Фактическое поле сервера — `voice_mode:boolean`. `voice_dialog` из первой редакции
+        // UI-контракта сервер не читает: ход молча уходил бы как текстовый.
+        assertEquals("voice_mode", VoiceDialogRequestMode.FIELD)
+        assertEquals("voice_dialog", VoiceDialogRequestMode.LEGACY_WRONG_FIELD)
         assertEquals(true, VoiceDialogRequestMode.fieldValue(voiceDialog = true))
         // Не голосовой ход — поля нет вовсе (сервер сохраняет свою политику).
         assertNull(VoiceDialogRequestMode.fieldValue(voiceDialog = false))
+    }
+
+    @Test
+    fun `voice mode flag reaches the chat start payload`() {
+        // Тело функции живёт в ChatTurnSection.kt (Activity разбит на секции-файлы).
+        val turn = body(turnSection, "startSendStream")
+        assertTrue(
+            "в теле chat/start должно стоять фактическое поле voice_mode",
+            turn.contains("voiceMode = VoiceDialogRequestMode.fieldValue(voiceTurn) == true"),
+        )
+        // Источник признака — состояние голосового цикла, а не «микрофон когда-то открывался».
+        assertTrue(turn.contains("voiceTurnFromDialog()"))
+        // Признак фиксируется ДО ожидания сессии: иначе выключение режима в момент создания
+        // сессии сделало бы ход неголосовым.
+        val fixAt = turn.indexOf("val voiceTurn = voiceTurnFromDialog()")
+        val awaitAt = turn.indexOf("EnsureSessionResult")
+        assertTrue("признак голоса должен фиксироваться до создания сессии", fixAt in 0 until awaitAt)
+        // Имя поля — ровно то, что читает сервер.
+        assertEquals("voice_mode", VoiceDialogRequestMode.FIELD)
     }
 
     @Test
@@ -225,7 +253,6 @@ class ChatVoiceUiWiringContractTest {
         val contract = File(repoRoot().parentFile, ".mars/voice-upgrade/UI-CONTRACT.md")
         assumeTrue("UI-CONTRACT.md вне репозитория — проверка только на этой машине", contract.isFile)
         val text = contract.readText()
-        assertTrue(text.contains("voice_dialog"))
         assertTrue(text.contains("/api/voice/interrupt"))
         assertTrue(text.contains("voiceInterruptHook"))
         assertTrue(text.contains("sendMessage"))

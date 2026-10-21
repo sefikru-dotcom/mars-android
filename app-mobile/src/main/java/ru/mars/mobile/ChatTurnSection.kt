@@ -80,13 +80,6 @@ internal fun ChatActivity.sendMessage() {
  * сервера (сессия не создана / стрим не стартовал / ошибка до первого события):
  * очередь возвращает такое сообщение на повтор, а доставленное не дублирует.
  */
-
-/**
- * Общая корутина отправки для прямого send и флаша офлайн-очереди (раньше — inline
- * в [sendMessage]). [onTurnFailed] вызывается, только если сообщение НЕ дошло до
- * сервера (сессия не создана / стрим не стартовал / ошибка до первого события):
- * очередь возвращает такое сообщение на повтор, а доставленное не дублирует.
- */
 internal fun ChatActivity.startSendStream(
     text: String,
     outgoingAttachments: List<ChatAttachment>,
@@ -104,6 +97,9 @@ internal fun ChatActivity.startSendStream(
     // Решение об озвучке фиксируется здесь: все дельты хода пойдут в потоковую озвучку
     // (или ни одна), а терминальный Done этот ответ уже не озвучит повторно.
     if (isStreamSpeechReady()) beginStreamSpeech()
+    // Источник хода фиксируется ДО launch: голосовой режим может выключиться, пока корутина
+    // ждёт сессию, но ход всё равно остаётся голосовым (он был начат речью).
+    val voiceTurn = voiceTurnFromDialog()
     // Токен выдаётся синхронно с регистрацией хода: любой последующий уход с контекста
     // (teardownLiveTurn) гасит его — поздние SSE-кадры этого collect не перекрасят новый экран.
     val turnToken = liveTurnGuard.beginTurn()
@@ -125,6 +121,11 @@ internal fun ChatActivity.startSendStream(
         when (val ensured = firstSessionFlow.ensureSession(targetSessionId, credential)) {
             is EnsureSessionResult.Ready -> {
                 currentSessionId = ensured.sessionId
+                // Голосовой канал привязан к сессии: первый ход нового чата создаёт её только
+                // здесь, и до этого перебивать было нечего (voice_id не к чему привязать).
+                // Проверка lateinit-поля живёт в хосте: снаружи (в extension-функции) backing
+                // field недоступен, и `::voiceInterruptChannel.isInitialized` там не компилируется.
+                if (voiceTurn) bindVoiceChannelToSession(ensured.sessionId)
                 if (targetSessionId == null) {
                     modelSelection.setSessionModel(ensured.model, ensured.modelProvider)
                     modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
@@ -160,6 +161,9 @@ internal fun ChatActivity.startSendStream(
             model = choice?.modelId,
             modelProvider = choice?.providerId,
             explicitModelPick = choice?.explicitPick == true,
+            // `voice_mode: true` — фактическое поле сервера (`voice_dialog` из первой редакции
+            // UI-контракта сервер не читает). null → ключа в теле нет.
+            voiceMode = VoiceDialogRequestMode.fieldValue(voiceTurn) == true,
             onTodoState = todoCallback(currentSessionId),
             onSideEvent = sideEventCallback(currentSessionId),
             // Курсор Last-Event-ID продвигается на КАЖДОМ id-кадре (до маппинга),

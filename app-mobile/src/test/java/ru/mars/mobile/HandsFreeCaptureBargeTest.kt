@@ -152,12 +152,16 @@ class HandsFreeCaptureBargeTest {
         assertTrue("начало речи должно дойти", recorder.starts.await(3, TimeUnit.SECONDS))
         assertTrue("тик длительности должен дойти", recorder.progressLatch.await(3, TimeUnit.SECONDS))
         assertTrue("сырой поток идёт параллельно озвучке", rawChunks.isNotEmpty())
+
+        // Снимок один: поток чтения продолжает дочитывать очередь, и два независимых чтения
+        // растущего списка сравнивали бы разные моменты времени (а не порядок тиков).
+        val ticks = recorder.progress.toList()
         assertTrue(
-            "каждый буфер уходит в ASR: ${rawChunks.size} буферов на ${recorder.progress.size} тиков",
-            rawChunks.size >= recorder.progress.size,
+            "каждый буфер уходит в ASR: ${rawChunks.size} буферов на ${ticks.size} тиков",
+            rawChunks.size >= ticks.size,
         )
-        assertTrue("длительность речи растёт", recorder.progress.last() >= 200L)
-        assertEquals("длительность только растёт", recorder.progress.sorted(), recorder.progress.toList())
+        assertTrue("длительность речи растёт", ticks.last() >= 200L)
+        assertEquals("длительность только растёт", ticks.sorted(), ticks)
 
         capture.cancel()
     }

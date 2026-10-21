@@ -41,12 +41,28 @@ class StreamingSpeechController(
     /** Ход уже завершён: финал прочитан, повторный flush не нужен. */
     private var turnFinished = false
 
+    /**
+     * Текст, который в этом ходе РЕАЛЬНО ушёл в озвучку (после нормализации, фразами).
+     *
+     * Зачем хосту: политика перебивания ([BargeInGate]) отличает эхо динамика от речи человека
+     * сравнением partial ASR с произносимым текстом. Придумать этот текст нельзя — нужен именно
+     * тот, что ушёл в синтез; иначе на динамике либо не работает перебивание, либо цикл
+     * перебивает сам себя.
+     */
+    private val spoken = StringBuilder()
+
+    /** Что прозвучало/звучит в текущем ходе; `null` — ещё ничего не ушло в синтез. */
+    val spokenText: String?
+        get() = synchronized(spoken) { spoken.toString().ifBlank { null } }
+
     /** Пришла очередная дельта ответа: готовые фразы сразу уходят в синтез. */
     fun onDelta(delta: String) {
         if (delta.isEmpty()) return
         // Дельта после завершённого хода — это уже НОВЫЙ ход: снимаем флаг, иначе его финал
-        // остался бы неозвученным.
+        // остался бы неозвученным. Текст прошлого хода при этом не переезжает в новый.
+        val startingNewTurn = turnFinished
         turnFinished = false
+        if (startingNewTurn) clearSpoken()
         metrics.onFirstDelta()
         chunker.feed(delta).forEach { phrase -> enqueue(phrase) }
     }
@@ -80,12 +96,14 @@ class StreamingSpeechController(
     fun stop() {
         turnFinished = false
         chunker.reset()
+        clearSpoken()
         queue.stopAll()
     }
 
     /** Хост уничтожен: остановить и освободить плеер. */
     fun release() {
         chunker.reset()
+        clearSpoken()
         queue.release()
     }
 
@@ -98,8 +116,23 @@ class StreamingSpeechController(
 
     /** Фраза проходит нормализацию и, если в ней остался произносимый текст, встаёт в очередь. */
     private fun enqueue(phrase: String) {
-        val spoken = normalizer.normalize(phrase)
-        if (spoken.isNotBlank()) queue.speak(spoken)
+        val normalized = normalizer.normalize(phrase)
+        if (normalized.isNotBlank()) {
+            queue.speak(normalized)
+            recordSpoken(normalized)
+        }
+    }
+
+    /** Запомнить реально произносимый текст хода (для echo-гейта перебивания). */
+    private fun recordSpoken(text: String) {
+        synchronized(spoken) {
+            if (spoken.isNotEmpty()) spoken.append(' ')
+            spoken.append(text.trim())
+        }
+    }
+
+    private fun clearSpoken() {
+        synchronized(spoken) { spoken.setLength(0) }
     }
 
     companion object {

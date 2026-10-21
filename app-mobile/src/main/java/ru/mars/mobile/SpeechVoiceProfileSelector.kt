@@ -34,18 +34,32 @@ import ru.mars.network.repository.ServerTtsVoices
  * @param nowMs монотонные часы в мс (в тестах подменяются).
  * @param transientCooldownMs пауза перед повторной попыткой после сетевого сбоя.
  * @param permanentCooldownMs пауза после «голоса нет на сервере».
- * @param localVoiceInstalled установлен ли локальный piper-голос. Пока серверного
- *   капабилити нет, значение оптимистичное (`true`): если irina не установлена, первый же
- *   ответ `400/404` понизит её надолго, и диалог продолжит системным TTS. Хост сможет
- *   уточнить флаг, когда появится контракт возможностей.
+ * @param localVoice установленность локального piper-голоса. По умолчанию
+ *   [LocalVoiceAvailability.UNVERIFIED] — «неизвестно», а НЕ «установлен»: серверного
+ *   капабилити-эндпоинта пока нет, и объявлять голос установленным наугад значит обещать
+ *   резерв, которого может не быть. Непроверенный профиль допускается к ОДНОЙ фактической
+ *   попытке: ответ сервера (`200` → [LocalVoiceAvailability.INSTALLED], `400/404/501` →
+ *   [LocalVoiceAvailability.ABSENT]) и есть настоящее доказательство.
  */
 class SpeechVoiceProfileSelector(
     private val profiles: List<ServerTtsVoiceProfile> = ServerTtsVoices.VOICE_DIALOG,
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
     private val transientCooldownMs: Long = DEFAULT_TRANSIENT_COOLDOWN_MS,
     private val permanentCooldownMs: Long = DEFAULT_PERMANENT_COOLDOWN_MS,
-    localVoiceInstalled: Boolean = true,
+    localVoice: LocalVoiceAvailability = LocalVoiceAvailability.UNVERIFIED,
 ) {
+
+    /** Что известно о локальном голосе: догадка не выдаётся за факт. */
+    enum class LocalVoiceAvailability {
+        /** Ни подтверждения, ни отказа: одна фактическая попытка допустима. */
+        UNVERIFIED,
+
+        /** Сервер реально отдал аудио этим голосом. */
+        INSTALLED,
+
+        /** Сервер ответил «голоса/движка нет» — больше не предлагаем. */
+        ABSENT,
+    }
 
     private val lock = Any()
 
@@ -55,7 +69,12 @@ class SpeechVoiceProfileSelector(
     /** Счётчик отказов по профилю — диагностика и тесты, решений не принимает. */
     private val failures = HashMap<String, Int>()
 
-    private var localInstalled: Boolean = localVoiceInstalled
+    @Volatile
+    private var localState: LocalVoiceAvailability = localVoice
+
+    /** Текущее знание о локальном голосе (диагностика; решений снаружи не принимает). */
+    val localVoiceAvailability: LocalVoiceAvailability
+        get() = localState
 
     /**
      * Профили, которые можно пробовать СЕЙЧАС, в порядке предпочтения.
@@ -65,16 +84,23 @@ class SpeechVoiceProfileSelector(
     fun candidates(): List<ServerTtsVoiceProfile> = synchronized(lock) {
         val now = nowMs()
         profiles.filter { profile ->
-            isInstalledLocked(profile) && (cooldownUntil[profile.id] ?: 0L) <= now
+            isAvailableLocked(profile) && (cooldownUntil[profile.id] ?: 0L) <= now
         }
     }
 
     /** Первый доступный профиль или null. */
     fun current(): ServerTtsVoiceProfile? = candidates().firstOrNull()
 
-    /** Уточнение установленности локального голоса (когда появится капабилити сервера). */
+    /**
+     * Зафиксировать факт установленности локального голоса (когда появится капабилити сервера
+     * или человек выбрал голос вручную). Значение — факт, а не догадка вызывающего.
+     */
     fun setLocalVoiceInstalled(installed: Boolean) {
-        synchronized(lock) { localInstalled = installed }
+        localState = if (installed) {
+            LocalVoiceAvailability.INSTALLED
+        } else {
+            LocalVoiceAvailability.ABSENT
+        }
     }
 
     /** Сколько отказов накопил профиль (диагностика). */
@@ -88,6 +114,8 @@ class SpeechVoiceProfileSelector(
             cooldownUntil.remove(profile.id)
             failures.remove(profile.id)
         }
+        // Факт: сервер отдал аудио этим голосом — теперь он действительно установлен.
+        if (profile.isLocal) localState = LocalVoiceAvailability.INSTALLED
     }
 
     /**
@@ -103,6 +131,11 @@ class SpeechVoiceProfileSelector(
             if (!demotesProfile(result)) return false
             val cooldown = if (isPermanent(result)) permanentCooldownMs else transientCooldownMs
             cooldownUntil[profile.id] = now + cooldown.coerceAtLeast(0L)
+            // «Голоса нет» — это не пауза, а факт: локальный профиль больше не предлагаем,
+            // иначе каждый диалог заново пробовал бы несуществующий голос.
+            if (profile.isLocal && isPermanent(result)) {
+                localState = LocalVoiceAvailability.ABSENT
+            }
             return true
         }
     }
@@ -115,8 +148,15 @@ class SpeechVoiceProfileSelector(
         }
     }
 
-    private fun isInstalledLocked(profile: ServerTtsVoiceProfile): Boolean =
-        profile.needsNetwork || localInstalled
+    /**
+     * Предлагается ли профиль сейчас.
+     *
+     * Сетевой профиль — всегда (его наличие определяет сервер, отказ придёт ответом).
+     * Локальный — только если не доказано обратное: `ABSENT` исключает его насовсем,
+     * `UNVERIFIED` даёт одну фактическую попытку, `INSTALLED` — обычный кандидат.
+     */
+    private fun isAvailableLocked(profile: ServerTtsVoiceProfile): Boolean =
+        profile.needsNetwork || localState != LocalVoiceAvailability.ABSENT
 
     /**
      * Понижает ли такой отказ профиль.
