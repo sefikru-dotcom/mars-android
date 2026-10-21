@@ -232,7 +232,8 @@ internal fun ChatActivity.finishRecoveredTurn(speakFinalAnswer: Boolean) {
     // Восстановленный ход завершился успешно — голосовой режим озвучивает финальный
     // ответ; ход, умерший серверной ошибкой, не озвучивается.
     if (speakFinalAnswer && isVoiceOutputReady()) {
-        voiceOutput.onTurnComplete(latestAssistantAnswer())
+        // Восстановленный ход: если ответ уже звучал потоково, дочитывания хвоста не нужно.
+        if (isStreamSpeechReady()) endStreamSpeech() else voiceOutput.onTurnComplete(latestAssistantAnswer())
     }
     onVoiceTurnCompleted()
     renderMessages()

@@ -54,6 +54,23 @@ interface ServerTtsPlayback {
      */
     fun play(bytes: ByteArray, contentType: String, onFailed: () -> Unit): Boolean
 
+    /**
+     * Играет [bytes] и сообщает о ЕСТЕСТВЕННОМ конце через [onFinished].
+     *
+     * Нужно очереди фраз ([SpeechQueue]): только по этому сигналу она запускает следующую
+     * фразу, поэтому порядок держится на факте «доиграло», а не на таймере. Базовая
+     * реализация завершения не сообщает и возвращает `false` — плеер без такого сигнала
+     * для очереди не годится, и она честно пропустит фразу, а не зависнет навсегда.
+     *
+     * @return `true` — воспроизведение принято; `false` — движок не смог начать.
+     */
+    fun playToEnd(
+        bytes: ByteArray,
+        contentType: String,
+        onFinished: () -> Unit,
+        onFailed: () -> Unit,
+    ): Boolean = false
+
     /** Немедленная тишина. Безопасно при простое. */
     fun stop()
 

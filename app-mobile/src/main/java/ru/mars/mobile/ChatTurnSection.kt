@@ -101,6 +101,9 @@ internal fun ChatActivity.startSendStream(
     if (isRecoveryReady()) recovery.onNewTurn()
     // Новый ход: озвучка предыдущего финального ответа обрывается, не перетекая в новый.
     if (isVoiceOutputReady()) voiceOutput.onNewTurn()
+    // Решение об озвучке фиксируется здесь: все дельты хода пойдут в потоковую озвучку
+    // (или ни одна), а терминальный Done этот ответ уже не озвучит повторно.
+    if (isStreamSpeechReady()) beginStreamSpeech()
     // Токен выдаётся синхронно с регистрацией хода: любой последующий уход с контекста
     // (teardownLiveTurn) гасит его — поздние SSE-кадры этого collect не перекрасят новый экран.
     val turnToken = liveTurnGuard.beginTurn()
@@ -186,10 +189,16 @@ internal fun ChatActivity.startSendStream(
                 explicitStatus = ChatActivity.STREAM_RECONNECT_STATUS
             } else {
                 uiState.onEvent(event)
+                // Дельта текста ассистента: потоковая озвучка получает её сразу, поэтому
+                // первый звук не ждёт конца хода. Размышления и вызовы инструментов сюда
+                // не попадают — они не часть ответа.
+                if (event is ChatEvent.Chunk && isStreamSpeechReady()) onAssistantDelta(event.text)
                 // Терминальный Done: ход завершён — голосовой режим озвучивает ФИНАЛЬНЫЙ
                 // ответ (промежуточные Chunk/Thought/ToolCall сюда не попадают никогда).
+                // Если ответ уже звучал потоково, второй раз его не читаем.
                 if (event is ChatEvent.Done && isVoiceOutputReady()) {
-                    voiceOutput.onTurnComplete(latestAssistantAnswer())
+                    if (isStreamSpeechReady()) endStreamSpeech()
+                    else voiceOutput.onTurnComplete(latestAssistantAnswer())
                     // Hands-free: ответ зазвучал → SPEAKING, иначе сразу снова слушаем.
                     onVoiceTurnCompleted()
                 }
@@ -231,7 +240,9 @@ internal fun ChatActivity.startSendStream(
             uiState.complete()
             // Стрим закрылся без терминального Done и без ухода в recovery: ход завершён
             // здесь — голосовой режим озвучивает финальный ответ (Done-путь уже озвучил).
-            if (isVoiceOutputReady()) voiceOutput.onTurnComplete(latestAssistantAnswer())
+            if (isVoiceOutputReady()) {
+                if (isStreamSpeechReady()) endStreamSpeech() else voiceOutput.onTurnComplete(latestAssistantAnswer())
+            }
             onVoiceTurnCompleted()
         }
     } catch (cancelled: CancellationException) {
@@ -381,6 +392,9 @@ internal fun ChatActivity.teardownLiveTurn() {
     // Смена диалога / «Стоп» / новый чат: озвучка предыдущего ответа не должна перетекать
     // в следующий контекст (one-shot «ответ на голос» тоже сбрасывается).
     if (isVoiceOutputReady()) voiceOutput.onSessionSwitch()
+    // Потоковая озвучка умершего хода замолкает сразу: перебивание не должно догонять
+    // пользователя хвостом старого ответа в новом контексте.
+    if (isStreamSpeechReady()) cancelStreamSpeech()
     stream?.cancel()
     stream = null
     currentStreamId = null

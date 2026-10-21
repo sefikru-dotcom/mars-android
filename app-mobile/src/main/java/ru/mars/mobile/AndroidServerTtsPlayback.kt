@@ -25,7 +25,8 @@ import java.util.concurrent.RejectedExecutionException
  * [MarsMusicPlayerNoMediaPlayerTest] запрещает android.media.MediaPlayer (на части
  * устройств он уводит AAC через compressed-offload ветку AudioFlinger и глохнет).
  * Серверный ответ уже лежит в памяти, поэтому играем локальный файл: байты пишутся во
- * временный файл cacheDir, ExoPlayer получает `file://`-источник.
+ * временный файл cacheDir, ExoPlayer получает `file://`-источник. Расширение файла берётся
+ * из Content-Type ответа ([ServerTtsAudioFormat]): сервер `api/tts` отдаёт и MP3, и WAV.
  *
  * Потоки:
  * - запись файла — на отдельном однопоточном исполнителе, чтобы главный поток не
@@ -64,11 +65,36 @@ class AndroidServerTtsPlayback(
     private var generation: Int = 0
     private var released: Boolean = false
 
-    override fun play(bytes: ByteArray, contentType: String, onFailed: () -> Unit): Boolean {
+    override fun play(bytes: ByteArray, contentType: String, onFailed: () -> Unit): Boolean =
+        playInternal(bytes, contentType, onEnded = null, onFailed = onFailed)
+
+    override fun playToEnd(
+        bytes: ByteArray,
+        contentType: String,
+        onFinished: () -> Unit,
+        onFailed: () -> Unit,
+    ): Boolean = playInternal(bytes, contentType, onEnded = onFinished, onFailed = onFailed)
+
+    /**
+     * Общий путь [play] и [playToEnd]: запись байтов в кэш и старт плеера.
+     *
+     * @param onEnded естественный конец ИМЕННО этой реплики (нужен очереди фраз); при `null`
+     *   работает общий колбэк конструктора — прежний путь одиночной реплики.
+     */
+    private fun playInternal(
+        bytes: ByteArray,
+        contentType: String,
+        onEnded: (() -> Unit)?,
+        onFailed: () -> Unit,
+    ): Boolean {
         if (released) return false
         val token = ++generation
         releasePlayer()
-        val file = File(appContext.cacheDir, "$FILE_PREFIX${System.nanoTime()}$FILE_SUFFIX")
+        // Расширение по Content-Type: сервер отдаёт и MP3, и WAV.
+        val file = File(
+            appContext.cacheDir,
+            FILE_PREFIX + System.nanoTime() + ServerTtsAudioFormat.extensionFor(contentType),
+        )
         try {
             writer.execute {
                 val written = runCatching {
@@ -85,7 +111,7 @@ class AndroidServerTtsPlayback(
                         return@post
                     }
                     tempFile = file
-                    startPlayer(file, token, onFailed)
+                    startPlayer(file, token, onEnded, onFailed)
                 }
             }
         } catch (rejected: RejectedExecutionException) {
@@ -111,8 +137,17 @@ class AndroidServerTtsPlayback(
         deleteTempFile()
     }
 
-    /** Строит и запускает плеер на главном потоке. Любой отказ уходит в [onFailed]. */
-    private fun startPlayer(file: File, token: Int, onFailed: () -> Unit) {
+    /**
+     * Строит и запускает плеер на главном потоке. Любой отказ уходит в [onFailed].
+     *
+     * @param onEnded конец реплики: колбэк [playToEnd] либо общий колбэк конструктора.
+     */
+    private fun startPlayer(
+        file: File,
+        token: Int,
+        onEnded: (() -> Unit)?,
+        onFailed: () -> Unit,
+    ) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (token != generation || released) return
@@ -127,7 +162,8 @@ class AndroidServerTtsPlayback(
                     file.delete()
                     // Доиграло: только теперь цикл может снова слушать. Ошибки/стоп сюда не
                     // приходят — их обрабатывает движок (фолбэк или стоп контроллера).
-                    runCatching { onFinished() }
+                    val callback = onEnded ?: onFinished
+                    runCatching { callback() }
                 }
             }
         }
@@ -173,6 +209,5 @@ class AndroidServerTtsPlayback(
     companion object {
         private const val THREAD_NAME = "mars-server-tts-write"
         private const val FILE_PREFIX = "mars-tts-"
-        private const val FILE_SUFFIX = ".audio"
     }
 }
