@@ -62,3 +62,12 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# --- Локальный ASR: sherpa-onnx (com.k2fsa.sherpa.onnx) ---
+# JNI-символы в libsherpa-onnx-jni.so сгенерированы из имён Kotlin-классов и
+# external-методов (Java_com_k2fsa_sherpa_onnx_OnlineRecognizer_newFromFile и т.п.).
+# R8, переименовав класс или метод, оставит native-метод без реализации:
+# UnsatisfiedLinkError на первом же вызове — и только в release-сборке (debug не
+# минифицируется, поэтому дебажные тесты этого не видят).
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-dontwarn com.k2fsa.sherpa.onnx.**
