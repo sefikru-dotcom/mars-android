@@ -190,18 +190,18 @@ internal fun ChatActivity.startSendStream(
             } else {
                 uiState.onEvent(event)
                 // Дельта текста ассистента: потоковая озвучка получает её сразу, поэтому
-                // первый звук не ждёт конца хода. Размышления и вызовы инструментов сюда
-                // не попадают — они не часть ответа.
+                // первый звук не ждёт конца хода. Решение «звучит ли дельта» — в
+                // VoiceTurnSpeechPolicy; размышления идут отдельным событием ниже.
                 if (event is ChatEvent.Chunk && isStreamSpeechReady()) onAssistantDelta(event.text)
-                // Терминальный Done: ход завершён — голосовой режим озвучивает ФИНАЛЬНЫЙ
-                // ответ (промежуточные Chunk/Thought/ToolCall сюда не попадают никогда).
-                // Если ответ уже звучал потоково, второй раз его не читаем.
-                if (event is ChatEvent.Done && isVoiceOutputReady()) {
-                    if (isStreamSpeechReady()) endStreamSpeech()
-                    else voiceOutput.onTurnComplete(latestAssistantAnswer())
-                    // Hands-free: ответ зазвучал → SPEAKING, иначе сразу снова слушаем.
-                    onVoiceTurnCompleted()
-                }
+                // Мысли — черновик модели, в динамик не попадают никогда (и это не «фильтр
+                // на всякий случай»: в живом ходе Thought идёт между Chunk-ами ответа).
+                if (event is ChatEvent.Thought) onAssistantThought(event.text)
+                // Вызов инструмента: одна короткая «Проверяю…» на ход, без имени инструмента
+                // и без результата (результата ещё нет — придумывать его нельзя).
+                if (event is ChatEvent.ToolCall) announceToolProgress(event.name)
+                // Терминальный Done: ход завершён — дочитываем остаток потоковой озвучки и
+                // НЕ читаем финал повторно, если ответ уже звучал.
+                if (event is ChatEvent.Done) finishVoiceTurn(speakFinal = true)
                 if (event is ChatEvent.Error) {
                     sawAppError = true
                     if (AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
@@ -240,10 +240,9 @@ internal fun ChatActivity.startSendStream(
             uiState.complete()
             // Стрим закрылся без терминального Done и без ухода в recovery: ход завершён
             // здесь — голосовой режим озвучивает финальный ответ (Done-путь уже озвучил).
-            if (isVoiceOutputReady()) {
-                if (isStreamSpeechReady()) endStreamSpeech() else voiceOutput.onTurnComplete(latestAssistantAnswer())
-            }
-            onVoiceTurnCompleted()
+            // Тот же finishVoiceTurn, что и на Done: два пути к концу хода не должны
+            // расходиться в том, читать финал или нет.
+            finishVoiceTurn(speakFinal = true)
         }
     } catch (cancelled: CancellationException) {
         throw cancelled

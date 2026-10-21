@@ -213,6 +213,9 @@ internal fun ChatActivity.reattachActiveTurn(activeTurn: ActiveTurnInfo) {
     if (!uiState.beginReattachedTurn()) return
     autoScroll.pinToBottom()
     currentStreamId = plan.streamId
+    // Reattach — начало хода для озвучки: без сброса квоты прошлый ход глушил бы финал
+    // восстановленного (политика считала бы, что ответ уже звучал).
+    voiceTurnSpeech.onTurnStarted()
     explicitStatus = ChatActivity.REATTACH_STATUS
     renderMessages()
     setStatus()
@@ -231,11 +234,8 @@ internal fun ChatActivity.finishRecoveredTurn(speakFinalAnswer: Boolean) {
     if (uiState.status == ChatStatus.TYPING) uiState.complete()
     // Восстановленный ход завершился успешно — голосовой режим озвучивает финальный
     // ответ; ход, умерший серверной ошибкой, не озвучивается.
-    if (speakFinalAnswer && isVoiceOutputReady()) {
-        // Восстановленный ход: если ответ уже звучал потоково, дочитывания хвоста не нужно.
-        if (isStreamSpeechReady()) endStreamSpeech() else voiceOutput.onTurnComplete(latestAssistantAnswer())
-    }
-    onVoiceTurnCompleted()
+    // Тот же finishVoiceTurn, что у первичного стрима: финал читается ровно один раз.
+    finishVoiceTurn(speakFinal = speakFinalAnswer)
     renderMessages()
     setStatus()
     updateControlsFromSection()

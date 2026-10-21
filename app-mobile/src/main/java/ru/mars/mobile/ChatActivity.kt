@@ -263,6 +263,42 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var handsFreeCapture: HandsFreeCapture
 
     /**
+     * Вид голосового диалога (кнопка/статус/a11y) — чистая [VoiceDialogPresentationPolicy].
+     * Activity только подставляет ресурсы и рисует: решения о фазе, иконке и подписи живут
+     * в политике, поэтому «красная кнопка» и её сброс проверяются JVM-тестами.
+     */
+    internal val voicePresentation = VoiceDialogPresentationPolicy()
+
+    /** Жесты микрофона: тап (ввод/перебивание/закрыть реплику) и удержание (режим) — в одной политике. */
+    internal val voiceGestures = VoiceMicGesturePolicy()
+
+    /**
+     * Что из хода произносить: ответ — да, мысли — нет, инструменты — одна фраза
+     * [VoiceTurnSpeechPolicy.PROGRESS_LINE] на ход, финал — только если ответ ещё не звучал.
+     */
+    internal val voiceTurnSpeech = VoiceTurnSpeechPolicy()
+
+    /**
+     * Шов перебивания на сервере: `POST /api/voice/interrupt` (`{voice_id, session_id}`).
+     *
+     * Перебивание НЕ отменяет ход: агент продолжает работу, глохнет только звук. Пока голосовой
+     * SSE-канал не подключён (в живом пути один канал — существующий chat SSE), шов пуст и
+     * локальная остановка остаётся единственным эффектом — встраивать второй канал «для галочки»
+     * значило бы держать два источника правды об одном ходе. Контракт — UI-CONTRACT.md.
+     */
+    internal var voiceInterruptHook: ((sessionId: String?) -> Unit)? = null
+
+    /** Фаза, уже нарисованная на кнопке: перерисовка только на смене (без аллокаций на кадр стрима). */
+    private var renderedVoicePhase: VoiceDialogPhase? = null
+
+    /** Ресурсы иконок состояния — единственное, что политика получает от Android. */
+    private val voiceIcons = VoiceDialogIcons(
+        mic = R.drawable.ic_mic,
+        thinking = R.drawable.ic_voice_thinking,
+        speaking = R.drawable.ic_volume,
+    )
+
+    /**
      * Потоковый ASR на устройстве (sherpa-onnx). Создаётся один раз, модель догружается в фоне
      * при первом hands-free запуске. `null` — движок недоступен, диалог идёт через whisper.
      */
@@ -985,6 +1021,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Прежний вызов в конце сборки композера: поля уже разложены, кнопка озвучки
         // получает тон по текущему режиму автоозвучивания (до attach, как и раньше).
         updateVolumeBtn()
+        // Кнопка микрофона получает нейтральный вид (режим выключен) до первого кадра.
+        renderVoiceButton()
         return v.root
     }
 
@@ -1658,7 +1696,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     internal fun setStatus() {
         val quiet = uiState.activityMode == ActivityDisplayMode.STREAM_QUIET
-        statusView.text = explicitStatus ?: contextStatusLine ?: when {
+        // Пока голосовой диалог активен, строка состояния принадлежит ему: человек в режиме
+        // «слушаю/думаю/говорю» смотрит именно туда, и «Марс печатает…» вместо «Слушаю…»
+        // означало бы, что микрофон открыт непонятно зачем. explicitStatus (обрыв связи,
+        // восстановление, readonly) остаётся сильнее — он про то, что блокирует сам диалог.
+        statusView.text = explicitStatus ?: voiceStatusLabel() ?: contextStatusLine ?: when {
             uiState.todoState?.todos?.isNotEmpty() == true && uiState.status == ChatStatus.TYPING -> {
                 val todos = requireNotNull(uiState.todoState).todos
                 val done = todos.count { it.status == "completed" }
@@ -1678,6 +1720,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             }
         }
         updateLiveRunPlate()
+        // Кнопка микрофона живёт по тому же источнику правды, что и строка состояния:
+        // один вызов setStatus() обновляет оба, рассинхрона «красная, а уже выключено» нет.
+        renderVoiceButton()
     }
 
     /** Human banner for the session's server-side attention (WebUI `_session_attention_summary` parity). */
@@ -1930,16 +1975,35 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Здесь только обвязка: разрешение, микрофон, статус и отправка распознанного текста.
      */
     private fun startVoiceInput() {
-        // Идёт распознавание уже записанного звука — второй записи не начинаем.
-        if (voiceTranscribeJob?.isActive == true) {
-            statusView.text = VOICE_TRANSCRIBING_STATUS
-            return
+        // Что делает тап — решает [VoiceMicGesturePolicy]: в режиме диалога тап не открывает
+        // вторую запись, а перебивает звук (или закрывает текущую реплику), иначе «тап по
+        // красной кнопке» означал бы разное в зависимости от того, что успел сделать Марс.
+        when (voiceGestures.onTap(
+            dialogActive = ::voiceLoop.isInitialized && voiceLoop.isActive,
+            speaking = isVoiceSpeakingNow(),
+            manualRecording = ::voiceSession.isInitialized &&
+                voiceSession.state == VoiceSessionController.State.LISTENING,
+            transcribing = voiceTranscribeJob?.isActive == true,
+        )) {
+            // Идёт распознавание уже записанного звука — второй записи не начинаем.
+            VoiceMicTapAction.IGNORE -> statusView.text = VOICE_TRANSCRIBING_STATUS
+            // Перебивание: звук глохнет сразу, ход НЕ отменяется (агент продолжает работу).
+            VoiceMicTapAction.STOP_SPEECH -> bargeIn()
+            VoiceMicTapAction.STOP_UTTERANCE -> {
+                // Реплика закрывается вручную. Движок может отдать текст синхронно (тогда ход
+                // уйдёт сразу), иначе текст придёт в Final — оба пути внутри цикла.
+                // Статус — из фактического состояния цикла, а не «Слушаю…» на всякий случай:
+                // если реплика уже ушла в работу, строка не должна обещать микрофон.
+                if (!voiceLoop.stopUtterance()) setStatus()
+            }
+            // Запись идёт (или уже закончилась по лимиту длительности) — тап её закрывает.
+            VoiceMicTapAction.STOP_MANUAL_INPUT -> stopVoiceInputAndTranscribe()
+            VoiceMicTapAction.START_MANUAL_INPUT -> startManualVoiceInput()
         }
-        // Запись идёт (или уже закончилась по лимиту длительности) — тап её закрывает.
-        if (voiceSession.state == VoiceSessionController.State.LISTENING) {
-            stopVoiceInputAndTranscribe()
-            return
-        }
+    }
+
+    /** Обычный голосовой ввод (режим диалога выключен): разрешение, затем запись одной реплики. */
+    private fun startManualVoiceInput() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -2012,12 +2076,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Состояния цикла → строка статуса. Вызывается с главного потока. */
     private val voiceLoopListener = object : VoiceDialogLoop.Listener {
         override fun onStateChanged(state: VoiceDialogLoop.State) {
-            statusView.text = when (state) {
-                VoiceDialogLoop.State.IDLE -> VOICE_IDLE_STATUS
-                VoiceDialogLoop.State.LISTENING -> VOICE_LISTENING_HANDS_FREE_STATUS
-                VoiceDialogLoop.State.THINKING -> VOICE_TRANSCRIBING_STATUS
-                VoiceDialogLoop.State.SPEAKING -> VOICE_SPEAKING_STATUS
-            }
+            // Текст и кнопка берутся из одной политики: смена фазы цикла обновляет и статус,
+            // и красную кнопку в одном кадре (раньше статус писался напрямую, а кнопка не
+            // менялась вовсе — состояние «слушаю» было видно только по тексту).
+            setStatus()
         }
 
         override fun onTranscribeRequested(requestId: Long, recording: Recording) {
@@ -2044,6 +2106,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Перебивание: потоковая очередь фраз тоже глохнет, иначе первое предложение
             // нового вопроса прозвучало бы поверх дочитываемого ответа.
             cancelStreamSpeech()
+            // Серверный interrupt — только если голосовой канал реально открыт (шов пуст при
+            // единственном chat SSE). Ход при этом не отменяется: агент продолжает работу.
+            requestVoiceInterrupt()
+            setStatus()
         }
 
         override fun onSegmentDropped() {
@@ -2081,12 +2147,30 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Долгое нажатие на микрофон: включить/выключить hands-free (возвращает новое состояние). */
     private fun toggleHandsFree(): Boolean {
-        if (voiceLoop.isActive) {
-            stopHandsFree()
-            return false
+        // Удержание — единственный жест выключения режима, поэтому оно проверяется политикой
+        // первой: пока диалог активен, удержание ВСЕГДА выключает его, в любой фазе (слушаю,
+        // думаю, говорю). Потерять этот жест — значит оставить человека в режиме без выхода.
+        when (voiceGestures.onHold(
+            dialogActive = ::voiceLoop.isInitialized && voiceLoop.isActive,
+            permissionGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+            manualRecording = ::voiceSession.isInitialized &&
+                voiceSession.state == VoiceSessionController.State.LISTENING,
+        )) {
+            VoiceMicHoldAction.DISABLE_DIALOG -> {
+                stopHandsFree()
+                return false
+            }
+            // Ручная запись уже идёт: второй микрофон не открываем и текущую реплику не рвём.
+            VoiceMicHoldAction.IGNORE -> {
+                statusView.text = VOICE_BUSY_STATUS
+                return false
+            }
+            // Разрешение спросит startHandsFree(): ответ придёт в onRequestPermissionsResult.
+            VoiceMicHoldAction.ENABLE_DIALOG_AFTER_PERMISSION,
+            VoiceMicHoldAction.ENABLE_DIALOG -> startHandsFree()
         }
-        startHandsFree()
-        return voiceLoop.isActive
+        return ::voiceLoop.isInitialized && voiceLoop.isActive
     }
 
     private fun startHandsFree() {
@@ -2168,6 +2252,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         voiceLoop.stop()
         handsFreeCapture.cancel()
         voiceOutput.stopSpeaking()
+        // Режим выключен: кнопка возвращается в нейтральное состояние тем же кадром, а не
+        // остаётся красной до следующего случайного setStatus().
+        setStatus()
     }
 
     /**
@@ -2177,6 +2264,106 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun onVoiceTurnCompleted() {
         if (!::voiceLoop.isInitialized || !voiceLoop.isActive) return
         if (voiceOutput.speaking) voiceLoop.onAnswerStarted() else voiceLoop.onAnswerFinished()
+    }
+
+    // --- вид голосового диалога (кнопка, статус, a11y) -----------------------------------------
+
+    /** Звучит ли ответ прямо сейчас: платформенный TTS или потоковая очередь фраз. */
+    internal fun isVoiceSpeakingNow(): Boolean =
+        (::voiceOutput.isInitialized && voiceOutput.speaking) ||
+            (::streamingSpeech.isInitialized && streamingSpeech.isSpeaking)
+
+    /**
+     * Текущее описание вида: фаза выводится из состояния цикла и факта звука.
+     *
+     * `null` вместо состояния цикла, когда режим выключен: `IDLE` бывает и «цикл не запущен»,
+     * и «выключен пользователем» — для интерфейса это одно и то же (кнопка нейтральная).
+     */
+    internal fun currentVoiceUi(): VoiceDialogUi {
+        val loopState = if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.state else null
+        val phase = voicePresentation.phaseFor(loopState, isVoiceSpeakingNow())
+        return voicePresentation.uiFor(phase, voiceIcons)
+    }
+
+    /** Подпись для статусной строки; `null` — режим выключен, строкой владеет чат. */
+    internal fun voiceStatusLabel(): String? {
+        val ui = currentVoiceUi()
+        return if (ui.active && ui.label.isNotEmpty()) ui.label else null
+    }
+
+    /**
+     * Нарисовать кнопку микрофона по текущей фазе. Перерисовка только на смене фазы: во время
+     * стрима setStatus() зовётся на каждый троттлированный кадр, и собирать GradientDrawable
+     * каждый раз значило бы мусорить в GC на ровном месте.
+     */
+    internal fun renderVoiceButton() {
+        val button = voiceBtn ?: return
+        val ui = currentVoiceUi()
+        if (ui.phase == renderedVoicePhase) return
+        renderedVoicePhase = ui.phase
+        VoiceMicButtonRenderer.render(this, button, ui)
+    }
+
+    /**
+     * Перебивание: локальная остановка звука + сетевой interrupt, БЕЗ отмены хода.
+     *
+     * Порядок важен: сначала тишина (человек уже говорит), потом сеть. `cancelStream()` здесь
+     * вызывать нельзя — он убил бы ход, а перебивание означает лишь «замолчи и слушай».
+     */
+    internal fun bargeIn() {
+        if (::voiceOutput.isInitialized) voiceOutput.stopSpeaking()
+        cancelStreamSpeech()
+        requestVoiceInterrupt()
+        setStatus()
+    }
+
+    /**
+     * Серверный interrupt текущего голосового канала. Шов пуст, пока голосовой SSE-канал не
+     * подключён (единственный живой канал — существующий chat SSE), поэтому по умолчанию
+     * локальная остановка остаётся единственным эффектом. Сигнатура — UI-CONTRACT.md.
+     */
+    internal fun requestVoiceInterrupt() {
+        val hook = voiceInterruptHook ?: return
+        hook(currentSessionId)
+    }
+
+    /**
+     * Конец озвучки хода — единственный путь «дочитать/не дочитывать финал».
+     *
+     * Правило: если ответ уже звучал потоково, финал не читается второй раз
+     * ([VoiceTurnSpeechPolicy.onFinal] вернёт `null`), а потоковая очередь только дочитывает
+     * остаток буфера. Если потоковой озвучки не было — финал звучит обычным путём.
+     */
+    internal fun finishVoiceTurn(speakFinal: Boolean) {
+        if (isVoiceOutputReady()) {
+            val finalText = if (speakFinal) voiceTurnSpeech.onFinal(latestAssistantAnswer()) else null
+            if (isStreamSpeechReady()) endStreamSpeech()
+            // Условие «ответ ещё не звучал» уже внутри политики (onFinal вернул null). Проверять
+            // здесь streamSpeechActive нельзя: при включённой потоковой озвучке и ходе без
+            // текстовых дельт (только инструменты, ответ пришёл целиком в Done) финал иначе
+            // не прозвучал бы вообще.
+            if (finalText != null) voiceOutput.onTurnComplete(finalText)
+        }
+        onVoiceTurnCompleted()
+    }
+
+    /**
+     * Начался вызов инструмента: одна короткая фраза «Проверяю…» на ход, без имени инструмента
+     * и без выдуманного результата. Звучит только когда ответ вообще озвучивается
+     * ([streamSpeechActive]) — иначе режим «читать вслух» выключен и лезть в динамик нечем.
+     */
+    internal fun announceToolProgress(toolName: String) {
+        if (!streamSpeechActive || !isStreamSpeechReady()) return
+        val line = voiceTurnSpeech.onToolStarted(toolName) ?: return
+        streamingSpeech.speakWhole(line)
+    }
+
+    /**
+     * Дельта размышлений. В речь не идёт никогда: это черновик модели, а не ответ. Метод
+     * существует, чтобы правило было видно в проводке, а не только в политике.
+     */
+    internal fun onAssistantThought(text: String) {
+        voiceTurnSpeech.onDeliberation(text)
     }
 
     // --- потоковая озвучка ответа -------------------------------------------------------------
@@ -2197,12 +2384,22 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         streamSpeechActive = streamSpeechEnabled()
         if (streamSpeechActive) voiceOutput.consumeSpeakNextAnswer()
         streamingSpeech.stop()
+        // Новый ход — новая квота на «Проверяю…» и сброс «ответ уже звучал»: иначе второй ход
+        // молчал бы про инструменты, а финал первого глушил бы озвучку второго.
+        voiceTurnSpeech.onTurnStarted()
     }
 
-    /** Дельта ответа (только текст ассистента, не размышления и не инструменты). */
+    /**
+     * Дельта ответа (только текст ассистента, не размышления и не инструменты).
+     *
+     * Факт «ответ уже пошёл в звук» фиксируется и тогда, когда озвучка выключена: финальный
+     * Done не должен читать весь ответ целиком поверх частично произнесённого.
+     */
     internal fun onAssistantDelta(text: String) {
-        if (!streamSpeechActive || text.isEmpty()) return
-        streamingSpeech.onDelta(text)
+        if (text.isEmpty()) return
+        val speakable = voiceTurnSpeech.onGeneratedText(text) ?: return
+        if (!streamSpeechActive) return
+        streamingSpeech.onDelta(speakable)
     }
 
     /** Ход завершён: остаток буфера тоже должен прозвучать. */
