@@ -2591,13 +2591,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         streamingSpeech.onDelta(speakable)
     }
 
-    /** Ход завершён: остаток буфера тоже должен прозвучать. */
+    /**
+     * Ход завершён: остаток буфера тоже должен прозвучать.
+     *
+     * «Доиграло» объявляется только по пустой ОЧЕРЕДИ, а не по отсутствию звука: хвостовая фраза,
+     * ушедшая в синтез на [streamingSpeech.onTurnFinished], ещё не играет, поэтому
+     * `isSpeaking == false` при непустой очереди — это «звук впереди», а не «конец». Ранний
+     * drained в этот момент гасит [streamSpeech], и следующая [onStreamSpeechPhraseStarted]
+     * глушит уже готовое аудио.
+     */
     internal fun endStreamSpeech() {
         if (!streamSpeech.isSpeechEnabled) return
         streamingSpeech.onTurnFinished()
         streamSpeech.end()
         // Стрим закрылся, а новых фраз нет — сигнал «доиграло» может не прийти вовсе.
-        if (!streamingSpeech.isSpeaking) onStreamSpeechDrained()
+        if (!streamingSpeech.hasPendingSpeech) onStreamSpeechDrained()
     }
 
     /** Ход отменён/прерван/экран ушёл: тишина немедленно, хвост ответа не догоняет. */

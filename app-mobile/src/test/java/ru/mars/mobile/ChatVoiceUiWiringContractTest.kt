@@ -114,6 +114,30 @@ class ChatVoiceUiWiringContractTest {
     }
 
     @Test
+    fun `turn end drains on an empty queue, not on silent playback`() {
+        val end = body(chat, "endStreamSpeech")
+        // Решение «доиграло» принимается по очереди, а не по факту звука: хвостовая фраза,
+        // ушедшая в синтез на конце хода, ещё не играет — `isSpeaking == false` при непустой
+        // очереди означает «звук впереди». На этом предикате ранний drained гасил streamSpeech,
+        // и следующая фраза глушилась в onStreamSpeechPhraseStarted.
+        assertTrue(
+            "конец хода должен смотреть на очередь, а не на текущий звук",
+            end.contains("if (!streamingSpeech.hasPendingSpeech) onStreamSpeechDrained()"),
+        )
+        assertFalse(
+            "ранний drained по isSpeaking обрезает хвост, который ещё синтезируется",
+            end.contains("streamingSpeech.isSpeaking"),
+        )
+        // Флаш остатка обязан идти ДО решения: иначе последняя фраза не попадёт в очередь и
+        // решение «пусто» станет верным по ошибке.
+        val flushAt = end.indexOf("streamingSpeech.onTurnFinished()")
+        val drainAt = end.indexOf("hasPendingSpeech")
+        assertTrue("хвост флашится до решения о drained", flushAt in 0 until drainAt)
+        // И очередь действительно сообщает о конце хода сама, когда доиграет.
+        assertTrue(chat.contains("onDrained = { runOnUiThread { onStreamSpeechDrained() } }"))
+    }
+
+    @Test
     fun `recovered turn finishes through the same helper`() {
         assertTrue(sessionSection.contains("finishVoiceTurn(speakFinal = speakFinalAnswer)"))
         assertFalse(sessionSection.contains("voiceOutput.onTurnComplete"))

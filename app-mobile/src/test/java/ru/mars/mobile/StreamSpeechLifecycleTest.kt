@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
@@ -304,6 +305,155 @@ class StreamSpeechLifecycleTest {
 
         override fun release() {
             onFinished = null
+        }
+    }
+
+    // --- 4. конец хода, когда хвост ещё СИНТЕЗИРУЕТСЯ (последний блокер) -------------------------
+    //
+    // Блокер: `endStreamSpeech` спрашивал `isSpeaking` (флаг «играет прямо сейчас»). Хвостовая
+    // фраза, ушедшая в синтез на `Done`, ещё не играет — предикат отвечал «звука нет», хост
+    // объявлял конец хода, гасил streamSpeech, и следующая `onStreamSpeechPhraseStarted`
+    // выключала уже готовое аудио. Различие `isSpeaking` / `hasPendingSpeech` проверяется здесь
+    // на настоящей очереди: фраза висит в SYNTHESIZING, пока тест её не отпустит.
+
+    @Test
+    fun `хвост, ушедший в синтез на Done, не объявляет конец раньше звука`() {
+        val host = DelayedTurnHost()
+        host.beginTurn()
+        // Короче minPhraseLength: чанкер держит фразу до flush на конце хода — единственная
+        // фраза хода появляется именно на Done.
+        host.delta("Ответ без точки")
+        host.done()
+
+        assertTrue("хвост ещё синтезируется — очередь не пуста", host.controller.hasPendingSpeech)
+        assertFalse(
+            "звука ещё нет: ровно здесь isSpeaking давал ложный drained",
+            host.controller.isSpeaking,
+        )
+        assertEquals("цикл не должен услышать конец ответа до звука", 0, host.answerFinished)
+
+        host.releaseSynthesis()
+        assertEquals("хвост обязан зазвучать", 1, host.played.size)
+        assertTrue(host.played.single().contains("Ответ"))
+
+        host.playback.finishCurrent()
+        assertEquals("конец ответа — один раз и после реального звука", 1, host.answerFinished)
+    }
+
+    @Test
+    fun `стоп во время синтеза хвоста не оживляет очередь`() {
+        val host = DelayedTurnHost()
+        host.beginTurn()
+        host.delta("Ответ без точки")
+        host.done()
+        assertTrue(host.controller.hasPendingSpeech)
+
+        host.cancel() // перебивание/стоп посреди синтеза
+        assertFalse("стоп чистит очередь", host.controller.hasPendingSpeech)
+        assertEquals("отменённый ход не объявляет конец", 0, host.answerFinished)
+
+        host.releaseSynthesis() // поздний ответ сервера
+        assertTrue("поздний синтез после стопа не звучит", host.played.isEmpty())
+        assertEquals(0, host.answerFinished)
+    }
+
+    @Test
+    fun `пустая очередь на Done сообщает конец сразу`() {
+        val host = DelayedTurnHost()
+        host.beginTurn()
+        host.delta("Первое предложение про погоду.")
+        host.releaseSynthesis()
+        host.playback.finishCurrent()
+        assertEquals("пауза внутри хода — ещё не конец", 0, host.answerFinished)
+
+        // Флашить нечего: конец хода должен объявиться без ожидания сигнала очереди, иначе
+        // hands-free завис бы в SPEAKING.
+        host.done()
+        assertEquals("нечего доигрывать — конец объявлен сразу", 1, host.answerFinished)
+    }
+
+    /**
+     * Хост с управляемым синтезом: проводка повторяет [ChatActivity] один в один, включая
+     * предикат конца хода (`hasPendingSpeech`), но фраза висит в SYNTHESIZING до
+     * [releaseSynthesis] — состояние, в котором старый предикат ошибался.
+     */
+    private class DelayedTurnHost {
+
+        val policy = VoiceTurnSpeechPolicy()
+        val lifecycle = StreamSpeechLifecycle()
+        val client = GatedClient()
+        val playback = RecordingPlayback()
+        val controller = StreamingSpeechController(
+            queue = SpeechQueue(
+                client = client,
+                playback = playback,
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                onDrained = { drained() },
+                retryPolicy = SpeechRetryPolicy(maxAttempts = 1, maxDelayMs = 0L),
+            ),
+        )
+
+        var answerFinished: Int = 0
+            private set
+
+        var finalText: String? = null
+            private set
+
+        val played: List<String> get() = playback.played
+
+        fun beginTurn(enabled: Boolean = true) {
+            lifecycle.begin(enabled)
+            controller.stop()
+            policy.onTurnStarted()
+        }
+
+        fun delta(text: String) {
+            val speakable = policy.onGeneratedText(text) ?: return
+            if (!lifecycle.acceptsDelta) return
+            controller.onDelta(speakable)
+        }
+
+        fun done() {
+            if (!lifecycle.isSpeechEnabled) return
+            finalText = policy.onFinal("Готово: двадцать градусов.")
+            controller.onTurnFinished()
+            lifecycle.end()
+            // То же решение, что в ChatActivity.endStreamSpeech: пустая ОЧЕРЕДЬ, а не тишина.
+            if (!controller.hasPendingSpeech) drained()
+        }
+
+        fun cancel() {
+            lifecycle.cancel()
+            controller.stop()
+        }
+
+        /** Отпустить синтез: висевшие фразы получают аудио. */
+        fun releaseSynthesis() = client.completeAll()
+
+        private fun drained() {
+            if (!lifecycle.isSpeechEnabled) return
+            if (!lifecycle.onQueueDrained()) return
+            answerFinished++
+        }
+    }
+
+    /** Синтез, который висит в SYNTHESIZING до [completeAll]. */
+    private class GatedClient : ServerTtsClient {
+
+        private val gates = LinkedHashMap<String, CompletableDeferred<ServerTtsResult>>()
+
+        val requested: MutableList<String> = ArrayList()
+
+        override suspend fun synthesize(text: String): ServerTtsResult {
+            requested += text
+            return synchronized(gates) { gates.getOrPut(text) { CompletableDeferred() } }.await()
+        }
+
+        fun completeAll() {
+            val pending = synchronized(gates) { gates.entries.map { it.key to it.value } }
+            pending.forEach { (text, gate) ->
+                gate.complete(ServerTtsResult.Audio(text.toByteArray(), "audio/wav"))
+            }
         }
     }
 }
