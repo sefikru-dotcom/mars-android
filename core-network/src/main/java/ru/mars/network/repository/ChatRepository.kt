@@ -193,7 +193,10 @@ class ChatRepository(
                             describeHttpError(
                                 response.code,
                                 body,
-                            )
+                            ),
+                            // Машинный код — отдельным полем: приложение классифицирует отказ
+                            // контракта по нему, а не по человеческой формулировке в `error`.
+                            errorCode = httpErrorCode(body),
                         )
                     )
                     return@flow
@@ -531,7 +534,10 @@ class ChatRepository(
                             response.code,
                             errorBody,
                             RetryAfterPolicy.parseSeconds(response.header("Retry-After")),
-                        )
+                        ),
+                        // Тот же машинный код, что и у start-POST: отказ контракта должен
+                        // классифицироваться одинаково на обоих HTTP-путях хода.
+                        errorCode = httpErrorCode(errorBody),
                     )
                 )
                 return

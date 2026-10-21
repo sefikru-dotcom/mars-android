@@ -111,6 +111,15 @@ class StreamingSpeechController(
     val isSpeaking: Boolean
         get() = queue.isSpeaking
 
+    /**
+     * В очереди ещё есть фразы (играющая, готовые и синтезируемые).
+     *
+     * Нужен хосту, чтобы отличить «звук кончился» от «звук ещё не начинался»: между этими
+     * состояниями `isSpeaking == false`, но конец хода наступает только во втором.
+     */
+    val hasPendingSpeech: Boolean
+        get() = queue.pendingCount > 0
+
     /** Снимок метрик текущего хода (без текста ответа). */
     fun latencySnapshot(): SpeechLatencySnapshot = metrics.snapshot()
 
@@ -150,6 +159,7 @@ class StreamingSpeechController(
             scope: CoroutineScope,
             onFirstAudio: () -> Unit = {},
             onDrained: () -> Unit = {},
+            onPhraseStarted: (text: String) -> Unit = {},
             onPhraseFailed: (text: String, reason: String) -> Unit = { _, _ -> },
             metrics: SpeechLatencyMetrics = SpeechLatencyMetrics(),
             retryPolicy: SpeechRetryPolicy = SpeechRetryPolicy(),
@@ -163,6 +173,9 @@ class StreamingSpeechController(
                     runCatching { onFirstAudio() }
                 },
                 onDrained = onDrained,
+                // Каждая фраза отдельно: хост обновляет echo-эталон перебивания только тем
+                // текстом, который реально пошёл в динамик.
+                onPhraseStarted = { text -> runCatching { onPhraseStarted(text) } },
                 onPhraseFailed = { text, reason ->
                     // Метрику отказа считает сама очередь (см. notifyPhraseFailed): здесь только
                     // проброс хосту, иначе один пропуск считался бы дважды.

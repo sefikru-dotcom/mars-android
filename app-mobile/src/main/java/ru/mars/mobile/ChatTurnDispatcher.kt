@@ -108,7 +108,10 @@ class ChatTurnDispatcher {
         // Отказ голосовому режиму проверяется ПЕРВЫМ: он приходит как обычный ChatEvent.Error
         // до доставки, и без отдельной ветки попал бы в общий путь «сообщение не дошло»,
         // то есть в авторетрай очереди и в сырой «Ошибка: HTTP 409 …» в транскрипте.
-        if (event is ChatEvent.Error && VoiceModeRejectionPolicy.isVoiceModeRejected(event.message)) {
+        // Классификация — по структурированному `errorCode` из тела ответа: человеческий текст
+        // сервера («voice_mode is not supported by the runner backend.») код не содержит, и
+        // строковая проверка пропускала бы отказ в общий путь.
+        if (event is ChatEvent.Error && VoiceModeRejectionPolicy.isVoiceModeRejected(event)) {
             tally.voiceModeRejected = true
             return FrameDecision.REJECT_VOICE_MODE
         }

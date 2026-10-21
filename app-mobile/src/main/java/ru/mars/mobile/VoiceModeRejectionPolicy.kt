@@ -1,5 +1,7 @@
 package ru.mars.mobile
 
+import ru.mars.network.model.ChatEvent
+
 /**
  * Отказ сервера в голосовом ходе: `409 unsupported_voice_mode_backend`.
  *
@@ -53,8 +55,25 @@ object VoiceModeRejectionPolicy {
     }
 
     /**
+     * Отказ ли это голосового режима — по СТРУКТУРИРОВАННОМУ коду события.
+     *
+     * Основной путь: `ChatRepository` кладёт `code` из тела ответа в [ChatEvent.Error.errorCode],
+     * и решение не зависит от того, как сервер сформулировал `error` (и сформулировал ли вообще).
+     * Строковая проверка [isVoiceModeRejected] остаётся фолбэком для тел без `code` (старый
+     * контракт: текст ошибки — сам код) и для источников, которые ещё не несут поле.
+     */
+    fun isVoiceModeRejected(error: ChatEvent.Error): Boolean {
+        val code = error.errorCode?.trim()
+        if (!code.isNullOrEmpty()) return code.equals(CODE, ignoreCase = true)
+        return isVoiceModeRejected(error.message)
+    }
+
+    /**
      * Можно ли повторять ход после такого отказа. Всегда `false`: повтор с `voice_mode`
      * даст тот же 409, повтор без него — тихую подмену режима.
      */
     fun isRetryable(message: String?): Boolean = !isVoiceModeRejected(message)
+
+    /** Можно ли повторять ход после отказа, распознанного по структурированному коду. */
+    fun isRetryable(error: ChatEvent.Error): Boolean = !isVoiceModeRejected(error)
 }

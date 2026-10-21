@@ -38,6 +38,9 @@ import ru.mars.network.repository.ServerTtsResult
  * @param scope область для фонового синтеза (в приложении — `lifecycleScope`).
  * @param onFirstAudio первое аудио пошло в динамик (один раз на очередь до [onDrained]).
  * @param onDrained очередь пуста и всё доиграно.
+ * @param onPhraseStarted КАЖДАЯ фраза пошла в динамик: её текст (для echo-эталона перебивания).
+ *   Зовётся по одной фразе, а не «весь ответ сразу»: текст, который ещё не звучал, не должен
+ *   считаться озвученным.
  * @param onPhraseFailed фраза пропущена: текст и короткая причина.
  * @param maxSynthesisParallelism предел одновременных запросов синтеза.
  * @param lookahead на сколько фраз вперёд синтезировать относительно играющей.
@@ -50,6 +53,7 @@ class SpeechQueue(
     private val scope: CoroutineScope,
     private val onFirstAudio: () -> Unit = {},
     private val onDrained: () -> Unit = {},
+    private val onPhraseStarted: (text: String) -> Unit = {},
     private val onPhraseFailed: (text: String, reason: String) -> Unit = { _, _ -> },
     private val maxSynthesisParallelism: Int = DEFAULT_SYNTHESIS_PARALLELISM,
     private val lookahead: Int = DEFAULT_LOOKAHEAD,
@@ -296,6 +300,8 @@ class SpeechQueue(
             failPhrase(gen, slot, "playback_rejected")
             return
         }
+        // Фраза реально пошла в динамик: только теперь её текст становится эталоном эха.
+        runCatching { onPhraseStarted(slot.text) }
         val first = synchronized(lock) {
             if (released || generationCounter != gen) {
                 false
