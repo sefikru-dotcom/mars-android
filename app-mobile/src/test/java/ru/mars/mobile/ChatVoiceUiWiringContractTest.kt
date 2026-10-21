@@ -1,0 +1,233 @@
+package ru.mars.mobile
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.Test
+import java.io.File
+
+/**
+ * Контракт проводки голосового диалога в UI-зоне.
+ *
+ * Instrumented-слоя в проекте нет, поэтому проводка закреплена как source-контракт (тот же
+ * стиль, что [ChatAccessibilityContractTest]): тест читает РЕАЛЬНЫЙ production-исходник и
+ * проверяет, что решения приняты политиками, а эффекты стоят именно там, где нужно.
+ *
+ * Что защищается (по требованиям пользователя):
+ * 1. потоковая озвучка идёт на дельтах и НЕ повторяется на финале — один путь `finishVoiceTurn`;
+ * 2. `tool.started` даёт одну фразу, `Thought` не озвучивается;
+ * 3. тап-стоп глушит звук локально и шлёт сетевой interrupt, но НЕ отменяет ход;
+ * 4. кнопка красная весь активный диалог и рисуется из одной политики;
+ * 5. второй канал (голосовой SSE) не встраивается «для галочки» — живёт один chat SSE.
+ */
+class ChatVoiceUiWiringContractTest {
+
+    private fun source(relative: String): String {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            val candidate = File(dir, relative)
+            if (candidate.isFile) return candidate.readText()
+            val nested = File(dir, "app-mobile/$relative")
+            if (nested.isFile) return nested.readText()
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден исходник: $relative")
+    }
+
+    private fun repoRoot(): File {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            if (File(dir, "app-mobile/src/main/java/ru/mars/mobile/ChatActivity.kt").isFile) return dir
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден корень репозитория")
+    }
+
+    private val chat by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+    private val turnSection by lazy { source("src/main/java/ru/mars/mobile/ChatTurnSection.kt") }
+    private val sessionSection by lazy { source("src/main/java/ru/mars/mobile/ChatSessionSection.kt") }
+
+    /** Тело функции по имени: от `fun name(` до парной закрывающей скобки. */
+    private fun body(src: String, name: String): String {
+        // `private fun` первым: у `startVoiceInput`/`toggleHandsFree` есть ещё и override-делегат
+        // в listener'е каркаса (`this@ChatActivity.startVoiceInput()`), и его тело ничего не
+        // доказывает про проводку.
+        var start = src.indexOf("private fun $name(")
+        if (start < 0) start = src.indexOf("internal fun $name(")
+        if (start < 0) start = src.indexOf("fun $name(")
+        assertTrue("функция $name не найдена", start >= 0)
+        val open = src.indexOf('{', start)
+        assertTrue("у $name нет тела", open > start)
+        var depth = 0
+        var i = open
+        while (i < src.length) {
+            when (src[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return src.substring(open, i + 1)
+                }
+            }
+            i++
+        }
+        throw AssertionError("не закрыто тело $name")
+    }
+
+    // --- 1. потоковая озвучка: дельты, без повтора на финале ------------------------------------
+
+    @Test
+    fun `streaming speech starts on deltas and resets the turn policy`() {
+        val begin = body(chat, "beginStreamSpeech")
+        assertTrue(begin.contains("voiceTurnSpeech.onTurnStarted()"))
+        val delta = body(chat, "onAssistantDelta")
+        assertTrue(delta.contains("voiceTurnSpeech.onGeneratedText"))
+        assertTrue(delta.contains("streamingSpeech.onDelta"))
+    }
+
+    @Test
+    fun `turn end goes through one finishVoiceTurn decision`() {
+        val finish = body(chat, "finishVoiceTurn")
+        // Финал спрашивается у политики, а не читается напрямую: политика помнит, звучал ли ответ.
+        assertTrue(finish.contains("voiceTurnSpeech.onFinal"))
+        assertTrue(finish.contains("endStreamSpeech()"))
+        assertTrue(finish.contains("onVoiceTurnCompleted()"))
+        // Прямой onTurnComplete — только когда политика разрешила финал (ответ ещё не звучал).
+        assertTrue(finish.contains("voiceOutput.onTurnComplete(finalText)"))
+    }
+
+    @Test
+    fun `done and end of stream use the same path`() {
+        assertTrue(turnSection.contains("if (event is ChatEvent.Done) finishVoiceTurn(speakFinal = true)"))
+        // Второй путь «стрим закрылся без Done» не должен расходиться с первым.
+        val sectionBody = turnSection.substringAfter("if (uiState.status == ChatStatus.TYPING) {")
+        assertTrue(sectionBody.contains("finishVoiceTurn(speakFinal = true)"))
+        // И ни один из них больше не озвучивает финал напрямую.
+        assertFalse(turnSection.contains("voiceOutput.onTurnComplete"))
+    }
+
+    @Test
+    fun `recovered turn finishes through the same helper`() {
+        assertTrue(sessionSection.contains("finishVoiceTurn(speakFinal = speakFinalAnswer)"))
+        assertFalse(sessionSection.contains("voiceOutput.onTurnComplete"))
+        // Reattach — начало хода: без сброса политики восстановленный финал молчал бы.
+        assertTrue(sessionSection.contains("voiceTurnSpeech.onTurnStarted()"))
+    }
+
+    // --- 2. мысли и инструменты -----------------------------------------------------------------
+
+    @Test
+    fun `thoughts are routed to the silent policy branch`() {
+        assertTrue(turnSection.contains("if (event is ChatEvent.Thought) onAssistantThought(event.text)"))
+        val thought = body(chat, "onAssistantThought")
+        assertTrue(thought.contains("voiceTurnSpeech.onDeliberation"))
+        // Размышления не должны попадать в потоковую озвучку ни под каким видом.
+        assertFalse(thought.contains("streamingSpeech"))
+    }
+
+    @Test
+    fun `tool start announces one progress line and nothing else`() {
+        assertTrue(turnSection.contains("if (event is ChatEvent.ToolCall) announceToolProgress(event.name)"))
+        val progress = body(chat, "announceToolProgress")
+        assertTrue(progress.contains("voiceTurnSpeech.onToolStarted"))
+        assertTrue(progress.contains("streamingSpeech.speakWhole(line)"))
+        // Результат инструмента не произносится: ToolResult в проводке озвучки отсутствует.
+        assertFalse(turnSection.contains("ToolResult) announce"))
+    }
+
+    // --- 3. barge-in: локальный стоп + сетевой interrupt, без отмены хода -----------------------
+
+    @Test
+    fun `barge-in stops sound locally and never cancels the agent turn`() {
+        val barge = body(chat, "bargeIn")
+        assertTrue(barge.contains("voiceOutput.stopSpeaking()"))
+        assertTrue(barge.contains("cancelStreamSpeech()"))
+        assertTrue(barge.contains("requestVoiceInterrupt()"))
+        // Главное: перебивание не убивает ход — «Стоп» для этого существует отдельно.
+        assertFalse("bargeIn не должен отменять ход", barge.contains("cancelStream()"))
+        assertFalse(barge.contains("teardownLiveTurn"))
+    }
+
+    @Test
+    fun `loop barge-in callback also reaches the network seam`() {
+        val listener = chat.substringAfter("override fun onStopSpeaking()")
+        val stopBody = listener.substringBefore("override fun onSegmentDropped")
+        assertTrue(stopBody.contains("cancelStreamSpeech()"))
+        assertTrue(stopBody.contains("requestVoiceInterrupt()"))
+    }
+
+    @Test
+    fun `network interrupt is a documented seam, not a second channel`() {
+        assertTrue(chat.contains("internal var voiceInterruptHook"))
+        val request = body(chat, "requestVoiceInterrupt")
+        assertTrue(request.contains("currentSessionId"))
+        // Голосовой SSE-канал не встроен в Activity: живой путь — существующий chat SSE.
+        assertFalse("второй канал не должен появляться в UI-слое", chat.contains("VoiceGatewayClient"))
+    }
+
+    // --- 4. кнопка и статус ---------------------------------------------------------------------
+
+    @Test
+    fun `status line and button are driven by one call`() {
+        val status = body(chat, "setStatus")
+        assertTrue(status.contains("voiceStatusLabel()"))
+        assertTrue(status.contains("renderVoiceButton()"))
+        // Явный статус (обрыв/восстановление) остаётся сильнее голосового.
+        assertTrue(status.indexOf("explicitStatus") < status.indexOf("voiceStatusLabel()"))
+    }
+
+    @Test
+    fun `button rendering is phase-gated and delegates to the renderer`() {
+        val render = body(chat, "renderVoiceButton")
+        assertTrue(render.contains("VoiceMicButtonRenderer.render"))
+        // Перерисовка только на смене фазы: setStatus зовётся на каждый кадр стрима.
+        assertTrue(render.contains("renderedVoicePhase"))
+        // Размер кнопки не трогаем — layout-параметры принадлежат каркасу композера.
+        assertFalse(render.contains("layoutParams"))
+        assertFalse(chat.contains("voiceBtn?.layoutParams"))
+    }
+
+    @Test
+    fun `active button uses the accent colour with a constant outline`() {
+        val renderer = source("src/main/java/ru/mars/mobile/VoiceMicButtonRenderer.kt")
+        assertTrue(renderer.contains("MarsTheme.ACCENT"))
+        assertTrue(renderer.contains("setStroke("))
+        assertTrue(renderer.contains("MarsTheme.ACCENT_HOVER"))
+        // Никаких пульсаций/анимаций: «постоянная обводка» — постоянная.
+        assertFalse(renderer.contains("ObjectAnimator"))
+        assertFalse(renderer.contains("ValueAnimator"))
+        assertFalse(renderer.contains("animate()"))
+    }
+
+    @Test
+    fun `tap and hold are decided by the gesture policy`() {
+        val tap = body(chat, "startVoiceInput")
+        assertTrue(tap.contains("voiceGestures.onTap("))
+        assertTrue(tap.contains("VoiceMicTapAction.STOP_SPEECH -> bargeIn()"))
+        val hold = body(chat, "toggleHandsFree")
+        assertTrue(hold.contains("voiceGestures.onHold("))
+        assertTrue(hold.contains("VoiceMicHoldAction.DISABLE_DIALOG"))
+    }
+
+    // --- 5. контракт с зонами Z1-Z3 -------------------------------------------------------------
+
+    @Test
+    fun `voice dialog flag in the request is explicit and backward compatible`() {
+        assertEquals("voice_dialog", VoiceDialogRequestMode.FIELD)
+        assertEquals(true, VoiceDialogRequestMode.fieldValue(voiceDialog = true))
+        // Не голосовой ход — поля нет вовсе (сервер сохраняет свою политику).
+        assertNull(VoiceDialogRequestMode.fieldValue(voiceDialog = false))
+    }
+
+    @Test
+    fun `cross-zone contract is written down`() {
+        val contract = File(repoRoot().parentFile, ".mars/voice-upgrade/UI-CONTRACT.md")
+        assumeTrue("UI-CONTRACT.md вне репозитория — проверка только на этой машине", contract.isFile)
+        val text = contract.readText()
+        assertTrue(text.contains("voice_dialog"))
+        assertTrue(text.contains("/api/voice/interrupt"))
+        assertTrue(text.contains("voiceInterruptHook"))
+        assertTrue(text.contains("sendMessage"))
+    }
+}
