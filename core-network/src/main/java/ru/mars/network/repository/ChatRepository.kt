@@ -153,6 +153,11 @@ class ChatRepository(
      * `Last-Event-ID` and the server replays its journal gap (docs/API-CONTRACT.md,
      * "Chat SSE: resume and reconnect"). Frames without an `id:` never invoke it.
      * Default `null` disables the callback — existing callers are unaffected.
+     *
+     * [voiceMode] — opt-in голосового хода: `true` добавляет в тело `POST api/chat/start`
+     * поле `"voice_mode": true`. По умолчанию `false`, и тогда ключ НЕ отправляется вовсе,
+     * поэтому обычный чат побайтово сохраняет прежний контракт (серверная поддержка
+     * voice_mode ещё в работе). Выставлять только для ходов, начатых голосом.
      */
     fun sendMessage(
         endpoint: String,
@@ -167,14 +172,15 @@ class ChatRepository(
         onTodoState: ((TodoSnapshot) -> Unit)? = null,
         onSideEvent: ((StreamSideEvent) -> Unit)? = null,
         onEventId: ((String) -> Unit)? = null,
+        voiceMode: Boolean = false,
     ): Flow<ChatEvent> = flow {
         val base = endpoint.toHttpUrl()
         try {
             if (base.encodedPath == "/chat") {
-                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace), credential, onTodoState, onSideEvent, onEventId) { event -> emit(event) }
+                stream(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace, voiceMode), credential, onTodoState, onSideEvent, onEventId) { event -> emit(event) }
                 return@flow
             }
-            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace)).execute().use { response ->
+            val startResp = client.newCall(requestStart(base, credential, message, sessionId, attachments, model, modelProvider, explicitModelPick, workspace, voiceMode)).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     // The server answers start failures with `{"error": "<reason>"}`
@@ -431,12 +437,17 @@ class ChatRepository(
         model: String? = null,
         modelProvider: String? = null,
         explicitModelPick: Boolean = false,
-        workspace: String? = null
+        workspace: String? = null,
+        voiceMode: Boolean = false
     ): Request {
         val url = if (base.encodedPath == "/chat") base else base.newBuilder().addPathSegments("api/chat/start").build()
         val jsonBody = buildString {
             append("{\"message\":").append(jsonString(message))
             if (!sessionId.isNullOrBlank()) append(",\"session_id\":").append(jsonString(sessionId))
+            // Голосовой ход — только явный opt-in: ключ появляется в теле лишь при true,
+            // поэтому обычный чат отправляет ровно тот же JSON, что и раньше, и сервер
+            // без поддержки voice_mode ничего не замечает.
+            if (voiceMode) append(",\"voice_mode\":true")
             // Server `_handle_chat_start` reads body["workspace"] (a trusted path
             // string) and resolves it via `_resolve_chat_workspace_with_recovery`,
             // letting a turn switch the session workspace mid-conversation. Only

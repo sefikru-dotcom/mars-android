@@ -95,6 +95,9 @@ class SpeechQueueTest {
 
         assertEquals(listOf("хорошая"), playback.played)
         assertEquals(listOf("плохая" to "server_error"), failed)
+        // Повтор ограничен политикой: фраза ушла в синтез ровно дважды, а не бесконечно.
+        // (В requests уже есть «третья»: очередь синтезирует следующую фразу, пока играет текущая.)
+        assertEquals(2, client.requests.count { it == "плохая" })
 
         playback.finishCurrent()
         assertEquals(listOf("хорошая", "третья"), playback.played)
@@ -162,6 +165,9 @@ class SpeechQueueTest {
         onFirstAudio: () -> Unit = {},
         onDrained: () -> Unit = {},
         onPhraseFailed: (String, String) -> Unit = { _, _ -> },
+        // Без реального ожидания: Unconfined + delay сделали бы исход теста гонкой с таймером.
+        retryPolicy: SpeechRetryPolicy = SpeechRetryPolicy(sleeper = {}),
+        metrics: SpeechLatencyMetrics? = null,
     ): SpeechQueue = SpeechQueue(
         client = client,
         playback = playback,
@@ -169,6 +175,8 @@ class SpeechQueueTest {
         onFirstAudio = onFirstAudio,
         onDrained = onDrained,
         onPhraseFailed = onPhraseFailed,
+        retryPolicy = retryPolicy,
+        metrics = metrics,
     )
 
     /** Синтез: сразу готовое аудио, отказ по списку или ожидание внешнего «ответа сервера». */

@@ -26,6 +26,9 @@ import ru.mars.network.repository.ServerTtsResult
  *   синтезируется и играет;
  * - СИГНАЛЫ: [onFirstAudio] — первое реально зазвучавшее аудио (замер задержки),
  *   [onDrained] — всё доиграно (хост переводит hands-free-цикл в слушание).
+ * - ЛИМИТЕР СЕРВЕРА: `api/tts` держит 2 с на клиента и отвечает `429`, когда фразы уходят
+ *   подряд. Такой отказ повторяется по [retryPolicy] (пауза из `Retry-After`, ограничена
+ *   сверху, отменяема) — иначе в речи появлялись бы дырки на ровном месте.
  *
  * Ядро чистое: зависимость от Android — только через [ServerTtsPlayback], поэтому весь
  * порядок, гонки и остановки проверяются юнит-тестами с фейками.
@@ -38,6 +41,8 @@ import ru.mars.network.repository.ServerTtsResult
  * @param onPhraseFailed фраза пропущена: текст и короткая причина.
  * @param maxSynthesisParallelism предел одновременных запросов синтеза.
  * @param lookahead на сколько фраз вперёд синтезировать относительно играющей.
+ * @param retryPolicy повтор фразы после `429`/`5xx` (ограниченный и отменяемый).
+ * @param metrics метрики задержки (только числа, без текста); null — не собираем.
  */
 class SpeechQueue(
     private val client: ServerTtsClient,
@@ -48,6 +53,8 @@ class SpeechQueue(
     private val onPhraseFailed: (text: String, reason: String) -> Unit = { _, _ -> },
     private val maxSynthesisParallelism: Int = DEFAULT_SYNTHESIS_PARALLELISM,
     private val lookahead: Int = DEFAULT_LOOKAHEAD,
+    private val retryPolicy: SpeechRetryPolicy = SpeechRetryPolicy(),
+    private val metrics: SpeechLatencyMetrics? = null,
 ) {
 
     /** Состояние фразы в очереди. Порядок переходов: QUEUED → SYNTHESIZING → READY → PLAYING. */
@@ -171,14 +178,7 @@ class SpeechQueue(
     private fun launchSynthesis(chosen: List<Slot>, gen: Int) {
         for (slot in chosen) {
             val job = scope.launch {
-                val result = try {
-                    client.synthesize(slot.text)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    // Порты обязаны не бросать; страховка — пропуск фразы, а не падение.
-                    ServerTtsResult.Unavailable("transport")
-                }
+                val result = synthesizeWithRetry(gen, slot)
                 onSynthesisFinished(gen, slot, result)
             }
             synchronized(lock) {
@@ -223,6 +223,42 @@ class SpeechQueue(
     }
 
     // --- воспроизведение -----------------------------------------------------------------------
+    /**
+     * Синтез одной фразы с ограниченным повтором на `429`/`5xx`.
+     *
+     * Повтор прерывается, если фраза перестала быть актуальной (перебивание, [stopAll],
+     * [release]): проверка ДО и ПОСЛЕ ожидания, потому что отмена корутины рвёт `delay`,
+     * но не гарантирует, что фраза ещё в очереди.
+     */
+    private suspend fun synthesizeWithRetry(gen: Int, slot: Slot): ServerTtsResult {
+        var attempt = 1
+        while (true) {
+            metrics?.onSynthesisRequest()
+            val result = try {
+                client.synthesize(slot.text)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // Порты обязаны не бросать; страховка — пропуск фразы, а не падение.
+                ServerTtsResult.Unavailable("transport")
+            }
+            val unavailable = result as? ServerTtsResult.Unavailable
+            if (unavailable == null) return result
+            val canRetry = attempt < retryPolicy.maxAttempts && retryPolicy.isRetryable(unavailable.reason)
+            if (!canRetry || !isCurrent(gen, slot)) return result
+            metrics?.onSynthesisRetry(unavailable.reason)
+            retryPolicy.awaitRetry(attempt, unavailable.retryAfterMs)
+            // Пока ждали, фразу могли остановить: поздний звук после «стоп» недопустим.
+            if (!isCurrent(gen, slot)) return result
+            attempt++
+        }
+    }
+
+    /** Фраза всё ещё ждёт синтеза в этом же поколении. */
+    private fun isCurrent(gen: Int, slot: Slot): Boolean = synchronized(lock) {
+        !released && generationCounter == gen &&
+            slots[slot.seq] === slot && slot.state == SlotState.SYNTHESIZING
+    }
 
     /** Запустить следующую готовую фразу, если сейчас ничего не играет. */
     private fun pumpPlayback() {
@@ -325,6 +361,8 @@ class SpeechQueue(
     }
 
     private fun notifyPhraseFailed(text: String, reason: String) {
+        // Метрика раньше колбэка: даже если хост упадёт в обработчике, счётчик пропусков верен.
+        metrics?.onPhraseFailed(reason)
         runCatching { onPhraseFailed(text, reason) }
     }
 

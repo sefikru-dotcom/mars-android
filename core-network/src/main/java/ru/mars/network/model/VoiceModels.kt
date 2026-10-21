@@ -17,6 +17,11 @@ sealed class VoiceEvent {
      * `session.ready` — первый кадр потока: привязка voice_id к сессии и параметры
      * протокола. [serverEvents] — список имён событий, которые сервер умеет слать;
      * [resumeRequested]/[resumeStatus] говорят, был ли поток продолжен с Last-Event-ID.
+     *
+     * [voiceMode] и [capabilities] — ПРОЕКТИВНЫЕ поля: серверная сторона (voice_mode хода,
+     * капабилити шлюза) ещё в работе, поэтому оба поля необязательные и разбираются
+     * терпимо. Отсутствие поля означает «сервер этого не сообщает» (null/пусто), и это
+     * НЕ ошибка: старый сервер просто не присылает ключи, а клиент ведёт себя как раньше.
      */
     data class SessionReady(
         val voiceId: String,
@@ -26,7 +31,22 @@ sealed class VoiceEvent {
         val keepaliveSeconds: Long?,
         val resumeRequested: Boolean,
         val resumeStatus: String?,
-    ) : VoiceEvent()
+        /** Ход помечен как голосовой (`voice_mode`); null — сервер не сообщил. */
+        val voiceMode: Boolean? = null,
+        /** Имена серверных возможностей голосового слоя (`normalizer`, `tts_voice_profile`, …). */
+        val capabilities: List<String> = emptyList(),
+    ) : VoiceEvent() {
+
+        /** Сервер подтвердил голосовой режим хода. */
+        val supportsVoiceMode: Boolean
+            get() = voiceMode == true
+
+        /** Умеет ли сервер названную возможность (сравнение без регистра). */
+        fun supports(capability: String): Boolean {
+            val wanted = capability.trim()
+            return wanted.isNotEmpty() && capabilities.any { it.trim().equals(wanted, ignoreCase = true) }
+        }
+    }
 
     /** `transcript.partial` — промежуточный (нестабильный) текст распознавания. */
     data class TranscriptPartial(val text: String, val sessionId: String?) : VoiceEvent()

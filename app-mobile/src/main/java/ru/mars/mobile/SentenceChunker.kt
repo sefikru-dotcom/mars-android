@@ -287,15 +287,18 @@ class SentenceChunker(
         if (buffer.length <= maxPhraseLength) return -1
         var space = -1
         var i = maxPhraseLength - 1
-        while (i > 0) {
+        while (i >= minPhraseLength) {
             when (buffer[i]) {
                 ',', ';', ':', '\n' -> return i + 1
                 ' ' -> if (space < 0) space = i
             }
-            if (i <= minPhraseLength) break
             i--
         }
-        return if (space > 0) space + 1 else -1
+        if (space > 0) return space + 1
+        // Ни запятой, ни пробела в окне (длинный токен, текст без пробелов) — режем ровно
+        // по лимиту. Иначе накопитель рос бы без границы и первая фраза ждала бы конца хода:
+        // это и есть «bounded chunk», когда пунктуации нет вовсе.
+        return maxPhraseLength
     }
 
     /** Разрезать остаток хода на куски не длиннее [maxPhraseLength]. */
@@ -325,7 +328,7 @@ class SentenceChunker(
             }
             i--
         }
-        return if (space > 0) space + 1 else -1
+        return if (space > 0) space + 1 else minOf(maxPhraseLength, text.length)
     }
 
     private fun isTerminalPunct(ch: Char): Boolean =

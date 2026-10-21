@@ -39,11 +39,13 @@ class VoiceNormalizer(
         if (text.isBlank()) return ""
         var out = text
         out = stripCodeFences(out)
+        out = stripTableSeparators(out)
         out = IMAGE.replace(out, " ")
         out = MD_LINK.replace(out, " $1 ")
         out = URL.replace(out, " ссылка ")
         out = WINDOWS_PATH.replace(out, " путь ")
         out = UNIX_PATH.replace(out, " путь ")
+        out = stripLiteralSlashes(out)
         out = HASH.replace(out, " ")
         out = EMOJI.replace(out, " ")
         out = HTML_TAG.replace(out, " ")
@@ -64,6 +66,16 @@ class VoiceNormalizer(
     private fun stripCodeFences(text: String): String =
         CODE_FENCE.replace(text, " ")
 
+    /**
+     * Строка-разделитель markdown-таблицы (`|---|---|`) — не текст.
+     *
+     * Без этого правила `|` убирался как markdown-символ, а дефисы оставались, и синтез
+     * получал «Готово. a b --- Дальше текст.»: движок либо молчит на этом месте, либо
+     * читает «тире тире тире» между фразами.
+     */
+    private fun stripTableSeparators(text: String): String =
+        TABLE_SEPARATOR.replace(text, " ")
+
     /** Аббревиатуры по словарю; границы слова — буквы и цифры любого алфавита. */
     private fun replaceAbbreviations(text: String): String {
         if (abbreviations.isEmpty()) return text
@@ -77,6 +89,31 @@ class VoiceNormalizer(
         return pattern.replace(text) { match ->
             abbreviations[match.value] ?: abbreviations[match.value.uppercase()] ?: match.value
         }
+    }
+
+    /**
+     * Убрать ЛИТЕРАЛЬНЫЙ `/` (и `\`) до синтеза.
+     *
+     * Почему это отдельный шаг: путь (`/root/workspace`) уже заменён на «путь», но голый
+     * слэш-разделитель доезжает до движка, а espeak-фронтенд piper читает его словами
+     * «косая черта» — проверено обратным STT: `«Слэш ждёт прогулку. / »` → «Касай черта!».
+     * Нейросеть Svetlana тоже спотыкается на символе, поэтому чистка нужна при ЛЮБОМ
+     * движке, а не только для piper.
+     *
+     * Правила контекстные, а не «вырезать все слэши»:
+     * - `и/или` (и подобные пары) — слэш несёт смысл: читаем как «или»;
+     * - `api/tts`, `км/ч` — два слова через паузу: оба произносятся, символа нет;
+     * - одиночный слэш (в начале, в конце, между пробелами, `//`) — просто пауза.
+     *
+     * Имя «Слэш» при этом НЕ переписывается: в нём нет символа `/`, а словарная замена
+     * («Слэш» → «Слээш» и т.п.) ломает Svetlana и не помогает irina — поэтому её нет.
+     */
+    private fun stripLiteralSlashes(text: String): String {
+        if (text.indexOf('/') < 0 && text.indexOf('\\') < 0) return text
+        var out = AND_OR_SLASH.replace(text, " или ")
+        out = WORD_SLASH_WORD.replace(out, " ")
+        out = LONE_SLASH.replace(out, " ")
+        return out
     }
 
     /**
@@ -313,6 +350,9 @@ class VoiceNormalizer(
         )
 
         private val CODE_FENCE = Regex("""```[\s\S]*?```""")
+
+        /** Строка-разделитель таблицы целиком: только `|`, `-`, `:` и пробелы. */
+        private val TABLE_SEPARATOR = Regex("""(?m)^[ \t]*\|?[ \t:|-]*-{3,}[ \t:|-]*\|?[ \t]*$""")
         private val IMAGE = Regex("""!\[[^\]]*]\([^)]*\)""")
         private val MD_LINK = Regex("""\[([^\]]+)]\([^)]*\)""")
         private val URL = Regex("""(?:https?://|www\.)\S+""")
@@ -330,6 +370,18 @@ class VoiceNormalizer(
         private val PERCENT = Regex("""\b(\d+)\s*%""")
         private val TIME = Regex("""\b(?:[01]?\d|2[0-3]):[0-5]\d\b""")
         private val NUMBER = Regex("""\b\d+\b""")
+
+        /** `и/или` → «или»: единственный случай, где слэш несёт смысл. */
+        private val AND_OR_SLASH = Regex(
+            """(?<![\p{L}\p{N}])и\s*/\s*или(?![\p{L}\p{N}])""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /** Слово/слово (`api/tts`): два слова через паузу вместо «косой черты». */
+        private val WORD_SLASH_WORD = Regex("""(?<=[\p{L}\p{N}])\s*/\s*(?=[\p{L}\p{N}])""")
+
+        /** Оставшийся литеральный слэш или обратный слэш — пауза. */
+        private val LONE_SLASH = Regex("""[/\\]+""")
         private val MARKDOWN_SYMBOLS = Regex("""[*_`#>|~\\]+""")
         private val WHITESPACE = Regex("""\s+""")
     }
