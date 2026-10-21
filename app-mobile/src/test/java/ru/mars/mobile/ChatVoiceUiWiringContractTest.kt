@@ -239,13 +239,33 @@ class ChatVoiceUiWiringContractTest {
         )
         // Источник признака — состояние голосового цикла, а не «микрофон когда-то открывался».
         assertTrue(turn.contains("voiceTurnFromDialog()"))
+        // Очередь/ручной повтор передают сохранённое намерение: пересчёт по циклу в момент
+        // флаша дал бы `voice_mode: false` (цикл уже выключен) — тихую подмену режима.
+        assertTrue(turn.contains("voiceTurnOverride ?: voiceTurnFromDialog()"))
         // Признак фиксируется ДО ожидания сессии: иначе выключение режима в момент создания
         // сессии сделало бы ход неголосовым.
-        val fixAt = turn.indexOf("val voiceTurn = voiceTurnFromDialog()")
+        val fixAt = turn.indexOf("val voiceTurn = voiceTurnOverride ?: voiceTurnFromDialog()")
         val awaitAt = turn.indexOf("EnsureSessionResult")
         assertTrue("признак голоса должен фиксироваться до создания сессии", fixAt in 0 until awaitAt)
         // Имя поля — ровно то, что читает сервер.
         assertEquals("voice_mode", VoiceDialogRequestMode.FIELD)
+    }
+
+    @Test
+    fun `unsupported voice backend rejection is explained and never silently downgraded`() {
+        val turn = body(turnSection, "startSendStream")
+        // Отказ разбирается политикой, а не общим путём «сообщение не дошло».
+        assertTrue(turn.contains("VoiceModeRejectionPolicy"))
+        assertTrue(turn.contains("FrameDecision.REJECT_VOICE_MODE"))
+        // Человеку — понятный русский текст вместо сырого «HTTP 409: …».
+        assertTrue(turn.contains("VoiceModeRejectionPolicy.NOTICE"))
+        assertTrue(turn.contains("onVoiceModeRejectedTurn("))
+        // Ход не уходит в очередь как «не дошло»: ветка отказа не вызывает onTurnFailed.
+        val rejected = body(turnSection, "dispatchQueuedMessage")
+        assertTrue(rejected.contains("onTurnRejected = {"))
+        assertTrue(rejected.contains("offlineQueuePresenter.onVoiceModeRejected("))
+        // Намерение из персистентной записи — до создания сессии.
+        assertTrue(rejected.contains("voiceTurnOverride = queued.voiceMode"))
     }
 
     @Test

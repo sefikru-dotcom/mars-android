@@ -78,9 +78,14 @@ internal fun describeNetworkError(error: Throwable): String {
  * already on the wire. Same pattern the rest of the module uses (uploadAttachment,
  * SessionRepository.createSession).
  *
- * Result format: `"HTTP <code>: <server error>"` when the body parses and carries a
- * non-blank `error`, else the plain `"HTTP <code>"`. Both shapes stay compatible with
- * the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
+ * Newer contract failures carry the reason under `code` instead of `error` — notably
+ * `409 {"code": "unsupported_voice_mode_backend"}` (SERVER-CONTRACT.md §1). Both keys are
+ * read, `error` first for backward compatibility, so a `code`-only refusal never degrades
+ * into a bare "HTTP 409" that the UI could not explain or classify.
+ *
+ * Result format: `"HTTP <code>: <server reason>"` when the body parses and carries a
+ * non-blank `error`/`code`, else the plain `"HTTP <code>"`. Both shapes stay compatible
+ * with the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
  * StreamReattachPolicy `\b404\b` / "not found").
  *
  * [retryAfterSeconds] — the parsed `Retry-After` response header (RFC 9110 §10.2.3,
@@ -92,8 +97,15 @@ internal fun describeNetworkError(error: Throwable): String {
  * marker never touches.
  */
 internal fun describeHttpError(code: Int, body: String?, retryAfterSeconds: Long? = null): String {
-    val serverMessage = StreamEventMapper.parseObject(body.orEmpty())
-        ?.get("error")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    val parsed = StreamEventMapper.parseObject(body.orEmpty())
+    // `error` — старый контракт; `code` — нынешние отказы контракта (409
+    // unsupported_voice_mode_backend). Порядок важен: старый ключ не должен проигрывать,
+    // но ПУСТОЙ `error` не имеет права скрывать причину из `code` — иначе отказ контракта
+    // деградировал бы до голого "HTTP 409", который UI не может ни объяснить, ни
+    // классифицировать (app-level VoiceModeRejectionPolicy ищет и код, и маркер причины).
+    val serverMessage = listOfNotNull(parsed?.get("error"), parsed?.get("code"))
+        .map { it.toString().trim() }
+        .firstOrNull { it.isNotBlank() }
     val base = if (serverMessage != null) "HTTP $code: $serverMessage" else "HTTP $code"
     return retryAfterSeconds?.let { "$base ${RetryAfterPolicy.marker(it)}" } ?: base
 }

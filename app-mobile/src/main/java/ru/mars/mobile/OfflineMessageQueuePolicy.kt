@@ -27,13 +27,21 @@ import org.json.JSONObject
  * хост показывает явный статус и сохраняет чипы вложений до восстановления.
  */
 
-/** Сообщение, ожидающее восстановления связи. [sessionId] == null — новый чат. */
+/**
+ * Сообщение, ожидающее восстановления связи. [sessionId] == null — новый чат.
+ *
+ * [voiceMode] — сообщение было начато голосом и обязано остаться голосовым при повторе.
+ * Без этого поля повтор считал бы режим заново по состоянию цикла (к этому моменту он уже
+ * выключен) и отправил бы `voice_mode: false`: сервер применил бы обычный ответ, а человек
+ * считал бы, что говорит в голосовом режиме. Ретрай обязан сохранять намерение хода.
+ */
 data class QueuedMessage(
     val id: String,
     val text: String,
     val sessionId: String?,
     val enqueuedAtEpochMillis: Long,
     val attempts: Int = 0,
+    val voiceMode: Boolean = false,
 )
 
 /** Исход запроса отправки при текущем состоянии сети. */
@@ -79,6 +87,9 @@ class PrefsPendingMessageStore(private val prefs: SharedPreferences) : PendingMe
                 sessionId = obj.optString(FIELD_SESSION_ID, "").ifBlank { null },
                 enqueuedAtEpochMillis = obj.optLong(FIELD_ENQUEUED_AT, 0L),
                 attempts = obj.optInt(FIELD_ATTEMPTS, 0),
+                // Старые записи поля не имеют: читаются как текстовый ход (false), и это
+                // честно — голосовым он не был.
+                voiceMode = obj.optBoolean(FIELD_VOICE_MODE, false),
             )
         }
     }.getOrDefault(emptyList())
@@ -92,7 +103,8 @@ class PrefsPendingMessageStore(private val prefs: SharedPreferences) : PendingMe
                     .put(FIELD_TEXT, message.text)
                     .put(FIELD_SESSION_ID, message.sessionId ?: "")
                     .put(FIELD_ENQUEUED_AT, message.enqueuedAtEpochMillis)
-                    .put(FIELD_ATTEMPTS, message.attempts),
+                    .put(FIELD_ATTEMPTS, message.attempts)
+                    .put(FIELD_VOICE_MODE, message.voiceMode),
             )
         }
         prefs.edit().putString(KEY_QUEUE, array.toString()).apply()
@@ -109,6 +121,7 @@ class PrefsPendingMessageStore(private val prefs: SharedPreferences) : PendingMe
         const val FIELD_SESSION_ID = "session_id"
         const val FIELD_ENQUEUED_AT = "enqueued_at"
         const val FIELD_ATTEMPTS = "attempts"
+        const val FIELD_VOICE_MODE = "voice_mode"
     }
 }
 
@@ -144,19 +157,25 @@ class OfflineMessageQueuePolicy(
      * Точка входа отправки: [canSend] — текущее [NetworkState.sendAllowed].
      * Пустой текст отклоняется всегда; при сети — штатная отправка; без сети — буферизация.
      */
-    fun onSendRequested(canSend: Boolean, text: String, sessionId: String?): SendDecision = when {
+    fun onSendRequested(
+        canSend: Boolean,
+        text: String,
+        sessionId: String?,
+        voiceMode: Boolean = false,
+    ): SendDecision = when {
         text.isBlank() -> SendDecision.Rejected
         canSend -> SendDecision.SendNow
-        else -> SendDecision.Buffer(enqueue(text, sessionId))
+        else -> SendDecision.Buffer(enqueue(text, sessionId, voiceMode))
     }
 
     /** Добавляет сообщение в хвост очереди; при переполнении вытесняет самое старое. */
-    fun enqueue(text: String, sessionId: String?): QueuedMessage {
+    fun enqueue(text: String, sessionId: String?, voiceMode: Boolean = false): QueuedMessage {
         val message = QueuedMessage(
             id = "q-${clock()}-${idCounter++}",
             text = text,
             sessionId = sessionId,
             enqueuedAtEpochMillis = clock(),
+            voiceMode = voiceMode,
         )
         while (queue.size >= maxQueueSize) queue.removeFirst()
         queue.addLast(message)

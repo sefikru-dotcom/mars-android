@@ -17,17 +17,31 @@ package ru.mars.mobile
  *   чтобы случайный тап не удалял текст безвозвратно.
  *
  * Контракт хоста по in-flight статусу: каждый [onSendStarted]/[RetryOutcome.TriggerSend]
- * обязан завершиться ровно одним [onSendSucceeded] (успех) или [onTurnFailed] (провал)
- * с тем же id — иначе строка останется в статусе SENDING.
+ * обязан завершиться ровно одним [onSendSucceeded] (успех), [onTurnFailed] (провал) или
+ * [onVoiceModeRejected] (сервер отверг голосовой режим) с тем же id — иначе строка
+ * останется в статусе SENDING.
  */
 
-/** Недоставленный ход очереди: лимит попыток исчерпан, сообщение живёт в презентере. */
+/**
+ * Недоставленный ход очереди: лимит попыток исчерпан или сервер отверг голосовой режим —
+ * сообщение живёт в презентере, текст сохраняется.
+ *
+ * [voiceMode] — намерение хода (был ли он голосовым), чтобы осознанный повтор не потерял
+ * его и не подменил режим молча.
+ *
+ * [voiceModeRejected] — отказ именно по `409 unsupported_voice_mode_backend`. Такой ход
+ * НЕ ретраится автоматически (сервер отвергнет его детерминированно) и не считается
+ * отправленным: человеку показывается отдельная причина, а повтор предлагается как
+ * «Отправить текстом» — это его решение, а не тихая деградация.
+ */
 data class FailedQueuedTurn(
     val id: String,
     val text: String,
     val sessionId: String?,
     val attempts: Int,
     val failedAtEpochMillis: Long,
+    val voiceMode: Boolean = false,
+    val voiceModeRejected: Boolean = false,
 )
 
 /** Строка панели неотправленных сообщений. */
@@ -40,6 +54,8 @@ data class OfflineQueueRowUi(
     val status: OfflineQueueRowStatus,
     val statusLabel: String,
     val retryAvailable: Boolean,
+    /** Подпись кнопки повтора: для отказа голосовому режиму — «Отправить текстом». */
+    val retryLabel: String,
     val discardAvailable: Boolean,
     /** Строка отмечена в текущем промпте подтверждения удаления. */
     val awaitingDiscardConfirm: Boolean,
@@ -69,8 +85,17 @@ sealed interface RetryOutcome {
      * Хост повторно отправляет ход (обычно через свежий [OfflineMessageQueuePolicy.enqueue],
      * сбрасывающий счётчик попыток). Презентер уже отметил ход как SENDING — повторный
      * [OfflineQueuePresenter.requestRetry] до завершения отправки будет отклонён.
+     *
+     * [voiceMode] — намерение повтора: `true` только если ход был голосовым и сервер его
+     * не отвергал. После отказа (`voiceModeRejected`) повтор идёт текстом (`false`), и это
+     * осознанное действие человека (кнопка «Отправить текстом»), а не молчаливая подмена.
      */
-    data class TriggerSend(val messageId: String, val text: String, val sessionId: String?) : RetryOutcome
+    data class TriggerSend(
+        val messageId: String,
+        val text: String,
+        val sessionId: String?,
+        val voiceMode: Boolean = false,
+    ) : RetryOutcome
 
     data class Rejected(val reason: RetryRejectReason) : RetryOutcome
 }
@@ -170,6 +195,32 @@ class OfflineQueuePresenter(
             sessionId = message.sessionId,
             attempts = message.attempts,
             failedAtEpochMillis = clock(),
+            voiceMode = message.voiceMode,
+        )
+    }
+
+    /**
+     * Сервер отверг голосовой режим хода (`409 unsupported_voice_mode_backend`).
+     *
+     * Отдельный вход, а не [onTurnFailed], потому что последствия разные:
+     * 1. Это **не транспортный провал** — повтор с тем же `voice_mode` даст тот же 409,
+     *    поэтому строка не возвращается в автоотправку вовсе (никаких бесконечных попыток).
+     * 2. Это **не успех** — [onSendSucceeded] здесь запрещён: очередь не имеет права
+     *    считать ход доставленным, иначе текст исчез бы вместе с причиной.
+     * 3. Текст **сохраняется** в карточке недоставленных: человек либо повторит его
+     *    осознанно как текст ([LABEL_SEND_AS_TEXT]), либо удалит.
+     */
+    fun onVoiceModeRejected(message: QueuedMessage) {
+        sendingIds -= message.id
+        failedTurns[message.id] = FailedQueuedTurn(
+            id = message.id,
+            text = message.text,
+            sessionId = message.sessionId,
+            attempts = message.attempts,
+            failedAtEpochMillis = clock(),
+            // Голосовое намерение больше не применимо: бэкенд его не принимает.
+            voiceMode = false,
+            voiceModeRejected = true,
         )
     }
 
@@ -243,7 +294,14 @@ class OfflineQueuePresenter(
             ?: return RetryOutcome.Rejected(RetryRejectReason.UNKNOWN_TURN)
         failedTurns -= messageId
         sendingIds += messageId
-        return RetryOutcome.TriggerSend(turn.id, turn.text, turn.sessionId)
+        // Отвергнутый голосовой ход повторяется ТОЛЬКО текстом: кнопка называется
+        // «Отправить текстом», то есть человек уже прочитал причину и согласился.
+        return RetryOutcome.TriggerSend(
+            messageId = turn.id,
+            text = turn.text,
+            sessionId = turn.sessionId,
+            voiceMode = if (turn.voiceModeRejected) false else turn.voiceMode,
+        )
     }
 
     /**
@@ -337,6 +395,7 @@ class OfflineQueuePresenter(
             status = status,
             statusLabel = statusLabel,
             retryAvailable = false,
+            retryLabel = LABEL_RETRY,
             discardAvailable = false,
             awaitingDiscardConfirm = false,
             contentDescription = "$statusLabel. $preview",
@@ -346,15 +405,20 @@ class OfflineQueuePresenter(
     private fun failedRow(turn: FailedQueuedTurn, prompt: DiscardPromptUi?): OfflineQueueRowUi {
         val preview = previewOf(turn.text)
         val awaiting = prompt?.target.let { it is DiscardTarget.Single && it.messageId == turn.id }
+        // Отказ голосовому режиму — не «не доставлено по связи»: причина называется прямо,
+        // а кнопка повтора честно обещает отправку текстом, а не повтор той же попытки.
+        val statusLabel = if (turn.voiceModeRejected) LABEL_VOICE_UNSUPPORTED else LABEL_FAILED
+        val retryLabel = if (turn.voiceModeRejected) LABEL_SEND_AS_TEXT else LABEL_RETRY
         return OfflineQueueRowUi(
             id = turn.id,
             preview = preview,
             status = OfflineQueueRowStatus.FAILED,
-            statusLabel = LABEL_FAILED,
+            statusLabel = statusLabel,
             retryAvailable = turn.id !in sendingIds,
+            retryLabel = retryLabel,
             discardAvailable = true,
             awaitingDiscardConfirm = awaiting,
-            contentDescription = "$LABEL_FAILED. $preview",
+            contentDescription = "$statusLabel. $preview",
         )
     }
 
@@ -364,6 +428,12 @@ class OfflineQueuePresenter(
         const val LABEL_AUTO_SEND = "Отправится автоматически"
         const val LABEL_SENDING = "Отправка…"
         const val LABEL_FAILED = "Не доставлено"
+        /** Причина отказа именно голосового режима: сервер такой бэкенд не поддерживает. */
+        const val LABEL_VOICE_UNSUPPORTED = "Сервер не поддерживает голосовой режим"
+        /** Кнопка повтора обычного провала. */
+        const val LABEL_RETRY = "Повторить"
+        /** Кнопка повтора отвергнутого голосового хода — осознанная отправка текстом. */
+        const val LABEL_SEND_AS_TEXT = "Отправить текстом"
 
         /** Потолок подписи бейджа: трёхзначные счётчики схлопываются в «99+». */
         const val BADGE_MAX_COUNT = 99

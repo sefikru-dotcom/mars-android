@@ -2398,6 +2398,34 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun voiceTurnFromDialog(): Boolean = voiceLoopActive()
 
     /**
+     * Сервер отказал голосовому ходу (`409 unsupported_voice_mode_backend`, [VoiceModeRejectionPolicy]).
+     *
+     * Что делает хост и почему именно это:
+     * 1. **Выключает режим.** Бэкенд сервера не умеет `voice_mode`, поэтому каждый следующий
+     *    голосовой ход получил бы тот же 409. Оставлять микрофон открытым — приглашение
+     *    повторять заведомо провальный сценарий; цикл, микрофон, потоковая озвучка и
+     *    голосовой канал закрываются ([stopHandsFree]).
+     * 2. **Возвращает текст в поле ввода** (только прямая отправка): человек решает сам —
+     *    отправить это как обычный текст или переписать. Никакой автоматической подмены
+     *    режима: `voice_mode: false` без его ведома не уходит.
+     * 3. **Не трогает транскрипт**: сообщение и объяснение уже добавлены вызывающей стороной.
+     *
+     * Для сообщения из очереди текст остаётся в карточке недоставленных
+     * ([OfflineQueuePresenter.onVoiceModeRejected]) — там же и осознанный повтор.
+     */
+    internal fun onVoiceModeRejectedTurn(text: String, restoreComposer: Boolean) {
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
+        // Озвучка хода, которого не было: очередь фраз могла успеть получить дельты до отказа.
+        if (isStreamSpeechReady()) cancelStreamSpeech()
+        if (restoreComposer && text.isNotBlank() && isInputReady() && input.text.isNullOrBlank()) {
+            // Набранное человеком не затирается: поле пустое — вернуть текст, иначе он
+            // остаётся в транскрипте (пузырь с текстом никуда не делся).
+            setComposerTextProgrammatically(text, TextApplyOrigin.DRAFT_RESTORE)
+        }
+        setStatus()
+    }
+
+    /**
      * Привязать голосовой канал к сессии диалога (безопасно до инициализации канала).
      *
      * Живёт в Activity, а не в extension-функции отправки: `lateinit`-поле проверяется только

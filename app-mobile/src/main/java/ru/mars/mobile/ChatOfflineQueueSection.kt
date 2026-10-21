@@ -54,7 +54,9 @@ internal fun ChatActivity.updateOfflineQueuePanel() {
         }
         line.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
         if (row.retryAvailable) {
-            line.addView(queueActionButton("Повторить", MarsTheme.ACCENT_TEXT) {
+            // Подпись приходит из презентера: после отказа голосовому режиму это
+            // «Отправить текстом» — честное обещание, а не повтор той же попытки.
+            line.addView(queueActionButton(row.retryLabel, MarsTheme.ACCENT_TEXT) {
                 retryQueuedMessage(row.id)
             }, LinearLayout.LayoutParams(-2, -2))
         }
@@ -110,6 +112,7 @@ internal fun ChatActivity.retryQueuedMessage(messageId: String) {
                         sessionId = outcome.sessionId,
                         enqueuedAtEpochMillis = known?.failedAtEpochMillis ?: System.currentTimeMillis(),
                         attempts = known?.attempts ?: 0,
+                        voiceMode = outcome.voiceMode,
                     )
                 )
                 updateOfflineQueuePanel()
@@ -126,6 +129,9 @@ internal fun ChatActivity.retryQueuedMessage(messageId: String) {
                 outgoingAttachments = emptyList(),
                 targetSessionId = outcome.sessionId ?: currentSessionId,
                 credential = credential,
+                // Намерение хода из презентера: обычный провал повторяется тем же режимом,
+                // отвергнутый голосовой — текстом (кнопка «Отправить текстом» = согласие).
+                voiceTurnOverride = outcome.voiceMode,
                 onTurnFailed = {
                     offlineQueuePresenter.onTurnFailed(
                         QueuedMessage(
@@ -134,6 +140,22 @@ internal fun ChatActivity.retryQueuedMessage(messageId: String) {
                             sessionId = currentSessionId ?: outcome.sessionId,
                             enqueuedAtEpochMillis = known?.failedAtEpochMillis ?: System.currentTimeMillis(),
                             attempts = (known?.attempts ?: 0) + 1,
+                            voiceMode = outcome.voiceMode,
+                        )
+                    )
+                    updateOfflineQueuePanel()
+                },
+                onTurnRejected = {
+                    // Сервер отверг голосовой режим и на ручном повторе: строка снова
+                    // уходит в недоставленные с причиной, текст сохраняется, «успеха» нет.
+                    offlineQueuePresenter.onVoiceModeRejected(
+                        QueuedMessage(
+                            id = outcome.messageId,
+                            text = outcome.text,
+                            sessionId = currentSessionId ?: outcome.sessionId,
+                            enqueuedAtEpochMillis = known?.failedAtEpochMillis ?: System.currentTimeMillis(),
+                            attempts = (known?.attempts ?: 0) + 1,
+                            voiceMode = outcome.voiceMode,
                         )
                     )
                     updateOfflineQueuePanel()
