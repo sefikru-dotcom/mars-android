@@ -1,6 +1,7 @@
 package ru.mars.network
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -206,5 +207,65 @@ class VoiceStreamParserTest {
         val partial = "id: v1_abc:2\nevent: agent.text.delta\ndata: {\"text\":\"tail\"}"
         assertTrue(parser.feed(partial).isEmpty())
         assertEquals(listOf(VoiceEvent.AgentTextDelta("tail")), parser.end())
+    }
+
+    // --- проективные поля voice_mode / capabilities ----------------------------------------
+
+    @Test
+    fun `voice mode and capabilities are read when the server sends them`() {
+        val events = VoiceStreamParser().feed(
+            frame(
+                "v1_abc:1",
+                "session.ready",
+                """{"voice_id":"v1_abc","session_id":"s-1","voice_mode":true,""" +
+                    """"capabilities":["normalizer","tts_voice_profile"]}""",
+            ),
+        )
+
+        val ready = events.single() as VoiceEvent.SessionReady
+        assertEquals(true, ready.voiceMode)
+        assertTrue(ready.supportsVoiceMode)
+        assertTrue(ready.supports("normalizer"))
+        assertTrue("сравнение без регистра", ready.supports("TTS_VOICE_PROFILE"))
+        assertFalse(ready.supports("speech_to_speech"))
+        assertFalse(ready.supports("  "))
+    }
+
+    @Test
+    fun `missing voice mode is unknown not false`() {
+        val ready = VoiceStreamParser().feed(sessionReady).single() as VoiceEvent.SessionReady
+
+        assertNull("отсутствие ключа ≠ выключенный режим", ready.voiceMode)
+        assertFalse(ready.supportsVoiceMode)
+        assertTrue(ready.capabilities.isEmpty())
+        assertFalse(ready.supports("normalizer"))
+    }
+
+    @Test
+    fun `explicit false voice mode is distinguishable from missing`() {
+        val ready = VoiceStreamParser().feed(
+            frame(
+                "v1_abc:1",
+                "session.ready",
+                """{"voice_id":"v1_abc","session_id":"s-1","voice_mode":false}""",
+            ),
+        ).single() as VoiceEvent.SessionReady
+
+        assertEquals(false, ready.voiceMode)
+        assertFalse(ready.supportsVoiceMode)
+    }
+
+    @Test
+    fun `unknown fields in session ready do not break the frame`() {
+        val ready = VoiceStreamParser().feed(
+            frame(
+                "v1_abc:1",
+                "session.ready",
+                """{"voice_id":"v1_abc","session_id":"s-1","future_field":{"a":1},"voice_mode":true}""",
+            ),
+        ).single() as VoiceEvent.SessionReady
+
+        assertEquals("v1_abc", ready.voiceId)
+        assertEquals(true, ready.voiceMode)
     }
 }

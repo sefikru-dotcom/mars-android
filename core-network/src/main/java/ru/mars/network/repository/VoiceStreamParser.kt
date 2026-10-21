@@ -66,6 +66,11 @@ internal class VoiceStreamParser {
                     keepaliveSeconds = TolerantJson.longOrNull(payload, "keepalive_seconds"),
                     resumeRequested = TolerantJson.bool(payload, "resume_requested"),
                     resumeStatus = TolerantJson.string(payload, "resume_status"),
+                    // Проективные поля: ключа нет → null/пусто (старый сервер), ключ есть →
+                    // разбираем терпимо. Так появление voice_mode на сервере не требует
+                    // выпуска клиента, а его отсутствие ничего не ломает.
+                    voiceMode = optionalBool(payload, "voice_mode"),
+                    capabilities = TolerantJson.stringListOrEmpty(payload, "capabilities"),
                 )
 
                 "transcript.partial" -> VoiceEvent.TranscriptPartial(
@@ -122,5 +127,9 @@ internal class VoiceStreamParser {
                 else -> VoiceEvent.Unknown(name, data)
             }
         }
+
+        /** Boolean только если ключ реально пришёл: отсутствие ≠ false. */
+        private fun optionalBool(payload: Map<*, *>?, key: String): Boolean? =
+            if (payload != null && payload.containsKey(key)) TolerantJson.bool(payload, key) else null
     }
 }
