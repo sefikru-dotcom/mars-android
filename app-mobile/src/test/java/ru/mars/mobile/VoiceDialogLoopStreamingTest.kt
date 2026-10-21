@@ -114,6 +114,8 @@ class VoiceDialogLoopStreamingTest {
         stt: SpeechToText,
         turnActive: Boolean = false,
         bargeIn: Boolean = false,
+        route: AudioRoute = AudioRoute.UNKNOWN,
+        aec: Boolean = false,
     ): Pair<RecordingHost, VoiceDialogLoop> {
         val host = RecordingHost()
         return host to VoiceDialogLoop(
@@ -121,8 +123,14 @@ class VoiceDialogLoopStreamingTest {
             bargeInEnabled = bargeIn,
             stt = stt,
             turnActive = { turnActive },
+            audioRoute = { route },
+            aecActive = { aec },
+            nowMs = { clock },
         )
     }
+
+    /** Часы цикла: окно эхо-успокоения не должно зависеть от реального времени в тестах. */
+    private var clock = 1_000_000L
 
     // --- 1. стадии цикла ------------------------------------------------------------------------
 
@@ -421,17 +429,22 @@ class VoiceDialogLoopStreamingTest {
     @Test
     fun `barge-in по событию движка останавливает озвучку и открывает новую реплику`() {
         val stt = FakeStt()
-        val (host, loop) = loop(stt, bargeIn = true)
+        val (host, loop) = loop(stt, bargeIn = true, route = AudioRoute.HEADPHONES)
         loop.start()
         stt.final("вопрос")
         loop.onAnswerStarted()
+        clock += 1_000L
         assertEquals(VoiceDialogLoop.State.SPEAKING, loop.state)
 
         stt.speechStarted()
+        assertEquals("одно событие движка — ещё не перебивание", 0, host.stopSpeakingCalls)
+        assertEquals(VoiceDialogLoop.State.SPEAKING, loop.state)
+
+        assertTrue(loop.onSpeechProgress(240))
 
         assertEquals(1, host.stopSpeakingCalls)
         assertEquals(VoiceDialogLoop.State.LISTENING, loop.state)
-        assertEquals("новая реплика открыта", 2, stt.starts)
+        assertEquals("монитор-реплика уже слушает человека: новую не открываем", 2, stt.starts)
         assertEquals("ход не отменяется", 1, host.sent.size)
     }
 }

@@ -51,6 +51,24 @@ package ru.mars.mobile
  *
  * Всё, что не готово, деградирует к шагу 3 старого пути: `stt == null` — ровно прежнее поведение.
  *
+ * ## Перебивание: что зовёт UI-слой
+ * Цикл микрофон не открывает и во время [State.SPEAKING] его НЕ закрывает: duplex-захват целиком
+ * на хосте. Полный контракт (порядок важен):
+ * 1. `capture.start(captureListener, rawPcm = { pcm, len -> stt.acceptPcm(pcm, len) })` — микрофон
+ *    остаётся открытым и пока Марс говорит; на [onAnswerStarted] его не останавливать.
+ * 2. `HandsFreeCapture.Listener.onSpeechStarted` → `loop.onSpeechStarted()`, а
+ *    `onSpeechProgress(voicedMs)` → `loop.onSpeechProgress(voicedMs)` (оба через `runOnUiThread`).
+ * 3. `loop.onAnswerStarted(spokenText)` — текст, который РЕАЛЬНО озвучивается. Без него на
+ *    динамике перебивание невозможно по конструкции: эхо отличить не от чего.
+ * 4. `Listener.onStopSpeaking()` → остановить TTS и очистить очередь реплик (локальная тишина).
+ * 5. `Listener.onBargeIn(event)` → upstream-прерывание (сообщить серверу/шлюзу, что человек
+ *    перебил). НЕ `cancelStream()`: ход должен дописаться в чат, иначе перебивание стоит
+ *    пользователю ответа.
+ * 6. `audioRoute = { monitor.route }` ([AndroidAudioRouteMonitor]) и
+ *    `aecActive = { capture.echoCanceled }` — иначе политика всегда считает худший случай.
+ * 7. `Listener.onAnswerFinished` вызывается хостом, когда озвучка кончилась: цикл выбрасывает
+ *    монитор-реплику, но сохраняет её, если человек в этот момент ещё говорит.
+ *
  * ## Защита от дубля (по конструкции)
  * - у каждого запроса распознавания есть [Long]-идентификатор; колбэк с чужим/старым id
  *   игнорируется, поэтому поздний или повторно доставленный ответ STT не может отправить
@@ -68,16 +86,30 @@ package ru.mars.mobile
  * Слот один: третья реплика поверх двух не копится (иначе человек получит очередь из старых
  * фраз), но и первая не теряется.
  *
- * ## Barge-in (L3) — только за флагом
+ * ## Barge-in — только за флагом, только подтверждённый
  * [bargeInEnabled] по умолчанию `false`. Перебивание останавливает ТОЛЬКО воспроизведение
- * ([Listener.onStopSpeaking]): ход на сервере продолжается, ответ дописывается в чат. Отмены
- * стрима здесь нет и быть не может — `cancelStream()` в [ChatActivity] убивает ход вместе с
- * recovery-циклом, и перебивание голосом не должно стоить пользователю ответа.
+ * ([Listener.onStopSpeaking]) и сообщает хосту событие ([Listener.onBargeIn]) для upstream-прерывания:
+ * ход на сервере продолжается, ответ дописывается в чат. Отмены стрима здесь нет и быть не может —
+ * `cancelStream()` в [ChatActivity] убивает ход вместе с recovery-циклом, и перебивание голосом
+ * не должно стоить пользователю ответа.
  *
- * ВАЖНО (почему флаг выключен): на Android микрофон слышит собственный динамик. Без
- * `AcousticEchoCanceler` и `AudioSource.VOICE_COMMUNICATION` TTS попадает в микрофон, сегментер
- * видит «речь» и цикл перебивает сам себя на первом же слове ответа. Включать только после
- * замеров на живом устройстве (POCO F5) с AEC.
+ * Главная проблема: на Android микрофон слышит собственный динамик, и раньше цикл перебивал себя
+ * на первом же слове ответа. Поэтому barge-in больше НЕ срабатывает на `SpeechStarted` — он лишь
+ * открывает попытку, а подтверждение даёт [BargeInGate] по длительности речи и/или partial ASR:
+ *
+ * - на наушниках ([AudioRoute.HEADPHONES]) хватает короткой подтверждённой речи;
+ * - на динамике нужен partial, слов которого нет в тексте ответа — длительность там ничего не
+ *   доказывает, потому что TTS даёт ровно такую же непрерывную громкость. Текст ответа хост
+ *   передаёт в [onAnswerStarted]; без него текстовое доказательство на динамике не принимается;
+ * - `AcousticEchoCanceler` помогает (порог ниже), но НЕ решает: он ослабляет эхо, а не убирает.
+ *
+ * ## Duplex-захват во время ответа
+ * Пока Марс говорит, цикл держит у [SpeechToText] ОТКРЫТУЮ «монитор-реплику» (только
+ * [SttMode.STREAMING]): её partial идут в политику, а звук начала реплики человека не теряется.
+ * Поэтому после подтверждённого перебивания реплику НЕ переоткрывают: движок уже слышит человека,
+ * и его `Final` становится следующим ходом. Если ответ закончился, а человек так и не перебил,
+ * монитор-реплика выбрасывается — иначе её финал отправил бы озвучку Марса как реплику человека
+ * (кроме случая, когда человек в этот момент ещё говорит: тогда она сохраняется).
  *
  * ## Потоки
  * Цикл однопоточный: все методы зовёт хост с главного потока. События [SpeechToText] приходят с
@@ -97,6 +129,17 @@ class VoiceDialogLoop(
     private val stt: SpeechToText? = null,
     /** Идёт ли сейчас ход: определяет `send` против `steer` в потоковом режиме. */
     private val turnActive: () -> Boolean = { false },
+    /**
+     * Политика подтверждения перебивания. Параметр нужен тестам и хосту, который хочет другие
+     * пороги; по умолчанию — [BargeInConfig] с дефолтами.
+     */
+    private val bargeInGate: BargeInGate = BargeInGate(),
+    /** Маршрут вывода: наушники/динамик. Спрашивается на старте каждого ответа. */
+    private val audioRoute: () -> AudioRoute = { AudioRoute.UNKNOWN },
+    /** Аппаратный AEC реально включён (см. [HandsFreeCapture.echoCanceled]). */
+    private val aecActive: () -> Boolean = { false },
+    /** Часы в миллисекундах: подменяются в тестах, чтобы окно эхо-успокоения не ждали реально. */
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
 
     /** Состояния цикла: ровно те, что показывает WebUI. */
@@ -130,7 +173,16 @@ class VoiceDialogLoop(
         fun onSendRequested(requestId: Long, text: String, mode: SendMode) {}
 
         /** Barge-in: немедленная тишина. Ход НЕ отменяется. */
-        fun onStopSpeaking() {}
+        fun onStopSpeaking()
+
+        /**
+         * Перебивание ПОДТВЕРЖДЕНО (человек действительно говорит, а не эхо динамика).
+         *
+         * Отдельный колбэк от [onStopSpeaking] нужен upstream-прерыванию: локальная тишина — это
+         * `SpeechQueue`/TTS, а сервер (SSE/voice gateway) узнаёт о перебивании только отсюда.
+         * Ход НЕ отменяется: [ChatActivity.cancelStream] убил бы ответ вместе с recovery.
+         */
+        fun onBargeIn(event: BargeInEvent) {}
 
         /** Сегмент отброшен (цикл не слушает или слот занят) — для диагностики/статуса. */
         fun onSegmentDropped() {}
@@ -182,6 +234,35 @@ class VoiceDialogLoop(
     /** Сколько реплик цикл открыл у [SpeechToText] (для тестов и диагностики). */
     var startedUtterances: Int = 0
         private set
+
+    /** Сколько раз сегментер услышал начало речи во время ответа (кандидаты, не перебивания). */
+    var bargeInCandidates: Int = 0
+        private set
+
+    /** Сколько перебиваний подтверждено и обработано. */
+    var bargeIns: Int = 0
+        private set
+
+    /** Чем подтвердилось последнее перебивание; `null` — перебиваний не было. */
+    var lastBargeInEvidence: BargeInEvidence? = null
+        private set
+
+    /** Сколько `Final` отброшено как эхо озвучки (движок услышал собственный динамик). */
+    var echoFinalsDropped: Int = 0
+        private set
+
+    /** Сколько сегментов на динамике не подтвердилось: текста нет, длительность ничего не доказывает. */
+    var bargeInRejected: Int = 0
+        private set
+
+    /**
+     * Реплика у [SpeechToText] открыта циклом ради прослушивания ответа (duplex-монитор), а не
+     * ради обычного ввода. Нужна, чтобы отбросить её финал как эхо, если человек так и не перебил.
+     */
+    private var monitorUtterance = false
+
+    /** Текст, который озвучивается прямо сейчас: по нему [BargeInGate] отличает эхо от речи. */
+    private var answerSpokenText: String? = null
 
     private var requestSeq: Long = 0L
 
@@ -241,6 +322,14 @@ class VoiceDialogLoop(
         partialTranscript = null
         utteranceOpen = false
         fallbackReported = false
+        bargeInCandidates = 0
+        bargeIns = 0
+        lastBargeInEvidence = null
+        echoFinalsDropped = 0
+        bargeInRejected = 0
+        answerSpokenText = null
+        monitorUtterance = false
+        bargeInGate.reset()
         resolveMode()
         transition(State.LISTENING)
         beginUtterance()
@@ -264,19 +353,44 @@ class VoiceDialogLoop(
     val usesStreaming: Boolean get() = sttMode == SttMode.STREAMING
 
     /**
-     * Сегментер услышал начало речи. В [State.SPEAKING] это barge-in: с флагом —
-     * останавливаем озвучку и возвращаемся в слушание; без флага — не мешаем ответу.
+     * Сегментер услышал начало речи. В [State.SPEAKING] это только КАНДИДАТ на перебивание:
+     * политика ([BargeInGate]) подтвердит его длительностью речи и/или partial ASR. Одного
+     * `SpeechStarted` недостаточно — ровно так же звучит собственный динамик.
      *
-     * @return true, если озвучка была перебита.
+     * @return true, если озвучка была перебита немедленно (для наушников возможно, если политика
+     *   уже видела достаточно речи). Обычно `false`: подтверждение придёт в [onSpeechProgress]
+     *   или в [SpeechToText.Events.onPartial].
      */
     fun onSpeechStarted(): Boolean {
         if (!started) return false
         if (state != State.SPEAKING) return false
         if (!bargeInEnabled) return false
-        listener.onStopSpeaking()
-        awaitingAnswer = false
-        transition(State.LISTENING)
-        resumeListening()
+        bargeInCandidates++
+        bargeInGate.onSpeechStarted(nowMs())
+        // Даже принятая попытка — ещё не перебивание: нужен порог длительности или текст.
+        return false
+    }
+
+    /**
+     * Сегментер сообщил, сколько речи уже накоплено (тикает с потока чтения микрофона). Именно
+     * здесь срабатывает barge-in по длительности, а не в конце фразы.
+     *
+     * `voicedMs == 0` — речь закончилась: попытка сбрасывается, чтобы пауза между всплесками эха
+     * не превращалась в «человек говорит уже три секунды». Счётчик перебиваний при этом цел.
+     *
+     * @return true, если перебивание подтверждено этим тиком.
+     */
+    fun onSpeechProgress(voicedMs: Long): Boolean {
+        if (!started) return false
+        if (state != State.SPEAKING) return false
+        if (!bargeInEnabled) return false
+        if (voicedMs <= 0L) {
+            bargeInGate.onSpeechEnded()
+            return false
+        }
+        val decision = bargeInGate.onVoiced(voicedMs, nowMs())
+        if (decision !is BargeInDecision.Trigger) return false
+        confirmBargeIn(decision)
         return true
     }
 
@@ -323,9 +437,17 @@ class VoiceDialogLoop(
                     listener.onSegmentDropped()
                     return false
                 }
-                listener.onStopSpeaking()
-                awaitingAnswer = false
-                transition(State.LISTENING)
+                // Whisper-путь: текста ещё нет, есть только длительность. На наушниках этого
+                // достаточно; на динамике — нет, и сегмент не отправляем (иначе озвучка Марса
+                // вернулась бы в чат как реплика человека).
+                val decision = bargeInGate.onSegment(recording.durationMs, nowMs())
+                if (decision !is BargeInDecision.Trigger) {
+                    bargeInRejected++
+                    droppedSegments++
+                    listener.onSegmentDropped()
+                    return false
+                }
+                confirmBargeIn(decision)
                 return dispatch(recording)
             }
         }
@@ -390,12 +512,21 @@ class VoiceDialogLoop(
         return completeUtterance(text)
     }
 
-    /** Ответ пришёл и начал звучать: цикл в [State.SPEAKING], микрофон не перехватывает его. */
-    fun onAnswerStarted(): Boolean {
+    /**
+     * Ответ пришёл и начал звучать: цикл в [State.SPEAKING].
+     *
+     * @param spokenText текст, который озвучивается. Нужен политике перебивания: partial ASR,
+     *   слова которого есть в этом тексте, — эхо динамика, а не речь человека. Без него на
+     *   динамике текстовое доказательство не принимается вовсе (на наушниках не нужно).
+     */
+    fun onAnswerStarted(spokenText: String? = null): Boolean {
         if (!started) return false
         if (state != State.THINKING && state != State.LISTENING) return false
         awaitingAnswer = false
+        answerSpokenText = spokenText
+        bargeInGate.onAnswerStarted(nowMs(), audioRoute(), aecActive(), spokenText)
         transition(State.SPEAKING)
+        openMonitorUtterance()
         return true
     }
 
@@ -407,7 +538,16 @@ class VoiceDialogLoop(
         if (!started) return false
         if (state != State.SPEAKING && state != State.THINKING) return false
         awaitingAnswer = false
+        // Человек ещё говорит, но не перебил (например, тихо или на динамике без текста): реплику
+        // сохраняем, иначе его слова потеряются на границе ответа.
+        val keepUtterance = bargeInEnabled && bargeInGate.isCandidate
+        bargeInGate.onAnswerFinished()
         transition(State.LISTENING)
+        if (sttMode == SttMode.STREAMING && utteranceOpen && !keepUtterance) {
+            // Монитор-реплика копила эхо озвучки: её `Final` отправил бы ответ Марса как реплику
+            // человека. Закрываем без текста и открываем чистую реплику для ввода.
+            discardUtterance()
+        }
         resumeListening()
         return true
     }
@@ -419,6 +559,9 @@ class VoiceDialogLoop(
         awaitingAnswer = false
         pendingSegment = null
         partialTranscript = null
+        answerSpokenText = null
+        monitorUtterance = false
+        bargeInGate.reset()
         if (utteranceOpen) {
             utteranceOpen = false
             // Недоговорённую реплику не отправляем: человек выключил микрофон.
@@ -450,6 +593,8 @@ class VoiceDialogLoop(
     /** Открыть реплику у [SpeechToText] (только в потоковом режиме и только когда слушаем). */
     private fun beginUtterance() {
         if (!started || sttMode != SttMode.STREAMING) return
+        // Вторая реплика поверх первой потеряла бы уже принятый звук и дала бы два финала.
+        if (utteranceOpen) return
         val target = stt ?: return
         if (!target.isReady) {
             degradeToWhisper("${target.id}: движок перестал быть готовым")
@@ -458,6 +603,26 @@ class VoiceDialogLoop(
         utteranceOpen = true
         startedUtterances++
         target.startUtterance()
+    }
+
+    /**
+     * Duplex-захват: пока Марс говорит, реплика у движка ОТКРЫТА. Это даёт partial ASR для
+     * подтверждения перебивания и сохраняет первые слова человека, если он всё-таки перебьёт.
+     * Только потоковый путь: whisper режет по тишине и во время озвучки слышит её.
+     */
+    private fun openMonitorUtterance() {
+        if (!bargeInEnabled || sttMode != SttMode.STREAMING) return
+        if (utteranceOpen) return
+        beginUtterance()
+        if (utteranceOpen) monitorUtterance = true
+    }
+
+    /** Выбросить реплику без текста (эхо озвучки) и приготовиться слушать дальше. */
+    private fun discardUtterance() {
+        utteranceOpen = false
+        monitorUtterance = false
+        partialTranscript = null
+        runCatching { stt?.cancelUtterance() }
     }
 
     /**
@@ -486,22 +651,99 @@ class VoiceDialogLoop(
     /** Промежуточный результат движка: только пока реплика открыта и мы действительно слушаем. */
     private fun onSttPartial(text: String) {
         if (!started || sttMode != SttMode.STREAMING || !utteranceOpen) return
-        if (state != State.LISTENING) return
         val clean = text.trim()
         if (clean.isEmpty()) return
-        partialTranscript = clean
-        listener.onPartialTranscript(clean)
+        when (state) {
+            State.LISTENING -> {
+                partialTranscript = clean
+                listener.onPartialTranscript(clean)
+            }
+            State.SPEAKING -> {
+                // Монитор-реплика слышит и Марса, и человека: показывать этот partial нельзя,
+                // но именно он (если слов нет в тексте ответа) подтверждает перебивание.
+                if (!bargeInEnabled) return
+                val decision = bargeInGate.onPartial(clean, nowMs())
+                if (decision is BargeInDecision.Trigger) confirmBargeIn(decision)
+            }
+            else -> Unit
+        }
     }
 
     /**
      * `Final` от движка — это endpoint: реплика закончена, ход уходит в чат. Поздний или
      * повторный финал отбрасывается: реплика уже закрыта ([utteranceOpen] == false) или цикл
      * занят ходом.
+     *
+     * Во время ответа финал может быть двух видов, и оба важны:
+     * - эхо озвучки (слова есть в тексте ответа) — выбрасываем и открываем чистую реплику;
+     * - речь человека, которую движок успел распознать целиком, — это перебивание по факту
+     *   (`Final` = сильнейшее доказательство), поэтому останавливаем озвучку и отправляем текст
+     *   один раз.
      */
     private fun onSttFinal(text: String) {
         if (!started || sttMode != SttMode.STREAMING || !utteranceOpen) return
-        if (state != State.LISTENING) return
-        completeUtterance(text)
+        when (state) {
+            State.LISTENING -> {
+                val clean = text.trim()
+                if (monitorUtterance && clean.isNotEmpty() && bargeInGate.isEchoOfAssistant(clean)) {
+                    echoFinalsDropped++
+                    discardUtterance()
+                    beginUtterance()
+                    return
+                }
+                completeUtterance(text)
+            }
+            State.SPEAKING -> onFinalWhileSpeaking(text)
+            else -> Unit
+        }
+    }
+
+    /**
+     * `Final` во время озвучки. Разделяем эхо и речь человека: эхо — в мусор, речь — в новый ход
+     * (и озвучку останавливаем: человек уже договорил, слушать больше нечего).
+     */
+    private fun onFinalWhileSpeaking(raw: String) {
+        if (!bargeInEnabled) return
+        val clean = raw.trim()
+        if (clean.isEmpty() || bargeInGate.isEchoOfAssistant(clean)) {
+            echoFinalsDropped++
+            // Реплика остаётся монитором: человек может заговорить в ту же секунду.
+            discardUtterance()
+            beginUtterance()
+            monitorUtterance = utteranceOpen
+            return
+        }
+        // Текст есть — это перебивание независимо от длительности: движок услышал фразу целиком.
+        confirmBargeIn(
+            BargeInDecision.Trigger(BargeInEvidence.TRANSCRIPT, 0L, bargeInGate.route),
+        )
+        completeUtterance(clean)
+    }
+
+    /**
+     * Перебивание подтверждено политикой: локальная тишина немедленно, событие — хосту для
+     * upstream-прерывания. Ход НЕ отменяется.
+     *
+     * Реплику у движка НЕ закрываем: в ней уже звук человека, и её `Final` станет следующим ходом.
+     */
+    private fun confirmBargeIn(decision: BargeInDecision.Trigger) {
+        bargeInGate.onAccepted()
+        bargeIns++
+        lastBargeInEvidence = decision.evidence
+        listener.onStopSpeaking()
+        listener.onBargeIn(
+            BargeInEvent(
+                evidence = decision.evidence,
+                voicedMs = decision.voicedMs,
+                route = decision.route,
+                aecActive = bargeInGate.aecActive,
+                partial = bargeInGate.lastPartial,
+            ),
+        )
+        awaitingAnswer = false
+        transition(State.LISTENING)
+        // В потоковом режиме реплика уже открыта — beginUtterance не откроет вторую.
+        resumeListening()
     }
 
     /**
@@ -510,6 +752,7 @@ class VoiceDialogLoop(
      */
     private fun completeUtterance(raw: String): Boolean {
         utteranceOpen = false
+        monitorUtterance = false
         partialTranscript = null
         val clean = raw.trim()
         if (clean.isEmpty()) {
