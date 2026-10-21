@@ -464,4 +464,85 @@ class StreamingAsrEngineTest {
         assertEquals("все потоки должны писать в одну реплику", 1, backend.streamCount)
         assertEquals(threads * 50 * 80, backend.samples.size)
     }
+
+    // --- контекстная коррекция финального текста ------------------------------------------------
+
+    @Test
+    fun finalTextIsCorrectedInVocativePosition() {
+        val backend = FakeBackend()
+        val events = ArrayList<AsrEvent>()
+        val engine = engine(backend, events = events)
+        engine.load()
+        engine.startUtterance()
+
+        // Ровно то, что модель отдаёт на обращение «Марс, открой порт 8090».
+        backend.text = "марш, открой порт восемь тысяч девяносто"
+        backend.endpoint = true
+        engine.acceptPcm(silence(), 320)
+
+        assertEquals(
+            listOf<AsrEvent>(
+                AsrEvent.SpeechStarted,
+                AsrEvent.Partial("марш, открой порт восемь тысяч девяносто"),
+                AsrEvent.Final("Марс, открой порт восемь тысяч девяносто"),
+            ),
+            events,
+        )
+        assertEquals(
+            "сырой транскрипт сохранён для диагностики",
+            "марш, открой порт восемь тысяч девяносто",
+            engine.lastRawFinal,
+        )
+        assertEquals(1, engine.finalCorrections)
+    }
+
+    @Test
+    fun finishUtteranceReturnsCorrectedText() {
+        val backend = FakeBackend()
+        val events = ArrayList<AsrEvent>()
+        val engine = engine(backend, events = events)
+        engine.load()
+        engine.startUtterance()
+
+        backend.text = "марш открой порт восемь тысяч девяносто"
+        engine.acceptPcm(silence(), 320)
+        events.clear()
+
+        val text = engine.finishUtterance()
+
+        assertEquals("Марс открой порт восемь тысяч девяносто", text)
+        assertEquals(listOf<AsrEvent>(AsrEvent.Final("Марс открой порт восемь тысяч девяносто")), events)
+    }
+
+    @Test
+    fun ordinaryWordMarsIsNotTouchedInFinalText() {
+        val backend = FakeBackend()
+        val events = ArrayList<AsrEvent>()
+        val engine = engine(backend, events = events)
+        engine.load()
+        engine.startUtterance()
+
+        backend.text = "включи военный марш на колонке"
+        backend.endpoint = true
+        engine.acceptPcm(silence(), 320)
+
+        assertEquals(AsrEvent.Final("включи военный марш на колонке"), events.last())
+        assertEquals("включи военный марш на колонке", engine.lastRawFinal)
+        assertEquals("ложных замен быть не должно", 0, engine.finalCorrections)
+    }
+
+    @Test
+    fun correctionCanBeDisabledByConfig() {
+        val backend = FakeBackend()
+        val engine = engine(backend, config = AsrConfig(correctVocativeName = false))
+        engine.load()
+        engine.startUtterance()
+
+        backend.text = "марш, открой порт"
+        backend.endpoint = true
+        engine.acceptPcm(silence(), 320)
+
+        assertEquals("марш, открой порт", engine.lastRawFinal)
+        assertEquals(0, engine.finalCorrections)
+    }
 }

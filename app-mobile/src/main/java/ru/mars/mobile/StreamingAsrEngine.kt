@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import ru.mars.mobile.asr.AsrBackend
 import ru.mars.mobile.asr.AsrConfig
+import ru.mars.mobile.asr.AsrFinalCorrector
 import ru.mars.mobile.asr.AsrModelSource
 import ru.mars.mobile.asr.ModelDownloader
 import ru.mars.mobile.asr.Pcm16ToFloat
@@ -67,6 +68,22 @@ class StreamingAsrEngine(
     /** true, если контекстный биасинг реально включён (не откатились на greedy_search). */
     @Volatile
     var isHotwordsActive: Boolean = false
+        private set
+
+    /**
+     * Сырой финальный текст последней реплики — ДО коррекции. Нужен для диагностики
+     * («что реально услышали» против «что отдали в диалог»).
+     *
+     * Приватность: поле только читают; в логи оно не попадает никогда — в logcat уходят
+     * лишь счётчики ([finalCorrections], длины). Транскрипт пользователя в logcat — утечка.
+     */
+    @Volatile
+    var lastRawFinal: String = ""
+        private set
+
+    /** Сколько финальных реплик пришлось править [AsrFinalCorrector] (только число, без текста). */
+    @Volatile
+    var finalCorrections: Int = 0
         private set
 
     /**
@@ -146,7 +163,7 @@ class StreamingAsrEngine(
                 }
             }
             if (b.isEndpoint()) {
-                if (lastPartial.isNotEmpty()) events += AsrEvent.Final(lastPartial)
+                if (lastPartial.isNotEmpty()) events += AsrEvent.Final(finalizeLocked(lastPartial))
                 // Endpoint — граница реплики: свежий stream, но микрофон продолжает литься,
                 // поэтому utteranceActive остаётся true и следующий текст снова даст SpeechStarted.
                 beginUtteranceLocked()
@@ -169,7 +186,7 @@ class StreamingAsrEngine(
             val b = backend ?: return ""
             b.finishStream()
             drainLocked(b)
-            text = b.result().trim().ifEmpty { lastPartial }
+            text = finalizeLocked(b.result().trim().ifEmpty { lastPartial })
             if (text.isNotEmpty()) events += AsrEvent.Final(text)
             utteranceActive = false
             lastPartial = ""
@@ -190,6 +207,7 @@ class StreamingAsrEngine(
             lastPartial = ""
             speechSeen = false
             isHotwordsActive = false
+            lastRawFinal = ""
             pcmConverter.reset()
             try {
                 backend?.release()
@@ -206,6 +224,26 @@ class StreamingAsrEngine(
         utteranceActive = true
         lastPartial = ""
         speechSeen = false
+    }
+
+    /**
+     * Финальный текст реплики: сохранить сырой вариант и применить контекстную коррекцию
+     * («марш» → «Марс» только в позиции обращения).
+     *
+     * Partial'ы остаются сырыми: они меняются на каждом кадре, и подмена в живом транскрипте
+     * мигала бы («Марс»/«марш»), не давая ничего полезного. Смысл имеет только финал — именно
+     * он уходит в диалог.
+     */
+    private fun finalizeLocked(raw: String): String {
+        if (raw.isEmpty()) return raw
+        lastRawFinal = raw
+        if (!config.correctVocativeName) return raw
+        val correction = AsrFinalCorrector.correct(raw)
+        if (!correction.changed) return correction.text
+        finalCorrections++
+        // Только счётчик: сам текст в logcat не пишем (приватные фразы).
+        Log.i(TAG, "ASR final corrected: ${correction.replacements} replacement(s)")
+        return correction.text
     }
 
     private fun backendOrCreate(): AsrBackend = backend ?: backendFactory().also { backend = it }
@@ -235,7 +273,8 @@ class StreamingAsrEngine(
                 listener(event)
             } catch (t: Throwable) {
                 // Исключение в UI-колбэке не должно убивать поток записи.
-                Log.w(TAG, "ASR listener failed on $event", t)
+                // В лог — только тип события: текст реплики в logcat не место.
+                Log.w(TAG, "ASR listener failed on ${event::class.simpleName}", t)
             }
         }
     }
