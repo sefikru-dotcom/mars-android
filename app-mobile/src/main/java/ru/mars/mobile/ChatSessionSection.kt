@@ -104,6 +104,9 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
             // Stream recovery: a session that is still streaming server-side must resume
             // live instead of showing a frozen transcript.
             reattachActiveTurn(detail.activeTurn)
+            // Догон сервера после холодного старта/поворота: если ход уже мёртв, а локально
+            // сохранённый хвост новее истории — он дописывается в транскрипт.
+            recoverInterruptedTurn(detail)
             // Сообщения этого диалога из офлайн-очереди возвращают локальное эхо; если
             // сеть уже есть — сразу отправляются. Первичное восстановление завершено.
             echoPendingOfflineMessages()
@@ -226,6 +229,36 @@ internal fun ChatActivity.reattachActiveTurn(activeTurn: ActiveTurnInfo) {
     // Done не ретраится, серверные tool-ошибки идут в транскрипт и завершают цикл без
     // reconnect'а, 401 → GiveUp(auth) → requestReauthentication (см. RecoveryListener).
     stream = recovery.attachActiveTurn(plan.streamId)
+}
+
+/**
+ * Догон прерванного хода после загрузки деталей диалога.
+ *
+ * Сценарий: пользователь смотрел стрим, процесс убили (или экран пересоздали), ход на
+ * сервере уже завершился — журнал недоступен, а в истории сервера нет последних дельт.
+ * Буфер ([InterruptedTurnStore]) помнит последний видимый текст, политика
+ * ([InterruptedTurnPolicy]) решает, дописывать ли хвост. Если ход ЖИВ, буфер не нужен:
+ * сервер переиграет журнал целиком, и локальная вставка дала бы дубль.
+ */
+internal fun ChatActivity.recoverInterruptedTurn(detail: SessionDetail) {
+    val snapshot = interruptedTurn.load() ?: return
+    val serverText = detail.messages.lastOrNull { it.role == "assistant" }?.content
+    val serverActive = reattachPolicy.planFor(detail.activeTurn) is ReattachPlan.Attach
+    val decision = InterruptedTurnPolicy.reconcile(
+        snapshot = snapshot,
+        sessionId = detail.id,
+        serverText = serverText,
+        serverTurnActive = serverActive,
+        nowMs = System.currentTimeMillis(),
+    )
+    // Буфер одноразовый: он либо отработал, либо признан неактуальным.
+    interruptedTurn.clear()
+    if (decision !is InterruptedTurnRecovery.Recovered) return
+    if (!uiState.appendRecoveredFragment(decision.appendText)) return
+    explicitStatus = ChatActivity.INTERRUPTED_TURN_HINT
+    renderMessages()
+    setStatus()
+    updateControlsFromSection()
 }
 
 /** Завершение recovery-цикла: статус/контролы/офлайн-очередь — паритет с finally прежнего attach. */

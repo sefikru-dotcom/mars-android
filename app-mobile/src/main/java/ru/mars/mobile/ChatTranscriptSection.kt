@@ -63,7 +63,13 @@ internal fun ChatActivity.renderMessages() {
     frameGate.invalidateInFlight()
 
     val current = currentSnapshots()
-    when (val plan = IncrementalTranscriptPolicy.plan(renderedSnapshots, current)) {
+    when (
+        val plan = messageListPresenter.plan(
+            previous = renderedSnapshots,
+            current = current,
+            streaming = uiState.status == ChatStatus.TYPING,
+        )
+    ) {
         TranscriptPlan.FullRebuild -> rebuildTranscript(current)
         is TranscriptPlan.Patch -> {
             // Fast path: только текст стримящегося пузыря — тяжёлый парсинг уходит в фон.
@@ -93,6 +99,14 @@ internal fun ChatActivity.renderMessages() {
  */
 internal fun ChatActivity.scheduleStreamRender() {
     if (!isMessagesReady()) return
+    // Локальный буфер прерванного хода: последний видимый текст ответа переживает смерть
+    // процесса/поворот. Троттлинг и apply() — внутри store, диск не участвует в кадре.
+    interruptedTurn.rememberFrame(
+        sessionId = currentSessionId,
+        streamId = currentStreamId,
+        streaming = uiState.status == ChatStatus.TYPING,
+        text = uiState.lastAssistantText(),
+    )
     if (uiState.status != ChatStatus.TYPING) {
         renderMessages()
         return
