@@ -112,6 +112,9 @@ jobs:
           set -eu
           python3 scripts/theme-parity-audit.py app-mobile/src/main
           python3 scripts/theme-parity-audit.py app-tv/src/main
+          # Один бренд — один hex: одноимённые токены mobile и TV обязаны
+          # совпадать (до этого гейта user_border/bot_border разъехались).
+          python3 scripts/theme-parity-audit.py --parity
 
       - name: Unit tests for release-gate scripts (pure python3, no SDK)
         run: |
