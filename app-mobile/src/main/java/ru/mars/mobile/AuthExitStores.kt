@@ -85,11 +85,13 @@ object AuthExitStores {
      *
      * [extras] — хранилища, которые не являются prefs-файлами (SQLite-база офлайн-слоя:
      * очередь + кэш одной транзакцией). Они идут в конец набора: сначала пользовательские
-     * plaintext-данные, затем транспортная очередь, затем база.
+     * plaintext-данные, затем транспортная очередь, затем база. Параметр стоит ПЕРВЫМ,
+     * чтобы вызов `cleanup { name -> ... }` продолжал означать «фабрика по имени файла»
+     * (trailing lambda привязывается к последнему параметру).
      */
     fun cleanup(
-        storeFor: (String) -> ClearableLocalStore,
         extras: List<ClearableLocalStore> = emptyList(),
+        storeFor: (String) -> ClearableLocalStore,
     ): AuthExitCleanup = AuthExitCleanup(PREFS_FILES.map(storeFor) + extras)
 
     /**
@@ -104,8 +106,8 @@ object AuthExitStores {
         overrides: Map<String, ClearableLocalStore> = emptyMap(),
         extras: List<ClearableLocalStore> = emptyList(),
     ): AuthExitCleanup = cleanup(
-        storeFor = { name -> overrides[name] ?: defaultStore(context, name) },
         extras = extras,
+        storeFor = { name -> overrides[name] ?: defaultStore(context, name) },
     )
 
     /**
