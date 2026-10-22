@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Монохромный слой adaptive-иконки (Android 13+ themed icons, HyperOS 2).
+
+     Без него система на POCO F5 не может перекрасить иконку под обои: в
+     «тематических иконках» рисуется только этот слой, а его отсутствие даёт
+     либо исходную цветную иконку, либо серый системный ромб. Слой — чистый
+     силуэт одним цветом: система сама красит его в тон темы, поэтому цвет
+     здесь не палитровый, а «несущий» (mars_icon).
+
+     Геометрия: диск планеты + кольцо, целиком внутри safe zone 66/108 —
+     маска любого вида (круг, squircle, teardrop) не срежет край. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/mars_icon"
+        android:pathData="M54,24a28,28 0 1,0 0.01,0z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M24,52a30,11 0 1,0 60,0a30,11 0 1,0 -60,0z"
+        android:strokeColor="@color/mars_icon"
+        android:strokeWidth="3.5" />
+</vector>

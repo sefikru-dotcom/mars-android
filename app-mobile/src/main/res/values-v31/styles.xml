@@ -15,6 +15,11 @@
     <style name="SplashTheme" parent="@style/AppTheme">
         <item name="android:windowSplashScreenBackground">@color/mars_background</item>
         <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <!-- Подложка иконки: без неё планета висит в пустоте ровно на цвете
+             фона, и системный сплэш читается как «чёрный экран с маленькой
+             планетой». Диск surface_card отделяет её от обсидиана — так же,
+             как в иконке лончера. -->
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/mars_splash_icon_bg</item>
         <item name="android:windowSplashScreenAnimationDuration">200</item>
         <item name="postSplashScreenTheme">@style/AppTheme</item>
         <!-- Окно под системным сплэшем: тот же брендовый фон, что и в базовой

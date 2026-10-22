@@ -65,6 +65,12 @@ object ChatMarkdownRenderer {
                         setLineSpacing(dp(2).toFloat(), 1f)
                     }
                     val ssb = SpannableStringBuilder()
+                    // Флаги построения: цитата добавляется обёрткой (бар + текст),
+                    // разделитель — отдельным View, поэтому общий addView ниже
+                    // знает, что именно класть в parent (инвариант «одна единица
+                    // <-> один ребёнок» сохраняется: и обёртка, и View — один ребёнок).
+                    var quoteLine = false
+                    var skipTv = false
                     when (line) {
                         is RichLine.Header -> {
                             tv.textSize = when (line.level) {
@@ -93,16 +99,28 @@ object ChatMarkdownRenderer {
                             appendInlineSpans(ssb, line.spans, openImage, openUrl)
                         }
                         is RichLine.Quote -> {
+                            // Цитата — блок, а не «палочка из пробела».
+                            // Раньше акцентный BackgroundColorSpan красил ОДИН
+                            // пробел в начале строки: бар был высотой с пробел,
+                            // не тянулся на перенос и рвался на каждой второй
+                            // строке цитаты. Теперь подложку несёт
+                            // BackgroundColorSpan(QUOTE_BG) на всём тексте
+                            // (тянется по строкам сам), а вертикальный бар
+                            // рисует View слева — см. quoteRow ниже.
                             val quoteStart = ssb.length
-                            ssb.append("  ")
-                            ssb.setSpan(
-                                android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
-                                quoteStart,
-                                quoteStart + 1,
-                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                            )
                             appendInlineSpans(ssb, line.spans, openImage, openUrl)
+                            if (ssb.length > quoteStart) {
+                                ssb.setSpan(
+                                    BackgroundColorSpan(MarsTheme.QUOTE_BG),
+                                    quoteStart,
+                                    ssb.length,
+                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                                )
+                            }
                             tv.setTypeface(null, Typeface.ITALIC)
+                            tv.setTextColor(MarsTheme.TEXT_EM)
+                            tv.setPadding(dp(10), dp(3), dp(8), dp(3))
+                            quoteLine = true
                         }
                         is RichLine.TaskItem -> {
                             val iconStart = ssb.length
@@ -125,19 +143,30 @@ object ChatMarkdownRenderer {
                             appendInlineSpans(ssb, line.spans, openImage, openUrl)
                         }
                         is RichLine.Divider -> {
-                            tv.text = ""
-                            tv.setBackgroundColor(MarsTheme.BORDER)
-                            tv.layoutParams = LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT,
-                                dp(1)
-                            ).apply {
-                                topMargin = dp(6)
-                                bottomMargin = dp(6)
-                            }
+                            // Разделитель — настоящий View 1dp, а не пустой
+                            // TextView с фоном: TextView в этом месте ещё и
+                            // мерил текст (высота строки), из-за чего линия
+                            // «плыла» по высоте между блоками.
+                            skipTv = true
+                            parent.addView(
+                                View(context).apply { setBackgroundColor(MarsTheme.DIVIDER) },
+                                LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    dp(1)
+                                ).apply {
+                                    topMargin = dp(8)
+                                    bottomMargin = dp(8)
+                                }
+                            )
                         }
                     }
                     tv.text = ssb
-                    parent.addView(tv)
+                    if (skipTv) continue
+                    if (quoteLine) {
+                        parent.addView(quoteRow(context, tv))
+                    } else {
+                        parent.addView(tv)
+                    }
                 }
                 is MarkdownUnit.Code -> {
                     val blockIndex = unit.blockIndex
@@ -253,6 +282,27 @@ object ChatMarkdownRenderer {
         }
         state.units = units
     }
+
+    /**
+     * Строка цитаты: вертикальный бар слева + текст с подложкой.
+     *
+     * Бар — настоящий View шириной 3dp во всю высоту строки (включая переносы),
+     * а не крашеный пробел в тексте: BackgroundColorSpan на символе даёт
+     * прямоугольник высотой с глиф и рвётся между строками. Подложку текста
+     * несёт [BackgroundColorSpan] в самом тексте (MarsTheme.QUOTE_BG).
+     */
+    private fun quoteRow(context: Context, tv: TextView): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                View(context).apply { setBackgroundColor(MarsTheme.QUOTE_BAR) },
+                LinearLayout.LayoutParams(
+                    MarsTheme.dp(context, 3),
+                    LinearLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
 
     private fun appendInlineSpans(
         builder: SpannableStringBuilder,

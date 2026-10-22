@@ -62,7 +62,7 @@ class CronActivity : ComponentActivity() {
             gravity = Gravity.END
         }
         createRow.addView(
-            MarsDialog.quietButton(this, "＋ Новая задача") { showJobForm(null) },
+            MarsDialog.quietButton(this, "Новая задача", iconRes = R.drawable.ic_add) { showJobForm(null) },
         )
         content.addView(createRow, LinearLayout.LayoutParams(-1, -2))
 

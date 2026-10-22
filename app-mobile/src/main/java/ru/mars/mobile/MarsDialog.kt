@@ -254,8 +254,19 @@ object MarsDialog {
     fun denyButton(context: Context, label: String, onClick: () -> Unit): Button =
         button(context, label, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_TEXT, onClick, MarsTheme.ACCENT_BORDER)
 
-    /** Text-only quiet action (back / cancel). */
-    fun quietButton(context: Context, label: String, onClick: () -> Unit): Button {
+    /**
+     * Тихая текстовая кнопка (назад/отмена — без иконки). [iconRes] —
+     * необязательная ведущая иконка из набора `ic_*`: глифы-символы в
+     * подписях («＋ Новая задача») на HyperOS приходят из CJK-фолбэка шрифта,
+     * не красятся tint'ом и съезжают по базовой линии. Вектор в compound
+     * drawable ведёт себя как остальной UI: 16dp, цвет — токен палитры.
+     */
+    fun quietButton(
+        context: Context,
+        label: String,
+        iconRes: Int? = null,
+        onClick: () -> Unit,
+    ): Button {
         return Button(context).apply {
             text = label
             setTextColor(MarsTheme.TEXT_MUTED)
@@ -266,6 +277,15 @@ object MarsDialog {
             stateListAnimator = null
             minWidth = 0
             minimumWidth = 0
+            if (iconRes != null) {
+                val iconSize = MarsTheme.dp(context, 16)
+                val icon = context.getDrawable(iconRes)?.mutate()?.apply {
+                    setBounds(0, 0, iconSize, iconSize)
+                    setTint(MarsTheme.TEXT_MUTED)
+                }
+                setCompoundDrawablesRelative(icon, null, null, null)
+                compoundDrawablePadding = MarsTheme.dp(context, 6)
+            }
             val padH = MarsTheme.dp(context, 12)
             setPadding(padH, MarsTheme.dp(context, 10), padH, MarsTheme.dp(context, 10))
             setOnClickListener { onClick() }

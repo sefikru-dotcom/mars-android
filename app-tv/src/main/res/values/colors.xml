@@ -26,6 +26,10 @@
     <color name="mars_text_strong">#FFFFFF</color>
     <color name="mars_muted">#8B95A5</color>
     <color name="mars_text_em">#CBD5E1</color>
+    <!-- Алиас имени, которым этот же тон зовёт app-mobile (mars_em): без пары
+         один и тот же оттенок назывался по-разному в двух модулях, и сверка
+         палитр не могла их сопоставить. -->
+    <color name="mars_em">#CBD5E1</color>
 
     <!-- Chat bubbles -->
     <color name="mars_user_bubble">#1C2436</color>

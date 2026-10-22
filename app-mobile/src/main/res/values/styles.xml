@@ -1,4 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+        Базовая тема приложения.
+
+        Что здесь принципиально:
+        * windowBackground — брендовый фон, а не цвет. Окно рисует первый кадр
+          ДО onCreate любой Activity, поэтому именно эта строка отвечает за то,
+          что при старте не мелькает чёрный прямоугольник.
+        * forceDarkAllowed=false — HyperOS (POCO F5) включает принудительный
+          «тёмный режим» для приложений, которые система считает светлыми, и
+          перекрашивает цвета. Клиент уже тёмный: инверсия ломала палитру
+          (рубиновый акцент уходил в розовый, #07080B — в серый). Флаг
+          выключает автодарк для всего приложения.
+        * windowLayoutInDisplayCutoutMode=shortEdges — контент уходит под вырез
+          камеры; иначе на POCO F5 сверху остаётся полоса фона поверх картинки.
+    -->
     <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">@color/mars_accent</item>
@@ -7,6 +23,9 @@
         <item name="android:windowBackground">@drawable/mars_window_bg</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
     </style>
 
     <!-- Стартовая тема заставки: до первого кадра Activity окно уже должно быть

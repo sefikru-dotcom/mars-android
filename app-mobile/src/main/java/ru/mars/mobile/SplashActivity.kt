@@ -55,6 +55,12 @@ class SplashActivity : ComponentActivity() {
     private var haloDrawable: GradientDrawable? = null
     private var pulseAnimator: ValueAnimator? = null
 
+    /**
+     * Колонка «планета + слово»: гаснет при уходе. Ссылка нужна, чтобы гасить
+     * контент, а не всё окно — фон обязан остаться до появления экрана цели.
+     */
+    private var contentColumn: View? = null
+
     private var credentialJob: Job? = null
     private var routeTick: Runnable? = null
 
@@ -155,6 +161,7 @@ class SplashActivity : ComponentActivity() {
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER
         ))
+        contentColumn = column
         return root
     }
 
@@ -260,9 +267,20 @@ class SplashActivity : ComponentActivity() {
     }
 
     /**
-     * Уход: гасим экран за [SplashPolicy.fadeOutMs] и только потом открываем
-     * целевой экран, иначе системный переход накладывается на ещё видимый
-     * логотип и читается как рывок.
+     * Уход: гасим СОДЕРЖИМОЕ (планету и слово), а не всё окно, и только потом
+     * открываем целевой экран.
+     *
+     * Раньше здесь анимировалась альфа `window.decorView` до нуля. Это давало
+     * ровно тот чёрный провал, ради которого заставку и переделывали: пока
+     * аниматор шёл к 0, за заставкой уже ничего не было — окно становилось
+     * прозрачным и просвечивал пустой Surface (на HyperOS он чёрный), а
+     * следующий экран появлялся только после finish(). Пользователь видел
+     * «Марс -> чёрный экран -> чат».
+     *
+     * Теперь брендовый фон окна остаётся непрозрачным до самого конца, гаснет
+     * только контент, а целевая Activity приходит перекрёстным фейдом
+     * ([navigate]): её собственный windowBackground — тот же @drawable/mars_bg,
+     * поэтому стык двух окон невидим.
      */
     private fun leave() {
         if (leaving) return
@@ -275,10 +293,9 @@ class SplashActivity : ComponentActivity() {
             navigate()
             return
         }
-        // Гасим decorView, а не корневой контейнер: фон окна рисует сам DecorView,
-        // и только его альфа гасит экран целиком — иначе картинка Марса осталась
-        // бы висеть до finish() и исчезла рывком.
-        window.decorView.animate()
+        // Гасим column, а не decorView: фон рисует окно (SplashTheme), и оно
+        // обязано остаться на экране, пока не появится окно цели.
+        (contentColumn ?: window.decorView).animate()
             .alpha(0f)
             .setDuration(fadeMs.toLong())
             .setInterpolator(DecelerateInterpolator())
@@ -289,7 +306,14 @@ class SplashActivity : ComponentActivity() {
         handler.postDelayed({ navigate() }, fadeMs.toLong() + FADE_GUARD_MS)
     }
 
-    /** Открывает целевой экран по [SplashRoute]; повторный вызов игнорируется. */
+    /**
+     * Открывает целевой экран по [SplashRoute]; повторный вызов игнорируется.
+     *
+     * Перекрёстный фейд задаётся явно: без него система берёт дефолтную
+     * анимацию перехода темы (на HyperOS — «всплытие» с затемнением), и стык
+     * двух брендовых экранов читается как рывок.
+     */
+    @Suppress("DEPRECATION") // overrideActivityTransition требует API 34, minSdk 28
     private fun navigate() {
         if (navigated) return
         navigated = true
@@ -298,6 +322,7 @@ class SplashActivity : ComponentActivity() {
             SplashRoute.Destination.LOGIN -> MainActivity::class.java
         }
         startActivity(Intent(this, target))
+        overridePendingTransition(R.anim.mars_fade_in, R.anim.mars_fade_out)
         finish()
     }
 

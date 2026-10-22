@@ -1,41 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Mars Design System — единый источник цвета для XML-слоя клиента.
+
+    Правила, которые держит этот файл (и проверяет scripts/theme-parity-audit.py):
+
+    * Hex живёт ТОЛЬКО здесь и в MarsTheme.kt / MarsGradients.kt. Любой
+      `0xff...` в экране — дефект: гейт падает на нём же.
+    * Имена общие с app-tv: один бренд — один токен. Значения одноимённых
+      токенов сверяет scripts/theme-parity-audit.py (режим parity); до этой
+      сверки user_border и bot_border разъехались между модулями
+      (2A354D / 2B374E, 1A2130 / 1B2230), и пузырь чата на телефоне и на
+      телевизоре имел разную рамку.
+    * Значения совпадают с MarsTheme.kt (Kotlin-палитра — источник истины):
+      colors.xml нужен только там, где цвет обязателен в XML (темы, иконки,
+      layer-list'ы).
+-->
 <resources>
-    <!-- Mars Dark Obsidian Theme Palette (Strict WebUI parity) -->
+    <!-- ===================== Base surfaces ===================== -->
     <color name="mars_background">#07080B</color>
     <color name="mars_sidebar">#0C0E14</color>
     <color name="mars_surface">#10131B</color>
     <color name="mars_surface_subtle">#141822</color>
     <color name="mars_surface_card">#161B28</color>
+
+    <!-- ===================== Borders ===================== -->
     <color name="mars_border">#212634</color>
     <color name="mars_border_subtle">#171C26</color>
     <color name="mars_border_muted">#283042</color>
-    
-    <!-- Accent Ruby Mars -->
+    <!-- Тонкая рамка всплывающих поверхностей (диалоги, шиты). -->
+    <color name="mars_border_dialog">#1E2433</color>
+
+    <!-- ===================== Accent Ruby Mars ===================== -->
     <color name="mars_accent">#EF4444</color>
     <color name="mars_accent_hover">#F87171</color>
     <color name="mars_accent_bg">#26EF4444</color>
+    <color name="mars_accent_bg_pressed">#33EF4444</color>
+    <color name="mars_accent_border">#33EF4444</color>
     <color name="mars_accent_text">#FCA5A5</color>
-    
-    <!-- Typography -->
+    <!-- Текст на акцентной заливке (кнопка «отправить», primary-CTA). -->
+    <color name="mars_on_accent">#0B0D12</color>
+    <!-- Стандартный 20% white ripple для интерактивных поверхностей. -->
+    <color name="mars_ripple">#33FFFFFF</color>
+
+    <!-- ===================== Typography ===================== -->
     <color name="mars_text">#F1F5F9</color>
+    <color name="mars_text_strong">#FFFFFF</color>
+    <!-- Историческое имя того же тона; оставлено, чтобы не ломать ссылки. -->
     <color name="mars_strong">#FFFFFF</color>
     <color name="mars_muted">#8B95A5</color>
     <color name="mars_em">#CBD5E1</color>
-    
-    <!-- Chat specific -->
+    <!-- Алиас имени, которым этот же тон зовёт app-tv (mars_text_em). -->
+    <color name="mars_text_em">#CBD5E1</color>
+    <!-- Монохромная иконка по умолчанию: векторы красятся tint'ом на месте. -->
+    <color name="mars_icon">#FFFFFF</color>
+
+    <!-- ===================== Chat ===================== -->
     <color name="mars_user_bubble">#1C2436</color>
-    <color name="mars_user_border">#2A354D</color>
+    <color name="mars_user_border">#2B374E</color>
     <color name="mars_bot_card">#0F121A</color>
-    <color name="mars_bot_border">#1A2130</color>
-    
-    <!-- Code & Terminal -->
+    <color name="mars_bot_border">#1B2230</color>
+    <!-- Подложка цитаты: тот же тон, что у inline-кода. -->
+    <color name="mars_quote_bg">#141822</color>
+    <!-- Вертикальный бар цитаты (View слева от текста). -->
+    <color name="mars_quote_bar">#EF4444</color>
+    <!-- Горизонтальный разделитель блоков: View 1dp, не глиф. -->
+    <color name="mars_divider">#212634</color>
+
+    <!-- ===================== Code & Terminal ===================== -->
     <color name="mars_code_bg">#090B10</color>
-    <color name="mars_code_border">#1D2331</color>
+    <color name="mars_code_border">#1C2331</color>
     <color name="mars_code_text">#F8FAFC</color>
     <color name="mars_code_tag">#38BDF8</color>
-    
-    <!-- Statuses -->
+
+    <!-- ===================== Thoughts (reasoning accordion) ===================== -->
+    <color name="mars_thought_bg">#143B82F6</color>
+    <color name="mars_thought_border">#333B82F6</color>
+
+    <!-- ===================== Statuses ===================== -->
     <color name="mars_status_online">#22C55E</color>
     <color name="mars_status_error">#EF4444</color>
     <color name="mars_status_warning">#F59E0B</color>
     <color name="mars_status_info">#38BDF8</color>
+
+    <!-- ===================== Chrome / overlays ===================== -->
+    <!-- Затемнение под модальными поверхностями (85% базового фона). -->
+    <color name="mars_scrim">#D907080B</color>
+    <!-- Подложка иконки системного сплэша (API 31+). -->
+    <color name="mars_splash_icon_bg">#161B28</color>
+    <!-- Вуаль поверх фонового рендера: сверху прозрачно, снизу плотно.
+         values-night/colors.xml перекрывает эти два токена системной темой. -->
+    <color name="mars_bg_scrim_top">#00000000</color>
+    <color name="mars_bg_scrim_bottom">#8C07080B</color>
 </resources>

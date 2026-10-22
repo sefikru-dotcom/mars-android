@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Появление целевого экрана после заставки.
+
+     Длительность совпадает с SplashPolicy.FADE_OUT_MS (260 мс): переход
+     читается как один жест, а не как «погасло — подождали — включилось».
+     Кривая decelerate: экран проявляется и останавливается, без рывка. -->
+<alpha xmlns:android="http://schemas.android.com/apk/res/android"
+    android:duration="260"
+    android:fromAlpha="0.0"
+    android:toAlpha="1.0"
+    android:interpolator="@android:interpolator/decelerate_cubic" />

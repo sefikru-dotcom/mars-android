@@ -5,6 +5,7 @@
     python3 theme-parity-audit.py <корень-исходников> [--palette ИМЯ ...]
     python3 theme-parity-audit.py app-mobile/src/main
     python3 theme-parity-audit.py app-tv/src/main
+    python3 theme-parity-audit.py --parity [КОРЕНЬ-РЕПО]   # сверка палитр mobile <-> TV
 
 Проверяет бан-листы визуального паритета:
   1. хардкод-цвета (`0xAARRGGBB` / `0xRRGGBB`, `Color.parseColor("#…")`) вне файла палитры;
@@ -151,7 +152,78 @@ def sources(root: Path):
             yield path
 
 
+# --- сверка палитр mobile <-> TV -----------------------------------------------
+# Один бренд, два модуля, один и тот же токен. Пока значения сверялись глазами,
+# в mobile и TV разъехались user_border (2A354D / 2B374E) и bot_border
+# (1A2130 / 1B2230): один и тот же пузырь в чате на телефоне и на телевизоре
+# имел разную рамку, и заметить это можно было только скриншотом рядом.
+# Гейт сравнивает ВСЕ одноимённые токены двух палитр; токены, объявленные
+# только в одном модуле, легальны (у mobile есть экраны, которых нет на TV),
+# но печатаются как справка, чтобы «своя палитра на модуль» не разрасталась
+# молча.
+MODULE_PALETTES = (
+    ("app-mobile", "app-mobile/src/main/res/values/colors.xml"),
+    ("app-tv", "app-tv/src/main/res/values/colors.xml"),
+)
+COLOR_DECL_RE = re.compile(
+    r'<color\s+name="([^"]+)"\s*>\s*(#[0-9a-fA-F]{3,8})\s*</color>'
+)
+
+
+def read_palette(path: Path) -> dict[str, str]:
+    """`имя -> #RRGGBB` из values/colors.xml; регистр hex приведён к верхнему."""
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {m.group(1): m.group(2).upper() for m in COLOR_DECL_RE.finditer(text)}
+
+
+def palette_parity(root: Path) -> int:
+    """Сверка одноимённых токенов между палитрами модулей. 0 — паритет."""
+    palettes: dict[str, dict[str, str]] = {}
+    for module, rel in MODULE_PALETTES:
+        palette = read_palette(root / rel)
+        if not palette:
+            print(f"Нет палитры: {root / rel}", file=sys.stderr)
+            return 2
+        palettes[module] = palette
+
+    names = [module for module, _ in MODULE_PALETTES]
+    base_name = names[0]
+    base = palettes[base_name]
+    mismatches = 0
+    for other in names[1:]:
+        other_palette = palettes[other]
+        for name in sorted(set(base) & set(other_palette)):
+            if base[name] != other_palette[name]:
+                print(
+                    f"[палитра] {name}: {base_name}={base[name]} != {other}={other_palette[name]}"
+                )
+                mismatches += 1
+        only_base = sorted(set(base) - set(other_palette))
+        only_other = sorted(set(other_palette) - set(base))
+        if only_base:
+            print(f"[палитра] только {base_name}: {', '.join(only_base)}")
+        if only_other:
+            print(f"[палитра] только {other}: {', '.join(only_other)}")
+
+    shared = len(set(palettes[names[0]]) & set(palettes[names[-1]]))
+    print(f"\nИтого: одноимённых токенов {shared}, расхождений {mismatches}")
+    if mismatches:
+        print("Один бренд — один hex: значение токена обязано совпадать в mobile и TV.")
+        return 1
+    print("Паритет.")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "--parity":
+        root = Path(argv[2]) if len(argv) > 2 else Path(__file__).resolve().parent.parent
+        if not root.is_dir():
+            print(f"Нет каталога: {root}", file=sys.stderr)
+            return 2
+        return palette_parity(root)
+
     if len(argv) < 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2

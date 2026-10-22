@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive launcher-иконка (API 26+): обсидиановый фон + планета-рендер.
-     Планета вписана по safe zone 66/108 (см. scripts/gen-visual-assets.py). -->
+<!-- Adaptive launcher-иконка (API 26+): градиентный диск + планета-рендер.
+
+     Что изменилось против плоского фона:
+     * background — вектор с радиальным градиентом (@drawable/ic_launcher_background)
+       вместо @color/mars_background: планета перестала сливаться с подложкой;
+     * добавлен monochrome-слой (Android 13+, HyperOS 2): без него система не
+       может перекрасить иконку под обои и рисует серый системный ромб.
+
+     Планета вписана по safe zone 66/108 (см. scripts/gen-visual-assets.py):
+     foreground — PNG 432px, диск занимает 250/432 = 58%, то есть ~87% видимой
+     области маски. Меньше делать нельзя (иконка выглядит потерянной в круге),
+     больше — маска срежет лимб. -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/mars_background" />
+    <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>
