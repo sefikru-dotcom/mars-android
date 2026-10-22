@@ -35,6 +35,17 @@ class HandsFreeCapture(
         /** Начало речи: хост может показать «слушаю» и (при barge-in) перебить озвучку. */
         fun onSpeechStarted() {}
 
+        /**
+         * Сколько миллисекунд речи накоплено в текущей фразе — тикает на каждом чанке, пока
+         * сегментер слышит речь.
+         *
+         * Зачем: перебивание нельзя решать «в конце фразы» — тогда человек уже договорил, а
+         * озвучка всё это время звучала. Политика ([BargeInGate]) подтверждает перебивание по
+         * накопленной длительности речи и/или partial ASR, поэтому ей нужен поток, а не одно
+         * событие. Метод вызывается С ПОТОКА ЧТЕНИЯ (как и остальные колбэки).
+         */
+        fun onSpeechProgress(voicedMs: Long) {}
+
         /** Готовая реплика в формате серверного контракта. */
         fun onSegment(recording: Recording) {}
 
@@ -72,8 +83,21 @@ class HandsFreeCapture(
     /** Потребитель сырого потока (потоковый ASR); `null` — движка нет, звук идёт только в сегментер. */
     @Volatile private var rawListener: RawPcmListener? = null
 
+    /** Источник текущей сессии: нужен, чтобы отдать хосту факт «AEC реально включён». */
+    @Volatile private var sessionSource: AudioSource? = null
+
     /** true, пока микрофон открыт (между успешным [start] и выходом потока чтения). */
     val isCapturing: Boolean get() = running
+
+    /**
+     * Работает ли аппаратное эхоподавление на ТЕКУЩЕЙ сессии захвата.
+     *
+     * Это не «мы попросили AEC», а «платформа подтвердила enabled» (см.
+     * [AudioCaptureDiagnostics.echoCanceled]). Хост передаёт это значение в [VoiceDialogLoop]:
+     * политика перебивания не имеет права считать, что AEC есть, только потому, что он запрошен.
+     */
+    val echoCanceled: Boolean
+        get() = sessionSource?.echoCanceled() == true
 
     /**
      * Открыть микрофон и начать резать поток на реплики.
@@ -99,6 +123,7 @@ class HandsFreeCapture(
             running = true
             this.listener = listener
             this.rawListener = rawPcm
+            sessionSource = source
             thread = Thread({ readLoop(source) }, THREAD_NAME).apply {
                 isDaemon = true
                 priority = Thread.NORM_PRIORITY
@@ -140,6 +165,7 @@ class HandsFreeCapture(
                 worker = null
                 listener = null
                 rawListener = null
+                sessionSource = null
             }
         }
         // Хвост отдаём здесь, а не в потоке чтения: [stop] обязан вернуть управление только
@@ -149,6 +175,8 @@ class HandsFreeCapture(
 
     private fun readLoop(source: AudioSource) {
         val buf = ByteArray(VoiceRecorder.READ_CHUNK_BYTES)
+        // Граница речи внутри этой сессии: нужна, чтобы отдать хосту ровно один тик спада.
+        var wasSpeaking = false
         try {
             while (running && !cancelRequested) {
                 val read = try {
@@ -159,6 +187,17 @@ class HandsFreeCapture(
                 if (read <= 0) break
                 feedRaw(buf, read)
                 deliver(segmenter.onChunk(buf, nowMs(), read))
+                // Длительность речи — ПОСЛЕ события: SpeechStarted должен прийти раньше первого
+                // подтверждения, иначе политика не успеет открыть попытку и тик потеряется.
+                val speaking = segmenter.isSpeaking
+                if (speaking) {
+                    notifyProgress(segmenter.activeVoicedMs)
+                } else if (wasSpeaking) {
+                    // Спад речи: хост закрывает попытку перебивания. Без этого тика пауза между
+                    // всплесками эха копилась бы как «человек говорит» и перебивала сама себя.
+                    notifyProgress(0L)
+                }
+                wasSpeaking = speaking
             }
         } finally {
             running = false
@@ -192,6 +231,12 @@ class HandsFreeCapture(
                 notify(sink) { it.onSegment(recording) }
             }
         }
+    }
+
+    /** Тик длительности речи; исключение хоста не рвёт чтение микрофона. */
+    private fun notifyProgress(voicedMs: Long) {
+        val sink = listener ?: return
+        notify(sink) { it.onSpeechProgress(voicedMs) }
     }
 
     /** Хост не должен ронять поток чтения: его исключение — не повод потерять микрофон. */

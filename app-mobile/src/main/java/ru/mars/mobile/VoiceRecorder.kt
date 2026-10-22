@@ -16,6 +16,16 @@ interface AudioSource {
 
     /** Stop the hardware and free its resources. Safe to call more than once. */
     fun release()
+
+    /**
+     * Whether hardware echo cancellation is actually ON for this session.
+     *
+     * Barge-in needs the truth, not the request: "we asked for AEC" is not "the platform enabled
+     * it" (see [AudioCaptureDiagnostics.echoCanceled]). The default is `false` — a source that does
+     * not know must not make the dialog loop believe the echo path is closed. Implementations keep
+     * the answer after [release]: the flag describes the session that was opened.
+     */
+    fun echoCanceled(): Boolean = false
 }
 
 /**
