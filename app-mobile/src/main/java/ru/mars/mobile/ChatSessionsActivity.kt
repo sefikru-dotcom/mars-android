@@ -28,8 +28,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
-import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.export.SessionMarkdownExporter
 import ru.mars.network.model.SessionAttention
@@ -72,6 +72,24 @@ class ChatSessionsActivity : ComponentActivity() {
     private lateinit var backCallback: OnBackPressedCallback
     private lateinit var sessionList: LinearLayout
     private lateinit var filterInput: EditText
+
+    /**
+     * Индикатор офлайна списка: видимый, но не блокирующий — список из кэша читается
+     * и открывается как обычно (требование «usable без сети»). Текст и тон считает
+     * [NetworkBannerPolicy] + [OfflineIndicatorPolicy], хост только мапит цвет.
+     */
+    private lateinit var offlineBanner: TextView
+
+    /** Состояние сети: тот же детектор, что в чате (снимок при старте + подписка). */
+    private val networkPolicy = NetworkStatePolicy()
+    private val bannerPolicy = NetworkBannerPolicy()
+    private lateinit var networkObserver: NetworkConnectivityObserver
+
+    /**
+     * Момент сохранения показанного снимка кэша (null — список пришёл с сервера).
+     * Нужен индикатору, чтобы писать «Нет связи · Кэш (5 мин назад)», а не просто «нет связи».
+     */
+    private var offlineSnapshotAt: Long? = null
 
     /** Плоский список диалогов (сеть, при сбое — снимок офлайн-кэша). */
     private var sessions: List<SessionItem> = emptyList()
@@ -142,31 +160,27 @@ class ChatSessionsActivity : ComponentActivity() {
         if (uri != null) importSessionFrom(uri)
     }
 
-    // Приватные хранилища общие с ChatActivity (ключи — ChatActivity companion):
-    // кэш списка переживает обрыв связи, а удаление диалога стирает его черновик
+    // Офлайн-хранилища общие с ChatActivity ([OfflineStores]): один SQLite-носитель на
+    // процесс. Кэш списка переживает обрыв связи, а удаление диалога стирает его копию
     // и буферизованные сообщения — поведение прежней шторки без регресса.
-    private val offlineCache by lazy {
-        SessionOfflineCache(
-            SharedPreferencesKeyValueStore(
-                getSharedPreferences(ChatActivity.OFFLINE_CACHE_PREFS, MODE_PRIVATE)
-            )
-        )
-    }
+    private val offlineCache by lazy { OfflineStores.sessionCache(this) }
     private val drafts by lazy {
         SessionDraftController(
             PrefsSessionDraftStore(getSharedPreferences(ChatActivity.DRAFTS_PREFS, MODE_PRIVATE))
         )
     }
     private val pendingQueue by lazy {
-        OfflineMessageQueuePolicy(
-            PrefsPendingMessageStore(getSharedPreferences(ChatActivity.PENDING_QUEUE_PREFS, MODE_PRIVATE))
-        )
+        OfflineMessageQueuePolicy(OfflineStores.pendingMessageStore(this))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
         setContentView(buildView())
+        // Детектор сети стартует ДО первого запроса списка: снимок при старте даёт
+        // корректный индикатор с первого кадра, а не после первого системного колбэка.
+        networkObserver = NetworkConnectivityObserver(this, networkPolicy) { updateOfflineBanner() }
+        networkObserver.start()
         backCallback = object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = handleBack()
         }
@@ -202,6 +216,8 @@ class ChatSessionsActivity : ComponentActivity() {
         renderJob?.cancel()
         searchJob?.cancel()
         refreshJob?.cancel()
+        // Колбэк сети снимаем: Activity-подписчик не должен держаться ConnectivityManager'ом.
+        if (::networkObserver.isInitialized) runCatching { networkObserver.stop() }
         super.onDestroy()
     }
 
@@ -288,14 +304,51 @@ class ChatSessionsActivity : ComponentActivity() {
                 // Пустой ответ (сбой сети или диалогов действительно нет) сверяется с
                 // офлайн-кэшем: на сбое уровень показывает последний сохранённый снимок.
                 sessions = withContext(Dispatchers.IO) { offlineCache.reconcile(fresh) }
+                // Пустой сетевой ответ = показан снимок: запоминаем его возраст для
+                // индикатора. Свежий список возраст сбрасывает — копия больше не нужна.
+                offlineSnapshotAt = if (fresh.isEmpty() && sessions.isNotEmpty()) {
+                    withContext(Dispatchers.IO) { offlineCache.loadSessions()?.savedAtEpochMillis }
+                } else {
+                    null
+                }
                 // Обновлённый список может уже содержать серверные совпадения —
                 // секция серверного поиска пересчитывается от нового списка.
                 if (remoteMatches.isNotEmpty()) remoteMatches = emptyList()
                 renderSessionList()
+                updateOfflineBanner()
             } finally {
                 onFinished()
             }
         }
+    }
+
+    /**
+     * Индикатор офлайна: решение (видимость/текст/тон) — чистые [NetworkBannerPolicy] и
+     * [OfflineIndicatorPolicy], хост мапит тон на цвета [MarsTheme] и всё.
+     *
+     * Возраст копии дописывается только в офлайне и только если он известен: «Нет связи»
+     * без даты читается как «данные свежие», а это неправда уже через час без сети.
+     */
+    private fun updateOfflineBanner() {
+        if (!::offlineBanner.isInitialized) return
+        val pendingCount = runCatching { pendingQueue.size }.getOrDefault(0)
+        val banner = bannerPolicy.bannerFor(networkPolicy.state, pendingCount)
+        offlineBanner.visibility = if (banner.visible) View.VISIBLE else View.GONE
+        if (!banner.visible) return
+        val text = if (networkPolicy.state == NetworkState.OFFLINE) {
+            OfflineIndicatorPolicy.listHint(banner.text, offlineSnapshotAt, System.currentTimeMillis())
+        } else {
+            banner.text
+        }
+        val tone = when (banner.tone) {
+            NetworkBannerUi.Tone.OK -> MarsTheme.STATUS_ONLINE
+            NetworkBannerUi.Tone.WARNING -> MarsTheme.STATUS_WARNING
+            NetworkBannerUi.Tone.ERROR -> MarsTheme.STATUS_ERROR
+            NetworkBannerUi.Tone.INFO -> MarsTheme.STATUS_INFO
+        }
+        offlineBanner.text = text
+        offlineBanner.setTextColor(tone)
+        offlineBanner.background = MarsTheme.card(this, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = tone)
     }
 
     /**
@@ -1157,6 +1210,18 @@ class ChatSessionsActivity : ComponentActivity() {
         }
         header.addView(newChatBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
         root.addView(header)
+
+        // Индикатор офлайна: видимая, но не блокирующая полоса над списком. Список из
+        // кэша читается и открывается как обычно — без сети экран остаётся рабочим.
+        offlineBanner = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            visibility = View.GONE
+            // Доступность: смену сетевого статуса TalkBack озвучивает сам (polite).
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        root.addView(offlineBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
         // Поиск по диалогам (title/preview — семантика фильтра прежней шторки).
         val searchBox = LinearLayout(this).apply {

@@ -44,6 +44,16 @@ object SettingsCachePolicy {
     )
 
     /**
+     * Файлы SQLite-базы офлайн-слоя ([AuthExitStores.OFFLINE_DB]): очередь неотправленных
+     * и кэш диалогов. Журналы WAL/SHM — часть фактического объёма на диске.
+     */
+    val CACHE_DB_FILES: List<String> = listOf(
+        AuthExitStores.OFFLINE_DB,
+        "${AuthExitStores.OFFLINE_DB}-wal",
+        "${AuthExitStores.OFFLINE_DB}-shm",
+    )
+
+    /**
      * Пользовательские plaintext-данные: очистка кэша НЕ имеет права их стирать
      * (это не кэш, а введённый текст; их единственный путь очистки — выход из аккаунта).
      */
@@ -52,6 +62,9 @@ object SettingsCachePolicy {
 
     /** Имя каталога приватных SharedPreferences внутри data-каталога приложения. */
     const val SHARED_PREFS_DIR = "shared_prefs"
+
+    /** Имя каталога SQLite-баз внутри data-каталога приложения. */
+    const val DATABASES_DIR = "databases"
 
     /** Имя файла SharedPreferences на диске (`shared_prefs/<имя>.xml`) — для честного замера размера. */
     fun prefsFileName(prefsName: String): String = "$prefsName.xml"
