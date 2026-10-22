@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 33+ добавляет windowSplashScreenBehavior — что показывать, когда
+     пользователь ВОЗВРАЩАЕТСЯ в уже запущенное приложение (тёплый старт).
+
+     Дефолт (0) на HyperOS/POCO F5 рисует пустое окно, пока задача поднимается:
+     на тёмной теме это тот самый «чёрный экран» при возврате в клиент с
+     сохранённым credential. 1 (ICON_PREFERRED) показывает на этом месте
+     брендовую иконку на подложке — переход из шторки/лаунчера перестаёт быть
+     провалом в чёрное.
+
+     ПОЧЕМУ ВСЕ ITEMS ПОВТОРЕНЫ: стили НЕ сливаются между конфигурациями
+     ресурсов. values-v33 полностью вытесняет values-v31 для API 33+, поэтому
+     «дописать один атрибут» нельзя — тема осталась бы без фона и иконки
+     сплэша. Набор обязан совпадать с values-v31/styles.xml плюс новый атрибут;
+     расхождение видно по диффу двух файлов при ревью. -->
+<resources>
+    <style name="SplashTheme" parent="@style/AppTheme">
+        <item name="android:windowSplashScreenBackground">@color/mars_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/mars_splash_icon_bg</item>
+        <item name="android:windowSplashScreenAnimationDuration">200</item>
+        <item name="android:windowSplashScreenBehavior">1</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <item name="android:windowBackground">@drawable/splash_window_bg</item>
+    </style>
+</resources>

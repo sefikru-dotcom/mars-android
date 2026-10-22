@@ -72,12 +72,28 @@ internal fun ChatActivity.updateTodoWidget() {
         }
 
         val moreBtn = Button(this).apply {
-            text = "Все задачи подробнее →"
+            text = "Все задачи подробнее"
             textSize = 11.5f
             setTextColor(MarsTheme.ACCENT_TEXT)
             background = null
             setPadding(0, dp(4), 0, 0)
             gravity = Gravity.START
+            isAllCaps = false
+            stateListAnimator = null
+            minWidth = 0
+            minimumWidth = 0
+            // Стрелка — вектор, а не глиф «→» в строке: на HyperOS шрифт
+            // подставлял эмодзи-вариант стрелки, она съезжала по базовой линии
+            // и не красилась в акцентный цвет.
+            val arrowSize = dp(12)
+            val arrow = ContextCompat.getDrawable(this@updateTodoWidget, R.drawable.ic_arrow_forward)
+                ?.mutate()
+                ?.apply {
+                    setBounds(0, 0, arrowSize, arrowSize)
+                    setTint(MarsTheme.ACCENT_TEXT)
+                }
+            setCompoundDrawablesRelative(null, null, arrow, null)
+            compoundDrawablePadding = dp(4)
             setOnClickListener {
                 startActivity(Intent(this@updateTodoWidget, TodosActivity::class.java).apply {
                     putExtra("EXTRA_SESSION_ID", currentSessionId)

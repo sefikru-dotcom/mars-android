@@ -242,7 +242,7 @@ class MemoryActivity : ComponentActivity() {
     private fun renderMarkdown(raw: String, parent: LinearLayout) {
         MarkdownFormatter.parseBlocks(raw).forEach { block ->
             when (block) {
-                is ContentBlock.Text -> block.lines.forEach { line ->
+                is ContentBlock.Text -> block.lines.forEach lineLoop@{ line ->
                     val tv = TextView(this).apply {
                         movementMethod = LinkMovementMethod.getInstance()
                         setTextColor(MarsTheme.TEXT)
@@ -251,6 +251,10 @@ class MemoryActivity : ComponentActivity() {
                         setLineSpacing(dp(2).toFloat(), 1f)
                     }
                     val ssb = SpannableStringBuilder()
+                    // См. ChatMarkdownRenderer: цитата кладётся обёрткой (бар + текст),
+                    // разделитель — отдельным View, чтобы TextView не мерил пустую строку.
+                    var quoteLine = false
+                    var skipTv = false
                     when (line) {
                         is RichLine.Header -> {
                             tv.textSize = when (line.level) {
@@ -279,17 +283,23 @@ class MemoryActivity : ComponentActivity() {
                             appendInlineSpans(ssb, line.spans)
                         }
                         is RichLine.Quote -> {
+                            // См. ChatMarkdownRenderer: подложка строки —
+                            // BackgroundColorSpan на всём тексте, бар — View
+                            // слева. Крашеный пробел давал бар высотой с глиф.
                             val quoteStart = ssb.length
-                            ssb.append("  ")
-                            ssb.setSpan(
-                                android.text.style.BackgroundColorSpan(MarsTheme.ACCENT),
-                                quoteStart,
-                                quoteStart + 1,
-                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                            )
                             appendInlineSpans(ssb, line.spans)
+                            if (ssb.length > quoteStart) {
+                                ssb.setSpan(
+                                    BackgroundColorSpan(MarsTheme.QUOTE_BG),
+                                    quoteStart,
+                                    ssb.length,
+                                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                                )
+                            }
                             tv.setTypeface(null, Typeface.ITALIC)
                             tv.setTextColor(MarsTheme.TEXT_EM)
+                            tv.setPadding(dp(10), dp(3), dp(8), dp(3))
+                            quoteLine = true
                         }
                         is RichLine.TaskItem -> {
                             val iconStart = ssb.length
@@ -310,19 +320,36 @@ class MemoryActivity : ComponentActivity() {
                         }
                         is RichLine.Normal -> appendInlineSpans(ssb, line.spans)
                         is RichLine.Divider -> {
-                            tv.text = ""
-                            tv.setBackgroundColor(MarsTheme.BORDER_MUTED)
-                            tv.layoutParams = LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT,
-                                dp(1)
-                            ).apply {
-                                topMargin = dp(6)
-                                bottomMargin = dp(6)
-                            }
+                            // Разделитель — View 1dp, а не пустой TextView:
+                            // TextView мерил строку и линия «плыла» по высоте.
+                            skipTv = true
+                            parent.addView(
+                                View(this@MemoryActivity).apply { setBackgroundColor(MarsTheme.DIVIDER) },
+                                LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT,
+                                    dp(1)
+                                ).apply {
+                                    topMargin = dp(8)
+                                    bottomMargin = dp(8)
+                                }
+                            )
                         }
                     }
                     tv.text = ssb
-                    parent.addView(tv)
+                    if (skipTv) return@lineLoop
+                    if (quoteLine) {
+                        val row = LinearLayout(this@MemoryActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            addView(
+                                View(this@MemoryActivity).apply { setBackgroundColor(MarsTheme.QUOTE_BAR) },
+                                LinearLayout.LayoutParams(dp(3), LinearLayout.LayoutParams.MATCH_PARENT)
+                            )
+                            addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                        }
+                        parent.addView(row)
+                    } else {
+                        parent.addView(tv)
+                    }
                 }
                 is ContentBlock.Code -> {
                     val box = LinearLayout(this).apply {

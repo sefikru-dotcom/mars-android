@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Круглая маска: та же пара, что у квадратной иконки. -->
+<!-- Круглая маска: та же тройка слоёв, что у квадратной иконки.
+
+     Раньше это был отдельный файл с тем же содержимым, что и ic_launcher.xml,
+     но с плоским фоном. Теперь оба файла ссылаются на одни и те же слои:
+     расхождение между квадратной и круглой иконкой невозможно по построению. -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/mars_background" />
+    <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>

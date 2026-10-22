@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Подложка adaptive-иконки: радиальный градиент вместо плоского #07080B.
+
+     Плоский обсидиан сливался с тёмной планетой — на домашнем экране POCO F5
+     (HyperOS, тёмные обои) иконка читалась как «чёрный квадрат с точкой».
+     Градиент от surface_card к фону даёт диску объём и отделяет планету от
+     подложки, не добавляя ни одного нового оттенка: оба цвета — токены
+     палитры.
+
+     108x108 — стандартный холст adaptive-иконки; слои внутри него маскируются
+     системой (круг, squircle, teardrop — на HyperOS это squircle). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="46"
+                android:gradientRadius="82"
+                android:startColor="@color/mars_user_bubble"
+                android:endColor="@color/mars_background" />
+        </aapt:attr>
+    </path>
+</vector>

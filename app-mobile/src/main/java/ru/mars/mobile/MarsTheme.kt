@@ -67,6 +67,14 @@ object MarsTheme {
     const val BOT_BORDER = 0xff1b2230.toInt()
     const val CODE_BG = 0xff090b10.toInt()
     const val CODE_BORDER = 0xff1c2331.toInt()
+
+    // Quote & divider (WebUI blockquote grammar: подложка + вертикальный бар)
+    /** Подложка строки цитаты — тот же тон, что у inline-кода (surface_subtle). */
+    const val QUOTE_BG = 0xff141822.toInt()
+    /** Вертикальный бар слева от цитаты. */
+    const val QUOTE_BAR = 0xffef4444.toInt()
+    /** Горизонтальный разделитель блоков: рисуется View 1dp, не глифом. */
+    const val DIVIDER = 0xff212634.toInt()
     
     // Status colors
     const val STATUS_ONLINE = 0xff22c55e.toInt()

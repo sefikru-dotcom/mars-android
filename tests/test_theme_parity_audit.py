@@ -106,5 +106,74 @@ class GateTest(unittest.TestCase):
         self.assertEqual(0, code, out)
 
 
+class PaletteParityTest(unittest.TestCase):
+    """`--parity`: одноимённые токены двух палитр обязаны совпадать по hex.
+
+    Дефект, который ловит гейт: в mobile и TV разъехались user_border
+    (2A354D / 2B374E) и bot_border (1A2130 / 1B2230) — один и тот же пузырь
+    чата на телефоне и на телевизоре имел разную рамку. Глазами это видно
+    только на двух скриншотах рядом, поэтому проверка живёт в скрипте.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="palette-parity-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def write_palette(self, module, body):
+        path = os.path.join(self.root, module, "src", "main", "res", "values")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "colors.xml"), "w", encoding="utf-8") as fh:
+            fh.write("<resources>\n%s\n</resources>\n" % body)
+
+    def run_parity(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            code = tpa.main(["theme-parity-audit.py", "--parity", self.root])
+        return code, out.getvalue()
+
+    def test_matching_tokens_pass(self):
+        for module in ("app-mobile", "app-tv"):
+            self.write_palette(module, '<color name="mars_accent">#EF4444</color>')
+        code, out = self.run_parity()
+        self.assertEqual(0, code, out)
+        self.assertIn("Паритет", out)
+
+    def test_diverged_hex_fails(self):
+        self.write_palette("app-mobile", '<color name="mars_user_border">#2B374E</color>')
+        self.write_palette("app-tv", '<color name="mars_user_border">#2A354D</color>')
+        code, out = self.run_parity()
+        self.assertEqual(1, code, out)
+        self.assertIn("mars_user_border", out)
+
+    def test_hex_case_is_not_a_divergence(self):
+        self.write_palette("app-mobile", '<color name="mars_accent">#ef4444</color>')
+        self.write_palette("app-tv", '<color name="mars_accent">#EF4444</color>')
+        code, out = self.run_parity()
+        self.assertEqual(0, code, out)
+
+    def test_module_only_token_is_legal_but_reported(self):
+        self.write_palette(
+            "app-mobile",
+            '<color name="mars_accent">#EF4444</color>\n'
+            '<color name="mars_code_bg">#090B10</color>',
+        )
+        self.write_palette("app-tv", '<color name="mars_accent">#EF4444</color>')
+        code, out = self.run_parity()
+        self.assertEqual(0, code, out)
+        self.assertIn("mars_code_bg", out)
+
+    def test_missing_module_palette_is_an_error(self):
+        self.write_palette("app-mobile", '<color name="mars_accent">#EF4444</color>')
+        code, _ = self.run_parity()
+        self.assertEqual(2, code)
+
+    def test_repo_palettes_are_in_parity(self):
+        """Реальный репозиторий: гейт обязан быть зелёным на текущем дереве."""
+        out = StringIO()
+        with redirect_stdout(out):
+            code = tpa.main(["theme-parity-audit.py", "--parity", REPO])
+        self.assertEqual(0, code, out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
