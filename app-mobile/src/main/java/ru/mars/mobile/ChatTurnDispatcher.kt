@@ -20,6 +20,10 @@ import ru.mars.network.model.ChatEvent
  * 3. Решение после закрытия стрима: реавторизация / восстановление по Last-Event-ID /
  *    обычное завершение. Восстановление возможно ТОЛЬКО для доставленного хода без `Done`
  *    и без терминальной серверной ошибки — иначе reconnect лишь отреплеил бы ту же ошибку.
+ * 4. Отказ серверного бэкенда в голосовом ходе (`409 unsupported_voice_mode_backend`):
+ *    ход не доставлен, повтор бессмысленен и запрещён ([QueueOutcome.REJECTED]) — ни
+ *    автоматический, ни через «успех» очереди. Тихой подмены обычным текстом здесь нет:
+ *    текст остаётся у человека, но отправляет его он сам.
  */
 class ChatTurnDispatcher {
 
@@ -61,7 +65,9 @@ class ChatTurnDispatcher {
      * app/tool-ошибка (терминальна для хода); `suppressedTransportError` — подавленный
      * ТРАНСПОРТНЫЙ обрыв (в транскрипт не пишется, ход уходит в recovery);
      * `credentialRejected` — 401: путь принудительной реавторизации;
-     * `turnFailed` — сообщение не дошло до сервера (сессия не создана / стрим не стартовал).
+     * `turnFailed` — сообщение не дошло до сервера (сессия не создана / стрим не стартовал);
+     * `voiceModeRejected` — сервер отказал голосовому режиму ДО side effects: это не сбой
+     * связи, поэтому ни ретрай, ни «успех» ([shouldRetryQueued] / [shouldConfirmQueued]).
      */
     class TurnTally {
         var delivered: Boolean = false
@@ -70,6 +76,7 @@ class ChatTurnDispatcher {
         var suppressedTransportError: ChatEvent.Error? = null
         var credentialRejected: Boolean = false
         var turnFailed: Boolean = false
+        var voiceModeRejected: Boolean = false
 
         /** Серверная ошибка закрыла ход без транспортного сбоя — reconnect бессмыслен. */
         val appErrorTerminal: Boolean get() = sawAppError && suppressedTransportError == null
@@ -79,6 +86,12 @@ class ChatTurnDispatcher {
     enum class FrameDecision {
         /** Транспортный обрыв после доставки: в транскрипт не пишем, статус — «переподключаюсь». */
         SUPPRESS_TRANSPORT,
+
+        /**
+         * Сервер отказал голосовому режиму (`409 unsupported_voice_mode_backend`): сырой
+         * HTTP-текст в пузырь не пишется, ход не ретраится, человеку — понятное объяснение.
+         */
+        REJECT_VOICE_MODE,
 
         /** Обычный кадр: применяется к состоянию хода и рисуется. */
         APPLY,
@@ -92,6 +105,16 @@ class ChatTurnDispatcher {
      *   после доставки и при известном `stream_id`), чтобы классификатор не дёргался зря.
      */
     fun onFrame(event: ChatEvent, tally: TurnTally, transportShaped: Boolean): FrameDecision {
+        // Отказ голосовому режиму проверяется ПЕРВЫМ: он приходит как обычный ChatEvent.Error
+        // до доставки, и без отдельной ветки попал бы в общий путь «сообщение не дошло»,
+        // то есть в авторетрай очереди и в сырой «Ошибка: HTTP 409 …» в транскрипте.
+        // Классификация — по структурированному `errorCode` из тела ответа: человеческий текст
+        // сервера («voice_mode is not supported by the runner backend.») код не содержит, и
+        // строковая проверка пропускала бы отказ в общий путь.
+        if (event is ChatEvent.Error && VoiceModeRejectionPolicy.isVoiceModeRejected(event)) {
+            tally.voiceModeRejected = true
+            return FrameDecision.REJECT_VOICE_MODE
+        }
         if (event !is ChatEvent.Error) tally.delivered = true
         if (event is ChatEvent.Done) tally.sawDone = true
         val suppress = event is ChatEvent.Error &&
@@ -134,14 +157,44 @@ class ChatTurnDispatcher {
         recoveryAvailable: Boolean,
     ): StreamOutcome = when {
         tally.credentialRejected -> StreamOutcome.REAUTH
+        tally.voiceModeRejected -> StreamOutcome.COMPLETE
         tally.delivered && !tally.sawDone && !tally.appErrorTerminal && streamId != null && recoveryAvailable ->
             StreamOutcome.RECOVER
         else -> StreamOutcome.COMPLETE
     }
 
+    /** Итог хода для очереди: что делать со строкой, которую этот ход представлял. */
+    enum class QueueOutcome {
+        /** Креденшел отклонён: очередь не трогаем, экран уходит на логин. */
+        NONE,
+
+        /** Отказ голосовому режиму: строка снимается с автоотправки и ждёт осознанного решения. */
+        REJECTED,
+
+        /** Сообщение не дошло по транспортной причине — вернуть в очередь (лимит попыток). */
+        RETRY,
+
+        /** Ход доставлен и завершился без провала — очередь снимает строку. */
+        CONFIRM,
+    }
+
+    /**
+     * Единственное решение для хвоста хода.
+     *
+     * Приоритет важен: 401 (реавторизация) перекрывает всё, отказ голосовому режиму
+     * перекрывает транспортный ретрай — иначе очередь бесконечно возвращала бы ход,
+     * который сервер отвергает детерминированно.
+     */
+    fun queueOutcome(tally: TurnTally): QueueOutcome = when {
+        tally.credentialRejected -> QueueOutcome.NONE
+        tally.voiceModeRejected -> QueueOutcome.REJECTED
+        tally.turnFailed -> QueueOutcome.RETRY
+        else -> QueueOutcome.CONFIRM
+    }
+
     /** Очередь возвращает недоставленное сообщение на повтор: доставленное не дублируется. */
-    fun shouldRetryQueued(tally: TurnTally): Boolean = tally.turnFailed && !tally.credentialRejected
+    fun shouldRetryQueued(tally: TurnTally): Boolean = queueOutcome(tally) == QueueOutcome.RETRY
 
     /** Ход доставлен и завершился без провала — очередь снимает строку. */
-    fun shouldConfirmQueued(tally: TurnTally): Boolean = !tally.turnFailed && !tally.credentialRejected
+    fun shouldConfirmQueued(tally: TurnTally): Boolean = queueOutcome(tally) == QueueOutcome.CONFIRM
 }

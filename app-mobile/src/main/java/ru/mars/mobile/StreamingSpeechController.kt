@@ -41,12 +41,28 @@ class StreamingSpeechController(
     /** Ход уже завершён: финал прочитан, повторный flush не нужен. */
     private var turnFinished = false
 
+    /**
+     * Текст, который в этом ходе РЕАЛЬНО ушёл в озвучку (после нормализации, фразами).
+     *
+     * Зачем хосту: политика перебивания ([BargeInGate]) отличает эхо динамика от речи человека
+     * сравнением partial ASR с произносимым текстом. Придумать этот текст нельзя — нужен именно
+     * тот, что ушёл в синтез; иначе на динамике либо не работает перебивание, либо цикл
+     * перебивает сам себя.
+     */
+    private val spoken = StringBuilder()
+
+    /** Что прозвучало/звучит в текущем ходе; `null` — ещё ничего не ушло в синтез. */
+    val spokenText: String?
+        get() = synchronized(spoken) { spoken.toString().ifBlank { null } }
+
     /** Пришла очередная дельта ответа: готовые фразы сразу уходят в синтез. */
     fun onDelta(delta: String) {
         if (delta.isEmpty()) return
         // Дельта после завершённого хода — это уже НОВЫЙ ход: снимаем флаг, иначе его финал
-        // остался бы неозвученным.
+        // остался бы неозвученным. Текст прошлого хода при этом не переезжает в новый.
+        val startingNewTurn = turnFinished
         turnFinished = false
+        if (startingNewTurn) clearSpoken()
         metrics.onFirstDelta()
         chunker.feed(delta).forEach { phrase -> enqueue(phrase) }
     }
@@ -80,12 +96,14 @@ class StreamingSpeechController(
     fun stop() {
         turnFinished = false
         chunker.reset()
+        clearSpoken()
         queue.stopAll()
     }
 
     /** Хост уничтожен: остановить и освободить плеер. */
     fun release() {
         chunker.reset()
+        clearSpoken()
         queue.release()
     }
 
@@ -93,13 +111,37 @@ class StreamingSpeechController(
     val isSpeaking: Boolean
         get() = queue.isSpeaking
 
+    /**
+     * В очереди ещё есть фразы (играющая, готовые и синтезируемые).
+     *
+     * Нужен хосту, чтобы отличить «звук кончился» от «звук ещё не начинался»: между этими
+     * состояниями `isSpeaking == false`, но конец хода наступает только во втором.
+     */
+    val hasPendingSpeech: Boolean
+        get() = queue.pendingCount > 0
+
     /** Снимок метрик текущего хода (без текста ответа). */
     fun latencySnapshot(): SpeechLatencySnapshot = metrics.snapshot()
 
     /** Фраза проходит нормализацию и, если в ней остался произносимый текст, встаёт в очередь. */
     private fun enqueue(phrase: String) {
-        val spoken = normalizer.normalize(phrase)
-        if (spoken.isNotBlank()) queue.speak(spoken)
+        val normalized = normalizer.normalize(phrase)
+        if (normalized.isNotBlank()) {
+            queue.speak(normalized)
+            recordSpoken(normalized)
+        }
+    }
+
+    /** Запомнить реально произносимый текст хода (для echo-гейта перебивания). */
+    private fun recordSpoken(text: String) {
+        synchronized(spoken) {
+            if (spoken.isNotEmpty()) spoken.append(' ')
+            spoken.append(text.trim())
+        }
+    }
+
+    private fun clearSpoken() {
+        synchronized(spoken) { spoken.setLength(0) }
     }
 
     companion object {
@@ -117,6 +159,7 @@ class StreamingSpeechController(
             scope: CoroutineScope,
             onFirstAudio: () -> Unit = {},
             onDrained: () -> Unit = {},
+            onPhraseStarted: (text: String) -> Unit = {},
             onPhraseFailed: (text: String, reason: String) -> Unit = { _, _ -> },
             metrics: SpeechLatencyMetrics = SpeechLatencyMetrics(),
             retryPolicy: SpeechRetryPolicy = SpeechRetryPolicy(),
@@ -130,6 +173,9 @@ class StreamingSpeechController(
                     runCatching { onFirstAudio() }
                 },
                 onDrained = onDrained,
+                // Каждая фраза отдельно: хост обновляет echo-эталон перебивания только тем
+                // текстом, который реально пошёл в динамик.
+                onPhraseStarted = { text -> runCatching { onPhraseStarted(text) } },
                 onPhraseFailed = { text, reason ->
                     // Метрику отказа считает сама очередь (см. notifyPhraseFailed): здесь только
                     // проброс хосту, иначе один пропуск считался бы дважды.

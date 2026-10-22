@@ -23,13 +23,14 @@ class SpeechVoiceProfileSelectorTest {
 
     private fun selector(
         profiles: List<ServerTtsVoiceProfile> = ServerTtsVoices.VOICE_DIALOG,
-        localInstalled: Boolean = true,
+        localVoice: SpeechVoiceProfileSelector.LocalVoiceAvailability =
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.UNVERIFIED,
     ) = SpeechVoiceProfileSelector(
         profiles = profiles,
         nowMs = { now },
         transientCooldownMs = 45_000L,
         permanentCooldownMs = 600_000L,
-        localVoiceInstalled = localInstalled,
+        localVoice = localVoice,
     )
 
     @Test
@@ -53,12 +54,66 @@ class SpeechVoiceProfileSelectorTest {
 
     @Test
     fun `not installed local voice is never offered`() {
-        val selector = selector(localInstalled = false)
+        val selector = selector(localVoice = SpeechVoiceProfileSelector.LocalVoiceAvailability.ABSENT)
 
         assertEquals(listOf("natural-svetlana"), selector.candidates().map { it.id })
 
         selector.setLocalVoiceInstalled(true)
         assertEquals(listOf("natural-svetlana", "local-irina"), selector.candidates().map { it.id })
+    }
+
+    @Test
+    fun `unverified local voice gets one real attempt and is not announced as installed`() {
+        val selector = selector()
+
+        // «Неизвестно» — это не «установлен»: профиль допускается к попытке, но знание о нём
+        // остаётся неподтверждённым, пока сервер не ответит.
+        assertEquals(
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.UNVERIFIED,
+            selector.localVoiceAvailability,
+        )
+        assertEquals(listOf("natural-svetlana", "local-irina"), selector.candidates().map { it.id })
+
+        // Сервер отдал аудио — теперь это факт.
+        selector.onAudio(ServerTtsVoices.LOCAL_IRINA)
+        assertEquals(
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.INSTALLED,
+            selector.localVoiceAvailability,
+        )
+    }
+
+    @Test
+    fun `server saying the local voice is missing removes it for good`() {
+        val selector = selector()
+
+        val demoted = selector.onUnavailable(
+            ServerTtsVoices.LOCAL_IRINA,
+            ServerTtsResult.Unavailable("not_found", 404),
+        )
+
+        assertTrue(demoted)
+        assertEquals(
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.ABSENT,
+            selector.localVoiceAvailability,
+        )
+        // Даже после истечения паузы отсутствующий голос не предлагается: это факт, не таймаут.
+        now += 10_000_000L
+        assertEquals(listOf("natural-svetlana"), selector.candidates().map { it.id })
+    }
+
+    @Test
+    fun `rate limit does not turn the local voice into a missing one`() {
+        val selector = selector()
+
+        selector.onUnavailable(
+            ServerTtsVoices.LOCAL_IRINA,
+            ServerTtsResult.Unavailable("rate_limited", 429),
+        )
+
+        assertEquals(
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.UNVERIFIED,
+            selector.localVoiceAvailability,
+        )
     }
 
     @Test

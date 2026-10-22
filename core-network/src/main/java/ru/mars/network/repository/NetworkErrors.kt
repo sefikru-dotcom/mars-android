@@ -78,9 +78,14 @@ internal fun describeNetworkError(error: Throwable): String {
  * already on the wire. Same pattern the rest of the module uses (uploadAttachment,
  * SessionRepository.createSession).
  *
- * Result format: `"HTTP <code>: <server error>"` when the body parses and carries a
- * non-blank `error`, else the plain `"HTTP <code>"`. Both shapes stay compatible with
- * the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
+ * Newer contract failures carry the reason under `code` instead of `error` — notably
+ * `409 {"code": "unsupported_voice_mode_backend"}` (SERVER-CONTRACT.md §1). Both keys are
+ * read, `error` first for backward compatibility, so a `code`-only refusal never degrades
+ * into a bare "HTTP 409" that the UI could not explain or classify.
+ *
+ * Result format: `"HTTP <code>: <server reason>"` when the body parses and carries a
+ * non-blank `error`/`code`, else the plain `"HTTP <code>"`. Both shapes stay compatible
+ * with the app-level substring policies (AuthRejectionPolicy "http 401" / "unauthorized",
  * StreamReattachPolicy `\b404\b` / "not found").
  *
  * [retryAfterSeconds] — the parsed `Retry-After` response header (RFC 9110 §10.2.3,
@@ -92,8 +97,39 @@ internal fun describeNetworkError(error: Throwable): String {
  * marker never touches.
  */
 internal fun describeHttpError(code: Int, body: String?, retryAfterSeconds: Long? = null): String {
-    val serverMessage = StreamEventMapper.parseObject(body.orEmpty())
-        ?.get("error")?.toString()?.trim()?.takeIf { it.isNotBlank() }
+    val parsed = StreamEventMapper.parseObject(body.orEmpty())
+    // `error` — старый контракт; `code` — нынешние отказы контракта (409
+    // unsupported_voice_mode_backend). Порядок важен: старый ключ не должен проигрывать,
+    // но ПУСТОЙ `error` не имеет права скрывать причину из `code` — иначе отказ контракта
+    // деградировал бы до голого "HTTP 409", который UI не может ни объяснить, ни
+    // классифицировать (app-level VoiceModeRejectionPolicy ищет и код, и маркер причины).
+    val serverMessage = listOfNotNull(parsed?.get("error"), parsed?.get("code"))
+        .map { it.toString().trim() }
+        .firstOrNull { it.isNotBlank() }
     val base = if (serverMessage != null) "HTTP $code: $serverMessage" else "HTTP $code"
     return retryAfterSeconds?.let { "$base ${RetryAfterPolicy.marker(it)}" } ?: base
+}
+
+/**
+ * Машинный код отказа из тела HTTP-ответа (поле `code`), без человеческого текста.
+ *
+ * Зачем отдельно от [describeHttpError]. Строка ошибки — для человека: она берёт ПЕРВОЕ
+ * непустое поле тела, а реальный отказ контракта приходит ДВУМЯ полями сразу:
+ *
+ * ```
+ * HTTP 409 {"error": "voice_mode is not supported by the runner backend.",
+ *           "code": "unsupported_voice_mode_backend"}
+ * ```
+ *
+ * поэтому в тексте оказывается формулировка сервера, а код в неё не попадает. Приложение,
+ * которое классифицировало отказ по подстроке кода, переставало его узнавать: ход уходил в
+ * офлайн-очередь и повторялся с `voice_mode`, который сервер отвергает детерминированно.
+ * Классификация должна опираться на это поле, а не на формулировку: текст меняется между
+ * бэкендами и локалями, код — часть контракта.
+ *
+ * @return код из `code` либо `null`, если тело не JSON, поля нет или оно пустое.
+ */
+internal fun httpErrorCode(body: String?): String? {
+    val parsed = StreamEventMapper.parseObject(body.orEmpty()) ?: return null
+    return parsed["code"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
 }

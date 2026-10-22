@@ -49,7 +49,16 @@ internal fun ChatActivity.sendMessage() {
             setStatus()
             return
         }
-        when (val decision = offlineQueue.onSendRequested(canSend = false, text = text, sessionId = currentSessionId)) {
+        when (
+            val decision = offlineQueue.onSendRequested(
+                canSend = false,
+                text = text,
+                sessionId = currentSessionId,
+                // Ход, начатый голосом, обязан остаться голосовым и после офлайн-буфера:
+                // иначе повтор уйдёт как обычный текст и человек не узнает, что режим пропал.
+                voiceMode = voiceTurnFromDialog(),
+            )
+        ) {
             is SendDecision.Buffer -> { onMessageBuffered(decision.message); return }
             else -> return // Пустой текст — отправлять/буферизовать нечего
         }
@@ -80,13 +89,6 @@ internal fun ChatActivity.sendMessage() {
  * сервера (сессия не создана / стрим не стартовал / ошибка до первого события):
  * очередь возвращает такое сообщение на повтор, а доставленное не дублирует.
  */
-
-/**
- * Общая корутина отправки для прямого send и флаша офлайн-очереди (раньше — inline
- * в [sendMessage]). [onTurnFailed] вызывается, только если сообщение НЕ дошло до
- * сервера (сессия не создана / стрим не стартовал / ошибка до первого события):
- * очередь возвращает такое сообщение на повтор, а доставленное не дублирует.
- */
 internal fun ChatActivity.startSendStream(
     text: String,
     outgoingAttachments: List<ChatAttachment>,
@@ -95,6 +97,21 @@ internal fun ChatActivity.startSendStream(
     onTurnFailed: (() -> Unit)? = null,
     /** Ход доставлен и завершился без провала: очередь снимает строку (O8). */
     onTurnSucceeded: (() -> Unit)? = null,
+    /**
+     * Сервер отказал голосовому режиму (`409 unsupported_voice_mode_backend`): сообщение
+     * снимается с очереди БЕЗ повтора и без «успеха» — повтор отсюда означал бы тихую
+     * отправку обычным текстом, то есть сокрытие того, что режима нет.
+     *
+     * Хост обязан сохранить текст (карточка недоставленных с кнопкой «Отправить текстом»),
+     * поэтому [onTurnFailed] и [onTurnSucceeded] для такого хода не вызываются никогда.
+     */
+    onTurnRejected: (() -> Unit)? = null,
+    /**
+     * Голосовой ход, зафиксированный вызывающей стороной. `null` — вычислить по состоянию
+     * цикла (прямая отправка). Ретрай очереди передаёт сохранённое намерение: к моменту
+     * повтора цикл уже выключен, и пересчёт дал бы `voice_mode: false`.
+     */
+    voiceTurnOverride: Boolean? = null,
 ): Job {
     // Новый пользовательский ход: предыдущий recovery-job прерывается (generation
     // guard), курсор Last-Event-ID и серии отказов координатора сбрасываются.
@@ -104,19 +121,18 @@ internal fun ChatActivity.startSendStream(
     // Решение об озвучке фиксируется здесь: все дельты хода пойдут в потоковую озвучку
     // (или ни одна), а терминальный Done этот ответ уже не озвучит повторно.
     if (isStreamSpeechReady()) beginStreamSpeech()
+    // Источник хода фиксируется ДО launch: голосовой режим может выключиться, пока корутина
+    // ждёт сессию, но ход всё равно остаётся голосовым (он был начат речью).
+    val voiceTurn = voiceTurnOverride ?: voiceTurnFromDialog()
     // Токен выдаётся синхронно с регистрацией хода: любой последующий уход с контекста
     // (teardownLiveTurn) гасит его — поздние SSE-кадры этого collect не перекрасят новый экран.
     val turnToken = liveTurnGuard.beginTurn()
     return lifecycleScope.launch {
-    var credentialRejected = false
-    var turnFailed = false
-    var delivered = false
-    // Итоги первичного collect для передачи хода в recovery-цикл: терминальный Done
-    // (никогда не ретраится), серверная app/tool-ошибка (терминальна для хода) и
-    // подавленная ТРАНСПОРТНАЯ ошибка обрыва (recoverable — в транскрипт не пишется).
-    var sawDone = false
-    var sawAppError = false
-    var suppressedTransportError: ChatEvent.Error? = null
+    // Итоги первичного collect считает политика ([ChatTurnDispatcher.TurnTally]):
+    // терминальный Done (никогда не ретраится), серверная app/tool-ошибка (терминальна
+    // для хода), подавленный ТРАНСПОРТНЫЙ обрыв (recoverable — в транскрипт не пишется)
+    // и отказ голосовому режиму (не транспорт, не ретрай, не «успех»).
+    val tally = ChatTurnDispatcher.TurnTally()
     try {
         if (targetSessionId == null) {
             explicitStatus = "Создаю сессию…"
@@ -125,6 +141,11 @@ internal fun ChatActivity.startSendStream(
         when (val ensured = firstSessionFlow.ensureSession(targetSessionId, credential)) {
             is EnsureSessionResult.Ready -> {
                 currentSessionId = ensured.sessionId
+                // Голосовой канал привязан к сессии: первый ход нового чата создаёт её только
+                // здесь, и до этого перебивать было нечего (voice_id не к чему привязать).
+                // Проверка lateinit-поля живёт в хосте: снаружи (в extension-функции) backing
+                // field недоступен, и `::voiceInterruptChannel.isInitialized` там не компилируется.
+                if (voiceTurn) bindVoiceChannelToSession(ensured.sessionId)
                 if (targetSessionId == null) {
                     modelSelection.setSessionModel(ensured.model, ensured.modelProvider)
                     modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
@@ -139,11 +160,11 @@ internal fun ChatActivity.startSendStream(
             }
             is EnsureSessionResult.Failed -> {
                 uiState.cancel()
-                turnFailed = true
+                tally.turnFailed = true
                 // A 401 here means the stored credential is dead server-side: route
                 // to login instead of leaving the user retrying the same failure.
                 if (AuthRejectionPolicy.isCredentialRejected(ensured.message)) {
-                    credentialRejected = true
+                    tally.credentialRejected = true
                     requestReauthentication()
                 } else {
                     explicitStatus = "Сессия не создана: ${ensured.message}"
@@ -160,6 +181,9 @@ internal fun ChatActivity.startSendStream(
             model = choice?.modelId,
             modelProvider = choice?.providerId,
             explicitModelPick = choice?.explicitPick == true,
+            // `voice_mode: true` — фактическое поле сервера (`voice_dialog` из первой редакции
+            // UI-контракта сервер не читает). null → ключа в теле нет.
+            voiceMode = VoiceDialogRequestMode.fieldValue(voiceTurn) == true,
             onTodoState = todoCallback(currentSessionId),
             onSideEvent = sideEventCallback(currentSessionId),
             // Курсор Last-Event-ID продвигается на КАЖДОМ id-кадре (до маппинга),
@@ -170,71 +194,81 @@ internal fun ChatActivity.startSendStream(
             // поздние кадры структурно не допускаются в новый экран — collect сразу
             // завершается, а finally видит отменённый job и не запускает автофлаш очереди.
             if (!liveTurnGuard.isCurrent(turnToken)) throw CancellationException("live turn superseded")
-            // Любое не-ошибочное событие доказывает: сервер принял запрос, сообщение
-            // доставлено. Ошибка ДО доставки (HTTP-отказ вместо стрима) — turnFailed.
-            if (event !is ChatEvent.Error) delivered = true
-            if (event is ChatEvent.Done) sawDone = true
             // Транспортный обрыв ПОСЛЕ доставки: не пишем «Ошибка: …» в пузырь и не
             // роняем статус в ERROR — ход жив на сервере, его подхватит recovery-цикл
             // через attachToStream. Ошибка всплывёт, только если восстановление
             // окончательно провалится (Listener.onGiveUp). 401 не подавляется: это
             // существующий путь принудительной реавторизации. Серверные tool/app-ошибки
             // (журнал хода) классификатором НЕ подавляются и проходят в транскрипт.
-            val suppressAsTransportDrop = event is ChatEvent.Error && delivered &&
+            // Доставка (и «это ошибка до доставки») считается внутри политики по тому же
+            // порядку проверок — здесь только форма кадра, которую она не знает.
+            val suppressAsTransportDrop = event is ChatEvent.Error && tally.delivered &&
                 currentStreamId != null &&
                 transportFailureClassifier.isTransportShaped(event.message) &&
                 !AuthRejectionPolicy.isCredentialRejected(event.message)
-            if (suppressAsTransportDrop) {
-                suppressedTransportError = event as ChatEvent.Error
-                explicitStatus = ChatActivity.STREAM_RECONNECT_STATUS
-            } else {
-                uiState.onEvent(event)
-                // Дельта текста ассистента: потоковая озвучка получает её сразу, поэтому
-                // первый звук не ждёт конца хода. Решение «звучит ли дельта» — в
-                // VoiceTurnSpeechPolicy; размышления идут отдельным событием ниже.
-                if (event is ChatEvent.Chunk && isStreamSpeechReady()) onAssistantDelta(event.text)
-                // Мысли — черновик модели, в динамик не попадают никогда (и это не «фильтр
-                // на всякий случай»: в живом ходе Thought идёт между Chunk-ами ответа).
-                if (event is ChatEvent.Thought) onAssistantThought(event.text)
-                // Вызов инструмента: одна короткая «Проверяю…» на ход, без имени инструмента
-                // и без результата (результата ещё нет — придумывать его нельзя).
-                if (event is ChatEvent.ToolCall) announceToolProgress(event.name)
-                // Терминальный Done: ход завершён — дочитываем остаток потоковой озвучки и
-                // НЕ читаем финал повторно, если ответ уже звучал.
-                if (event is ChatEvent.Done) finishVoiceTurn(speakFinal = true)
-                if (event is ChatEvent.Error) {
-                    sawAppError = true
-                    if (AuthRejectionPolicy.isCredentialRejected(event.message)) credentialRejected = true
-                    if (!delivered) turnFailed = true
+            when (turnDispatcher.onFrame(event, tally, suppressAsTransportDrop)) {
+                ChatTurnDispatcher.FrameDecision.REJECT_VOICE_MODE -> {
+                    // Сервер отказал голосовому режиму (409 unsupported_voice_mode_backend)
+                    // ДО side effects: сырой HTTP-текст в пузырь не пишем (он ничего не
+                    // объясняет), режим выключаем, ход не ретраим и в очередь как
+                    // «не дошло» не возвращаем. Текст хода остаётся у человека: в
+                    // транскрипте и — при прямой отправке — обратно в поле ввода.
+                    uiState.onEvent(ChatEvent.Error(VoiceModeRejectionPolicy.NOTICE))
+                    onVoiceModeRejectedTurn(text, restoreComposer = voiceTurnOverride == null)
+                    explicitStatus = VoiceModeRejectionPolicy.STATUS
                 }
-                if (event is ChatEvent.SessionBound) {
-                    currentSessionId = event.sessionId
-                    refreshAutonomyState()
+                ChatTurnDispatcher.FrameDecision.SUPPRESS_TRANSPORT -> {
+                    explicitStatus = ChatActivity.STREAM_RECONNECT_STATUS
                 }
-                if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
-                if (event is ChatEvent.ContextUsage) updateContextIndicator()
-                if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
-                interactiveController.onEvent(event)
-                if (isCompressionControllerReady()) compressionController.onEvent(event)
-                // ANR-фикс: НЕ на каждый токен — троттлинг кадров стрима (StreamRenderThrottle).
-                // Терминальные события (Done/Error → status != TYPING) рисуются немедленно внутри.
-                scheduleStreamRender()
-                setStatus()
+                ChatTurnDispatcher.FrameDecision.APPLY -> {
+                    uiState.onEvent(event)
+                    // Дельта текста ассистента: потоковая озвучка получает её сразу, поэтому
+                    // первый звук не ждёт конца хода. Решение «звучит ли дельта» — в
+                    // VoiceTurnSpeechPolicy; размышления идут отдельным событием ниже.
+                    if (event is ChatEvent.Chunk && isStreamSpeechReady()) onAssistantDelta(event.text)
+                    // Мысли — черновик модели, в динамик не попадают никогда (и это не «фильтр
+                    // на всякий случай»: в живом ходе Thought идёт между Chunk-ами ответа).
+                    if (event is ChatEvent.Thought) onAssistantThought(event.text)
+                    // Вызов инструмента: одна короткая «Проверяю…» на ход, без имени инструмента
+                    // и без результата (результата ещё нет — придумывать его нельзя).
+                    if (event is ChatEvent.ToolCall) announceToolProgress(event.name)
+                    // Терминальный Done: ход завершён — дочитываем остаток потоковой озвучки и
+                    // НЕ читаем финал повторно, если ответ уже звучал.
+                    if (event is ChatEvent.Done) finishVoiceTurn(speakFinal = true)
+                    if (event is ChatEvent.SessionBound) {
+                        currentSessionId = event.sessionId
+                        refreshAutonomyState()
+                    }
+                    if (event is ChatEvent.StreamStarted) currentStreamId = event.streamId
+                    if (event is ChatEvent.ContextUsage) updateContextIndicator()
+                    if (event is ChatEvent.SteerLeftover) restoreSteerText(event.text)
+                    interactiveController.onEvent(event)
+                    if (isCompressionControllerReady()) compressionController.onEvent(event)
+                    // ANR-фикс: НЕ на каждый токен — троттлинг кадров стрима (StreamRenderThrottle).
+                    // Терминальные события (Done/Error → status != TYPING) рисуются немедленно внутри.
+                    scheduleStreamRender()
+                    setStatus()
+                }
             }
         }
-        if (credentialRejected) { requestReauthentication(); return@launch }
+        // Отказ голосовому режиму уже обработан в collect (понятный текст, статус,
+        // выключение режима): ни recovery, ни «обычное завершение» хода здесь не нужны.
+        if (tally.voiceModeRejected) return@launch
         // Доставленный ход оборвался без терминального Done → ЕДИНСТВЕННЫЙ recovery-job:
-        // только attach c Last-Event-ID, никогда повторный POST chat/start и никогда
+        // только attach с Last-Event-ID, никогда повторный POST chat/start и никогда
         // повторная отправка сообщения. Серверная ошибка, закрывшая ход (app-ошибка без
         // транспортного сбоя), — терминальна: reconnect лишь отреплеил бы её же.
-        val recoveryStreamId = currentStreamId
-        val appErrorTerminal = sawAppError && suppressedTransportError == null
-        if (delivered && !sawDone && !appErrorTerminal && recoveryStreamId != null &&
-            isRecoveryReady()
-        ) {
-            explicitStatus = ChatActivity.STREAM_RECONNECT_STATUS
-            stream = recovery.beginRecoveryAfterDrop(recoveryStreamId, suppressedTransportError)
-            return@launch
+        when (turnDispatcher.resolveAfterStream(tally, currentStreamId, isRecoveryReady())) {
+            ChatTurnDispatcher.StreamOutcome.REAUTH -> { requestReauthentication(); return@launch }
+            ChatTurnDispatcher.StreamOutcome.RECOVER -> {
+                val recoveryStreamId = currentStreamId
+                if (recoveryStreamId != null) {
+                    explicitStatus = ChatActivity.STREAM_RECONNECT_STATUS
+                    stream = recovery.beginRecoveryAfterDrop(recoveryStreamId, tally.suppressedTransportError)
+                    return@launch
+                }
+            }
+            ChatTurnDispatcher.StreamOutcome.COMPLETE -> Unit
         }
         if (uiState.status == ChatStatus.TYPING) {
             uiState.complete()
@@ -247,9 +281,9 @@ internal fun ChatActivity.startSendStream(
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
-        if (!delivered) turnFailed = true
+        if (!tally.delivered) tally.turnFailed = true
         uiState.fail()
-        if (credentialRejected) { requestReauthentication(); return@launch }
+        if (tally.credentialRejected) { requestReauthentication(); return@launch }
     } finally {
         renderMessages()
         setStatus()
@@ -259,8 +293,14 @@ internal fun ChatActivity.startSendStream(
         // запускает: осознанная остановка не должна продолжать очередь — остальные
         // сообщения ждут следующего триггера (переход сети, открытие диалога, отправка).
         if (coroutineContext[Job]?.isCancelled != true) {
-            if (turnFailed && !credentialRejected) onTurnFailed?.invoke()
-            if (!turnFailed && !credentialRejected) onTurnSucceeded?.invoke()
+            when (turnDispatcher.queueOutcome(tally)) {
+                // Отказ серверного бэкенда: НЕ «успех» и НЕ авторетрай — строка уходит
+                // в карточку недоставленных, повтор остаётся осознанным действием.
+                ChatTurnDispatcher.QueueOutcome.REJECTED -> onTurnRejected?.invoke()
+                ChatTurnDispatcher.QueueOutcome.RETRY -> onTurnFailed?.invoke()
+                ChatTurnDispatcher.QueueOutcome.CONFIRM -> onTurnSucceeded?.invoke()
+                ChatTurnDispatcher.QueueOutcome.NONE -> Unit
+            }
             flushOfflineQueue()
             // A14: расход сессии меняется только ходами — обновляем счётчик по завершении.
             refreshSessionUsage()
@@ -311,6 +351,10 @@ internal fun ChatActivity.dispatchQueuedMessage(queued: QueuedMessage) {
         outgoingAttachments = emptyList(),
         targetSessionId = queued.sessionId,
         credential = credential,
+        // Намерение хода берётся из ПЕРСИСТЕНТНОЙ записи, а не из состояния цикла: к моменту
+        // флаша (перезапуск приложения, восстановление сети) цикл уже выключен, и пересчёт
+        // молча отправил бы `voice_mode: false` — то есть подменил бы режим без ведома человека.
+        voiceTurnOverride = queued.voiceMode,
         onTurnFailed = {
             // Сессия могла создаться до сбоя потока: возврат в очередь под актуальным
             // ключом, иначе сообщение застрянет под null и не дождётся флаша диалога.
@@ -324,6 +368,16 @@ internal fun ChatActivity.dispatchQueuedMessage(queued: QueuedMessage) {
             } else {
                 offlineQueuePresenter.onSendSucceeded(queued.id)
             }
+            updateOfflineQueuePanel()
+        },
+        onTurnRejected = {
+            // Сервер отказал голосовому режиму: строка НЕ возвращается в очередь (повтор с
+            // `voice_mode` детерминированно получит тот же 409 — это были бы бесконечные
+            // попытки) и НЕ снимается как успех (текст исчез бы вместе с причиной). Она
+            // переезжает в недоставленные: текст сохранён, повтор — осознанный, текстом.
+            offlineQueuePresenter.onVoiceModeRejected(
+                queued.copy(sessionId = currentSessionId ?: queued.sessionId)
+            )
             updateOfflineQueuePanel()
         },
         onTurnSucceeded = {

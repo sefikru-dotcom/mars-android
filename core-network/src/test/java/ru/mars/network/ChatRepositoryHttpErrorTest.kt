@@ -45,6 +45,34 @@ class ChatRepositoryHttpErrorTest {
         assertEquals("HTTP 500", describeHttpError(500, "expired"))
     }
 
+    /**
+     * Newer contract refusals carry the reason under `code`, not `error`:
+     * `409 {"code": "unsupported_voice_mode_backend"}` (SERVER-CONTRACT.md §1). Without
+     * reading that key the client would see a bare "HTTP 409" and could neither explain
+     * the refusal to the user nor classify it as a voice-mode rejection.
+     */
+    @Test fun describeHttpErrorReadsTheCodeKeyOfContractRefusals() {
+        assertEquals(
+            "HTTP 409: unsupported_voice_mode_backend",
+            describeHttpError(409, """{"code":"unsupported_voice_mode_backend"}"""),
+        )
+        // Legacy key keeps priority when both are present.
+        assertEquals(
+            "HTTP 409: unsupported_voice_mode_backend",
+            describeHttpError(
+                409,
+                """{"error":"unsupported_voice_mode_backend","code":"something_else"}""",
+            ),
+        )
+        // A blank `error` must not shadow a usable `code`.
+        assertEquals(
+            "HTTP 409: unsupported_voice_mode_backend",
+            describeHttpError(409, """{"error":"  ","code":"unsupported_voice_mode_backend"}"""),
+        )
+        // Non-JSON bodies still fall back to the bare status.
+        assertEquals("HTTP 409", describeHttpError(409, "conflict"))
+    }
+
     // ---- POST /api/chat/start (two-phase path) ----
 
     @Test fun chatStartFailureSurfacesServerReasonAndStopsBeforeStream() = runBlocking {
@@ -56,6 +84,36 @@ class ChatRepositoryHttpErrorTest {
             // Terminal: no follow-up GET /api/chat/stream was attempted.
             assertEquals(1, server.requestCount)
             assertEquals("POST", server.takeRequest().method)
+        }
+    }
+
+    /**
+     * `runtime-runner` refuses a voice turn before any side effect:
+     * `409 {"code": "unsupported_voice_mode_backend"}` (SERVER-CONTRACT.md §1). The client
+     * must (a) actually send `voice_mode: true`, (b) see the reason in the error string and
+     * (c) stop right there — one POST, no session materialisation, no stream GET, so the UI
+     * can explain the refusal instead of retrying it.
+     */
+    @Test fun chatStartVoiceModeRefusalCarriesTheContractCodeAndStops() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(409)
+                    .setBody("""{"code":"unsupported_voice_mode_backend"}""")
+            )
+            val events = ChatRepository().sendMessage(
+                server.url("/").toString(), credential(), "Привет", voiceMode = true,
+            ).toList()
+            assertEquals(1, events.size)
+            assertEquals(
+                "HTTP 409: unsupported_voice_mode_backend",
+                (events.single() as ChatEvent.Error).message,
+            )
+            // No follow-up GET /api/chat/stream and no second POST: the turn is over.
+            assertEquals(1, server.requestCount)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            val body = request.body.readUtf8()
+            assertTrue("voice_mode must ride in the start payload: $body", "\"voice_mode\":true" in body)
         }
     }
 

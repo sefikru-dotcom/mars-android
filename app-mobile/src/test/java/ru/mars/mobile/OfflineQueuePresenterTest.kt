@@ -220,6 +220,95 @@ class OfflineQueuePresenterTest {
 
     // --- ретрай ----------------------------------------------------------------------------------
 
+    // --- отказ голосовому режиму (409 unsupported_voice_mode_backend) ------------------------------
+
+    private fun voiceMessage(text: String = "голосом", sessionId: String? = "s1"): QueuedMessage =
+        QueuedMessage(
+            id = "q-${seq++}",
+            text = text,
+            sessionId = sessionId,
+            enqueuedAtEpochMillis = now,
+            attempts = 1,
+            voiceMode = true,
+        )
+
+    @Test
+    fun `voice rejection keeps the text as an undelivered turn with its own reason`() {
+        val message = voiceMessage("сказал вслух")
+        presenter.onSendStarted(message.id)
+        presenter.onVoiceModeRejected(message)
+        // Строка не «отправляется» и не исчезла: текст сохранён, причина названа.
+        assertFalse(presenter.isSending(message.id))
+        val turn = presenter.failed.single()
+        assertEquals(message.id, turn.id)
+        assertEquals("сказал вслух", turn.text)
+        assertTrue(turn.voiceModeRejected)
+        // Голосовое намерение снято: бэкенд его не принимает.
+        assertFalse(turn.voiceMode)
+
+        val row = presenter.panelFor(emptyList(), NetworkState.ONLINE, "s1").rows.single()
+        assertEquals(OfflineQueueRowStatus.FAILED, row.status)
+        assertEquals(OfflineQueuePresenter.LABEL_VOICE_UNSUPPORTED, row.statusLabel)
+        assertTrue(row.retryAvailable)
+        assertTrue(row.discardAvailable)
+        // Кнопка обещает именно отправку текстом — это и есть осознанное согласие.
+        assertEquals(OfflineQueuePresenter.LABEL_SEND_AS_TEXT, row.retryLabel)
+    }
+
+    @Test
+    fun `voice rejection is not an auto-retry and not a success`() {
+        val message = voiceMessage()
+        presenter.onSendStarted(message.id)
+        presenter.onVoiceModeRejected(message)
+        // Не успех: бейдж ERROR и строка на месте (иначе текст исчез бы вместе с причиной).
+        assertEquals(1, presenter.failed.size)
+        assertEquals(OfflineQueueBadgeUi.Tone.ERROR, presenter.badgeFor(0, NetworkState.ONLINE).tone)
+        // Не авторетрай: в очереди ничего не появилось, повтор — только ручной.
+        assertFalse(presenter.isSending(message.id))
+    }
+
+    @Test
+    fun `manual retry of a rejected voice turn goes as plain text`() {
+        val message = voiceMessage("повторить текстом")
+        presenter.onVoiceModeRejected(message)
+        val outcome = presenter.requestRetry(message.id)
+        assertTrue(outcome is RetryOutcome.TriggerSend)
+        outcome as RetryOutcome.TriggerSend
+        assertEquals("повторить текстом", outcome.text)
+        assertEquals("s1", outcome.sessionId)
+        // Явный `false`: повтор не притворяется голосовым ходом.
+        assertFalse(outcome.voiceMode)
+    }
+
+    @Test
+    fun `retry of a network-failed voice turn keeps the voice intent`() {
+        val message = voiceMessage("связь пропала")
+        presenter.onTurnFailed(message)
+        val outcome = presenter.requestRetry(message.id) as RetryOutcome.TriggerSend
+        // Транспортный провал голосового хода повторяется голосовым: режим не подменяется.
+        assertTrue(outcome.voiceMode)
+    }
+
+    @Test
+    fun `rejected voice turn that fails again on manual retry keeps the voice reason`() {
+        val message = voiceMessage("дважды")
+        presenter.onVoiceModeRejected(message)
+        presenter.requestRetry(message.id)
+        // Повтор текстом тоже может не дойти (сеть): это уже обычный провал, не отказ режима.
+        presenter.onTurnFailed(message.copy(voiceMode = false, attempts = 2))
+        val row = presenter.panelFor(emptyList(), NetworkState.ONLINE, "s1").rows.single()
+        assertEquals(OfflineQueuePresenter.LABEL_FAILED, row.statusLabel)
+        assertEquals(OfflineQueuePresenter.LABEL_RETRY, row.retryLabel)
+    }
+
+    @Test
+    fun `queued rows keep the plain retry label`() {
+        val waiting = queued("просто ждёт")
+        val row = presenter.panelFor(listOf(waiting), NetworkState.OFFLINE, "s1").rows.single()
+        assertEquals(OfflineQueueRowStatus.WAITING, row.status)
+        assertEquals(OfflineQueuePresenter.LABEL_RETRY, row.retryLabel)
+    }
+
     @Test
     fun `retry of failed turn triggers send with original payload and guards double tap`() {
         val message = drop("ретрай меня", sessionId = "s7")

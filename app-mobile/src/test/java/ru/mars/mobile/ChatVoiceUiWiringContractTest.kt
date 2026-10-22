@@ -57,6 +57,12 @@ class ChatVoiceUiWiringContractTest {
         var start = src.indexOf("private fun $name(")
         if (start < 0) start = src.indexOf("internal fun $name(")
         if (start < 0) start = src.indexOf("fun $name(")
+        if (start < 0) {
+            // Функция-расширение: `internal fun ChatActivity.name(`. Ищем по сигнатуре, а не по
+            // подстроке, иначе `fun name(` не находится вовсе.
+            val match = Regex("""fun\s+(?:[\w.]+\.)?${Regex.escape(name)}\s*\(""").find(src)
+            if (match != null) start = match.range.first
+        }
         assertTrue("функция $name не найдена", start >= 0)
         val open = src.indexOf('{', start)
         assertTrue("у $name нет тела", open > start)
@@ -105,6 +111,30 @@ class ChatVoiceUiWiringContractTest {
         assertTrue(sectionBody.contains("finishVoiceTurn(speakFinal = true)"))
         // И ни один из них больше не озвучивает финал напрямую.
         assertFalse(turnSection.contains("voiceOutput.onTurnComplete"))
+    }
+
+    @Test
+    fun `turn end drains on an empty queue, not on silent playback`() {
+        val end = body(chat, "endStreamSpeech")
+        // Решение «доиграло» принимается по очереди, а не по факту звука: хвостовая фраза,
+        // ушедшая в синтез на конце хода, ещё не играет — `isSpeaking == false` при непустой
+        // очереди означает «звук впереди». На этом предикате ранний drained гасил streamSpeech,
+        // и следующая фраза глушилась в onStreamSpeechPhraseStarted.
+        assertTrue(
+            "конец хода должен смотреть на очередь, а не на текущий звук",
+            end.contains("if (!streamingSpeech.hasPendingSpeech) onStreamSpeechDrained()"),
+        )
+        assertFalse(
+            "ранний drained по isSpeaking обрезает хвост, который ещё синтезируется",
+            end.contains("streamingSpeech.isSpeaking"),
+        )
+        // Флаш остатка обязан идти ДО решения: иначе последняя фраза не попадёт в очередь и
+        // решение «пусто» станет верным по ошибке.
+        val flushAt = end.indexOf("streamingSpeech.onTurnFinished()")
+        val drainAt = end.indexOf("hasPendingSpeech")
+        assertTrue("хвост флашится до решения о drained", flushAt in 0 until drainAt)
+        // И очередь действительно сообщает о конце хода сама, когда доиграет.
+        assertTrue(chat.contains("onDrained = { runOnUiThread { onStreamSpeechDrained() } }"))
     }
 
     @Test
@@ -214,10 +244,52 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `voice dialog flag in the request is explicit and backward compatible`() {
-        assertEquals("voice_dialog", VoiceDialogRequestMode.FIELD)
+        // Фактическое поле сервера — `voice_mode:boolean`. `voice_dialog` из первой редакции
+        // UI-контракта сервер не читает: ход молча уходил бы как текстовый.
+        assertEquals("voice_mode", VoiceDialogRequestMode.FIELD)
+        assertEquals("voice_dialog", VoiceDialogRequestMode.LEGACY_WRONG_FIELD)
         assertEquals(true, VoiceDialogRequestMode.fieldValue(voiceDialog = true))
         // Не голосовой ход — поля нет вовсе (сервер сохраняет свою политику).
         assertNull(VoiceDialogRequestMode.fieldValue(voiceDialog = false))
+    }
+
+    @Test
+    fun `voice mode flag reaches the chat start payload`() {
+        // Тело функции живёт в ChatTurnSection.kt (Activity разбит на секции-файлы).
+        val turn = body(turnSection, "startSendStream")
+        assertTrue(
+            "в теле chat/start должно стоять фактическое поле voice_mode",
+            turn.contains("voiceMode = VoiceDialogRequestMode.fieldValue(voiceTurn) == true"),
+        )
+        // Источник признака — состояние голосового цикла, а не «микрофон когда-то открывался».
+        assertTrue(turn.contains("voiceTurnFromDialog()"))
+        // Очередь/ручной повтор передают сохранённое намерение: пересчёт по циклу в момент
+        // флаша дал бы `voice_mode: false` (цикл уже выключен) — тихую подмену режима.
+        assertTrue(turn.contains("voiceTurnOverride ?: voiceTurnFromDialog()"))
+        // Признак фиксируется ДО ожидания сессии: иначе выключение режима в момент создания
+        // сессии сделало бы ход неголосовым.
+        val fixAt = turn.indexOf("val voiceTurn = voiceTurnOverride ?: voiceTurnFromDialog()")
+        val awaitAt = turn.indexOf("EnsureSessionResult")
+        assertTrue("признак голоса должен фиксироваться до создания сессии", fixAt in 0 until awaitAt)
+        // Имя поля — ровно то, что читает сервер.
+        assertEquals("voice_mode", VoiceDialogRequestMode.FIELD)
+    }
+
+    @Test
+    fun `unsupported voice backend rejection is explained and never silently downgraded`() {
+        val turn = body(turnSection, "startSendStream")
+        // Отказ разбирается политикой, а не общим путём «сообщение не дошло».
+        assertTrue(turn.contains("VoiceModeRejectionPolicy"))
+        assertTrue(turn.contains("FrameDecision.REJECT_VOICE_MODE"))
+        // Человеку — понятный русский текст вместо сырого «HTTP 409: …».
+        assertTrue(turn.contains("VoiceModeRejectionPolicy.NOTICE"))
+        assertTrue(turn.contains("onVoiceModeRejectedTurn("))
+        // Ход не уходит в очередь как «не дошло»: ветка отказа не вызывает onTurnFailed.
+        val rejected = body(turnSection, "dispatchQueuedMessage")
+        assertTrue(rejected.contains("onTurnRejected = {"))
+        assertTrue(rejected.contains("offlineQueuePresenter.onVoiceModeRejected("))
+        // Намерение из персистентной записи — до создания сессии.
+        assertTrue(rejected.contains("voiceTurnOverride = queued.voiceMode"))
     }
 
     @Test
@@ -225,7 +297,6 @@ class ChatVoiceUiWiringContractTest {
         val contract = File(repoRoot().parentFile, ".mars/voice-upgrade/UI-CONTRACT.md")
         assumeTrue("UI-CONTRACT.md вне репозитория — проверка только на этой машине", contract.isFile)
         val text = contract.readText()
-        assertTrue(text.contains("voice_dialog"))
         assertTrue(text.contains("/api/voice/interrupt"))
         assertTrue(text.contains("voiceInterruptHook"))
         assertTrue(text.contains("sendMessage"))

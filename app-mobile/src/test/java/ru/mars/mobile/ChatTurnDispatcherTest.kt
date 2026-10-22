@@ -113,6 +113,79 @@ class ChatTurnDispatcherTest {
         assertFalse(dispatcher.shouldRetryQueued(tally))
     }
 
+    // --- Отказ голосовому режиму (409 unsupported_voice_mode_backend) -------------------------
+
+    @Test
+    fun `voice backend rejection is its own frame decision - not a transport drop, not delivery`() {
+        val tally = ChatTurnDispatcher.TurnTally()
+        // transportShaped=true намеренно: даже если бы классификатор счёл «HTTP 409» похожим
+        // на транспорт, отказ голосовому режиму обязан разбираться раньше.
+        val decision = dispatcher.onFrame(
+            ChatEvent.Error("HTTP 409: unsupported_voice_mode_backend"),
+            tally,
+            transportShaped = true,
+        )
+        assertEquals(ChatTurnDispatcher.FrameDecision.REJECT_VOICE_MODE, decision)
+        assertTrue(tally.voiceModeRejected)
+        // Ни доставки, ни транспортного подавления, ни «сообщение не дошло».
+        assertFalse(tally.delivered)
+        assertFalse(tally.turnFailed)
+        assertFalse(tally.sawAppError)
+        assertNull(tally.suppressedTransportError)
+        assertFalse(tally.credentialRejected)
+    }
+
+    @Test
+    fun `rejected voice turn is neither retried nor confirmed by the queue`() {
+        val tally = ChatTurnDispatcher.TurnTally()
+        dispatcher.onFrame(
+            ChatEvent.Error("HTTP 409: unsupported_voice_mode_backend"),
+            tally,
+            transportShaped = false,
+        )
+        // Очередь не имеет права ни повторять ход (тот же 409), ни считать его успехом.
+        assertEquals(ChatTurnDispatcher.QueueOutcome.REJECTED, dispatcher.queueOutcome(tally))
+        assertFalse(dispatcher.shouldRetryQueued(tally))
+        assertFalse(dispatcher.shouldConfirmQueued(tally))
+    }
+
+    @Test
+    fun `rejected voice turn never reconnects even with a stream id`() {
+        val tally = ChatTurnDispatcher.TurnTally()
+        dispatcher.onFrame(
+            ChatEvent.Error("HTTP 409: unsupported_voice_mode_backend"),
+            tally,
+            transportShaped = false,
+        )
+        assertEquals(
+            ChatTurnDispatcher.StreamOutcome.COMPLETE,
+            dispatcher.resolveAfterStream(tally, streamId = "stream-1", recoveryAvailable = true),
+        )
+    }
+
+    @Test
+    fun `plain conflict without the voice marker stays a retryable undelivered turn`() {
+        val tally = ChatTurnDispatcher.TurnTally()
+        val decision = dispatcher.onFrame(
+            ChatEvent.Error("HTTP 409: stream already active"),
+            tally,
+            transportShaped = false,
+        )
+        assertEquals(ChatTurnDispatcher.FrameDecision.APPLY, decision)
+        assertFalse(tally.voiceModeRejected)
+        assertTrue(tally.turnFailed)
+        assertEquals(ChatTurnDispatcher.QueueOutcome.RETRY, dispatcher.queueOutcome(tally))
+    }
+
+    @Test
+    fun `credential rejection outranks the voice rejection in the queue outcome`() {
+        val tally = ChatTurnDispatcher.TurnTally()
+        tally.voiceModeRejected = true
+        tally.credentialRejected = true
+        // 401 — уход на логин: очередь не трогаем вовсе.
+        assertEquals(ChatTurnDispatcher.QueueOutcome.NONE, dispatcher.queueOutcome(tally))
+    }
+
     // --- Решение после закрытия стрима ------------------------------------------------------
 
     @Test

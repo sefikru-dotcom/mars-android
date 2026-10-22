@@ -139,10 +139,16 @@ sealed interface ChatEvent {
      *   never be re-classified as a network failure or re-attached.
      * The default keeps every pre-seam construction site (`ChatEvent.Error(msg)`)
      * source-compatible and semantically unchanged (transport).
+     *
+     * [errorCode] — МАШИННЫЙ код отказа из тела HTTP-ответа (поле `code`, например
+     * `unsupported_voice_mode_backend`), а не текст для человека. Приложения классифицируют
+     * отказы по нему: человеческая формулировка (`error`) меняется между бэкендами и
+     * локалями, а код — часть контракта. `null` — тело кода не несло.
      */
     data class Error(
         val message: String,
         val origin: ErrorOrigin = ErrorOrigin.TRANSPORT,
+        val errorCode: String? = null,
     ) : ChatEvent
 }
 

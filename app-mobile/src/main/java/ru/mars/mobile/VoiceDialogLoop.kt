@@ -531,6 +531,31 @@ class VoiceDialogLoop(
     }
 
     /**
+     * Очередная фраза ответа пошла в звук.
+     *
+     * Первый вызов переводит цикл в [State.SPEAKING] ([onAnswerStarted]). Дальше ответ звучит
+     * фразами, и каждая следующая обязана обновить эталон эха: иначе её слова, услышанные
+     * микрофоном с динамика, не находятся в «тексте ответа» и выглядят как речь человека —
+     * на динамике без AEC это подтверждает перебивание, и Марс глушит сам себя.
+     *
+     * В [State.SPEAKING] меняется ТОЛЬКО эталон: состояние, накопленная длительность речи
+     * человека и счётчик перебиваний не трогаются. Весь будущий текст заранее не выставляется —
+     * хост передаёт фразу, которую очередь реально отдала в воспроизведение.
+     *
+     * @return true, если вызов учтён (переход в SPEAKING или обновление эталона).
+     */
+    fun onAnswerSpeechStarted(spokenText: String?): Boolean {
+        if (!started) return false
+        if (state == State.SPEAKING) {
+            val clean = spokenText?.takeIf { it.isNotBlank() } ?: return false
+            answerSpokenText = clean
+            bargeInGate.onAssistantTextUpdated(clean)
+            return true
+        }
+        return onAnswerStarted(spokenText)
+    }
+
+    /**
      * Ответ закончился (TTS дочитал, или озвучка недоступна, или ход упал). Hands-free: снова
      * слушаем — и сразу забираем реплику, если человек говорил, пока Марс отвечал.
      */

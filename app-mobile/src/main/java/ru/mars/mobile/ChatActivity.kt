@@ -244,11 +244,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Потоковая озвучка: дельты ответа → фразы → звук, не дожидаясь конца хода. Живёт
      * параллельно [voiceOutput] (он остаётся путём для готового сообщения и фолбэка), но
      * при активном стриме звучит только она — две озвучки одного текста исключены флагом
-     * [streamSpeechActive].
+     * [streamSpeech].
      */
     internal lateinit var streamingSpeech: StreamingSpeechController
-    /** Ход сейчас озвучивается потоково: терминальный Done не должен озвучивать его второй раз. */
-    private var streamSpeechActive = false
+    /**
+     * Жизненный цикл озвучки текущего хода: озвучивается ли ход, можно ли ещё отдавать текст в
+     * синтез и пора ли циклу снова слушать. Отдельный класс, а не флаг в Activity, потому что
+     * «ход озвучивается» и «аудио сейчас звучит» — разные вопросы (см. [StreamSpeechLifecycle]).
+     */
+    private val streamSpeech = StreamSpeechLifecycle()
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     private var speechEngineInitResult: Boolean? = null
     private lateinit var voiceSession: VoiceSessionController
@@ -261,6 +265,30 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var voiceLoop: VoiceDialogLoop
     /** Непрерывный микрофон hands-free: сегментер режет поток на реплики (см. [HandsFreeCapture]). */
     private lateinit var handsFreeCapture: HandsFreeCapture
+
+    /**
+     * Наблюдатель маршрута вывода (наушники/динамик/Bluetooth).
+     *
+     * Нужен политике перебивания: на наушниках микрофон не слышит динамик, и перебивание можно
+     * принимать по одной энергии; на динамике — только по текстовому доказательству. Без него
+     * [VoiceDialogLoop] считает худший случай (динамик) и не пускает перебивание вовсе.
+     */
+    private var audioRouteMonitor: AndroidAudioRouteMonitor? = null
+
+    /**
+     * Жизненный цикл серверного голосового канала для перебивания (`voice_id`).
+     *
+     * Создаётся по фактическому API при первом перебивании в диалоге и закрывается вместе с
+     * режимом. Транскрипт по-прежнему идёт ОДНИМ каналом (chat SSE) — здесь только управление.
+     */
+    internal lateinit var voiceInterruptChannel: VoiceInterruptChannel
+
+    /** Показывать partial ASR в композере, не затирая набранное человеком. */
+    internal val partialPreview = VoicePartialPreviewPolicy()
+
+    /** Последнее подтверждённое перебивание — диагностика (без него решение политики не видно). */
+    internal var lastBargeIn: BargeInEvent? = null
+        private set
 
     /**
      * Вид голосового диалога (кнопка/статус/a11y) — чистая [VoiceDialogPresentationPolicy].
@@ -558,6 +586,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             scope = lifecycleScope,
             onFirstAudio = { runOnUiThread { onStreamSpeechStarted() } },
             onDrained = { runOnUiThread { onStreamSpeechDrained() } },
+            // Фраза реально пошла в динамик: цикл получает точный эталон эха именно для неё,
+            // а не «весь ответ целиком» (будущий текст ещё не звучал).
+            onPhraseStarted = { text -> runOnUiThread { onStreamSpeechPhraseStarted(text) } },
         )
         speechEngineInitResult?.let { available ->
             speechEngineInitResult = null
@@ -581,13 +612,38 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         createAsrPort()
         voiceLoop = VoiceDialogLoop(
             listener = voiceLoopListener,
-            bargeInEnabled = voiceOutputPrefs.getBoolean(KEY_VOICE_BARGE_IN, false),
+            // Перебивание включено по умолчанию, но НЕ беззащитно: допуск решает [BargeInGate]
+            // вместе с политикой маршрута. На динамике без AEC принимается только текстовое
+            // доказательство (partial ASR, слов которого нет в произносимом ответе), на
+            // наушниках/Bluetooth — энергия. Голое «включить и слушать» перебивало бы цикл
+            // собственным динамиком. Живые замеры на устройстве остаются обязательными.
+            bargeInEnabled = voiceOutputPrefs.getBoolean(KEY_VOICE_BARGE_IN, DEFAULT_VOICE_BARGE_IN),
             stt = streamingStt,
             // Ход уже идёт: вторая реплика уходит steer-ом, а не новым сообщением.
             turnActive = { uiState.status == ChatStatus.TYPING },
+            // Фактический маршрут вывода и наличие AEC у текущего захвата — политике
+            // перебивания, а не догадке «наверное, динамик».
+            audioRoute = { audioRouteMonitor?.route ?: AudioRoute.UNKNOWN },
+            aecActive = { ::handsFreeCapture.isInitialized && handsFreeCapture.echoCanceled },
         )
         // Слушатель передаётся в start(): у захвата нет «постоянного» получателя.
         handsFreeCapture = HandsFreeCapture()
+        // Маршрут может смениться на ходу (воткнули наушники посреди ответа) — наблюдатель
+        // пересчитывает его сам, цикл спрашивает актуальное значение через лямбду выше.
+        audioRouteMonitor = AndroidAudioRouteMonitor(this)
+        // Серверный канал перебивания: voice_id создаётся по фактическому API и живёт до конца
+        // голосового режима. Пустой шов здесь означал бы, что сервер продолжает синтез после
+        // того, как человек начал говорить.
+        voiceInterruptChannel = VoiceInterruptChannel(
+            gateway = GatewayVoiceControl(),
+            credentialProvider = { store.read() },
+            // Не lifecycleScope: `close()` вызывается из onDestroy, а lifecycleScope к этому
+            // моменту уже отменяется — запрос закрытия до сервера не дошёл бы и voice_id
+            // висел бы до TTL.
+            scope = VoiceTeardownScope,
+            baseUrl = BASE_URL,
+        )
+        voiceInterruptHook = { sessionId -> voiceInterruptChannel.interrupt(sessionId) }
         // «Озвучка закончилась» приходит из движка (Android TTS — UtteranceProgressListener,
         // серверный — конец воспроизведения). Только после этого цикл снова слушает.
         voiceOutput.onSpeakingFinished = {
@@ -703,6 +759,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Hands-free-цикл тоже: микрофон не должен остаться открытым после закрытия экрана.
         if (::handsFreeCapture.isInitialized) handsFreeCapture.cancel()
         if (::voiceLoop.isInitialized) voiceLoop.stop()
+        // Голосовой канал на сервере и подписка на маршрут: экран ушёл — voice_id закрываем,
+        // иначе он висит до TTL, а AudioDeviceCallback держит ссылку на Activity.
+        audioRouteMonitor?.stop()
+        if (::voiceInterruptChannel.isInitialized) voiceInterruptChannel.close()
         // Нативный движок ASR держит модель в памяти (~50 МБ RSS): освобождаем явно.
         runCatching { streamingStt?.release() }
         runCatching { asrPort?.release() }
@@ -2087,6 +2147,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
 
         override fun onSendRequested(requestId: Long, text: String, mode: VoiceDialogLoop.SendMode) {
+            // Реплика распознана целиком: предпросмотр перестаёт быть «нашим», поле ниже
+            // заполняется финальным текстом.
+            partialPreview.onFinal()
             input.setText(text)
             input.setSelection(text.length)
             // Голосом спросили — голосом и ответ: озвучиваем именно этот ответ (одноразовый
@@ -2106,10 +2169,33 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Перебивание: потоковая очередь фраз тоже глохнет, иначе первое предложение
             // нового вопроса прозвучало бы поверх дочитываемого ответа.
             cancelStreamSpeech()
-            // Серверный interrupt — только если голосовой канал реально открыт (шов пуст при
-            // единственном chat SSE). Ход при этом не отменяется: агент продолжает работу.
+            // Серверный interrupt по открытому `voice_id` (см. [requestVoiceInterrupt]). Ход при
+            // этом НЕ отменяется: агент продолжает работу и дописывает ответ в транскрипт.
             requestVoiceInterrupt()
             setStatus()
+        }
+
+        /**
+         * Живой транскрипт реплики — предпросмотр в композере.
+         *
+         * Пишем только «свободное» поле: если человек уже начал печатать, его текст важнее
+         * предпросмотра ([VoicePartialPreviewPolicy]). Так видно, что Марс слышит, и при этом
+         * ничего не затирается молча.
+         */
+        override fun onPartialTranscript(text: String) {
+            val decision = partialPreview.onPartial(text, input.text?.toString().orEmpty())
+            if (decision !is VoicePartialPreviewPolicy.Decision.Apply) return
+            setComposerTextProgrammatically(decision.text, TextApplyOrigin.VOICE_INPUT)
+            input.setSelection(decision.text.length)
+        }
+
+        /**
+         * Перебивание подтверждено политикой ([BargeInGate]) — то есть это речь человека, а не
+         * эхо динамика. Серверный interrupt уже отправлен из [onStopSpeaking]; здесь только
+         * диагностика: отмена хода тут недопустима (агент должен доработать ответ).
+         */
+        override fun onBargeIn(event: BargeInEvent) {
+            lastBargeIn = event
         }
 
         override fun onSegmentDropped() {
@@ -2133,6 +2219,21 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             runOnUiThread {
                 if (!::voiceLoop.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
                 voiceLoop.onSegment(recording)
+            }
+        }
+
+        /**
+         * Накопленная длительность речи — политике перебивания, а не «в конце фразы».
+         *
+         * Колбэк идёт с потока чтения микрофона (десятки раз в секунду), а [VoiceDialogLoop]
+         * живёт на главном потоке: без перекладывания состояние цикла менялось бы из чужого
+         * потока, и SPEAKING/LISTENING гонялись бы с UI. Частота безопасна: onSpeechProgress
+         * сам решает по гейту, ничего не рисует и не аллоцирует.
+         */
+        override fun onSpeechProgress(voicedMs: Long) {
+            runOnUiThread {
+                if (!::voiceLoop.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+                voiceLoop.onSpeechProgress(voicedMs)
             }
         }
 
@@ -2190,6 +2291,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (!voiceLoop.start()) return
         // Озвучка прошлого ответа не должна попасть в микрофон с первого же чанка.
         voiceOutput.stopSpeaking()
+        // Маршрут вывода — до первого ответа: политика перебивания читает его на входе в
+        // SPEAKING, и «неизвестно» там означает худший случай (динамик).
+        audioRouteMonitor?.start()
         // Модель ASR (23 МиБ) качается при первом запуске: в фоне, чтобы не задерживать
         // открытие микрофона. Пока её нет, цикл уже слушает через whisper — диалог не стоит.
         asrPort?.let { port ->
@@ -2252,6 +2356,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         voiceLoop.stop()
         handsFreeCapture.cancel()
         voiceOutput.stopSpeaking()
+        // Режим выключен — голосовой канал на сервере больше не нужен: закрываем voice_id,
+        // иначе он висел бы до TTL и занимал слот потока. Отписка от маршрута — там же:
+        // колбэк AudioManager держит ссылку на Activity.
+        audioRouteMonitor?.stop()
+        if (::voiceInterruptChannel.isInitialized) voiceInterruptChannel.close()
+        partialPreview.reset()
         // Режим выключен: кнопка возвращается в нейтральное состояние тем же кадром, а не
         // остаётся красной до следующего случайного setStatus().
         setStatus()
@@ -2260,10 +2370,78 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /**
      * Ход закончился (Done / конец стрима / recovery-финиш). Если ответ зазвучал — цикл в
      * SPEAKING и ждёт конца озвучки; если читать нечего — сразу снова слушаем.
+     *
+     * «Зазвучал» проверяется по ОБОИМ путям озвучки ([isVoiceSpeakingNow]): потоковая очередь
+     * фраз — не `voiceOutput.speaking`, и старая проверка только по нему отправляла цикл в
+     * LISTENING посреди звучащего ответа (микрофон слышал динамик).
      */
     internal fun onVoiceTurnCompleted() {
         if (!::voiceLoop.isInitialized || !voiceLoop.isActive) return
-        if (voiceOutput.speaking) voiceLoop.onAnswerStarted() else voiceLoop.onAnswerFinished()
+        if (isVoiceSpeakingNow()) voiceLoop.onAnswerStarted(spokenAnswerText()) else voiceLoop.onAnswerFinished()
+    }
+
+    /**
+     * Что реально звучит/звучало в этом ходе — для echo-гейта перебивания.
+     *
+     * Приоритет у потоковой озвучки: именно её текст ушёл в синтез фразами. Если её не было —
+     * берём ответ целиком (путь [VoiceOutputController]). `null` означает «текста нет»: тогда
+     * на динамике перебивание по тексту не подтвердится, и это правильный отказ, а не догадка.
+     */
+    internal fun spokenAnswerText(): String? {
+        val streamed = if (::streamingSpeech.isInitialized) streamingSpeech.spokenText else null
+        if (!streamed.isNullOrBlank()) return streamed
+        return latestAssistantAnswer()?.takeIf { it.isNotBlank() }
+    }
+
+    /** Слушает ли цикл прямо сейчас (микрофон может быть открыт, но цикл уже выключен). */
+    internal fun voiceLoopActive(): Boolean = ::voiceLoop.isInitialized && voiceLoop.isActive
+
+    /**
+     * Начат ли текущий ход голосовым диалогом — источник поля `voice_mode` в теле `chat/start`.
+     *
+     * Берётся из состояния ЦИКЛА, а не из «микрофон когда-либо открывался»: текст, набранный
+     * руками при включённом режиме, остаётся текстовым ходом, и наоборот.
+     */
+    internal fun voiceTurnFromDialog(): Boolean = voiceLoopActive()
+
+    /**
+     * Сервер отказал голосовому ходу (`409 unsupported_voice_mode_backend`, [VoiceModeRejectionPolicy]).
+     *
+     * Что делает хост и почему именно это:
+     * 1. **Выключает режим.** Бэкенд сервера не умеет `voice_mode`, поэтому каждый следующий
+     *    голосовой ход получил бы тот же 409. Оставлять микрофон открытым — приглашение
+     *    повторять заведомо провальный сценарий; цикл, микрофон, потоковая озвучка и
+     *    голосовой канал закрываются ([stopHandsFree]).
+     * 2. **Возвращает текст в поле ввода** (только прямая отправка): человек решает сам —
+     *    отправить это как обычный текст или переписать. Никакой автоматической подмены
+     *    режима: `voice_mode: false` без его ведома не уходит.
+     * 3. **Не трогает транскрипт**: сообщение и объяснение уже добавлены вызывающей стороной.
+     *
+     * Для сообщения из очереди текст остаётся в карточке недоставленных
+     * ([OfflineQueuePresenter.onVoiceModeRejected]) — там же и осознанный повтор.
+     */
+    internal fun onVoiceModeRejectedTurn(text: String, restoreComposer: Boolean) {
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
+        // Озвучка хода, которого не было: очередь фраз могла успеть получить дельты до отказа.
+        if (isStreamSpeechReady()) cancelStreamSpeech()
+        if (restoreComposer && text.isNotBlank() && isInputReady() && input.text.isNullOrBlank()) {
+            // Набранное человеком не затирается: поле пустое — вернуть текст, иначе он
+            // остаётся в транскрипте (пузырь с текстом никуда не делся).
+            setComposerTextProgrammatically(text, TextApplyOrigin.DRAFT_RESTORE)
+        }
+        setStatus()
+    }
+
+    /**
+     * Привязать голосовой канал к сессии диалога (безопасно до инициализации канала).
+     *
+     * Живёт в Activity, а не в extension-функции отправки: `lateinit`-поле проверяется только
+     * внутри класса, где оно объявлено. До инициализации/без открытого канала вызов ничего не
+     * делает — `bindSession` сам выходит, если привязки нет.
+     */
+    internal fun bindVoiceChannelToSession(sessionId: String?) {
+        if (!::voiceInterruptChannel.isInitialized) return
+        voiceInterruptChannel.bindSession(sessionId)
     }
 
     // --- вид голосового диалога (кнопка, статус, a11y) -----------------------------------------
@@ -2318,9 +2496,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /**
-     * Серверный interrupt текущего голосового канала. Шов пуст, пока голосовой SSE-канал не
-     * подключён (единственный живой канал — существующий chat SSE), поэтому по умолчанию
-     * локальная остановка остаётся единственным эффектом. Сигнатура — UI-CONTRACT.md.
+     * Серверный interrupt текущего голосового канала.
+     *
+     * Шов заполнен в [onCreate] ([VoiceInterruptChannel]): `voice_id` создаётся по фактическому
+     * API при первом перебивании в сессии и закрывается на выходе из режима. Перебивание НЕ
+     * отменяет ход агента — отмены (`api/chat/cancel`) здесь нет намеренно: человек хочет
+     * замолчать, а не оборвать ответ. Сессия ещё не создана (`currentSessionId == null`) —
+     * перебивать нечего, канал сам отбросит пустой id без сетевого вызова.
      */
     internal fun requestVoiceInterrupt() {
         val hook = voiceInterruptHook ?: return
@@ -2339,7 +2521,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             val finalText = if (speakFinal) voiceTurnSpeech.onFinal(latestAssistantAnswer()) else null
             if (isStreamSpeechReady()) endStreamSpeech()
             // Условие «ответ ещё не звучал» уже внутри политики (onFinal вернул null). Проверять
-            // здесь streamSpeechActive нельзя: при включённой потоковой озвучке и ходе без
+            // здесь streamSpeech нельзя: при включённой потоковой озвучке и ходе без
             // текстовых дельт (только инструменты, ответ пришёл целиком в Done) финал иначе
             // не прозвучал бы вообще.
             if (finalText != null) voiceOutput.onTurnComplete(finalText)
@@ -2350,10 +2532,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /**
      * Начался вызов инструмента: одна короткая фраза «Проверяю…» на ход, без имени инструмента
      * и без выдуманного результата. Звучит только когда ответ вообще озвучивается
-     * ([streamSpeechActive]) — иначе режим «читать вслух» выключен и лезть в динамик нечем.
+     * ([StreamSpeechLifecycle.isSpeechEnabled]) — иначе режим «читать вслух» выключен и лезть
+     * в динамик нечем.
      */
     internal fun announceToolProgress(toolName: String) {
-        if (!streamSpeechActive || !isStreamSpeechReady()) return
+        if (!streamSpeech.isSpeechEnabled || !isStreamSpeechReady()) return
         val line = voiceTurnSpeech.onToolStarted(toolName) ?: return
         streamingSpeech.speakWhole(line)
     }
@@ -2381,8 +2564,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * полуфразу в динамике и вторую половину в конце.
      */
     internal fun beginStreamSpeech() {
-        streamSpeechActive = streamSpeechEnabled()
-        if (streamSpeechActive) voiceOutput.consumeSpeakNextAnswer()
+        streamSpeech.begin(streamSpeechEnabled())
+        if (streamSpeech.isSpeechEnabled) voiceOutput.consumeSpeakNextAnswer()
         streamingSpeech.stop()
         // Новый ход — новая квота на «Проверяю…» и сброс «ответ уже звучал»: иначе второй ход
         // молчал бы про инструменты, а финал первого глушил бы озвучку второго.
@@ -2397,39 +2580,73 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      */
     internal fun onAssistantDelta(text: String) {
         if (text.isEmpty()) return
+        // Политика идёт ПЕРВОЙ намеренно: факт «ответ уже пошёл» нужен и при выключенной
+        // озвучке, иначе терминальный Done прочитал бы весь ответ целиком. Раньше это же
+        // свойство превращало баг жизненного цикла в потерю звука: очередь пустела между
+        // фразами, [streamSpeech] гас навсегда, дельты отбрасывались, а финал был уже
+        // «озвучен». Теперь гаснет только конец хода ([StreamSpeechLifecycle.end]), поэтому
+        // отбрасывать здесь можно лишь хвост уже завершённого или отменённого хода.
         val speakable = voiceTurnSpeech.onGeneratedText(text) ?: return
-        if (!streamSpeechActive) return
+        if (!streamSpeech.acceptsDelta) return
         streamingSpeech.onDelta(speakable)
     }
 
-    /** Ход завершён: остаток буфера тоже должен прозвучать. */
+    /**
+     * Ход завершён: остаток буфера тоже должен прозвучать.
+     *
+     * «Доиграло» объявляется только по пустой ОЧЕРЕДИ, а не по отсутствию звука: хвостовая фраза,
+     * ушедшая в синтез на [streamingSpeech.onTurnFinished], ещё не играет, поэтому
+     * `isSpeaking == false` при непустой очереди — это «звук впереди», а не «конец». Ранний
+     * drained в этот момент гасит [streamSpeech], и следующая [onStreamSpeechPhraseStarted]
+     * глушит уже готовое аудио.
+     */
     internal fun endStreamSpeech() {
-        if (!streamSpeechActive) return
+        if (!streamSpeech.isSpeechEnabled) return
         streamingSpeech.onTurnFinished()
+        streamSpeech.end()
         // Стрим закрылся, а новых фраз нет — сигнал «доиграло» может не прийти вовсе.
-        if (!streamingSpeech.isSpeaking) onStreamSpeechDrained()
+        if (!streamingSpeech.hasPendingSpeech) onStreamSpeechDrained()
     }
 
     /** Ход отменён/прерван/экран ушёл: тишина немедленно, хвост ответа не догоняет. */
     internal fun cancelStreamSpeech() {
-        streamSpeechActive = false
+        streamSpeech.cancel()
         if (!::streamingSpeech.isInitialized) return
         streamingSpeech.stop()
         if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
     }
 
-    /** Зазвучала первая фраза: цикл в SPEAKING, микрофон не принимает собственный динамик. */
+    /**
+     * Пошло первое аудио ответа: внешний динамик помечается занятым.
+     *
+     * Эталон эха здесь НЕ задаётся — его несёт [onStreamSpeechPhraseStarted] для каждой
+     * реально зазвучавшей фразы. Раньше снимок брался именно тут, один раз на ответ, и
+     * вторая фраза в эталон уже не попадала.
+     */
     private fun onStreamSpeechStarted() {
-        if (!streamSpeechActive) { streamingSpeech.stop(); return }
+        if (!streamSpeech.isSpeechEnabled) { streamingSpeech.stop(); return }
         if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(true)
-        if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerStarted()
+    }
+
+    /**
+     * Очередная фраза пошла в динамик — цикл получает её как эталон эха.
+     *
+     * Раньше цикл получал снимок [spokenAnswerText] один раз, на первом звуке, и в нём была
+     * только первая фраза (или весь накопленный текст). Вторая и следующие фразы в эталон не
+     * попадали, поэтому их эхо с динамика подтверждало перебивание — и Марс глушил сам себя.
+     * Теперь передаётся ровно та фраза, которую очередь отдала в воспроизведение.
+     */
+    private fun onStreamSpeechPhraseStarted(spokenText: String) {
+        if (!streamSpeech.isSpeechEnabled) { streamingSpeech.stop(); return }
+        if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(true)
+        if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerSpeechStarted(spokenText)
     }
 
     /** Очередь фраз пуста и всё доиграно: цикл снова слушает. */
     private fun onStreamSpeechDrained() {
-        if (!streamSpeechActive) return
+        if (!streamSpeech.isSpeechEnabled) return
         if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
-        streamSpeechActive = false
+        if (!streamSpeech.onQueueDrained()) return
         if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerFinished()
     }
 
@@ -2508,8 +2725,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             cancelStreamSpeech()
             // Ручная озвучка тоже проходит через цикл хода (SPEAKING → снова слушание),
             // поэтому помечается активной: иначе первый же звук был бы заглушён как «чужой».
-            streamSpeechActive = true
+            streamSpeech.begin(true)
             streamingSpeech.speakWhole(text)
+            // Ход ручной озвучки состоит из одного куска: новых фраз не будет, очередь только
+            // доигрывает — цикл должен услышать «ответ закончился» ровно один раз.
+            streamSpeech.end()
             return
         }
         when (voiceOutput.speakNow(text)) {
@@ -3188,13 +3408,25 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val VOICE_SPEAKING_STATUS = "Отвечаю вслух…"
         private const val VOICE_SEGMENT_DROPPED_STATUS = "Ответ ещё звучит — реплика не отправлена"
         /**
-         * L3 (перебивание озвучки голосом) — ВЫКЛЮЧЕНО по умолчанию и включается только руками.
-         * Без AcousticEchoCanceler и AudioSource.VOICE_COMMUNICATION микрофон слышит собственный
-         * динамик, поэтому при включённом флаге цикл перебивает сам себя на первом слове ответа.
-         * Флаг заведён для замеров на живом устройстве (POCO F5): менять значение в shared prefs
-         * вручную, UI-переключателя нет намеренно — пока не подтверждено AEC, включать нельзя.
+         * L3 (перебивание озвучки голосом). Значение по умолчанию — [DEFAULT_VOICE_BARGE_IN]:
+         * перебивание включено, но допуск решает [BargeInGate] вместе с политикой маршрута
+         * ([AudioRoutePolicy]). На динамике без AEC принимается только текстовое доказательство
+         * (partial ASR, слов которого нет в произносимом тексте), на наушниках/Bluetooth —
+         * накопленная речь. «Просто слушать и перебивать» без этого гейта означало бы, что цикл
+         * перебивает сам себя собственным динамиком. Живые замеры (POCO F5) остаются
+         * обязательными: пока акустика не проверена, гейт — единственная защита.
          */
         private const val KEY_VOICE_BARGE_IN = "barge_in"
+
+        /**
+         * Перебивание включено по умолчанию — вместе с гейтом, а не вместо него.
+         *
+         * Раньше было `false`: без [BargeInGate] и маршрута это действительно было опасно.
+         * Теперь опасность закрыта политикой (гейт + [AudioRoutePolicy] + `spokenText` для
+         * echo-проверки), и выключенный по умолчанию флаг означал бы, что семь улучшений
+         * голосового чата не работают у человека из коробки.
+         */
+        internal const val DEFAULT_VOICE_BARGE_IN = true
     }
 }
 

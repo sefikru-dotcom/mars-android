@@ -201,6 +201,10 @@ class HandsFreeCapture(
             }
         } finally {
             running = false
+            // Речь была открыта, а спад прочитать не успели (stop() прервал поток) — отдаём
+            // нулевой тик здесь. Иначе попытка перебивания осталась бы «живой» до конца хода,
+            // и следующая короткая реплика перебивала бы по накопленному времени.
+            if (wasSpeaking && !cancelRequested) notifyProgress(0L)
             releaseQuietly(source)
         }
     }

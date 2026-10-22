@@ -75,6 +75,37 @@ The server auto-compresses mid-turn on its own threshold. The client additionall
 
 `POST /api/chat/start` carries NO reasoning field. The server resolves the effort per turn from session override > per-model pin > global config, so an explicit pick must be persisted via `POST /api/reasoning` before the next chat/start; the mobile client records a pick locally only after the server confirmed it, and hides the selector on any failed/unknown status.
 
+## Voice turns: `voice_mode` and the unsupported-backend refusal
+
+A voice turn adds `"voice_mode": true` to the `POST /api/chat/start` body (text turns omit the
+key entirely, so the payload is byte-identical to the pre-voice contract).
+
+Backend support is not universal (`SERVER-CONTRACT.md` §1): `legacy-direct` / `legacy-journal`
+apply the flag and echo it in the start response, while `runtime-runner` refuses it BEFORE any
+side effect:
+
+```
+HTTP 409 {"code": "unsupported_voice_mode_backend"}
+```
+
+Client contract for that refusal (implemented by `VoiceModeRejectionPolicy` +
+`ChatTurnDispatcher.FrameDecision.REJECT_VOICE_MODE`):
+
+- `describeHttpError` reads `code` as well as `error`, so the refusal reaches the app as
+  `HTTP 409: unsupported_voice_mode_backend` and is classifiable (a bare `HTTP 409` is not —
+  it is also "session is streaming" / stale clarify).
+- It is NOT a transport drop: no recovery job, no reconnect, no `Last-Event-ID` attach.
+- It is NOT retried: the same body yields the same 409, and retrying with `voice_mode: false`
+  would silently downgrade the turn. The queued message leaves the auto-send FIFO and lands in
+  the failed card with the text preserved; its retry button reads "Отправить текстом", i.e. the
+  downgrade only ever happens as an explicit user action.
+- It is NOT a success: the queue row is neither confirmed nor removed.
+- The user is told the truth in Russian, and the voice dialog is switched off (the backend
+  cannot serve it, so leaving the microphone open would only invite the same failure).
+- A queued voice turn keeps `voice_mode` in its persisted record (`QueuedMessage.voiceMode`,
+  SharedPreferences) and replays it at flush time — the voice loop is already off by then, and
+  recomputing the flag from loop state would send `voice_mode: false` silently.
+
 # Chat SSE: resume and reconnect
 
 ## Event ids and the resume cursor
