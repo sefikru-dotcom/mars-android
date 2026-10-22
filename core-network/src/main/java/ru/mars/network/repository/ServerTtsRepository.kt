@@ -1,6 +1,8 @@
 package ru.mars.network.repository
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -10,6 +12,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import ru.mars.network.http.HttpClients
 import ru.mars.network.model.ConsumedDeviceCredential
 import java.io.IOException
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
+import kotlin.coroutines.coroutineContext
 
 /**
  * Исход синтеза через серверный `POST /api/tts`.
@@ -30,8 +36,14 @@ sealed interface ServerTtsResult {
      * @param reason короткая причина: `unauthorized`, `not_found`, `rate_limited`,
      *   `server_error`, `invalid_response`, `transport`.
      * @param httpCode код ответа либо null (транспортный сбой/невалидное тело).
+     * @param retryAfterMs сколько сервер просил подождать (заголовок `Retry-After`),
+     *   уже ограниченное сверху [ServerTtsRetryPolicy.maxDelayMs]; null — сервер не сказал.
      */
-    class Unavailable(val reason: String, val httpCode: Int? = null) : ServerTtsResult
+    class Unavailable(
+        val reason: String,
+        val httpCode: Int? = null,
+        val retryAfterMs: Long? = null,
+    ) : ServerTtsResult
 }
 
 /**
@@ -100,23 +112,38 @@ object ServerTtsContract {
     }
 
     /**
-     * Тело запроса. Флаг `engine` включается только когда задан явно: без него сервер
-     * сам подставляет `edge`.
+     * Тело запроса. Поля `engine` и `voice` включаются только когда заданы явно: без них
+     * сервер подставляет свой дефолт (`engine=edge`, а для piper — свой `voice`), и
+     * Android получает НЕ тот голос, что выбран в вебе. Пара (engine, voice) едет вместе,
+     * потому что имя голоса имеет смысл только внутри движка.
      */
     fun buildBody(
         text: String,
         rate: String? = null,
         pitch: String? = null,
         engine: String? = null,
+        voice: String? = null,
     ): String = buildString(text.length + 96) {
         append("{\"text\":").append(JsonStringEncoding.escape(text))
         engine?.trim()?.takeIf { it.isNotEmpty() }?.let {
             append(",\"engine\":").append(JsonStringEncoding.escape(it))
         }
+        voice?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            append(",\"voice\":").append(JsonStringEncoding.escape(it))
+        }
         prosodyOrNull(rate, "%")?.let { append(",\"rate\":").append(JsonStringEncoding.escape(it)) }
         prosodyOrNull(pitch, "Hz")?.let { append(",\"pitch\":").append(JsonStringEncoding.escape(it)) }
         append('}')
     }
+
+    /** Тело запроса по [request]: один и тот же путь для профиля и для «пусть сервер решит». */
+    fun buildBody(request: ServerTtsSpeechRequest): String = buildBody(
+        text = request.text,
+        rate = request.rate,
+        pitch = request.pitch,
+        engine = request.engine,
+        voice = request.voice,
+    )
 
     /** Ответ похож на синтезированное аудио? */
     fun isAudioPayload(contentType: String?, byteCount: Long): Boolean =
@@ -130,6 +157,87 @@ object ServerTtsContract {
         429 -> "rate_limited"
         in 500..599 -> "server_error"
         else -> "http_$code"
+    }
+}
+
+/**
+ * Политика одного повторного запроса при `429`/`5xx` от `api/tts`.
+ *
+ * Почему повтор нужен именно здесь: у ручки лимитер **2 секунды на клиента**, а потоковая
+ * озвучка отправляет фразы подряд, пока играет предыдущая. Короткая фраза синтезируется
+ * быстрее, чем истекает окно лимитера, и сервер честно отвечает `429 rate limit exceeded`.
+ * Без обработки очередь теряет фразу (дырка в речи), с бесконечными ретраями — залипает.
+ * Поэтому: не больше [maxAttempts] попыток, пауза из `Retry-After` (если сервер её дал),
+ * иначе фиксированный бэкофф, и жёсткий потолок [maxDelayMs] — задержка речи ограничена
+ * сверху, а не «сколько попросил сервер».
+ *
+ * Пауза делается через [delay] в контексте вызывающей корутины: отмена (перебивание,
+ * уход с экрана) прерывает ожидание немедленно, а не через 2 секунды.
+ *
+ * @param maxAttempts всего попыток, включая первую (2 = один повтор).
+ * @param maxDelayMs потолок паузы: больше ждать бессмысленно, лучше отдать фразу как
+ *   пропущенную и продолжить очередь.
+ * @param sleeper подмена ожидания в тестах (по умолчанию настоящий `delay`).
+ */
+class ServerTtsRetryPolicy(
+    val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
+    val maxDelayMs: Long = DEFAULT_MAX_DELAY_MS,
+    private val sleeper: suspend (Long) -> Unit = { millis -> delay(millis) },
+) {
+
+    /** Повторять ли запрос с такой причиной отказа. */
+    fun isRetryable(reason: String): Boolean = reason == "rate_limited" || reason == "server_error"
+
+    /**
+     * Пауза перед повтором: `Retry-After` сервера, иначе бэкофф по номеру попытки.
+     * Всегда в `0..maxDelayMs`.
+     *
+     * @param attempt номер УЖЕ выполненной попытки (1 после первой).
+     * @param retryAfterMs разобранный `Retry-After` или null.
+     */
+    fun delayBeforeRetryMs(attempt: Int, retryAfterMs: Long?): Long {
+        val requested = retryAfterMs ?: (DEFAULT_BACKOFF_MS * attempt)
+        return requested.coerceIn(0L, maxDelayMs)
+    }
+
+    /** Подождать перед повтором. Отмена корутины прерывает ожидание. */
+    suspend fun awaitRetry(attempt: Int, retryAfterMs: Long?) {
+        val wait = delayBeforeRetryMs(attempt, retryAfterMs)
+        if (wait > 0) sleeper(wait)
+    }
+
+    companion object {
+
+        /** Две попытки: один повтор закрывает окно лимитера, дальше фраза пропускается. */
+        const val DEFAULT_MAX_ATTEMPTS: Int = 2
+
+        /**
+         * Потолок паузы. Лимитер `api/tts` — 2 с, поэтому 2.5 с хватает на его окно и не
+         * превращает перебивание в «звук через пять секунд».
+         */
+        const val DEFAULT_MAX_DELAY_MS: Long = 2_500L
+
+        /** Бэкофф, когда `Retry-After` нет: 1.2 с ≈ окно лимитера. */
+        const val DEFAULT_BACKOFF_MS: Long = 1_200L
+
+        /**
+         * Разбор заголовка `Retry-After`: либо число секунд, либо HTTP-дата
+         * (`RFC 1123`). Неизвестный/битый формат — null (тогда работает бэкофф), а не
+         * исключение: заголовок приходит от внешнего прокси и не должен ронять синтез.
+         *
+         * @param nowMs текущее время в мс (для даты); в тестах подменяется.
+         */
+        fun parseRetryAfterMs(header: String?, nowMs: Long): Long? {
+            val raw = header?.trim().orEmpty()
+            if (raw.isEmpty()) return null
+            raw.toLongOrNull()?.let { seconds -> return (seconds * 1_000L).coerceAtLeast(0L) }
+            return try {
+                val at = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME)
+                (at.toInstant().toEpochMilli() - nowMs).coerceAtLeast(0L)
+            } catch (parse: DateTimeParseException) {
+                null
+            }
+        }
     }
 }
 
@@ -150,18 +258,28 @@ object ServerTtsContract {
  */
 class ServerTtsRepository(
     private val client: OkHttpClient = HttpClients.rest,
+    /**
+     * Политика единственного повтора на `429`/`5xx`. Лимитер `api/tts` — 2 с на клиента,
+     * поэтому повтор обязателен, но строго ограничен (см. [ServerTtsRetryPolicy]).
+     */
+    private val retryPolicy: ServerTtsRetryPolicy = ServerTtsRetryPolicy(),
+    /** Часы для разбора `Retry-After` в формате HTTP-даты (в тестах подменяются). */
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
 
     /**
      * Синтезирует [text] на сервере.
      *
      * @param baseUrl базовый адрес бэкенда (например `https://marscore.ru`).
-     * @param credential device-credential: `Authorization: Bearer <accessToken>`.
+     * @param credential device-credential: заголовок `Authorization` со схемой Bearer и
+     *   токеном устройства.
      * @param text уже отфильтрованный для озвучки текст (вызывающий слой обязан
      *   проверить [ServerTtsContract.isSendable] — здесь длина НЕ проверяется, чтобы
      *   факт отправки длинного текста был виден в тестах контракта).
      * @param rate необязательное `rate` (`+10%`); невалидное значение не попадёт в тело.
      * @param pitch необязательное `pitch` (`-5Hz`); невалидное значение не попадёт в тело.
+     * @param engine необязательный движок (`edge`, `piper`); null — выбор сервера.
+     * @param voice необязательный голос движка; имеет смысл только вместе с [engine].
      */
     suspend fun synthesize(
         baseUrl: String,
@@ -169,18 +287,65 @@ class ServerTtsRepository(
         text: String,
         rate: String? = null,
         pitch: String? = null,
+        engine: String? = null,
+        voice: String? = null,
+    ): ServerTtsResult = synthesize(
+        baseUrl = baseUrl,
+        credential = credential,
+        request = ServerTtsSpeechRequest(
+            text = text,
+            engine = engine,
+            voice = voice,
+            rate = rate,
+            pitch = pitch,
+        ),
+    )
+
+    /**
+     * Синтез по готовому [request] (текст + профиль голоса).
+     *
+     * Один повтор на `429`/`5xx`: пауза берётся из `Retry-After`, ограничена
+     * [ServerTtsRetryPolicy.maxDelayMs] и прерывается отменой корутины. Терминальные
+     * ответы (`401`, `404`, `400 invalid voice`) НЕ повторяются — это сигнал сменить
+     * голосовой профиль, а не подождать.
+     */
+    suspend fun synthesize(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        request: ServerTtsSpeechRequest,
     ): ServerTtsResult = withContext(Dispatchers.IO) {
         val url = baseUrl.toHttpUrl().newBuilder()
             .addPathSegments(ServerTtsContract.PATH)
             .build()
-        val body = ServerTtsContract.buildBody(text, rate = rate, pitch = pitch)
+        var attempt = 1
+        var result: ServerTtsResult
+        while (true) {
+            result = attemptOnce(url.toString(), credential, request)
+            val unavailable = result as? ServerTtsResult.Unavailable ?: break
+            val canRetry = attempt < retryPolicy.maxAttempts && retryPolicy.isRetryable(unavailable.reason)
+            if (!canRetry) break
+            // Отмена (перебивание, уход с экрана) рвёт ожидание сразу, без «дожидаем окно».
+            coroutineContext.ensureActive()
+            retryPolicy.awaitRetry(attempt, unavailable.retryAfterMs)
+            attempt++
+        }
+        result
+    }
+
+    /** Одна HTTP-попытка. Исключения не летят наружу: любой сбой — [ServerTtsResult.Unavailable]. */
+    private fun attemptOnce(
+        url: String,
+        credential: ConsumedDeviceCredential,
+        speech: ServerTtsSpeechRequest,
+    ): ServerTtsResult {
+        val body = ServerTtsContract.buildBody(speech)
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer ${credential.accessToken}")
             .header("Accept", "audio/mpeg")
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
-        try {
+        return try {
             client.newCall(request).execute().use { response ->
                 val bytes = response.body?.bytes() ?: ByteArray(0)
                 val contentType = response.header("Content-Type")
@@ -188,6 +353,10 @@ class ServerTtsRepository(
                     response.code !in 200..299 -> ServerTtsResult.Unavailable(
                         reason = ServerTtsContract.reasonForHttpCode(response.code),
                         httpCode = response.code,
+                        retryAfterMs = ServerTtsRetryPolicy.parseRetryAfterMs(
+                            response.header("Retry-After"),
+                            nowMs(),
+                        ),
                     )
                     ServerTtsContract.isAudioPayload(contentType, bytes.size.toLong()) ->
                         ServerTtsResult.Audio(bytes, contentType.orEmpty())

@@ -263,7 +263,7 @@ class ServerTtsSpeechEngineTest {
         val client = RepositoryServerTtsClient(
             baseUrl = "https://marscore.ru",
             credentialProvider = { null },
-            transport = ServerTtsTransport { _, _, _, _, _ ->
+            transport = ServerTtsTransport { _, _, _ ->
                 transportCalls++
                 ServerTtsResult.Audio(byteArrayOf(9), "audio/mpeg")
             },
@@ -277,7 +277,7 @@ class ServerTtsSpeechEngineTest {
     }
 
     @Test
-    fun `bridge forwards text and credential to the repository transport`() {
+    fun `bridge forwards text and the explicit voice profile to the repository transport`() {
         val credential = ConsumedDeviceCredential(
             accessToken = "native-token", tokenType = "Bearer", deviceId = "device-1",
             scopes = listOf("chat:send"), expiresIn = 3600,
@@ -285,14 +285,17 @@ class ServerTtsSpeechEngineTest {
         var seenUrl: String? = null
         var seenText: String? = null
         var seenRate: String? = null
+        var seenEngine: String? = null
+        var seenVoice: String? = null
         val client = RepositoryServerTtsClient(
             baseUrl = "https://marscore.ru",
             credentialProvider = { credential },
-            rate = "+10%",
-            transport = ServerTtsTransport { url, _, text, rate, _ ->
+            transport = ServerTtsTransport { url, _, request ->
                 seenUrl = url
-                seenText = text
-                seenRate = rate
+                seenText = request.text
+                seenRate = request.rate
+                seenEngine = request.engine
+                seenVoice = request.voice
                 ServerTtsResult.Audio(byteArrayOf(7), "audio/mpeg")
             },
         )
@@ -302,7 +305,11 @@ class ServerTtsSpeechEngineTest {
         assertTrue(result is ServerTtsResult.Audio)
         assertEquals("https://marscore.ru", seenUrl)
         assertEquals("динамика", seenText)
+        // Подтверждённый контракт: естественный голос запрашивается явно, а не «по умолчанию».
+        assertEquals("edge", seenEngine)
+        assertEquals("ru-RU-SvetlanaNeural", seenVoice)
         assertEquals("+10%", seenRate)
+        assertEquals("natural-svetlana", client.lastProfileId)
     }
 
     @Test

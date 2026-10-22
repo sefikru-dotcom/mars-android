@@ -10,6 +10,7 @@ import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
+import ru.mars.network.repository.ServerTtsRetryPolicy
 
 /**
  * Контрактные тесты `POST /api/tts` (A5), снятые с боевого `api/route_tts.py` и
@@ -22,6 +23,15 @@ import ru.mars.network.repository.ServerTtsResult
 class ServerTtsRepositoryTest {
 
     private val repository = ServerTtsRepository()
+
+    /**
+     * Без повторов и без пауз: этот набор проверяет МАППИНГ кодов, а не поведение лимитера.
+     * Повтор на `429`/`5xx` проверяется отдельно (`ServerTtsVoiceContractTest`), где для него
+     * есть второй ответ сервера.
+     */
+    private fun singleShotRepository() = ServerTtsRepository(
+        retryPolicy = ServerTtsRetryPolicy(maxAttempts = 1, maxDelayMs = 0L),
+    )
 
     private fun credential() = ConsumedDeviceCredential(
         accessToken = "native-token", tokenType = "Bearer", deviceId = "device-1",
@@ -89,7 +99,7 @@ class ServerTtsRepositoryTest {
                         .setBody("{\"error\":\"$body\"}")
                 )
                 val result = runBlocking {
-                    repository.synthesize(server.url("/").toString(), credential(), "текст")
+                    singleShotRepository().synthesize(server.url("/").toString(), credential(), "текст")
                 }
                 assertTrue("код $code должен быть Unavailable", result is ServerTtsResult.Unavailable)
                 assertEquals(expectedCode, (result as ServerTtsResult.Unavailable).httpCode)

@@ -8,6 +8,7 @@ import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
+import ru.mars.network.repository.ServerTtsSpeechRequest
 
 /**
  * Порты серверного синтеза — единственное, что нужно движку озвучки, чтобы не знать
@@ -24,9 +25,7 @@ fun interface ServerTtsTransport {
     suspend fun synthesize(
         baseUrl: String,
         credential: ConsumedDeviceCredential,
-        text: String,
-        rate: String?,
-        pitch: String?,
+        request: ServerTtsSpeechRequest,
     ): ServerTtsResult
 }
 
@@ -219,27 +218,49 @@ class ServerTtsSpeechEngine(
  * без авторизации и не исключение: движок просто уйдёт в фолбэк (тот же принцип, что у
  * `RepositoryContextCompressionGateway`).
  *
+ * Голос выбирается ЯВНО ([selector]): иначе сервер подставляет свой дефолт и приложение
+ * говорит не тем голосом, что в вебе. Первый кандидат — естественный Svetlana, локальный
+ * piper — только резерв. Понижение профиля идёт по фактическому ответу `api/tts`, а
+ * `429`/`401` профиль НЕ понижают (это лимитер и токен, а не отсутствие голоса).
+ *
+ * @param selector выбор профиля голоса; `null` — «пусть сервер решит сам» (старое поведение,
+ *   нужное только тестам контракта).
  * @param transport точка подмены для тестов; по умолчанию — боевой HTTP-репозиторий.
  */
 class RepositoryServerTtsClient(
     private val baseUrl: String,
     private val credentialProvider: () -> ConsumedDeviceCredential?,
-    private val rate: String? = null,
-    private val pitch: String? = null,
-    private val transport: ServerTtsTransport = ServerTtsTransport { url, credential, text, rateValue, pitchValue ->
-        ServerTtsRepository().synthesize(url, credential, text, rate = rateValue, pitch = pitchValue)
+    private val selector: SpeechVoiceProfileSelector? = SpeechVoiceProfileSelector(),
+    private val transport: ServerTtsTransport = ServerTtsTransport { url, credential, request ->
+        ServerTtsRepository().synthesize(url, credential, request)
     },
 ) : ServerTtsClient {
 
+    /** Последний профиль, которым реально синтезировали (диагностика, без текста). */
+    var lastProfileId: String? = null
+        private set
+
     override suspend fun synthesize(text: String): ServerTtsResult {
         val credential = credentialProvider() ?: return ServerTtsResult.Unavailable("unauthorized")
-        return try {
-            transport.synthesize(baseUrl, credential, text, rate, pitch)
+        val profile = selector?.current()
+        lastProfileId = profile?.id
+        val request = ServerTtsSpeechRequest.of(text, profile)
+        val result = try {
+            transport.synthesize(baseUrl, credential, request)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             // Репозиторий и сам не бросает; страховка — фолбэк вместо падения.
             ServerTtsResult.Unavailable("transport")
         }
+        // Обратная связь только по факту ответа сервера: удача снимает понижение, отказ по
+        // голосу понижает профиль, а лимитер/токен — нет (см. SpeechVoiceProfileSelector).
+        if (profile != null) {
+            when (result) {
+                is ServerTtsResult.Audio -> selector?.onAudio(profile)
+                is ServerTtsResult.Unavailable -> selector?.onUnavailable(profile, result)
+            }
+        }
+        return result
     }
 }
