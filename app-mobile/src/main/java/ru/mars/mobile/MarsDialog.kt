@@ -21,9 +21,11 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import ru.mars.mobile.InteractiveDialogSpec.ANSWER_HINT
+import ru.mars.mobile.InteractiveDialogSpec.SENDING_LABEL
 
 /**
  * Custom Mars modal primitives: the full replacement for the stock Android AlertDialog.
@@ -339,6 +341,45 @@ object MarsDialog {
             strip.visibility = View.VISIBLE
         }
     }
+
+    /**
+     * Indeterminate progress row ("Отправка…") for a respond POST in flight: a slow network must
+     * not look like a dead dialog. Hidden until [setProgress]; the row is a live region so
+     * TalkBack announces the state change when it appears.
+     */
+    fun progressRow(context: Context): View {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            contentDescription = SENDING_LABEL
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        val size = MarsTheme.dp(context, 18)
+        row.addView(
+            ProgressBar(context, null, android.R.attr.progressBarStyleSmall).apply {
+                isIndeterminate = true
+                indeterminateTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
+            },
+            LinearLayout.LayoutParams(size, size),
+        )
+        row.addView(
+            text(context, SENDING_LABEL, 12, MarsTheme.TEXT_MUTED).apply {
+                setPadding(MarsTheme.dp(context, 8), 0, 0, 0)
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        return withBottomMargin(context, row, 8)
+    }
+
+    /** Toggle the [progressRow] visibility. */
+    fun setProgress(row: View?, visible: Boolean) {
+        row?.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    /** Retry action after a transport failure: accent-tinted quiet button (48dp touch target). */
+    fun retryButton(context: Context, label: String, onClick: () -> Unit): Button =
+        button(context, label, MarsTheme.SURFACE_SUBTLE, MarsTheme.ACCENT_TEXT, onClick, MarsTheme.ACCENT_BORDER)
 
     /** Lock/unlock interactive controls while a respond call is in flight. */
     fun setResponding(controls: List<View>, responding: Boolean) {

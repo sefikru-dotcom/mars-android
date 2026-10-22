@@ -8,6 +8,7 @@ import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.AutonomyToggleResult
 import ru.mars.network.repository.InteractiveRequestsRepository
 import ru.mars.network.repository.InteractiveRespondResult
+import ru.mars.network.repository.InteractiveRetryPolicy
 import ru.mars.network.repository.PendingApprovalLookup
 import ru.mars.network.repository.PendingClarifyLookup
 import ru.mars.network.repository.SessionAutonomyRepository
@@ -28,6 +29,17 @@ interface InteractiveRequestView {
     fun setApprovalResponding(responding: Boolean)
     /** Lock/unlock the clarify dialog controls while a respond call is in flight. */
     fun setClarifyResponding(responding: Boolean)
+
+    /**
+     * Offer (non-null) or hide (null) the retry action for a failed approval respond, keeping
+     * the choice the user already made. Default: no-op, so surfaces without a retry affordance
+     * stay valid implementations.
+     */
+    fun setApprovalRetry(attempt: ApprovalAttempt?) = Unit
+
+    /** Same for clarify: the retained free-text/preset answer that may be re-sent unchanged. */
+    fun setClarifyRetry(answer: String?) = Unit
+
     fun dismissApproval()
     fun dismissClarify()
     fun showError(message: String)
@@ -42,9 +54,20 @@ interface InteractiveRequestListener {
      * autonomy server-side (web parity).
      */
     fun onApprovalChoice(choice: ApprovalChoice, grantsAutonomy: Boolean = false)
+
+    /**
+     * User tapped "retry" after a transport failure: re-send the retained choice unchanged.
+     * Default: no-op (a surface without retry never calls it).
+     */
+    fun onApprovalRetry() = Unit
+
     /** User cancelled the approval dialog. MUST NOT be interpreted as a decision (silence ≠ consent). */
     fun onApprovalDismissed()
     fun onClarifyResponse(text: String)
+
+    /** User tapped "retry" after a failed clarify respond: re-send the retained answer. */
+    fun onClarifyRetry() = Unit
+
     /** User cancelled the clarify dialog without answering. */
     fun onClarifyDismissed()
 }
@@ -170,6 +193,17 @@ class InteractiveRequestController(
     private var clarifyResponding = false
 
     /**
+     * The decision the user already submitted, retained across a failed respond call so the
+     * retry action re-sends exactly that choice — "не терять выбор" (the user never has to find
+     * and re-tap the button, and the retry can never send a different decision than the one they
+     * saw). Cleared on success, on a stale prompt and on dismissal/supersede.
+     */
+    private var lastApprovalAttempt: ApprovalAttempt? = null
+
+    /** The clarify answer retained across a failed respond call (preset label or free text). */
+    private var lastClarifyAnswer: String? = null
+
+    /**
      * Bumped by every [dismissAll] (cancel / new session / bind / destroy). Background work
      * captures the generation it was started under; if it changed by the time the result is
      * dispatched, the result is dropped — a prompt belonging to a dead stream/session must never
@@ -217,7 +251,9 @@ class InteractiveRequestController(
         if (id != null && current?.payload?.approvalId == id) return
         currentApproval = event
         approvalResponding = false
+        lastApprovalAttempt = null
         view.setApprovalResponding(false)
+        view.setApprovalRetry(null)
         view.showApproval(event.payload)
     }
 
@@ -228,7 +264,9 @@ class InteractiveRequestController(
         if (id != null && current?.payload?.clarifyId == id) return
         currentClarify = event
         clarifyResponding = false
+        lastClarifyAnswer = null
         view.setClarifyResponding(false)
+        view.setClarifyRetry(null)
         view.showClarify(event.payload)
     }
 
@@ -236,11 +274,31 @@ class InteractiveRequestController(
         if (destroyed) return
         val current = currentApproval ?: return
         if (approvalResponding) return
+        sendApproval(current, ApprovalAttempt(choice, grantsAutonomy))
+    }
+
+    /**
+     * Retry after a transport failure: re-sends the RETAINED decision, never a new one, so a
+     * retry can only ever deliver what the user already agreed to. No-op while a respond is in
+     * flight or when nothing is retained.
+     */
+    override fun onApprovalRetry() {
+        if (destroyed) return
+        val current = currentApproval ?: return
+        if (approvalResponding) return
+        val attempt = lastApprovalAttempt ?: return
+        sendApproval(current, attempt)
+    }
+
+    private fun sendApproval(current: ChatEvent.ApprovalRequired, attempt: ApprovalAttempt) {
         val sid = sessionProvider()
         if (sid.isNullOrBlank()) {
             view.showError(NO_SESSION)
             return
         }
+        // Retained before the call: a failed respond keeps it for the retry action, and the
+        // dialog's progress row hides that action while the retry itself is in flight.
+        lastApprovalAttempt = attempt
         approvalResponding = true
         view.setApprovalResponding(true)
         val gen = generation
@@ -248,7 +306,7 @@ class InteractiveRequestController(
             // Best-effort pre-flight: a cancel/destroy that landed after the tap must not fire
             // the respond call at all (the authoritative guards run on the dispatcher below).
             if (destroyed || gen != generation) return@execute
-            val result = gateway.respondApproval(sid, current.payload, choice, grantsAutonomy)
+            val result = gateway.respondApproval(sid, current.payload, attempt.choice, attempt.grantsAutonomy)
             uiDispatcher.dispatch {
                 if (destroyed || gen != generation) return@dispatch
                 // Identity guard: dialog was superseded or dismissed while the call was in
@@ -276,15 +334,31 @@ class InteractiveRequestController(
                         approvalResponding = false
                         view.setApprovalResponding(false)
                         view.showError(result.message)
+                        offerApprovalRetry(attempt, InteractiveRetryPolicy.isRetryable(result))
                     }
                     is InteractiveRespondResult.NetworkError -> {
                         approvalResponding = false
                         view.setApprovalResponding(false)
                         view.showError(NETWORK_FAILURE)
+                        offerApprovalRetry(attempt, InteractiveRetryPolicy.isRetryable(result))
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Keeps the choice for a manual retry only when re-sending it can actually succeed; a
+     * deterministic 4xx drops it, so the dialog never advertises a dead-end button.
+     */
+    private fun offerApprovalRetry(attempt: ApprovalAttempt, retryable: Boolean) {
+        lastApprovalAttempt = if (retryable) attempt else null
+        view.setApprovalRetry(lastApprovalAttempt)
+    }
+
+    private fun offerClarifyRetry(answer: String, retryable: Boolean) {
+        lastClarifyAnswer = if (retryable) answer else null
+        view.setClarifyRetry(lastClarifyAnswer)
     }
 
     /**
@@ -337,11 +411,25 @@ class InteractiveRequestController(
         if (clarifyResponding) return
         val text = rawText.trim()
         if (text.isEmpty()) return // Nothing to send; the dialog stays open (web: focus input, no-op).
+        sendClarify(current, text)
+    }
+
+    /** Retry with the retained answer (see [onApprovalRetry]); never sends a different text. */
+    override fun onClarifyRetry() {
+        if (destroyed) return
+        val current = currentClarify ?: return
+        if (clarifyResponding) return
+        val answer = lastClarifyAnswer ?: return
+        sendClarify(current, answer)
+    }
+
+    private fun sendClarify(current: ChatEvent.ClarifyRequired, text: String) {
         val sid = current.payload.sessionId?.takeIf { it.isNotBlank() } ?: sessionProvider()
         if (sid.isNullOrBlank()) {
             view.showError(NO_SESSION)
             return
         }
+        lastClarifyAnswer = text
         clarifyResponding = true
         view.setClarifyResponding(true)
         val gen = generation
@@ -368,11 +456,13 @@ class InteractiveRequestController(
                         clarifyResponding = false
                         view.setClarifyResponding(false)
                         view.showError(result.message)
+                        offerClarifyRetry(text, InteractiveRetryPolicy.isRetryable(result))
                     }
                     is InteractiveRespondResult.NetworkError -> {
                         clarifyResponding = false
                         view.setClarifyResponding(false)
                         view.showError(NETWORK_FAILURE)
+                        offerClarifyRetry(text, InteractiveRetryPolicy.isRetryable(result))
                     }
                 }
             }
@@ -464,12 +554,16 @@ class InteractiveRequestController(
     private fun clearApproval() {
         currentApproval = null
         approvalResponding = false
+        lastApprovalAttempt = null
+        view.setApprovalRetry(null)
         state?.resolveApproval()
     }
 
     private fun clearClarify() {
         currentClarify = null
         clarifyResponding = false
+        lastClarifyAnswer = null
+        view.setClarifyRetry(null)
         state?.resolveClarify()
     }
 

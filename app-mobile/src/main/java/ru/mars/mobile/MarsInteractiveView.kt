@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Dialog
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -46,6 +47,11 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
     private var approvalControls: List<View> = emptyList()
     private var approvalError: TextView? = null
     private var approvalResponding = false
+    /** In-flight progress row ("Отправка…") and the retry action of the current approval card. */
+    private var approvalProgress: View? = null
+    private var approvalRetry: Button? = null
+    private var approvalRetryAttempt: ApprovalAttempt? = null
+    private var approvalPayload: ApprovalPayload? = null
 
     private var clarifyDialog: Dialog? = null
     private var clarifyControls: List<View> = emptyList()
@@ -53,10 +59,15 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
     private var clarifyResponding = false
     /** Last shown clarify payload: reused when the free-text editor navigates back to presets. */
     private var currentClarifyPayload: ClarifyPayload? = null
+    private var clarifyProgress: View? = null
+    private var clarifyRetry: Button? = null
+    private var clarifyRetryAnswer: String? = null
 
     override fun showApproval(payload: ApprovalPayload) = onUi {
         dismissDialog(approvalDialog); approvalDialog = null
         approvalError = null; approvalControls = emptyList(); approvalResponding = false
+        approvalProgress = null; approvalRetry = null; approvalRetryAttempt = null
+        approvalPayload = payload
         approvalDialog = MarsDialog.show(activity, onCancel = { listener?.onApprovalDismissed() }) { root ->
             buildApproval(root, payload)
         }
@@ -65,6 +76,7 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
     override fun showClarify(payload: ClarifyPayload) = onUi {
         dismissDialog(clarifyDialog); clarifyDialog = null
         clarifyError = null; clarifyControls = emptyList(); clarifyResponding = false
+        clarifyProgress = null; clarifyRetry = null; clarifyRetryAnswer = null
         currentClarifyPayload = payload
         showClarifyMode(InteractiveDialogSpec.clarifyMode(payload))
     }
@@ -73,23 +85,41 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         approvalResponding = responding
         approvalDialog?.setCancelable(!responding)
         MarsDialog.setResponding(approvalControls, responding)
+        // Sending indicator and the retry action are mutually exclusive with the in-flight call.
+        MarsDialog.setProgress(approvalProgress, responding)
+        renderApprovalRetry()
     }
 
     override fun setClarifyResponding(responding: Boolean) = onUi {
         clarifyResponding = responding
         clarifyDialog?.setCancelable(!responding)
         MarsDialog.setResponding(clarifyControls, responding)
+        MarsDialog.setProgress(clarifyProgress, responding)
+        renderClarifyRetry()
+    }
+
+    override fun setApprovalRetry(attempt: ApprovalAttempt?) = onUi {
+        approvalRetryAttempt = attempt
+        renderApprovalRetry()
+    }
+
+    override fun setClarifyRetry(answer: String?) = onUi {
+        clarifyRetryAnswer = answer
+        renderClarifyRetry()
     }
 
     override fun dismissApproval() = onUi {
         dismissDialog(approvalDialog); approvalDialog = null
         approvalControls = emptyList(); approvalError = null; approvalResponding = false
+        approvalProgress = null; approvalRetry = null; approvalRetryAttempt = null
+        approvalPayload = null
     }
 
     override fun dismissClarify() = onUi {
         dismissDialog(clarifyDialog); clarifyDialog = null
         clarifyControls = emptyList(); clarifyError = null; clarifyResponding = false
         currentClarifyPayload = null
+        clarifyProgress = null; clarifyRetry = null; clarifyRetryAnswer = null
     }
 
     /** Inline ruby strip inside the open dialog; toast only as a fallback when none is open. */
@@ -110,6 +140,8 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         dismissDialog(clarifyDialog); clarifyDialog = null
         approvalControls = emptyList(); clarifyControls = emptyList()
         approvalError = null; clarifyError = null; currentClarifyPayload = null
+        approvalProgress = null; approvalRetry = null; approvalRetryAttempt = null; approvalPayload = null
+        clarifyProgress = null; clarifyRetry = null; clarifyRetryAnswer = null
     }
 
     // --- approval ------------------------------------------------------------------------------
@@ -137,14 +169,24 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         approvalError = error
         root.addView(MarsDialog.block(activity, error, bottomDp = 12))
 
+        // Sending indicator (hidden until a respond is in flight) and the retry action that
+        // re-sends the retained choice after a transport failure (hidden until one fails).
+        val progress = MarsDialog.progressRow(activity)
+        approvalProgress = progress
+        root.addView(progress)
+        val retry = MarsDialog.retryButton(activity, InteractiveDialogSpec.RETRY_PREFIX) { onApprovalRetryTap() }
+        retry.visibility = View.GONE
+        approvalRetry = retry
+        root.addView(MarsDialog.block(activity, retry, bottomDp = 8))
+
         val controls = mutableListOf<View>()
         InteractiveDialogSpec.approvalOptions(payload, autonomyEnabledProvider()).forEach { option ->
-            val button = when {
-                InteractiveDialogSpec.isDeny(option) ->
+            // Style comes from the shared card mapping, so the rendered roles and the tested
+            // UI-state model can never drift apart.
+            val button = when (InteractiveCardPresenter.approvalOptionKind(option)) {
+                InteractiveOptionKind.DESTRUCTIVE ->
                     MarsDialog.denyButton(activity, option.label) { onApprovalTap(option.choice, option.grantsAutonomy) }
-                option.grantsAutonomy ->
-                    MarsDialog.secondaryButton(activity, option.label) { onApprovalTap(option.choice, option.grantsAutonomy) }
-                option.choice == ApprovalChoice.ONCE ->
+                InteractiveOptionKind.PRIMARY ->
                     MarsDialog.primaryButton(activity, option.label) { onApprovalTap(option.choice, option.grantsAutonomy) }
                 else ->
                     MarsDialog.secondaryButton(activity, option.label) { onApprovalTap(option.choice, option.grantsAutonomy) }
@@ -162,6 +204,45 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         listener?.onApprovalChoice(choice, grantsAutonomy)
     }
 
+    private fun onApprovalRetryTap() {
+        if (approvalResponding) return
+        approvalError?.let { MarsDialog.setError(it, null) }
+        listener?.onApprovalRetry()
+    }
+
+    /**
+     * Retry label carries the retained decision ("Повторить: Разрешить один раз") so the user
+     * re-sends exactly what they chose — never a guess. Hidden while the respond is in flight
+     * (the progress row replaces it) and when nothing is retained.
+     */
+    private fun renderApprovalRetry() {
+        val button = approvalRetry ?: return
+        val label = if (!approvalResponding) {
+            InteractiveCardPresenter.approvalRetryLabel(
+                approvalPayload,
+                autonomyEnabledProvider(),
+                approvalRetryAttempt,
+            )
+        } else null
+        button.text = label
+        button.visibility = if (label != null) View.VISIBLE else View.GONE
+    }
+
+    private fun renderClarifyRetry() {
+        val button = clarifyRetry ?: return
+        val label = if (!clarifyResponding) {
+            InteractiveCardPresenter.clarifyRetryLabel(clarifyRetryAnswer)
+        } else null
+        button.text = label
+        button.visibility = if (label != null) View.VISIBLE else View.GONE
+    }
+
+    private fun onClarifyRetryTap() {
+        if (clarifyResponding) return
+        clarifyError?.let { MarsDialog.setError(it, null) }
+        listener?.onClarifyRetry()
+    }
+
     // --- clarify ------------------------------------------------------------------------------
 
     private fun showClarifyMode(mode: ClarifyMode) {
@@ -177,6 +258,13 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
             MarsDialog.setResponding(controls, responding)
             controls
         }.also { it.setCancelable(!responding) }
+        applyClarifyState()
+    }
+
+    /** Re-applies in-flight/retry state to the freshly rebuilt clarify dialog. */
+    private fun applyClarifyState() {
+        MarsDialog.setProgress(clarifyProgress, clarifyResponding)
+        renderClarifyRetry()
     }
 
     private fun buildClarifyPresets(
@@ -195,9 +283,21 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
         }
         val stack = MarsDialog.pillStack(activity, pills, accentLast = true)
         root.addView(stack)
+        addClarifyStatusRows(root)
         val controls = collectClickables(stack)
         clarifyControls = controls
         return controls
+    }
+
+    /** Sending indicator + retry action shared by both clarify modes (presets / free text). */
+    private fun addClarifyStatusRows(root: LinearLayout) {
+        val progress = MarsDialog.progressRow(activity)
+        clarifyProgress = progress
+        root.addView(progress)
+        val retry = MarsDialog.retryButton(activity, InteractiveDialogSpec.RETRY_PREFIX) { onClarifyRetryTap() }
+        retry.visibility = View.GONE
+        clarifyRetry = retry
+        root.addView(MarsDialog.block(activity, retry, bottomDp = 8))
     }
 
     private fun buildClarifyFreeText(
@@ -228,6 +328,7 @@ class MarsInteractiveView(private val activity: Activity) : InteractiveRequestVi
             }
         }
         root.addView(MarsDialog.buttonRow(activity, submit, back))
+        addClarifyStatusRows(root)
         val controls = listOf<View>(input, submit, back)
         clarifyControls = controls
         input.requestFocus()

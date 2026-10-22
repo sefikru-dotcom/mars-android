@@ -157,3 +157,65 @@ A 404 means the journal is GONE — resume is impossible. The client surfaces it
 6. otherwise → `ReattachAfter(delayMs, attempt, resumeFromEventId)`: jittered exponential ladder (500 ms → cap, ×2 per consecutive failure, ±20% jitter), 1-based attempt within the streak, cursor for the `Last-Event-ID` header.
 
 Budget resets are progress-aware to close the replay-only infinite loop. Feed every frame's id to `onStreamFrame(eventId)` (wire it from the same `onEventId` lambda as `StreamResumeTracker`): an id NEWER than the high-water cursor (`RunJournalCursor.isAfter` — same-run ids compare `<stream_id>:<seq>` numerically, different runs are always newer, opaque shapes fall back to inequality) resets the streak AND re-arms the per-turn cap; an id at/below it is a REPLAYED duplicate and resets nothing, so a reconnect loop fed only by journal replays still terminates in `GiveUp`. The legacy `onStreamHealthy()` (id-less liveness proof) resets only the streak and never re-arms the cap. A `/api/health` probe fed through `onServerProbe(...)` (`ServerHealthPolicy.evaluateStatus`) gates the one-shot immediate retry: while the server measures OFFLINE the arm is preserved and the ladder delay is used instead — the radio came back but the backend is still down, so a 0 ms hammer helps nobody. The coordinator never sleeps or re-opens anything itself; the caller owns threading, delays and the actual `attachToStream` call (a GET — never a repeated `POST /api/chat/start`, which would start a second turn), and must call `decide` exactly once per failure.
+
+# Interactive attention: approval / clarify
+
+Both prompts arrive as structured SSE frames carrying an id and explicit options. The client must
+keep the payload structured end to end (id + options + gateway triple) and answer through the
+matching `respond` endpoint — collapsing the frame into transcript text breaks the answer path.
+
+## SSE frames
+
+- `approval` — `{approval_id, command, description, pattern_key(s), allow_permanent, allow_session,
+  run_id?, _gateway_mirror_token?, tool?, risk_level?, choices?, pending_count}` →
+  `ChatEvent.ApprovalRequired` (`ApprovalPayload`).
+- `clarify` — `{clarify_id, question, choices_offered, session_id, requested_at, timeout_seconds,
+  expires_at, pending_count?}` → `ChatEvent.ClarifyRequired` (`ClarifyPayload`).
+
+`approval_id`/`run_id`/`_gateway_mirror_token` must be preserved: the respond endpoint resolves the
+exact queued entry with them, and a partial gateway triple is rejected (409 `gateway_run_unavailable`).
+
+## Respond endpoints
+
+`POST /api/approval/respond` (auth: `Authorization: Bearer <native credential>`)
+
+```json
+{"session_id":"...","choice":"once|session|always|deny","approval_id":"...","run_id":"...","mirror_token":"...","grant_autonomy":true}
+```
+
+- `run_id` + `mirror_token` are sent only when BOTH are present;
+- `grant_autonomy` only when true (the autonomy-grant option), which flips session-wide autonomy
+  server-side; the settled flag comes back in the response and is projected into the UI.
+
+`POST /api/clarify/respond`
+
+```json
+{"session_id":"...","response":"...","clarify_id":"..."}
+```
+
+`session_id` and a non-blank `response` are required; the entry is matched by `clarify_id`.
+
+Pending lookups (queue refresh after an answer): `GET /api/approval/pending?session_id=` →
+`{"pending": {...}|null, "pending_count": N}`, `GET /api/clarify/pending?session_id=` →
+`{"pending": {...}|null}`.
+
+## Response taxonomy and retry rules
+
+| Result | Meaning | Retry with the same choice |
+|---|---|---|
+| 200 `{"ok": true}` | accepted (`stale_cleared` possible for approval) | no — prompt resolved |
+| 409 `{"ok": false, "stale": true}` (clarify) | expired/already resolved | no — dismiss, retrying can never succeed |
+| 200 `{"ok": false}`, 400/401/403/409, 422 | refused; deterministic for this body | no — the UI shows the message only |
+| 408, 429, 5xx | transient transport/server failure | yes |
+| transport error (no HTTP response) | request may or may not have reached the server | yes |
+
+`InteractiveRetryPolicy` (core-network) is the single place implementing this table. On a retryable
+failure the mobile client KEEPS the user's decision (`ApprovalAttempt` / the clarify answer) and
+shows one retry action labelled with that decision ("Повторить: Разрешить для этой сессии"), so a
+retry re-sends exactly what the user approved — never a default and never a re-typed guess. The
+choice is dropped on success, on stale, on dismissal and when the prompt is superseded by the next
+queued entry.
+
+Client states: idle (options enabled) → sending (all options disabled, indeterminate "Отправка…"
+row) → failed (inline error strip + retry action). No silent automatic re-post: an approval is a
+consent, so the retry is always an explicit user action.
