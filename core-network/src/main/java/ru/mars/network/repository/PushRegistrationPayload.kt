@@ -20,6 +20,12 @@ internal object PushRegistrationPayload {
     /** Путь регистрации токена относительно `MarsApi.BASE_URL` — один на клиент. */
     const val REGISTER_PATH = "api/push/fcm/register"
 
+    /**
+     * Путь снятия токена (logout): сервер идемпотентно удаляет его из реестра
+     * устройства, чтобы вышедший из аккаунта телефон не получал чужие пуши.
+     */
+    const val UNREGISTER_PATH = "api/push/fcm/unregister"
+
     /** Платформа клиента в теле регистрации. */
     const val PLATFORM_ANDROID = "android"
 
@@ -28,4 +34,11 @@ internal object PushRegistrationPayload {
         """{"token":${JsonStringEncoding.escape(token)},""" +
             """"platform":${JsonStringEncoding.escape(platform)},""" +
             """"device_name":${JsonStringEncoding.escape(deviceName)}}"""
+
+    /**
+     * Тело запроса снятия токена: только токен. `platform`/`device_name` не нужны —
+     * сервер удаляет запись по токену.
+     */
+    fun unregisterBody(token: String): String =
+        """{"token":${JsonStringEncoding.escape(token)}}"""
 }

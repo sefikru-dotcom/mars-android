@@ -44,14 +44,22 @@ jobs:
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
 
+      # google-services.json в git НЕ хранится (в нём api_key Firebase). Файл
+      # материализуется из секрета на каждом прогоне; без него плагин
+      # com.google.gms.google-services валит сборку невнятной ошибкой «File
+      # google-services.json is missing», поэтому здесь fail-fast с причиной и
+      # проверкой, что расшифровался именно Firebase-конфиг (project_id + client),
+      # а не пустой файл из незаполненного секрета.
       - name: Materialize Firebase google-services.json from CI secrets
         env:
           GS_MOBILE_B64: ${{ secrets.MARS_GOOGLE_SERVICES_MOBILE_B64 }}
           GS_TV_B64: ${{ secrets.MARS_GOOGLE_SERVICES_TV_B64 }}
         run: |
           set -eu
-          printf '%s' "$GS_MOBILE_B64" | base64 -d > app-mobile/google-services.json
-          printf '%s' "$GS_TV_B64" | base64 -d > app-tv/google-services.json
+          printf '%s' "${GS_MOBILE_B64:-}" | base64 -d > app-mobile/google-services.json
+          printf '%s' "${GS_TV_B64:-}" | base64 -d > app-tv/google-services.json
+          python3 scripts/verify-google-services.py app-mobile/google-services.json app-mobile
+          python3 scripts/verify-google-services.py app-tv/google-services.json app-tv
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -117,6 +125,7 @@ jobs:
         run: |
           python3 tests/test_apk_contract_check.py
           python3 tests/test_theme_parity_audit.py
+          python3 tests/test_verify_google_services.py
 
       - name: Verify signing contract with apksigner
         run: |

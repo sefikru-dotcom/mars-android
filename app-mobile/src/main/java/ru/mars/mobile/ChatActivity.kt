@@ -481,11 +481,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = AndroidKeyStoreCredentialStore(this)
-        // FCM push (волна 4): регистрируем токен на сервере, если есть credential
-        // (покрывает первый вход, перезапуск и пропущенную офлайн ротацию), и
-        // запрашиваем POST_NOTIFICATIONS на Android 13+ — без него баннеры молчат.
+        // FCM push: регистрируем токен на сервере, если есть credential
+        // (покрывает первый вход, перезапуск и пропущенную офлайн ротацию),
+        // создаём каналы уведомлений и запрашиваем POST_NOTIFICATIONS на
+        // Android 13+ — без него баннеры молчат.
         PushTokenSync.syncNow(this)
-        ru.mars.mobile.service.PushNotifications.ensurePostPermission(this)
+        ru.mars.mobile.fcm.PushNotifications.ensureChannels(this)
+        ru.mars.mobile.fcm.PushNotifications.ensurePostPermission(this)
         interactiveView = MarsInteractiveView(this)
         interactiveController = InteractiveRequestController(
             view = interactiveView,
@@ -775,6 +777,11 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onResume() {
         super.onResume()
         if (::voiceOutput.isInitialized) voiceOutput.onResume()
+        // FCM push: живой экран подписывается на тихие команды синхронизации.
+        // Отложенная команда (пуш пришёл, пока экран был свёрнут) забирается здесь:
+        // approval/clarify, отправленный сервером в фон, оказывается на экране сразу.
+        ru.mars.mobile.fcm.PushSilentSync.addListener(pushSyncListener)
+        ru.mars.mobile.fcm.PushSilentSync.consumePending()?.let { onPushSyncCommand(it) }
         // Возврат на передний план: хвост стрима не должен ждать trailing-окно —
         // отложенная перерисовка выполняется немедленно (renderMessages гасит job сам).
         if (streamFlushJob != null) renderMessages()
@@ -788,6 +795,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onPause() {
+        ru.mars.mobile.fcm.PushSilentSync.removeListener(pushSyncListener)
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
@@ -3289,10 +3297,43 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         renderMessages()
     }
 
+    /**
+     * Подписка живого экрана на тихие push-команды ([ru.mars.mobile.fcm.PushSilentSync]).
+     * Вызывается на main-потоке, поэтому трогать UI-состояние безопасно.
+     */
+    private val pushSyncListener = ru.mars.mobile.fcm.PushSilentSync.Listener { command ->
+        onPushSyncCommand(command)
+    }
+
+    /**
+     * Тихий push: обновляет данные без уведомления.
+     *
+     * `refresh_pending` — перечитывает pending approval/clarify текущего диалога:
+     * сервер прислал запрос, пока приложение было свёрнуто, и он обязан появиться
+     * сразу после возврата, а не ждать следующего хода. Событие чужого диалога
+     * экран не трогает (тот диалог открывается по тапу, а не подменой текущего).
+     *
+     * `refresh_sessions` — здесь намеренно no-op: список диалогов перечитывается
+     * своим экраном при возврате на него, а подмена открытого чата «на лету»
+     * сломала бы навигацию пользователя.
+     */
+    private fun onPushSyncCommand(command: ru.mars.network.repository.PushSyncCommand) {
+        if (!command.refreshesPending) return
+        if (!::interactiveController.isInitialized) return
+        val target = command.sessionId
+        if (target != null && target != currentSessionId) return
+        interactiveController.refreshPending()
+    }
+
     internal fun leaveChat() {
         // Logout убивает живой ход локально: цикл не должен дёргать API после отзыва
         // credentials, а поздние SSE-кадры убитого хода не должны трогать экран.
         teardownLiveTurn()
+        // Push этого профиля больше не должен приходить на устройство: токен снимается
+        // с сервера (credential читается ДО очистки хранилища ниже) и удаляется
+        // локально, а отложенные тихие команды сбрасываются.
+        PushTokenSync.unregisterNow(this)
+        ru.mars.mobile.fcm.PushSilentSync.reset()
         // Локальные plaintext-данные (черновики, история поиска музыки) стираются синхронно
         // ДО finish() и независимо от асинхронного best-effort revoke; pending-навигация
         // инвалидируется, а повторное сохранение черновика в onPause блокируется.

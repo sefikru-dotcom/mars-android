@@ -411,6 +411,20 @@ class InteractiveRequestController(
         dismissAll()
     }
 
+    /**
+     * Перечитывает pending approval/clarify текущего диалога (тихий push, возврат в
+     * приложение). Существующие диалоги не перебиваются: [showNextPendingApproval]
+     * выходит, если на экране уже открыт другой запрос, поэтому вызов безопасен и
+     * идемпотентен. Вызывать на UI-диспетчере (как и все остальные входы контроллера).
+     */
+    fun refreshPending() {
+        if (destroyed) return
+        val sid = sessionProvider()
+        if (sid.isNullOrBlank()) return
+        showNextPendingApproval(sid)
+        showNextPendingClarify(sid)
+    }
+
     private fun showNextPendingApproval(sid: String) {
         val gen = generation
         executor.execute {

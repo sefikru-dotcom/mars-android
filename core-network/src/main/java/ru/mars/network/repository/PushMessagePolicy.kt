@@ -70,6 +70,10 @@ object PushMessagePolicy {
         notificationBody: String?,
         data: Map<String, String>,
     ): PushNotificationSpec? {
+        // Тихий пуш (синхронизация) не показывается НИКОГДА — даже если сервер по
+        // ошибке приложил title/body: его работу выполняет PushSilentPolicy, а
+        // уведомление «синхронизация» только будило бы пользователя.
+        if (PushSilentPolicy.isSilent(data)) return null
         val title = firstNonBlank(data[KEY_TITLE], notificationTitle)
         val body = firstNonBlank(data[KEY_BODY], notificationBody)
         if (title == null && body == null) return null

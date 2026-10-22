@@ -26,10 +26,24 @@
             android:name=".service.MarsMusicService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
-        <!-- FCM push (волна 4): приём сообщений и ротация токена; регистрация
-             токена на сервере — PushTokenSync (POST /api/push/fcm/register). -->
+        <!-- FCM push: приём сообщений и ротация токена (пакет fcm). Сервис принимает
+             data-only сообщения Марса (видимые — канал/иконка/цвет из палитры,
+             тихие — синхронизация без уведомления) и регистрирует токен на
+             сервере через PushTokenSync (POST /api/push/fcm/register).
+             default_notification_* нужны для notification-payload, который система
+             рисует САМА при убитом процессе: без channel_id Android 8+ отбрасывает
+             такое уведомление, без icon/color — рисует чужой серый значок. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_mars" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/mars_accent" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="mars_push_chat" />
         <service
-            android:name=".service.MarsPushMessagingService"
+            android:name=".fcm.MarsFirebaseMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
