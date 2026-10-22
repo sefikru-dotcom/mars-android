@@ -474,6 +474,29 @@ class ChatUiState(
         return result
     }
 
+    /** Текст последнего ответа ассистента (локальный буфер прерванного хода). */
+    fun lastAssistantText(): String = messages.lastOrNull { it.role == "assistant" }?.text.orEmpty()
+
+    /**
+     * Догон прерванного хода: дописывает локально сохранённый хвост ответа, которого нет
+     * в серверной истории ([InterruptedTurnPolicy]). Ход на сервере уже мёртв, поэтому
+     * фрагмент показывается как завершённый ответ, а не как «печатающийся».
+     *
+     * Возвращает false, если дописывать некуда (нет assistant-сообщения и пустой текст).
+     */
+    fun appendRecoveredFragment(text: String): Boolean {
+        if (text.isBlank()) return false
+        val index = messages.indexOfLast { it.role == "assistant" }
+        if (index >= 0) {
+            val last = messages[index]
+            messages[index] = last.copy(text = last.text + text, status = MessageStatus.COMPLETE)
+        } else {
+            messages += ChatMessage(role = "assistant", text = text, status = MessageStatus.COMPLETE)
+        }
+        status = ChatStatus.RECEIVED
+        return true
+    }
+
     fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); expandedToolGroups.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }

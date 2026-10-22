@@ -56,12 +56,20 @@ object AuthExitStores {
     const val PENDING_QUEUE_PREFS = "mars-pending-messages"
 
     /**
+     * Локальный буфер прерванного хода ([InterruptedTurnStore]): последний видимый текст
+     * ответа, ещё не подтверждённый серверной историей. Это plaintext диалога, поэтому
+     * файл обязан стираться на каждом пути выхода из авторизации.
+     */
+    const val INTERRUPTED_TURN_PREFS = InterruptedTurnStore.PREFS_NAME
+
+    /**
      * Полный упорядоченный набор приватных prefs-файлов, стираемых на каждом пути выхода
      * из авторизации. Порядок зафиксирован: сначала пользовательские plaintext-данные,
      * затем транспортная очередь.
      */
     val PREFS_FILES: List<String> = listOf(
         DRAFTS_PREFS,
+        INTERRUPTED_TURN_PREFS,
         MUSIC_HISTORY_PREFS,
         OFFLINE_CACHE_PREFS,
         TODOS_OFFLINE_PREFS,
