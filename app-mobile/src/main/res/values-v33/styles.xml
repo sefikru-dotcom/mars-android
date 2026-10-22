@@ -19,7 +19,9 @@
         <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
         <item name="android:windowSplashScreenIconBackgroundColor">@color/mars_splash_icon_bg</item>
         <item name="android:windowSplashScreenAnimationDuration">200</item>
-        <item name="android:windowSplashScreenBehavior">1</item>
+        <!-- Enum, а не число: aapt ждёт icon_preferred/default, "1" падает
+             с «expected enum but got (raw string) 1». -->
+        <item name="android:windowSplashScreenBehavior">icon_preferred</item>
         <item name="postSplashScreenTheme">@style/AppTheme</item>
         <item name="android:windowBackground">@drawable/splash_window_bg</item>
     </style>
