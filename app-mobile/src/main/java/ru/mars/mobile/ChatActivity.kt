@@ -89,14 +89,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var messages: LinearLayout
     internal lateinit var scroll: ScrollView
     internal lateinit var input: EditText
-    private lateinit var sendButton: ImageButton
+    internal lateinit var sendButton: ImageButton
     internal lateinit var statusView: TextView
     internal val uiState = ChatUiState()
 
     internal val composerLayoutPresenter = ComposerLayoutPresenter()
-    private lateinit var composerQuoteView: LinearLayout
-    private lateinit var composerQuoteTitle: TextView
-    private lateinit var composerQuoteExcerpt: TextView
+    internal lateinit var composerQuoteView: LinearLayout
+    internal lateinit var composerQuoteTitle: TextView
+    internal lateinit var composerQuoteExcerpt: TextView
     private lateinit var liveRunPlate: LinearLayout
     private lateinit var liveRunLabel: TextView
     private lateinit var liveRunDetail: TextView
@@ -486,7 +486,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // (покрывает первый вход, перезапуск и пропущенную офлайн ротацию), и
         // запрашиваем POST_NOTIFICATIONS на Android 13+ — без него баннеры молчат.
         PushTokenSync.syncNow(this)
-        ru.mars.mobile.service.PushNotifications.ensurePostPermission(this)
+        ru.mars.mobile.fcm.PushNotifications.ensurePostPermission(this)
         interactiveView = MarsInteractiveView(this)
         interactiveController = InteractiveRequestController(
             view = interactiveView,
