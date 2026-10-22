@@ -49,11 +49,16 @@ class InteractiveRequestControllerTest {
         var clarifyDismissals = 0
         val errors = mutableListOf<String>()
         val notices = mutableListOf<String>()
+        /** Every retry offer, including the nulls that hide the action. */
+        val approvalRetries = mutableListOf<ApprovalAttempt?>()
+        val clarifyRetries = mutableListOf<String?>()
 
         override fun showApproval(payload: ApprovalPayload) { shownApprovals += payload }
         override fun showClarify(payload: ClarifyPayload) { shownClarifies += payload }
         override fun setApprovalResponding(responding: Boolean) { approvalResponding += responding }
         override fun setClarifyResponding(responding: Boolean) { clarifyResponding += responding }
+        override fun setApprovalRetry(attempt: ApprovalAttempt?) { approvalRetries += attempt }
+        override fun setClarifyRetry(answer: String?) { clarifyRetries += answer }
         override fun dismissApproval() { approvalDismissals++ }
         override fun dismissClarify() { clarifyDismissals++ }
         override fun showError(message: String) { errors += message }
@@ -814,5 +819,188 @@ class InteractiveRequestControllerTest {
         executor.runAll(); ui.runAll()
 
         assertEquals(listOf(true), changes)
+    }
+
+    // --- retry (choice retention) ---------------------------------------------------------------
+
+    @Test
+    fun approvalNetworkFailureKeepsTheChoiceAndRetryRepostsIt() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.NetworkError("offline")
+
+        controller.onApprovalChoice(ApprovalChoice.SESSION)
+        executor.runAll()
+
+        assertEquals(1, gateway.approvalCalls.size)
+        assertEquals(ApprovalAttempt(ApprovalChoice.SESSION), view.approvalRetries.last())
+        assertEquals(0, view.approvalDismissals) // the dialog stays open for the retry
+        assertEquals(InteractiveRequestController.NETWORK_FAILURE, view.errors.last())
+
+        gateway.approvalResult = InteractiveRespondResult.Accepted()
+        controller.onApprovalRetry()
+        executor.runAll()
+
+        assertEquals(2, gateway.approvalCalls.size)
+        // The retry re-sent exactly the retained decision — not a default and not a new tap.
+        assertEquals(ApprovalChoice.SESSION, gateway.approvalCalls.last().choice)
+        assertFalse(gateway.approvalCalls.last().grantAutonomy)
+        assertEquals(1, view.approvalDismissals)
+        assertNull(view.approvalRetries.last())
+    }
+
+    @Test
+    fun approvalRetryKeepsTheAutonomyGrantFlag() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.NetworkError("offline")
+
+        controller.onApprovalChoice(ApprovalChoice.ONCE, grantsAutonomy = true)
+        executor.runAll()
+        gateway.approvalResult = InteractiveRespondResult.Accepted()
+        controller.onApprovalRetry()
+        executor.runAll()
+
+        assertTrue(gateway.approvalCalls.last().grantAutonomy)
+        assertEquals(ApprovalChoice.ONCE, gateway.approvalCalls.last().choice)
+    }
+
+    @Test
+    fun deterministicRejectionDoesNotOfferRetry() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.Rejected("Invalid choice", 400)
+
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll()
+
+        assertNull(view.approvalRetries.last()) // no dead-end button
+        controller.onApprovalRetry()
+        executor.runAll()
+        assertEquals(1, gateway.approvalCalls.size) // nothing retained → nothing sent
+    }
+
+    @Test
+    fun serverFaultOffersRetry() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.Rejected("upstream timeout", 503)
+
+        controller.onApprovalChoice(ApprovalChoice.DENY)
+        executor.runAll()
+
+        assertEquals(ApprovalAttempt(ApprovalChoice.DENY), view.approvalRetries.last())
+        gateway.approvalResult = InteractiveRespondResult.Accepted()
+        controller.onApprovalRetry()
+        executor.runAll()
+        assertEquals(ApprovalChoice.DENY, gateway.approvalCalls.last().choice)
+    }
+
+    @Test
+    fun retryIsIgnoredWhileARespondIsAlreadyInFlight() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.NetworkError("offline")
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll()
+
+        gateway.approvalResult = InteractiveRespondResult.Accepted()
+        controller.onApprovalRetry()
+        controller.onApprovalRetry() // second tap while the retry POST is queued
+        executor.runAll()
+
+        assertEquals(2, gateway.approvalCalls.size)
+    }
+
+    @Test
+    fun supersedingPromptDropsTheRetainedChoice() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.NetworkError("offline")
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll()
+
+        controller.onEvent(approvalEvent("appr-2")) // queue moved on
+        assertNull(view.approvalRetries.last())
+
+        controller.onApprovalRetry()
+        executor.runAll()
+        assertEquals(1, gateway.approvalCalls.size) // the old decision is never replayed onto appr-2
+    }
+
+    @Test
+    fun dismissalDropsTheRetainedChoice() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(approvalEvent("appr-1"))
+        gateway.approvalResult = InteractiveRespondResult.NetworkError("offline")
+        controller.onApprovalChoice(ApprovalChoice.ONCE)
+        executor.runAll()
+
+        controller.onApprovalDismissed()
+        assertNull(view.approvalRetries.last())
+
+        controller.onApprovalRetry()
+        executor.runAll()
+        assertEquals(1, gateway.approvalCalls.size)
+    }
+
+    @Test
+    fun clarifyNetworkFailureKeepsTheAnswerAndRetryResendsIt() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(clarifyEvent("clr-1", "Кратко"))
+        gateway.clarifyResult = InteractiveRespondResult.NetworkError("offline")
+
+        controller.onClarifyResponse("Подробно, с примерами")
+        executor.runAll()
+
+        assertEquals("Подробно, с примерами", view.clarifyRetries.last())
+        assertEquals(0, view.clarifyDismissals)
+
+        gateway.clarifyResult = InteractiveRespondResult.Accepted()
+        controller.onClarifyRetry()
+        executor.runAll()
+
+        assertEquals(2, gateway.clarifyCalls.size)
+        assertEquals("Подробно, с примерами", gateway.clarifyCalls.last().third)
+        assertEquals(1, view.clarifyDismissals)
+        assertNull(view.clarifyRetries.last())
+    }
+
+    @Test
+    fun clarifyStaleDropsTheRetainedAnswer() {
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onEvent(clarifyEvent("clr-1"))
+        gateway.clarifyResult = InteractiveRespondResult.NetworkError("offline")
+        controller.onClarifyResponse("да")
+        executor.runAll()
+
+        gateway.clarifyResult = InteractiveRespondResult.Stale("expired")
+        controller.onClarifyRetry()
+        executor.runAll()
+
+        // Stale is terminal: dialog dismissed, answer forgotten, no third POST possible.
+        assertEquals(1, view.clarifyDismissals)
+        assertNull(view.clarifyRetries.last())
+        controller.onClarifyRetry()
+        executor.runAll()
+        assertEquals(2, gateway.clarifyCalls.size)
     }
 }

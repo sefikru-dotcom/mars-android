@@ -47,6 +47,12 @@ object InteractiveDialogSpec {
     const val TOOL_PREFIX = "Инструмент"
     const val AUTONOMY_ENABLE_LABEL = "Больше не спрашивать (выполнять автоматически)"
 
+    /** Progress row shown while a respond POST is in flight (options are locked meanwhile). */
+    const val SENDING_LABEL = "Отправка…"
+
+    /** Prefix of the retry action that re-sends the retained choice after a transport failure. */
+    const val RETRY_PREFIX = "Повторить"
+
     /**
      * Approval options in display order; session/permanent gated by the payload flags.
      * When session-wide autonomy is not yet active, a trailing grant offers to enable it
