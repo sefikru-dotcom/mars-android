@@ -1,6 +1,7 @@
 package ru.mars.mobile
 
 import android.app.Application
+import ru.mars.mobile.offline.OfflineStores
 
 /**
  * Application-класс процесса (в манифесте: android:name=".MarsApplication").
@@ -33,6 +34,10 @@ class MarsApplication : Application() {
         // Дисковый кэш обложек: каталог берётся от application-контекста, поэтому
         // привязка живёт здесь, а не в Activity — обложки грузят и чат, и музыка.
         ImageLoader.attachContext(this)
+        // Офлайн-слой: открываем SQLite-базу (очередь + кэш диалогов) в фоне, чтобы
+        // первое чтение кэша в onCreate экрана не делало диск на главной ветке.
+        // Ошибка прогрева не фатальна: экран откроет базу сам при первом обращении.
+        OfflineStores.warmUp(this)
     }
 
     override fun onTrimMemory(level: Int) {

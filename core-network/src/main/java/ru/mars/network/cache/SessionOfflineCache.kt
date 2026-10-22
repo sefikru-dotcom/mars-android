@@ -37,6 +37,11 @@ import ru.mars.network.model.SessionMessage
 class SessionOfflineCache(
     private val store: KeyValueStore,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * Срок годности снимка: снимок старше этого окна не отдаётся (см. [OfflineCacheTtl]).
+     * 0 — TTL выключен (прежнее поведение; нужно экранам без политики и старым тестам).
+     */
+    val maxAgeMillis: Long = 0L,
 ) {
 
     /** Сохраняет снимок списка сессий; false — хранилище не приняло запись. */
@@ -49,12 +54,14 @@ class SessionOfflineCache(
         true
     }.getOrDefault(false)
 
-    /** Сохранённый снимок сессий; null — кэша нет, пустой список или данные битые. */
+    /** Сохранённый снимок сессий; null — кэша нет, пустой список, снимок просрочен или битый. */
     fun loadSessions(): CachedSessions? = runCatching {
         val body = readEnvelope(store.getString(KEY_SESSIONS) ?: return null) ?: return null
+        val savedAt = (body["saved_at"] as? Number)?.toLong() ?: 0L
+        if (!isFresh(savedAt)) return null
         val rows = body["sessions"] as? List<*> ?: return null
         CachedSessions(
-            savedAtEpochMillis = (body["saved_at"] as? Number)?.toLong() ?: 0L,
+            savedAtEpochMillis = savedAt,
             sessions = rows.mapNotNull { rowToSession(it) },
         )
     }.getOrNull()
@@ -91,17 +98,32 @@ class SessionOfflineCache(
         }.getOrDefault(false)
     }
 
-    /** Сохранённые сообщения диалога; null — кэша нет или данные битые. */
-    fun loadMessages(sessionId: String): List<SessionMessage>? {
+    /**
+     * Сохранённые сообщения диалога; null — кэша нет, снимок просрочен или данные битые.
+     * Возраст копии нужен экрану («показана копия 5 мин назад») — см. [loadMessagesWithMeta].
+     */
+    fun loadMessages(sessionId: String): List<SessionMessage>? = loadMessagesWithMeta(sessionId)?.messages
+
+    /**
+     * Сохранённые сообщения диалога вместе с моментом сохранения снимка.
+     *
+     * Тот же контракт, что у [loadMessages] (битые данные/просроченный снимок → null,
+     * успешное чтение продвигает LRU), но хост получает [CachedMessages.savedAtEpochMillis]
+     * и может честно подписать экран возрастом копии — индикатор офлайна должен говорить
+     * не только «нет связи», но и насколько данные старые.
+     */
+    fun loadMessagesWithMeta(sessionId: String): CachedMessages? {
         if (sessionId.isBlank()) return null
-        val messages = runCatching {
+        val snapshot = runCatching {
             val body = readEnvelope(store.getString(messagesKey(sessionId)) ?: return null) ?: return null
+            val savedAt = (body["saved_at"] as? Number)?.toLong() ?: 0L
+            if (!isFresh(savedAt)) return null
             val rows = body["messages"] as? List<*> ?: return null
-            rows.mapNotNull { rowToMessage(it) }
+            CachedMessages(savedAt, rows.mapNotNull { rowToMessage(it) })
         }.getOrNull()
         // Успешное чтение — признак «диалог недавно открывали»: продвигаем в LRU.
-        if (messages != null) touchLru(sessionId)
-        return messages
+        if (snapshot != null) touchLru(sessionId)
+        return snapshot
     }
 
     /** Удаляет кэш сообщений одного диалога (сессия удалена/завершена). */
@@ -169,10 +191,18 @@ class SessionOfflineCache(
         if (sessionId.isBlank()) return null
         return runCatching {
             val body = readEnvelope(store.getString(messagesKey(sessionId)) ?: return null) ?: return null
+            val savedAt = (body["saved_at"] as? Number)?.toLong() ?: 0L
+            // Просроченный снимок не участвует и в локальном поиске: искать по нему —
+            // значит показывать как найденное то, что экран не покажет.
+            if (!isFresh(savedAt)) return null
             val rows = body["messages"] as? List<*> ?: return null
             rows.mapNotNull { rowToMessage(it) }
         }.getOrNull()
     }
+
+    /** Годен ли снимок с моментом [savedAtEpochMillis] по TTL этого кэша ([OfflineCacheTtl]). */
+    private fun isFresh(savedAtEpochMillis: Long): Boolean =
+        OfflineCacheTtl.isFresh(savedAtEpochMillis, clock(), maxAgeMillis)
 
     /**
      * Нормализованная выдержка вокруг первого совпадения: переводы строк схлопываются
@@ -383,4 +413,13 @@ data class SessionSearchResult(
 data class CachedSessions(
     val savedAtEpochMillis: Long,
     val sessions: List<SessionItem>,
+)
+
+/**
+ * Снимок транскрипта диалога с моментом сохранения: экран офлайна показывает не только
+ * «нет связи», но и возраст копии («Кэш (5 мин назад)»).
+ */
+data class CachedMessages(
+    val savedAtEpochMillis: Long,
+    val messages: List<SessionMessage>,
 )

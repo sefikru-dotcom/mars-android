@@ -52,8 +52,16 @@ object AuthExitStores {
      */
     const val KNOWLEDGE_OFFLINE_PREFS = "mars_knowledge_offline"
 
-    /** Очередь неотправленных сообщений. */
+    /** Очередь неотправленных сообщений (legacy prefs-адаптер; данные мигрируются в SQLite). */
     const val PENDING_QUEUE_PREFS = "mars-pending-messages"
+
+    /**
+     * Файл SQLite-базы офлайн-слоя ([ru.mars.mobile.offline.OfflineDatabase]): очередь
+     * неотправленных и кэш диалогов. Отдельная константа, а не имя prefs-файла: база
+     * стирается своим хранилищем ([ru.mars.mobile.offline.OfflineStores.clearAll]) одной
+     * транзакцией, поэтому в [PREFS_FILES] её нет — но в cleanup-набор она входит.
+     */
+    const val OFFLINE_DB = "mars-offline.db"
 
     /**
      * Полный упорядоченный набор приватных prefs-файлов, стираемых на каждом пути выхода
@@ -74,23 +82,31 @@ object AuthExitStores {
     /**
      * Чистая (JVM-тестируемая) фабрика [AuthExitCleanup]: по одному хранилищу на каждый
      * файл из [PREFS_FILES], построение — через [storeFor].
+     *
+     * [extras] — хранилища, которые не являются prefs-файлами (SQLite-база офлайн-слоя:
+     * очередь + кэш одной транзакцией). Они идут в конец набора: сначала пользовательские
+     * plaintext-данные, затем транспортная очередь, затем база.
      */
-    fun cleanup(storeFor: (String) -> ClearableLocalStore): AuthExitCleanup =
-        AuthExitCleanup(PREFS_FILES.map(storeFor))
+    fun cleanup(
+        storeFor: (String) -> ClearableLocalStore,
+        extras: List<ClearableLocalStore> = emptyList(),
+    ): AuthExitCleanup = AuthExitCleanup(PREFS_FILES.map(storeFor) + extras)
 
     /**
      * Android-вариант фабрики: приватные SharedPreferences на каждый файл из [PREFS_FILES].
      * [overrides] позволяет экрану передать уже живой экземпляр хранилища (например,
      * очередь неотправленных, которую экран использует для отправки), чтобы cleanup и
-     * рабочая логика делили один объект.
+     * рабочая логика делили один объект. [extras] — не-prefs хранилища (см. первый cleanup).
      */
     @JvmOverloads
     fun cleanup(
         context: Context,
         overrides: Map<String, ClearableLocalStore> = emptyMap(),
-    ): AuthExitCleanup = cleanup { name ->
-        overrides[name] ?: defaultStore(context, name)
-    }
+        extras: List<ClearableLocalStore> = emptyList(),
+    ): AuthExitCleanup = cleanup(
+        storeFor = { name -> overrides[name] ?: defaultStore(context, name) },
+        extras = extras,
+    )
 
     /**
      * Фабрика [LogoutFlow] с существующим сетевым контрактом revoke

@@ -129,7 +129,10 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
 internal suspend fun ChatActivity.showOfflineSessionCopy(sessionId: String) {
     // Флаг ставится даже без кэша: автофлаш очереди не должен блокироваться вечно.
     initialRestoreDone = true
-    val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
+    // С метаданными: возраст копии — часть индикатора офлайна (иначе «нет связи» читается
+    // как «данные свежие» даже когда копии сутки).
+    val snapshot = withContext(Dispatchers.IO) { offlineCache.loadMessagesWithMeta(sessionId) } ?: return
+    val cached = snapshot.messages
     drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
     composerGuard.onSessionSwitch()
     currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
@@ -150,7 +153,10 @@ internal suspend fun ChatActivity.showOfflineSessionCopy(sessionId: String) {
     restoreComposerDraft()
     echoPendingOfflineMessages()
     autoScroll.pinToBottom()
-    explicitStatus = ChatActivity.OFFLINE_SESSION_HINT
+    explicitStatus = OfflineIndicatorPolicy.chatHint(
+        savedAtEpochMillis = snapshot.savedAtEpochMillis,
+        nowEpochMillis = System.currentTimeMillis(),
+    )
     renderMessages()
     setStatus()
     updateControlsFromSection()

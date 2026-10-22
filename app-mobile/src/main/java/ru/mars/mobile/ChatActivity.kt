@@ -46,8 +46,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.offline.OfflineStores
+import ru.mars.mobile.offline.SqlitePendingMessageStore
 import ru.mars.network.cache.SessionOfflineCache
-import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
@@ -507,20 +508,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", MODE_PRIVATE))
         drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences(DRAFTS_PREFS, MODE_PRIVATE)))
         // Офлайн-устойчивость: кэш сессий/транскриптов (core-network) и персистентная очередь
-        // неотправленных сообщений. Оба хранилища — приватные plaintext-данные, поэтому входят
-        // в cleanup при logout/реавторизации вместе с черновиками.
-        val offlineCachePrefs = getSharedPreferences(OFFLINE_CACHE_PREFS, MODE_PRIVATE)
-        val pendingQueuePrefs = getSharedPreferences(PENDING_QUEUE_PREFS, MODE_PRIVATE)
-        offlineCache = SessionOfflineCache(SharedPreferencesKeyValueStore(offlineCachePrefs))
-        val pendingMessageStore = PrefsPendingMessageStore(pendingQueuePrefs)
+        // неотправленных сообщений. Носитель — SQLite ([OfflineStores]): очередь и кэш
+        // переживают смерть процесса атомарно, а не перезаписью целого prefs-блоба.
+        // Оба хранилища — приватные plaintext-данные, поэтому входят в cleanup при
+        // logout/реавторизации вместе с черновиками.
+        val offlineDb = OfflineStores.database(this)
+        offlineCache = OfflineStores.sessionCache(this)
+        val pendingMessageStore = SqlitePendingMessageStore(offlineDb)
         offlineQueue = OfflineMessageQueuePolicy(pendingMessageStore)
         // Выход из авторизации (logout/реавторизация) обязан стереть локальные plaintext-данные
         // до finish(), и после этого черновики больше не сохраняются (onPause не пишет назад).
         // Набор хранилищ — единая фабрика AuthExitStores (P0): живой экземпляр очереди
-        // передаётся override'ом, чтобы cleanup и отправка делили один объект.
+        // передаётся override'ом, чтобы cleanup и отправка делили один объект; сама база
+        // стирается отдельным хранилищем (очередь + кэш одной транзакцией).
         authExitCleanup = AuthExitStores.cleanup(
             context = this,
             overrides = mapOf(AuthExitStores.PENDING_QUEUE_PREFS to pendingMessageStore),
+            extras = listOf(offlineDb),
         )
         compressionController = ContextCompressionController(
             host = CompressionHostBridge(),
@@ -3374,7 +3378,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         internal const val OFFLINE_CACHE_PREFS = AuthExitStores.OFFLINE_CACHE_PREFS
         internal const val PENDING_QUEUE_PREFS = AuthExitStores.PENDING_QUEUE_PREFS
         /** Подсказки статуса для офлайн-сценариев (копия из кэша / вложения / лимит очереди). */
-        internal const val OFFLINE_SESSION_HINT = "Нет связи — показана сохранённая копия диалога"
+        internal const val OFFLINE_SESSION_HINT = OfflineIndicatorPolicy.CHAT_OFFLINE_BASE
         internal const val OFFLINE_ATTACHMENT_STATUS = "Нет связи — сообщение с вложениями будет отправлено после восстановления"
         internal const val MESSAGE_NOT_DELIVERED_STATUS = "Сообщение из очереди не доставлено — лимит попыток исчерпан"
         /** Status line while a reattach to the session's live stream is being established. */

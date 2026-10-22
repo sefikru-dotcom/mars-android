@@ -20,6 +20,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.http.HttpClients
@@ -46,7 +47,11 @@ class SettingsActivity : ComponentActivity() {
      * сессий/задач/проектов, очередь неотправленных) — единая фабрика [AuthExitStores],
      * тот же набор хранилищ, что и на других путях выхода из авторизации.
      */
-    private val authExitCleanup by lazy { AuthExitStores.cleanup(this) }
+    private val authExitCleanup by lazy {
+        // SQLite-база офлайн-слоя (очередь + кэш диалогов) входит в cleanup: logout не должен
+        // оставлять ни неотправленных текстов, ни копий переписки.
+        AuthExitStores.cleanup(this, extras = listOf(OfflineStores.database(this)))
+    }
 
     /**
      * Проба лёгкости/задержки боевого хоста Марса. Путь `health` публичный
@@ -316,8 +321,15 @@ class SettingsActivity : ComponentActivity() {
                 val file = File(prefsDir, SettingsCachePolicy.prefsFileName(name))
                 if (file.isFile) runCatching { file.length() }.getOrDefault(0L) else 0L
             }
+            // SQLite-база офлайн-слоя лежит в databases/, а не в shared_prefs/: без неё
+            // строка «кэш» занижала бы реальный объём (очередь + копии диалогов).
+            val dbDir = File(applicationInfo.dataDir, SettingsCachePolicy.DATABASES_DIR)
+            val dbSizes = SettingsCachePolicy.CACHE_DB_FILES.map { name ->
+                val file = File(dbDir, name)
+                if (file.isFile) runCatching { file.length() }.getOrDefault(0L) else 0L
+            }
             val label = SettingsCachePolicy.formatSize(
-                SettingsCachePolicy.totalSizeBytes(cacheFileSizes + prefsSizes),
+                SettingsCachePolicy.totalSizeBytes(cacheFileSizes + prefsSizes + dbSizes),
             )
             withContext(Dispatchers.Main) {
                 cacheSizeText.text = label
@@ -344,6 +356,9 @@ class SettingsActivity : ComponentActivity() {
             SettingsCachePolicy.CACHE_PREFS_FILES.forEach { name ->
                 runCatching { AuthExitStores.defaultStore(this@SettingsActivity, name).clearAll() }
             }
+            // Очередь и кэш диалогов живут в SQLite: чистим базу той же кнопкой (одна
+            // транзакция), иначе «очистить кэш» оставлял бы неотправленные сообщения.
+            runCatching { OfflineStores.clearAll(this@SettingsActivity) }
             cacheDir.deleteRecursively()
             cacheDir.mkdirs()
             ImageLoader.trimMemoryCache()
