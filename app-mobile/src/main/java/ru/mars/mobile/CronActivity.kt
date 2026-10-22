@@ -221,7 +221,7 @@ class CronActivity : ComponentActivity() {
     }
 
     private fun cardAction(label: String, onClick: () -> Unit): Button =
-        MarsDialog.quietButton(this, label, onClick).apply {
+        MarsDialog.quietButton(this, label, onClick = onClick).apply {
             textSize = 12f
             setPadding(dp(10), dp(6), dp(10), dp(6))
         }
