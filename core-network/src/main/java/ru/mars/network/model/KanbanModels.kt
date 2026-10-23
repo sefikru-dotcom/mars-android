@@ -274,3 +274,15 @@ data class KanbanDispatchOutcomePayload(
     val skippedLocked: Boolean = false,
     val memoryPressure: String? = null,
 )
+
+/**
+ * One row of `POST /api/kanban/tasks/bulk` → `results[]`: per-task verdict of a
+ * batched mutation. The bridge reports per-id failures instead of failing the
+ * whole request (`{"id": "...", "ok": false, "error": "not found"}`), so a batch
+ * where one card was deleted server-side still applies to the rest.
+ */
+data class KanbanBulkEntry(
+    val id: String = "",
+    val ok: Boolean = false,
+    val error: String? = null,
+)

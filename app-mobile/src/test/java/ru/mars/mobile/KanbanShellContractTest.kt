@@ -11,13 +11,13 @@ import java.io.File
  * Контракт перевода экрана «Канбан» на общий shell разделов ([SectionScaffold])
  * и общие состояния ([SectionStateViews]): shell используется и НЕ дублируется
  * экраном, polling onResume/onPause, offline/no-auth/error/retry-семантика и
- * read-only-контракт доски сохранены при миграции.
+ * контракт записи доски (ровно device-Bearer allowlist `api/auth.py`) сохранены.
  *
  * Instrumented-слоя для телефона в проекте нет, поэтому проводка закреплена как
  * контракт по РЕАЛЬНОМУ production-исходнику (паттерн [ProjectsShellContractTest]
  * из [ChatClickPathContractTest]): любое удаление shell-вызова, возврат
- * самодельной шапки/insets/спиннера, отмена polling или появление мутаций
- * kanban ломает тест. Поведенческая часть (сопоставление фазы экрана с общим
+ * самодельной шапки/insets/спиннера, отмена polling или появление мутации вне
+ * allowlist записи ломает тест. Поведенческая часть (сопоставление фазы экрана с общим
  * [SectionScreenState]) проверяется на чистой [KanbanPolicy] в последнем тесте.
  */
 class KanbanShellContractTest {
@@ -141,25 +141,95 @@ class KanbanShellContractTest {
         )
     }
 
-    // --- Read-only ------------------------------------------------------------------------
+    // --- Запись (device-Bearer allowlist api/auth.py) -------------------------------------
 
     @Test
-    fun `screen stays a read-only showcase`() {
+    fun `writes use exactly the device-bearer allowlisted routes`() {
         val repoCalls = Regex("(?<![.\\w])repository\\.(\\w+)").findAll(kanban).map { it.groupValues[1] }.toSet()
         assertEquals(
-            "Допустимы только GET-вызовы доски/статистики/конфига/карточки/досок/исполнителей",
-            setOf("getBoard", "getStats", "getConfig", "getTaskDetail", "getBoards", "getAssignees", "streamEvents"),
+            "Чтение доски + ровно шесть методов записи; сверх allowlist api/auth.py экран не ходит",
+            setOf(
+                "getBoard", "getStats", "getConfig", "getTaskDetail", "getBoards", "getAssignees", "streamEvents",
+                "createTask", "patchTask", "addComment", "setBlocked", "bulkUpdate", "linkTasks",
+            ),
             repoCalls
         )
         assertFalse(
-            "Никаких мутаций kanban в UI (вызовы функций)",
-            Regex("(?i)\\b(createTask|editTask|moveTask|deleteTask|dispatch)\\w*\\s*\\(").containsMatchIn(kanban)
+            "dispatch и управление досками экрану недоступны — их нет в device-Bearer allowlist",
+            Regex("(?<![.\\w])repository\\.(dispatch|createBoard|patchBoard|deleteBoard|switchBoard|updateConfig)\\w*\\(")
+                .containsMatchIn(kanban)
+        )
+    }
+
+    @Test
+    fun `write ports forward the selected board into the repository`() {
+        assertTrue(
+            "Все записи собраны в одном порту KanbanWritePort",
+            kanban.contains("writes = object : KanbanWritePort")
+        )
+        listOf("createTask", "patchTask", "addComment", "setBlocked", "bulkUpdate", "linkTasks").forEach { call ->
+            assertTrue("порт обязан пробросить $call в репозиторий", kanban.contains("repository.$call("))
+        }
+        assertTrue(
+            "Запись адресуется текущей доске экрана (как ?board= у WebUI)",
+            kanban.contains("board = board,")
+        )
+    }
+
+    @Test
+    fun `write actions are gated by the server read-only flag`() {
+        assertTrue(
+            "Панель записи скрывается, когда сервер объявил доску read-only",
+            render.contains("actionsRow.visibility = if (writable) View.VISIBLE else View.GONE")
         )
         assertTrue(
-            "Диалог задачи — только «Закрыть»",
-            kanban.contains("KanbanPolicy.CLOSE_LABEL") && kanban.contains("MarsDialog.quietButton")
+            "Гейт записи — флаг доски и отсутствие фазы NO_AUTH",
+            kanban.contains("!presenter.state.serverReadOnly && presenter.state.phase != KanbanPhase.NO_AUTH")
         )
-        assertFalse("Диалог задачи не содержит кнопок действия", kanban.contains("MarsDialog.primaryButton"))
+        assertTrue(
+            "Деталь задачи под тем же гейтом, что и панель",
+            kanban.substringAfter("private fun showTaskDetail").contains("isWritable()")
+        )
+        listOf(
+            "showCreateTaskDialog", "showMoveDialog", "showCommentDialog",
+            "showBlockDialog", "showLinkDialog",
+        ).forEach { dialog ->
+            assertTrue("диалог записи $dialog объявлен", kanban.contains("private fun $dialog("))
+        }
+        assertTrue(
+            "Массовые действия идут через bulk-порт презентера",
+            kanban.contains("presenter.archiveTasks(") && kanban.contains("presenter.moveTasks(")
+        )
+        assertTrue(
+            "Комментарий/блокировка/связь идут через презентер, а не напрямую в сеть",
+            kanban.contains("presenter.comment(") &&
+                kanban.contains("presenter.setBlocked(") &&
+                kanban.contains("presenter.linkTasks(")
+        )
+    }
+
+    @Test
+    fun `selection mode survives a re-render and never opens the detail dialog`() {
+        assertTrue(
+            "Выбранные id живут вне render() — перерисовка доски их не теряет",
+            kanban.contains("private val selectedIds = linkedSetOf<String>()")
+        )
+        assertTrue(
+            "Долгое нажатие включает режим выбора карточки",
+            kanban.contains("enterSelectionMode(card.id)")
+        )
+        assertTrue(
+            "Тап в режиме выбора переключает выбор, а не открывает деталь",
+            kanban.contains("if (selectionMode) toggleSelection(card.id) else showTaskDetail(card)")
+        )
+        assertTrue(
+            "Выбор чистится по фактическим карточкам доски (исчезнувшая карточка не висит в выборе)",
+            render.contains("selectedIds.retainAll(visible)")
+        )
+        assertTrue(
+            "Выход из режима выбора доступен пользователю",
+            kanban.contains("KanbanPolicy.CANCEL_LABEL) { exitSelectionMode() }")
+        )
     }
 
     @Test

@@ -16,7 +16,7 @@ import ru.mars.network.model.KanbanTaskLinks
 
 /**
  * Чистые JVM-тесты [KanbanPolicy]: тексты, тона статусов, возрастные метки,
- * колонки/карточки, статистика и модель read-only диалога задачи.
+ * колонки/карточки, статистика и модель диалога задачи.
  */
 class KanbanPolicyTest {
 

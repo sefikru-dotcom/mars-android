@@ -14,10 +14,69 @@ import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanConfig
 import ru.mars.network.model.KanbanStats
 import ru.mars.network.model.KanbanTaskDetail
+import ru.mars.network.repository.KanbanBulkResult
+import ru.mars.network.repository.KanbanCommentResult
+import ru.mars.network.repository.KanbanLinkResult
 import ru.mars.network.repository.KanbanStreamFrame
+import ru.mars.network.repository.KanbanTaskWriteResult
 
 /**
- * Презентер read-only экрана «Канбан»: оркестрирует загрузку доски
+ * Порты записи доски — одна группа, чтобы конструктор презентера не распухал на
+ * шесть отдельных лямбд. Возвращают типизированный результат репозитория:
+ * презентер не разбирает HTTP, а переводит исход в [KanbanActionOutcome].
+ */
+interface KanbanWritePort {
+
+    suspend fun createTask(board: String?, title: String, body: String?, assignee: String?): KanbanTaskWriteResult
+
+    suspend fun patchTask(
+        board: String?,
+        taskId: String,
+        status: String? = null,
+        title: String? = null,
+        body: String? = null,
+        assignee: String? = null,
+    ): KanbanTaskWriteResult
+
+    suspend fun addComment(board: String?, taskId: String, text: String): KanbanCommentResult
+
+    suspend fun setBlocked(board: String?, taskId: String, blocked: Boolean, reason: String? = null): KanbanTaskWriteResult
+
+    suspend fun bulkUpdate(board: String?, ids: List<String>, status: String? = null, archive: Boolean? = null): KanbanBulkResult
+
+    suspend fun linkTasks(board: String?, parentId: String, childId: String): KanbanLinkResult
+
+    /** Порт без проводки: любое действие честно отвечает «недоступно». */
+    object Unavailable : KanbanWritePort {
+        override suspend fun createTask(board: String?, title: String, body: String?, assignee: String?) =
+            KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+
+        override suspend fun patchTask(
+            board: String?,
+            taskId: String,
+            status: String?,
+            title: String?,
+            body: String?,
+            assignee: String?,
+        ) =
+            KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+
+        override suspend fun addComment(board: String?, taskId: String, text: String) =
+            KanbanCommentResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+
+        override suspend fun setBlocked(board: String?, taskId: String, blocked: Boolean, reason: String?) =
+            KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+
+        override suspend fun bulkUpdate(board: String?, ids: List<String>, status: String?, archive: Boolean?) =
+            KanbanBulkResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+
+        override suspend fun linkTasks(board: String?, parentId: String, childId: String) =
+            KanbanLinkResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+    }
+}
+
+/**
+ * Презентер экрана «Канбан»: оркестрирует загрузку доски
  * (порт [fetchBoard] — в app это `KanbanRepository().getBoard(...)`),
  * статистику ([fetchStats], best-effort) и детальную карточку задачи
  * ([fetchTaskDetail]). Чистый JVM-класс без Android-импортов: сеть,
@@ -40,9 +99,14 @@ import ru.mars.network.repository.KanbanStreamFrame
  * обновляя только курсор `latest_event_id`. Дефектный `changed:false` без
  * кэша трактуется как пустая доска (EMPTY), а не как ошибка.
  *
- * Контракт read-only: здесь нет и не может появиться операций
- * create/edit/move/delete/dispatch — серверный Bearer allowlist допускает
- * только GET/HEAD /api/kanban/, а экран является витриной данных.
+ * Запись: экран создаёт карточки, двигает их по статусам, комментирует,
+ * блокирует/разблокирует, связывает родителя с потомком и делает массовые
+ * операции ([createTask], [moveTask], [comment], [setBlocked], [linkTasks],
+ * [archiveTasks], [moveTasks]). Все порты записи собраны в [KanbanWritePort];
+ * после подтверждённого сервером изменения доска перечитывается ([refresh]),
+ * поэтому экран показывает серверную правду, а не свою догадку. Порт по
+ * умолчанию — [KanbanWritePort.Unavailable]: без явной проводки (unit-тесты
+ * витрины) запись отвечает отказом, а не падением.
  */
 class KanbanPresenter(
     private val hasCredential: () -> Boolean,
@@ -82,6 +146,8 @@ class KanbanPresenter(
      */
     private val events: suspend (since: Long?, board: String?) -> Flow<KanbanStreamFrame> =
         { _, _ -> emptyFlow() },
+    /** Порты записи доски; [KanbanWritePort.Unavailable] по умолчанию — витрина без записи. */
+    private val writes: KanbanWritePort = KanbanWritePort.Unavailable,
 ) {
 
     var state: KanbanUiState = KanbanUiState(
@@ -351,15 +417,186 @@ class KanbanPresenter(
     }
 
     /**
-     * Read-only детальная карточка задачи: возвращает готовую UI-модель
-     * диалога или null (сеть/сервер/парсинг) — Activity показывает
-     * [KanbanPolicy.MSG_DETAIL_ERROR]. Никаких операций изменения задачи.
+     * Детальная карточка задачи: возвращает готовую UI-модель диалога или null
+     * (сеть/сервер/парсинг) — Activity показывает [KanbanPolicy.MSG_DETAIL_ERROR].
+     * Чтение ничего не меняет: действия записи — отдельные методы ниже.
      */
     suspend fun loadTaskDetail(taskId: String): KanbanTaskDetailUi? {
         if (!hasCredential()) return null
         val detail = runCatching { fetchTaskDetail(taskId) }.getOrNull() ?: return null
         return KanbanPolicy.detailUi(detail, nowEpochSeconds())
     }
+
+    // ── запись доски ──
+
+    /**
+     * Создать карточку. Пустое название отсекается локально (сервер ответил бы
+     * 400 «title is required»); пустые тело/исполнитель не отправляются вовсе —
+     * исполнителя тогда проставит серверный дефолт доски.
+     */
+    suspend fun createTask(title: String, body: String?, assignee: String?): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_TITLE_REQUIRED)
+        val result = guarded({ KanbanTaskWriteResult.Failed(readable(it.message)) }) {
+            writes.createTask(selectedBoard, cleanTitle, body.clean(), assignee.clean())
+        }
+        return taskOutcome(result, KanbanPolicy.MSG_TASK_CREATED)
+    }
+
+    /**
+     * Переместить карточку в другой статус — `PATCH …/patch` с одним `status`.
+     * `running` сервер отклоняет (состояние claim-протокола), поэтому пикер
+     * [KanbanPolicy.moveTargets] его и не предлагает.
+     */
+    suspend fun moveTask(taskId: String, status: String): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        if (taskId.isBlank() || status.isBlank()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_TASK_GONE)
+        val result = guarded({ KanbanTaskWriteResult.Failed(readable(it.message)) }) {
+            writes.patchTask(selectedBoard, taskId.trim(), status = status.trim())
+        }
+        return taskOutcome(result, KanbanPolicy.MSG_TASK_MOVED)
+    }
+
+    /** Добавить комментарий к задаче; пустой текст не уходит на сервер. */
+    suspend fun comment(taskId: String, text: String): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        val cleanText = text.trim()
+        if (taskId.isBlank()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_TASK_GONE)
+        if (cleanText.isEmpty()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_COMMENT_REQUIRED)
+        val result = guarded({ KanbanCommentResult.Failed(readable(it.message)) }) {
+            writes.addComment(selectedBoard, taskId.trim(), cleanText)
+        }
+        return when (result) {
+            is KanbanCommentResult.Added -> {
+                // Счётчик комментариев на карточке рисуется из board-конверта —
+                // без перечитки он отставал бы от только что отправленного текста.
+                refresh()
+                KanbanActionOutcome.ok(KanbanPolicy.MSG_COMMENT_ADDED)
+            }
+            is KanbanCommentResult.NotFound -> KanbanActionOutcome.failed(readable(result.message))
+            is KanbanCommentResult.Failed -> KanbanActionOutcome.failed(readable(result.message))
+        }
+    }
+
+    /**
+     * Заблокировать/разблокировать карточку структурными глаголами бриджа
+     * (`block`/`unblock`) — сервер сам пишет событие блокировки и причину.
+     */
+    suspend fun setBlocked(taskId: String, blocked: Boolean, reason: String? = null): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        if (taskId.isBlank()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_TASK_GONE)
+        val result = guarded({ KanbanTaskWriteResult.Failed(readable(it.message)) }) {
+            writes.setBlocked(selectedBoard, taskId.trim(), blocked, reason.clean())
+        }
+        return taskOutcome(
+            result,
+            if (blocked) KanbanPolicy.MSG_TASK_BLOCKED else KanbanPolicy.MSG_TASK_UNBLOCKED,
+        )
+    }
+
+    /** Связать родителя с потомком (`POST /api/kanban/links`). */
+    suspend fun linkTasks(parentId: String, childId: String): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        if (parentId.isBlank() || childId.isBlank()) {
+            return KanbanActionOutcome.failed(KanbanPolicy.MSG_LINK_IDS_REQUIRED)
+        }
+        if (parentId.trim() == childId.trim()) {
+            // Сервер принял бы самоссылку, но это заведомо бессмысленный граф.
+            return KanbanActionOutcome.failed(KanbanPolicy.MSG_LINK_IDS_REQUIRED)
+        }
+        val result = guarded({ KanbanLinkResult.Failed(readable(it.message)) }) {
+            writes.linkTasks(selectedBoard, parentId.trim(), childId.trim())
+        }
+        return when (result) {
+            is KanbanLinkResult.Linked -> {
+                // Связи видны на карточке (link_counts) — показываем серверный граф.
+                refresh()
+                KanbanActionOutcome.ok(
+                    if (result.changed == false) KanbanPolicy.MSG_LINK_GONE else KanbanPolicy.MSG_LINK_ADDED
+                )
+            }
+            is KanbanLinkResult.NotFound -> KanbanActionOutcome.failed(readable(result.message))
+            is KanbanLinkResult.Failed -> KanbanActionOutcome.failed(readable(result.message))
+        }
+    }
+
+    /** Массовый архив: `POST /api/kanban/tasks/bulk` с `archive:true`. */
+    suspend fun archiveTasks(ids: List<String>): KanbanActionOutcome =
+        bulkOutcome(ids) { cleanIds -> writes.bulkUpdate(selectedBoard, cleanIds, archive = true) }
+
+    /** Массовое перемещение: тот же bulk-маршрут с общим `status`. */
+    suspend fun moveTasks(ids: List<String>, status: String): KanbanActionOutcome {
+        if (status.isBlank()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_TASK_GONE)
+        return bulkOutcome(ids) { cleanIds -> writes.bulkUpdate(selectedBoard, cleanIds, status = status.trim()) }
+    }
+
+    /**
+     * Общий контур массовой операции: пустой выбор — отказ без запроса; частичный
+     * успех — успех с припиской о неудавшихся id (бридж отвечает по каждой
+     * задаче, поэтому одна удалённая карточка не отменяет всю пачку).
+     */
+    private suspend fun bulkOutcome(
+        ids: List<String>,
+        call: suspend (List<String>) -> KanbanBulkResult,
+    ): KanbanActionOutcome {
+        if (!hasCredential()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_NO_AUTH)
+        val cleanIds = ids.map(String::trim).filter(String::isNotEmpty).distinct()
+        if (cleanIds.isEmpty()) return KanbanActionOutcome.failed(KanbanPolicy.MSG_SELECTION_EMPTY)
+        val result = guarded({ KanbanBulkResult.Failed(readable(it.message)) }) { call(cleanIds) }
+        if (result is KanbanBulkResult.Failed) return KanbanActionOutcome.failed(readable(result.message))
+        val applied = result as KanbanBulkResult.Applied
+        val done = applied.entries.count { it.ok }
+        if (done > 0) refresh()
+        val base = KanbanPolicy.bulkDoneLabel(done)
+        return when {
+            applied.entries.isEmpty() -> KanbanActionOutcome.failed(KanbanPolicy.MSG_SELECTION_EMPTY)
+            applied.allOk -> KanbanActionOutcome.ok(base)
+            else -> KanbanActionOutcome(
+                ok = done > 0,
+                message = if (done == 0) {
+                    KanbanPolicy.MSG_BULK_PARTIAL + readable(applied.failures.firstOrNull()?.error)
+                } else {
+                    base + " · " + KanbanPolicy.MSG_BULK_PARTIAL + readable(applied.failures.firstOrNull()?.error)
+                },
+            )
+        }
+    }
+
+    /** Единый исход task-образной записи: успех -> перечитать доску серверной правдой. */
+    private suspend fun taskOutcome(result: KanbanTaskWriteResult, success: String): KanbanActionOutcome =
+        when (result) {
+            is KanbanTaskWriteResult.Updated -> {
+                refresh()
+                KanbanActionOutcome.ok(success)
+            }
+            is KanbanTaskWriteResult.NotFound -> KanbanActionOutcome.failed(readable(result.message))
+            is KanbanTaskWriteResult.Failed -> KanbanActionOutcome.failed(readable(result.message))
+        }
+
+    /**
+     * Вызов порта записи: сетевой/парсинг сбой не должен ронять экран. Отмена
+     * корутины пробрасывается как есть — иначе уход с экрана выглядел бы ошибкой.
+     */
+    private suspend fun <T> guarded(fallback: (Throwable) -> T, call: suspend () -> T): T =
+        try {
+            call()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            fallback(error)
+        }
+
+    /** Тексты бриджа английские: известные случаи переводим, остальное показываем как есть. */
+    private fun readable(message: String?): String = when {
+        message.isNullOrBlank() -> KanbanPolicy.MSG_WRITE_UNAVAILABLE
+        message.contains("not found", ignoreCase = true) -> KanbanPolicy.MSG_TASK_GONE
+        message.contains("title is required", ignoreCase = true) -> KanbanPolicy.MSG_TITLE_REQUIRED
+        else -> message
+    }
+
+    /** Пустое/пробельное значение -> null: такие поля в тело не попадают. */
+    private fun String?.clean(): String? = this?.trim()?.takeIf(String::isNotEmpty)
 
     /** Общая воронка board-конверта -> состояние (load и refresh с changed:true). */
     private fun applyBoard(board: KanbanBoard?) {

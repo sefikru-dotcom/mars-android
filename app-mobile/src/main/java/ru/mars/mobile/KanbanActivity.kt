@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
@@ -16,7 +17,9 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -25,13 +28,18 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.KanbanAssigneesResult
 import ru.mars.network.repository.KanbanBoardResult
 import ru.mars.network.repository.KanbanBoardsResult
+import ru.mars.network.repository.KanbanBulkResult
+import ru.mars.network.repository.KanbanCommentResult
 import ru.mars.network.repository.KanbanConfigResult
+import ru.mars.network.repository.KanbanLinkResult
 import ru.mars.network.repository.KanbanRepository
 import ru.mars.network.repository.KanbanStatsResult
 import ru.mars.network.repository.KanbanTaskDetailResult
+import ru.mars.network.repository.KanbanTaskWriteResult
 
 /**
  * Read-only экран «Канбан»: доска `GET /api/kanban/board` (колонки, задачи,
@@ -49,9 +57,14 @@ import ru.mars.network.repository.KanbanTaskDetailResult
  * polling стартует в onResume и гаснет в onPause, `changed:false` не мигает,
  * offline-safe stale-доска сохраняется.
  *
- * Контракт read-only: экран — витрина. Никаких create/edit/move/delete/
- * dispatch ни в UI, ни в презентере; серверный Bearer allowlist допускает
- * только GET/HEAD /api/kanban/. Диалог задачи — только чтение.
+ * Запись: экран не только показывает доску, но и меняет её — создаёт карточки
+ * (кнопка «Новая задача»), двигает их по статусам, комментирует, блокирует и
+ * связывает из диалога задачи, а также делает массовые операции (режим выбора
+ * карточек -> архив/перемещение). Все мутации идут через [KanbanWritePort]
+ * презентера, который Activity собирает из [KanbanRepository]; маршруты — ровно
+ * те, что `api/auth.py` допускает для device-Bearer (`/api/kanban/tasks`,
+ * `.../{id}/patch|comments|block|unblock`, `/tasks/bulk`, `/links`).
+ * Управление досками и dispatch из приложения недоступны.
  *
  * Переход из меню: раздел левого бара ([AppDestination.KANBAN]) через
  * [AppNavIntents.sectionIntent]. Публичная точка входа для интегратора —
@@ -78,8 +91,23 @@ class KanbanActivity : ComponentActivity() {
     private lateinit var assigneesRow: LinearLayout
     private lateinit var assigneesScroll: HorizontalScrollView
 
+    // Панель действий записи: «Новая задача» и вход в режим массового выбора.
+    private lateinit var actionsRow: LinearLayout
+    private lateinit var createButton: TextView
+    private lateinit var selectButton: TextView
+    private lateinit var selectionBar: LinearLayout
+    private lateinit var selectionLabel: TextView
+
     private var pollJob: Job? = null
     private var liveJob: Job? = null
+
+    /**
+     * Режим выбора карточек: тап по карточке выбирает её вместо открытия
+     * диалога, выбранные id живут здесь и переживают перерисовку доски
+     * (render() пересобирает колонки на каждый кадр).
+     */
+    private var selectionMode = false
+    private val selectedIds = linkedSetOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -151,6 +179,93 @@ class KanbanActivity : ComponentActivity() {
                 if (credential == null) emptyFlow()
                 else repository.streamEvents(MarsApi.BASE_URL, credential, board = board, since = since)
             },
+            // Порт записи. Доску презентер передаёт сам (его выбранный slug), поэтому
+            // карточка всегда меняется на той доске, которую видит оператор, а не на
+            // серверной «активной». Без сохранённой пары — честный отказ вместо тихого
+            // 401: экран уже в фазе NO_AUTH и действия не рисуются.
+            writes = object : KanbanWritePort {
+                override suspend fun createTask(
+                    board: String?,
+                    title: String,
+                    body: String?,
+                    assignee: String?,
+                ): KanbanTaskWriteResult {
+                    val credential = store.read()
+                        ?: return KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.createTask(
+                        MarsApi.BASE_URL, credential,
+                        title = title, body = body, assignee = assignee, board = board,
+                    )
+                }
+
+                override suspend fun patchTask(
+                    board: String?,
+                    taskId: String,
+                    status: String?,
+                    title: String?,
+                    body: String?,
+                    assignee: String?,
+                ): KanbanTaskWriteResult {
+                    val credential = store.read()
+                        ?: return KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.patchTask(
+                        MarsApi.BASE_URL, credential, taskId,
+                        status = status, title = title, body = body, assignee = assignee, board = board,
+                    )
+                }
+
+                override suspend fun addComment(
+                    board: String?,
+                    taskId: String,
+                    text: String,
+                ): KanbanCommentResult {
+                    val credential = store.read()
+                        ?: return KanbanCommentResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.addComment(
+                        MarsApi.BASE_URL, credential, taskId, text, board = board,
+                    )
+                }
+
+                override suspend fun setBlocked(
+                    board: String?,
+                    taskId: String,
+                    blocked: Boolean,
+                    reason: String?,
+                ): KanbanTaskWriteResult {
+                    val credential = store.read()
+                        ?: return KanbanTaskWriteResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.setBlocked(
+                        MarsApi.BASE_URL, credential, taskId,
+                        blocked = blocked, reason = reason, board = board,
+                    )
+                }
+
+                override suspend fun bulkUpdate(
+                    board: String?,
+                    ids: List<String>,
+                    status: String?,
+                    archive: Boolean?,
+                ): KanbanBulkResult {
+                    val credential = store.read()
+                        ?: return KanbanBulkResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.bulkUpdate(
+                        MarsApi.BASE_URL, credential, ids,
+                        status = status, archive = archive, board = board,
+                    )
+                }
+
+                override suspend fun linkTasks(
+                    board: String?,
+                    parentId: String,
+                    childId: String,
+                ): KanbanLinkResult {
+                    val credential = store.read()
+                        ?: return KanbanLinkResult.Failed(KanbanPolicy.MSG_WRITE_UNAVAILABLE)
+                    return repository.linkTasks(
+                        MarsApi.BASE_URL, credential, parentId, childId, board = board,
+                    )
+                }
+            },
         )
         setContentView(buildView())
         presenter.subscribe { render(it) }
@@ -191,8 +306,9 @@ class KanbanActivity : ComponentActivity() {
         // статус-строка — общий shell разделов; экран добавляет только контент.
         scaffold = SectionScaffold.create(this, KanbanPolicy.SCREEN_TITLE, ::load)
 
-        // Бейдж «доска только для чтения» (server read_only=true или всегда —
-        // мобильный клиент не выполняет мутации kanban по контракту волны).
+        // Бейдж «доска только для чтения»: только серверный флаг read_only=true
+        // (старый мост без маршрутов записи). При обычной доске бейджа нет —
+        // экран умеет писать, и постоянная плашка «только чтение» была бы ложью.
         readOnlyBadge = TextView(this).apply {
             visibility = View.GONE
             text = KanbanPolicy.NOTICE_READ_ONLY
@@ -218,6 +334,50 @@ class KanbanActivity : ComponentActivity() {
             addView(liveBadge, LinearLayout.LayoutParams(-2, -2))
         }
         scaffold.content.addView(headerBadges, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+
+        // Панель записи: «Новая задача» и вход в режим выбора карточек. Скрывается
+        // целиком, когда сервер объявил доску read-only: предлагать действие,
+        // которое мост гарантированно отклонит, нельзя.
+        actionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        createButton = actionChip(KanbanPolicy.CREATE_LABEL, R.drawable.ic_add) { showCreateTaskDialog() }
+        selectButton = actionChip(KanbanPolicy.SELECT_LABEL, null) { toggleSelectionMode() }
+        actionsRow.addView(createButton, LinearLayout.LayoutParams(-2, -2))
+        actionsRow.addView(selectButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+        scaffold.content.addView(actionsRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        // Панель массовых действий: только в режиме выбора — иначе она занимала бы
+        // место на экране, где ничего не выбрано.
+        selectionLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_EM)
+            setPadding(dp(2), 0, 0, dp(6))
+        }
+        val selectionButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        selectionButtons.addView(actionChip(KanbanPolicy.MOVE_LABEL, null) { showBulkMoveDialog() })
+        selectionButtons.addView(
+            actionChip(KanbanPolicy.ARCHIVE_LABEL, null) { archiveSelected() },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) },
+        )
+        selectionButtons.addView(
+            MarsDialog.quietButton(this, KanbanPolicy.CANCEL_LABEL) { exitSelectionMode() },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) },
+        )
+        selectionBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            addView(selectionLabel, LinearLayout.LayoutParams(-1, -2))
+            addView(
+                HorizontalScrollView(this@KanbanActivity).apply {
+                    isHorizontalScrollBarEnabled = false
+                    addView(selectionButtons, ViewGroup.LayoutParams(-2, -2))
+                },
+                LinearLayout.LayoutParams(-1, -2),
+            )
+        }
+        scaffold.content.addView(selectionBar, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
 
         // Переключатель досок. Строка скрыта целиком, пока сервер не отдал список:
         // пустая «Доски» на старом мосте была бы шумом на экране.
@@ -290,13 +450,30 @@ class KanbanActivity : ComponentActivity() {
         headerBadges.visibility =
             if (state.serverReadOnly || state.live) View.VISIBLE else View.GONE
 
-        val notice = state.notice
-        if (notice != null) {
-            scaffold.statusLine.visibility = View.VISIBLE
-            scaffold.statusLine.text = notice
-            scaffold.statusLine.setTextColor(MarsTheme.STATUS_WARNING)
-        } else {
-            scaffold.statusLine.visibility = View.GONE
+        // Запись доступна, пока сервер не объявил доску read-only и есть пара.
+        val writable = isWritable()
+        actionsRow.visibility = if (writable) View.VISIBLE else View.GONE
+        if (!writable && selectionMode) {
+            selectionMode = false
+            selectedIds.clear()
+        }
+        if (selectionMode) {
+            // Карточка могла исчезнуть (архив/чужая правка между кадрами) — выбор
+            // чистим по факту, иначе массовая операция ушла бы по мёртвому id.
+            val visible = state.columns.flatMap { it.cards }.mapTo(mutableSetOf()) { it.id }
+            selectedIds.retainAll(visible)
+        }
+        selectionBar.visibility = if (writable && selectionMode) View.VISIBLE else View.GONE
+        selectButton.visibility = if (selectionMode) View.GONE else View.VISIBLE
+        selectionLabel.text = KanbanPolicy.selectionLabel(selectedIds.size)
+
+        when (val notice = state.notice) {
+            null -> scaffold.statusLine.visibility = View.GONE
+            else -> {
+                scaffold.statusLine.visibility = View.VISIBLE
+                scaffold.statusLine.text = notice
+                scaffold.statusLine.setTextColor(MarsTheme.STATUS_WARNING)
+            }
         }
 
         renderStats(state.stats)
@@ -505,15 +682,26 @@ class KanbanActivity : ComponentActivity() {
         return shell
     }
 
-    /** Карточка задачи: тап — read-only диалог [showTaskDetail]. */
+    /**
+     * Карточка задачи. В обычном режиме тап открывает диалог задачи; в режиме
+     * выбора тап включает/снимает выбор, а долгое нажатие включает режим выбора
+     * на этой карточке (жест, привычный по спискам с массовыми действиями).
+     */
     private fun taskCardView(card: KanbanTaskCardUi): View {
+        val selected = selectionMode && card.id in selectedIds
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = MarsTheme.card(
                 this@KanbanActivity,
-                if (card.isBlocked) MarsTheme.BLOCKED_CARD_BG else MarsTheme.SURFACE_CARD,
+                if (selected) MarsTheme.ACCENT_BG
+                else if (card.isBlocked) MarsTheme.BLOCKED_CARD_BG
+                else MarsTheme.SURFACE_CARD,
                 radiusDp = 12,
-                strokeColor = if (card.isBlocked) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_SUBTLE,
+                strokeColor = when {
+                    selected -> MarsTheme.ACCENT
+                    card.isBlocked -> MarsTheme.ACCENT_BORDER
+                    else -> MarsTheme.BORDER_SUBTLE
+                },
             )
             setPadding(dp(12), dp(10), dp(12), dp(10))
             // Тап-цель карточки: минимум 48dp по высоте даже у карточки без футера.
@@ -526,10 +714,17 @@ class KanbanActivity : ComponentActivity() {
                 append(", ")
                 append(card.status.ifBlank { KanbanPolicy.STATUS_UNKNOWN_LABEL })
                 card.ageLabel?.let { append(", ").append(it) }
+                if (selected) append(", ").append(KanbanPolicy.SELECTED_BADGE)
             }
             isClickable = true
             isFocusable = true
-            setOnClickListener { showTaskDetail(card) }
+            setOnClickListener {
+                if (selectionMode) toggleSelection(card.id) else showTaskDetail(card)
+            }
+            setOnLongClickListener {
+                enterSelectionMode(card.id)
+                true
+            }
         }
         view.addView(TextView(this).apply {
             text = card.title
@@ -585,6 +780,14 @@ class KanbanActivity : ComponentActivity() {
         if (card.childCount > 0) {
             footer.addView(cardBadge(KanbanPolicy.childrenLabel(card.childCount), MarsTheme.TEXT_MUTED))
         }
+        if (selectionMode) {
+            footer.addView(
+                cardBadge(
+                    if (selected) KanbanPolicy.SELECTED_BADGE else KanbanPolicy.SELECT_HINT,
+                    if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED,
+                )
+            )
+        }
         view.addView(footer, LinearLayout.LayoutParams(-1, -2))
         return view
     }
@@ -601,9 +804,10 @@ class KanbanActivity : ComponentActivity() {
     }
 
     /**
-     * Read-only диалог задачи (тап по карточке): заголовок, статус, тело,
-     * факты, комментарии, связи, хвост ленты событий. Единственное действие —
-     * «Закрыть»: мутации kanban мобильным клиентом не выполняются.
+     * Диалог задачи (тап по карточке): заголовок, статус, тело, факты,
+     * комментарии, связи, хвост ленты событий. Действия записи (перемещение,
+     * комментарий, блокировка, связь) появляются только на записываемой доске и
+     * каждая уходит отдельным запросом — сам диалог остаётся чистым GET.
      */
     private fun showTaskDetail(card: KanbanTaskCardUi) = openTaskDetail(card.id, card.title)
 
@@ -611,8 +815,7 @@ class KanbanActivity : ComponentActivity() {
      * Диалог задачи по id (`GET /api/kanban/tasks/{id}`). [fallbackTitle] —
      * заголовок на случай, когда сервер не ответил (карточка исчезла из доски).
      * Связи задачи (`links {parents, children}`) показаны реальными id:
-     * тап/фокус по пилюле открывает диалог связанной задачи — навигация только
-     * на чтение, как и весь экран.
+     * тап/фокус по пилюле открывает диалог связанной задачи (навигация — GET).
      */
     private fun openTaskDetail(taskId: String, fallbackTitle: String) {
         lifecycleScope.launch {
@@ -625,7 +828,8 @@ class KanbanActivity : ComponentActivity() {
                 }
                 return@launch
             }
-            MarsDialog.show(this@KanbanActivity) { root ->
+            var dialogRef: Dialog? = null
+            dialogRef = MarsDialog.show(this@KanbanActivity) { root ->
                 root.addView(MarsDialog.header(this@KanbanActivity, detail.title, detail.status.ifBlank { null }))
                 detail.body?.let { body -> root.addView(MarsDialog.paragraph(this@KanbanActivity, body)) }
                 detail.rows.forEach { row ->
@@ -658,9 +862,352 @@ class KanbanActivity : ComponentActivity() {
                     root.addView(MarsDialog.caption(this@KanbanActivity, KanbanPolicy.EVENTS_LABEL))
                     root.addView(MarsDialog.pillRow(this@KanbanActivity, detail.eventLabels))
                 }
-                listOf(MarsDialog.quietButton(this@KanbanActivity, KanbanPolicy.CLOSE_LABEL) {})
+
+                // Действия записи. Каждое закрывает диалог и уходит своим запросом:
+                // после мутации данные карточки уже не те, что показаны здесь, а
+                // доска перечитывается презентером.
+                val controls = mutableListOf<View>()
+                fun action(button: View) {
+                    controls += button
+                    root.addView(MarsDialog.block(this@KanbanActivity, button, bottomDp = 8))
+                }
+                if (isWritable()) {
+                    action(
+                        MarsDialog.primaryButton(this@KanbanActivity, KanbanPolicy.MOVE_LABEL) {
+                            dialogRef?.dismiss()
+                            showMoveDialog(detail.id, detail.status)
+                        }
+                    )
+                    action(
+                        MarsDialog.secondaryButton(this@KanbanActivity, KanbanPolicy.COMMENT_LABEL) {
+                            dialogRef?.dismiss()
+                            showCommentDialog(detail.id)
+                        }
+                    )
+                    val blocked = detail.tone == KanbanStatusTone.BLOCKED
+                    action(
+                        MarsDialog.secondaryButton(
+                            this@KanbanActivity,
+                            if (blocked) KanbanPolicy.UNBLOCK_LABEL else KanbanPolicy.BLOCK_LABEL,
+                        ) {
+                            dialogRef?.dismiss()
+                            if (blocked) runWrite { presenter.setBlocked(detail.id, blocked = false) }
+                            else showBlockDialog(detail.id)
+                        }
+                    )
+                    action(
+                        MarsDialog.secondaryButton(this@KanbanActivity, KanbanPolicy.LINK_LABEL) {
+                            dialogRef?.dismiss()
+                            showLinkDialog(detail.id)
+                        }
+                    )
+                }
+                action(MarsDialog.quietButton(this@KanbanActivity, KanbanPolicy.CLOSE_LABEL) { dialogRef?.dismiss() })
+                controls
             }
         }
+    }
+
+    // ── запись: общие помощники ──
+
+    /**
+     * Запись разрешена, пока сервер не объявил доску read-only и сохранена пара.
+     * Без пары запрос ушёл бы без Bearer и вернул 401 — такие кнопки не нужны.
+     */
+    private fun isWritable(): Boolean =
+        !presenter.state.serverReadOnly && presenter.state.phase != KanbanPhase.NO_AUTH
+
+    /**
+     * Один вызов записи с единым показом итога: тост с готовой строкой презентера
+     * (успех и причина отказа формулируются в [KanbanPolicy], не здесь) и выход из
+     * режима выбора после успеха — выбранных карточек в прежнем виде уже нет.
+     */
+    private fun runWrite(block: suspend () -> KanbanActionOutcome) {
+        lifecycleScope.launch {
+            val outcome = block()
+            toast(outcome.message)
+            if (outcome.ok && selectionMode) exitSelectionMode()
+        }
+    }
+
+    private fun toast(message: String?) {
+        message?.takeIf { it.isNotBlank() }?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+    }
+
+    /** ── запись: режим выбора карточек ── */
+
+    private fun toggleSelectionMode() {
+        if (selectionMode) {
+            exitSelectionMode()
+            return
+        }
+        selectionMode = true
+        selectedIds.clear()
+        render(presenter.state)
+    }
+
+    /** Долгое нажатие по карточке: включить выбор и сразу отметить эту карточку. */
+    private fun enterSelectionMode(taskId: String) {
+        if (!isWritable()) {
+            return
+        }
+        selectionMode = true
+        selectedIds.add(taskId)
+        render(presenter.state)
+    }
+
+    private fun toggleSelection(taskId: String) {
+        if (!selectedIds.add(taskId)) selectedIds.remove(taskId)
+        render(presenter.state)
+    }
+
+    private fun exitSelectionMode() {
+        selectionMode = false
+        selectedIds.clear()
+        render(presenter.state)
+    }
+
+    /** ── запись: диалоги ── */
+
+    /**
+     * Новая задача: название обязательно, описание и исполнитель — нет (без
+     * исполнителя сервер ставит `kanban.default_assignee`, карточка не остаётся
+     * бесхозной). Отказ показывается в error-strip диалога, чтобы поле можно было
+     * поправить, не открывая форму заново.
+     */
+    private fun showCreateTaskDialog() {
+        var dialogRef: Dialog? = null
+        val titleField = MarsDialog.textField(this, KanbanPolicy.CREATE_HINT_TITLE)
+        val bodyField = MarsDialog.textField(this, KanbanPolicy.CREATE_HINT_BODY)
+        val assigneeField = MarsDialog.textField(this, KanbanPolicy.CREATE_HINT_ASSIGNEE)
+        val errorStrip = MarsDialog.errorStrip(this)
+        val controls = listOf<View>(titleField, bodyField, assigneeField)
+        fun submit() {
+            MarsDialog.setResponding(controls, true)
+            MarsDialog.setError(errorStrip, null)
+            lifecycleScope.launch {
+                val outcome = presenter.createTask(
+                    title = titleField.text?.toString().orEmpty(),
+                    body = bodyField.text?.toString()?.trim()?.takeIf(String::isNotEmpty),
+                    assignee = assigneeField.text?.toString()?.trim()?.takeIf(String::isNotEmpty),
+                )
+                MarsDialog.setResponding(controls, false)
+                if (outcome.ok) {
+                    dialogRef?.dismiss()
+                    toast(outcome.message)
+                } else {
+                    MarsDialog.setError(errorStrip, outcome.message)
+                }
+            }
+        }
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, KanbanPolicy.CREATE_LABEL, null))
+            root.addView(MarsDialog.paragraph(this, KanbanPolicy.CREATE_HINT))
+            controls.forEach { root.addView(MarsDialog.block(this, it, bottomDp = 8)) }
+            // Известные исполнители — плашками: свободный ввод остаётся (можно
+            // назначить нового), но опечатку в существующем имени не сделать.
+            val knownAssignees = presenter.state.assignees.map { it.name }
+            if (knownAssignees.isNotEmpty()) {
+                root.addView(MarsDialog.caption(this, KanbanPolicy.ASSIGNEES_LABEL))
+                root.addView(MarsDialog.pillRow(this, knownAssignees) { name ->
+                    assigneeField.setText(name)
+                })
+            }
+            root.addView(errorStrip)
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, KanbanPolicy.CANCEL_LABEL) { dialogRef?.dismiss() },
+                    MarsDialog.primaryButton(this, KanbanPolicy.CREATE_LABEL) { submit() },
+                )
+            )
+            controls
+        }
+    }
+
+    /**
+     * Пикер колонки. Цели строятся из фактических дорожек доски
+     * ([KanbanPolicy.moveTargets]), поэтому статус, которого на доске нет,
+     * предложить невозможно. [excludeStatus] — текущий статус карточки: «переместить
+     * туда, где она уже лежит» не предлагается (сервер всё равно ответил бы no-op).
+     */
+    private fun pickMoveTarget(
+        excludeStatus: String?,
+        title: String,
+        onPick: (KanbanMoveTargetUi) -> Unit,
+    ) {
+        val targets = KanbanPolicy.moveTargets(presenter.state.columns)
+            .filterNot { excludeStatus != null && it.status.equals(excludeStatus, ignoreCase = true) }
+        if (targets.isEmpty()) {
+            toast(KanbanPolicy.MSG_NO_MOVE_TARGETS)
+            return
+        }
+        var dialogRef: Dialog? = null
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, title, null))
+            val items = targets.map { target ->
+                val action: () -> Unit = {
+                    dialogRef?.dismiss()
+                    onPick(target)
+                }
+                target.label to action
+            }
+            root.addView(MarsDialog.pillStack(this, items))
+            listOf(MarsDialog.quietButton(this, KanbanPolicy.CANCEL_LABEL) { dialogRef?.dismiss() })
+        }
+    }
+
+    private fun showMoveDialog(taskId: String, currentStatus: String) {
+        pickMoveTarget(currentStatus, KanbanPolicy.MOVE_LABEL) { target ->
+            runWrite { presenter.moveTask(taskId, target.status) }
+        }
+    }
+
+    /** Массовое перемещение: одна цель применяется ко всем выбранным карточкам. */
+    private fun showBulkMoveDialog() {
+        val ids = selectedIds.toList()
+        if (ids.isEmpty()) {
+            toast(KanbanPolicy.MSG_SELECTION_EMPTY)
+            return
+        }
+        pickMoveTarget(null, KanbanPolicy.MOVE_LABEL) { target ->
+            runWrite { presenter.moveTasks(ids, target.status) }
+        }
+    }
+
+    /** Массовый архив: подтверждения нет — карточки обратимо скрываются с доски. */
+    private fun archiveSelected() {
+        val ids = selectedIds.toList()
+        if (ids.isEmpty()) {
+            toast(KanbanPolicy.MSG_SELECTION_EMPTY)
+            return
+        }
+        runWrite { presenter.archiveTasks(ids) }
+    }
+
+    private fun showCommentDialog(taskId: String) {
+        var dialogRef: Dialog? = null
+        val field = MarsDialog.textField(this, KanbanPolicy.COMMENT_HINT)
+        val errorStrip = MarsDialog.errorStrip(this)
+        val controls = listOf<View>(field)
+        fun submit() {
+            MarsDialog.setResponding(controls, true)
+            MarsDialog.setError(errorStrip, null)
+            lifecycleScope.launch {
+                val outcome = presenter.comment(taskId, field.text?.toString().orEmpty())
+                MarsDialog.setResponding(controls, false)
+                if (outcome.ok) {
+                    dialogRef?.dismiss()
+                    toast(outcome.message)
+                } else {
+                    MarsDialog.setError(errorStrip, outcome.message)
+                }
+            }
+        }
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, KanbanPolicy.COMMENT_LABEL, null))
+            root.addView(field)
+            root.addView(errorStrip)
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, KanbanPolicy.CANCEL_LABEL) { dialogRef?.dismiss() },
+                    MarsDialog.primaryButton(this, KanbanPolicy.COMMENT_LABEL) { submit() },
+                )
+            )
+            controls
+        }
+    }
+
+    /** Блокировка с необязательной причиной — её увидит тот, кто возьмёт задачу. */
+    private fun showBlockDialog(taskId: String) {
+        var dialogRef: Dialog? = null
+        val reasonField = MarsDialog.textField(this, KanbanPolicy.BLOCK_REASON_HINT)
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, KanbanPolicy.BLOCK_LABEL, null))
+            root.addView(reasonField)
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, KanbanPolicy.CANCEL_LABEL) { dialogRef?.dismiss() },
+                    MarsDialog.primaryButton(this, KanbanPolicy.BLOCK_LABEL) {
+                        val reason = reasonField.text?.toString()?.trim()?.takeIf(String::isNotEmpty)
+                        dialogRef?.dismiss()
+                        runWrite { presenter.setBlocked(taskId, blocked = true, reason = reason) }
+                    },
+                )
+            )
+            listOf(reasonField)
+        }
+    }
+
+    /** Связь «текущая задача → потомок»: id вводится вручную (в карточке их нет). */
+    private fun showLinkDialog(parentId: String) {
+        var dialogRef: Dialog? = null
+        val childField = MarsDialog.textField(this, KanbanPolicy.LINK_HINT)
+        val errorStrip = MarsDialog.errorStrip(this)
+        val controls = listOf<View>(childField)
+        fun submit() {
+            MarsDialog.setResponding(controls, true)
+            MarsDialog.setError(errorStrip, null)
+            lifecycleScope.launch {
+                val outcome = presenter.linkTasks(parentId, childField.text?.toString().orEmpty())
+                MarsDialog.setResponding(controls, false)
+                if (outcome.ok) {
+                    dialogRef?.dismiss()
+                    toast(outcome.message)
+                } else {
+                    MarsDialog.setError(errorStrip, outcome.message)
+                }
+            }
+        }
+        dialogRef = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, KanbanPolicy.LINK_LABEL, null))
+            root.addView(MarsDialog.paragraph(this, KanbanPolicy.LINK_PARENT_HINT))
+            root.addView(childField)
+            root.addView(errorStrip)
+            root.addView(
+                MarsDialog.buttonRow(
+                    this,
+                    MarsDialog.secondaryButton(this, KanbanPolicy.CANCEL_LABEL) { dialogRef?.dismiss() },
+                    MarsDialog.primaryButton(this, KanbanPolicy.LINK_LABEL) { submit() },
+                )
+            )
+            controls
+        }
+    }
+
+    /**
+     * Крупная плашка действия (тап-цель 48dp): акцентная рамка и, если задана,
+     * иконка compound-drawable. Подпись остаётся текстом кнопки — TalkBack читает
+     * её, а не глиф.
+     */
+    private fun actionChip(label: String, iconRes: Int?, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        setTextColor(MarsTheme.ACCENT_TEXT)
+        background = MarsTheme.button(
+            this@KanbanActivity,
+            MarsTheme.ACCENT_BG,
+            radiusDp = 999,
+            strokeColor = MarsTheme.ACCENT_BORDER,
+        )
+        setPadding(dp(16), dp(10), dp(16), dp(10))
+        minimumWidth = dp(48)
+        minimumHeight = dp(48)
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        if (iconRes != null) {
+            val size = dp(16)
+            ContextCompat.getDrawable(this@KanbanActivity, iconRes)?.mutate()?.let { icon ->
+                icon.setBounds(0, 0, size, size)
+                icon.setTint(MarsTheme.ACCENT_TEXT)
+                setCompoundDrawablesRelative(icon, null, null, null)
+                compoundDrawablePadding = dp(6)
+            }
+        }
+        setOnClickListener { onClick() }
     }
 
     private fun detailValue(value: String): TextView = TextView(this).apply {
