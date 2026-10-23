@@ -76,3 +76,30 @@ data class ClarifyStreamUpdate(val payload: ClarifyPayload?, val pendingCount: I
     /** True when the server says nothing is waiting — the card must be hidden. */
     val isEmpty: Boolean get() = payload == null || pendingCount <= 0
 }
+
+/** Transport mode of a live channel; surfaced so the UI never claims "live" while polling. */
+enum class LiveChannelMode {
+    /** No connection yet, or reconnecting after a failure (backoff delay is running). */
+    CONNECTING,
+
+    /** SSE connection is open and has proven alive (any byte, including the keepalive). */
+    STREAMING,
+
+    /** SSE is unreachable; the flow is polling the pre-SSE endpoint until the next retry. */
+    POLLING,
+}
+
+/**
+ * Element of a live channel flow: either a parsed [Update] or a [Mode] transition.
+ *
+ * [Mode] is not a payload — a collector that only renders cards can ignore it, but the screen
+ * that wants to reconcile after an outage (the session list refetches on [LiveChannelMode.STREAMING]
+ * because events that happened while polling was down were only partially observed) must see it.
+ */
+sealed class LiveChannelEvent<out T> {
+    /** A parsed frame or a fallback poll result. */
+    data class Update<T>(val value: T) : LiveChannelEvent<T>()
+
+    /** Transport changed; [reason] carries the failure text that caused it, if any. */
+    data class Mode(val mode: LiveChannelMode, val reason: String? = null) : LiveChannelEvent<Nothing>()
+}
