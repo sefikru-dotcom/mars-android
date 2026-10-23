@@ -3,6 +3,7 @@ package ru.mars.mobile
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -170,6 +172,25 @@ class SettingsActivity : ComponentActivity() {
         }
         content.addView(serverCard)
 
+        // SECTION: Голос
+        // Перебивание голосом (L3) раньше только читалось из prefs — writer'а не было вовсе.
+        // Ключ и дефолт берутся из [VoiceBargeInSetting], а не дублируются здесь: иначе экран
+        // и голосовой цикл разошлись бы по разным ключам/дефолтам.
+        content.addView(buildSectionHeader(getString(R.string.settings_voice_section)))
+        val bargeInSetting = VoiceBargeInSetting.of(
+            getSharedPreferences(VOICE_OUTPUT_PREFS, Context.MODE_PRIVATE),
+        )
+        val voiceCard = buildCard().apply {
+            addView(
+                buildToggleRow(
+                    label = getString(R.string.settings_voice_barge_in),
+                    hint = getString(R.string.settings_voice_barge_in_hint),
+                    checked = bargeInSetting.isEnabled(),
+                ) { enabled -> bargeInSetting.setEnabled(enabled) },
+            )
+        }
+        content.addView(voiceCard)
+
         // SECTION: Кэш и память устройства
         content.addView(buildSectionHeader("ДАННЫЕ И КЭШ"))
         val cacheCard = buildCard().apply {
@@ -303,6 +324,60 @@ class SettingsActivity : ComponentActivity() {
             setTextColor(MarsTheme.ACCENT_TEXT)
             setTypeface(null, Typeface.BOLD)
         })
+    }
+
+    /**
+     * Строка-переключатель: подпись и пояснение слева, компактный [SwitchCompat] справа.
+     *
+     * Тот же каркас строки, что у [buildNavRow]/[buildInfoRow], — переключатель не должен
+     * выглядеть главным действием экрана (кнопка во всю ширину для него слишком крупная).
+     * Тап по всей строке переключает то же значение: это привычное поведение строк настроек.
+     */
+    private fun buildToggleRow(
+        label: String,
+        hint: String,
+        checked: Boolean,
+        onCheckedChange: (Boolean) -> Unit,
+    ): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        isClickable = true
+        isFocusable = true
+        contentDescription = "$label. $hint"
+
+        val texts = LinearLayout(this@SettingsActivity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        texts.addView(TextView(this@SettingsActivity).apply {
+            text = label
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT)
+        })
+        texts.addView(TextView(this@SettingsActivity).apply {
+            text = hint
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            setPadding(0, dp(2), 0, 0)
+        })
+        addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val toggle = SwitchCompat(this@SettingsActivity).apply {
+            isChecked = checked
+            // Палитра дизайн-системы, а не системный акцент: на тёмном экране включённое
+            // состояние должно читаться тем же красным, что и остальные акценты Марса.
+            thumbTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MarsTheme.ACCENT, MarsTheme.TEXT_MUTED),
+            )
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(MarsTheme.ACCENT_BORDER, MarsTheme.BORDER),
+            )
+            setOnCheckedChangeListener { _, value -> onCheckedChange(value) }
+        }
+        addView(toggle, LinearLayout.LayoutParams(-2, -2))
+        setOnClickListener { toggle.toggle() }
     }
 
     /**
