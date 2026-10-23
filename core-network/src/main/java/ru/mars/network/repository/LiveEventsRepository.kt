@@ -341,4 +341,4 @@ class LiveEventsRepository(
  */
 @Suppress("UNCHECKED_CAST")
 fun <T> Flow<LiveChannelEvent<T>>.updatesOnly(): Flow<T> =
-    mapNotNull { event -> (event as? LiveChannelEvent.Update<T>)?.value }
+    mapNotNull { event -> event.payloadOrNull }

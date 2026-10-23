@@ -102,4 +102,18 @@ sealed class LiveChannelEvent<out T> {
 
     /** Transport changed; [reason] carries the failure text that caused it, if any. */
     data class Mode(val mode: LiveChannelMode, val reason: String? = null) : LiveChannelEvent<Nothing>()
+
+    /**
+     * Payload of an [Update], null for a [Mode] transition.
+     *
+     * Exists so screens never have to write `is LiveChannelEvent.Update<*>` (star projection
+     * erases the payload type and forces a cast at every call site).
+     */
+    @Suppress("UNCHECKED_CAST")
+    val payloadOrNull: T?
+        get() = (this as? Update<T>)?.value
+
+    /** Transport mode of a [Mode] transition, null for an [Update]. */
+    val modeOrNull: LiveChannelMode?
+        get() = (this as? Mode)?.mode
 }

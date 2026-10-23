@@ -25,7 +25,8 @@ import ru.mars.network.repository.updatesOnly
  *
  * The SSE bodies are byte-for-byte what the handlers write (see
  * `api/route_approvals.py::_handle_approval_sse_stream` — `event: initial`, `event: approval`,
- * `: keepalive` comments) and the polling bodies are what `GET /api/*/pending` returns.
+ * `: keepalive` comments) and the polling bodies are what `GET /api/approval/pending` and
+ * `GET /api/clarify/pending` return.
  */
 class LiveEventsRepositoryTest {
 
