@@ -35,10 +35,25 @@ class MusicChartsFallbackContractTest {
 
     private val activity by lazy { source("src/main/java/ru/mars/mobile/MusicActivity.kt") }
 
+    /**
+     * Секции-расширения экрана после раскладки (шаги 0–6): вынесенный код — тот же
+     * production-код, поэтому контракт читает его вместе с Activity и не сужается.
+     */
+    private val sections by lazy {
+        listOf(
+            "MusicPlaybackGlyphSection.kt",
+            "MusicAudioSettingsSection.kt",
+            "MusicForYouSection.kt",
+            "MusicChartSection.kt",
+            "MusicFlowSection.kt",
+            "MusicFavoritesSection.kt",
+        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
+
     /** Тело [MusicActivity.loadHome] — единственное место, где решается исход чартов. */
     private val loadHome by lazy {
-        activity.substringAfter("private fun loadHome() {")
-            .substringBefore("private fun showCachedCharts()")
+        sections.substringAfter("fun MusicActivity.loadHome() {")
+            .substringBefore("fun MusicActivity.showCachedCharts()")
     }
 
     @Test
@@ -49,9 +64,9 @@ class MusicChartsFallbackContractTest {
         )
         assertFalse(
             "Второго транспорта для /api/home в экране быть не должно",
-            activity.contains("fetchHomeText") ||
-                activity.contains("HttpURLConnection") ||
-                activity.contains("openConnection"),
+            (activity + "\n" + sections).contains("fetchHomeText") ||
+                (activity + "\n" + sections).contains("HttpURLConnection") ||
+                (activity + "\n" + sections).contains("openConnection"),
         )
     }
 
