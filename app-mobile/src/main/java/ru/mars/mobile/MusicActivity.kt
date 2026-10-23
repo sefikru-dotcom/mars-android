@@ -55,7 +55,7 @@ import ru.mars.network.repository.MusicRepository
 import java.io.Closeable
 
 class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
-    private lateinit var repository: MusicRepository
+    internal lateinit var repository: MusicRepository
     /**
      * Domain glue for the real remote music event stream: validates each Mars Connect
      * frame and routes it through [RemoteQueueSyncPolicy] (see [RemoteQueueSyncController]).
@@ -71,7 +71,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var playButton: ImageButton
     private lateinit var artwork: ImageView
     internal var tracks = emptyList<MusicTrack>()
-    private var job: Job? = null
+    internal var job: Job? = null
     /**
      * Офлайн-снимок вкладок музыки ([MusicOfflineCache]): при сбое сети «Обзор» и
      * «Плейлисты» показывают последний успешный ответ с подписью возраста вместо
@@ -79,7 +79,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * [MusicOfflineFallbackPolicy]. Файл стирается на выходе из аккаунта
      * ([AuthExitStores.MUSIC_OFFLINE_PREFS]): снимок чарта = история прослушивания.
      */
-    private val offlineCache by lazy {
+    internal val offlineCache by lazy {
         MusicOfflineCache(
             SharedPreferencesKeyValueStore(
                 getSharedPreferences(AuthExitStores.MUSIC_OFFLINE_PREFS, Context.MODE_PRIVATE),
@@ -757,73 +757,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun loadHome() {
-        job?.cancel()
-        showLoading()
-        job = lifecycleScope.launch {
-            // Charts go through the repository: {success:false,error} at HTTP 200 is an
-            // exception there, so a server rejection can never masquerade as an empty
-            // «Треки не найдены» list — both endpoints failing shows the error/retry UI.
-            // The /api/home fallback rides the SAME repository transport (OkHttp, shared
-            // interceptors/timeouts, `success:false` → exception) instead of a second
-            // hand-rolled URL connection; shelves are flattened by [MusicHomePolicy].
-            val outcome = withContext(Dispatchers.IO) {
-                MusicChartLoader.resolve(runCatching { repository.getCharts() }) {
-                    runCatching { repository.getHome() }.map(MusicHomePolicy::playbackQueue)
-                }
-            }
-            when (outcome) {
-                is MusicChartLoader.Outcome.Tracks -> {
-                    // Снимок пишется только из успешного ответа и только непустого:
-                    // кэш должен повторять то, что пользователь реально видел.
-                    if (outcome.items.isNotEmpty()) offlineCache.saveChartsSnapshot(outcome.items)
-                    showTracks(outcome.items)
-                }
-                is MusicChartLoader.Outcome.Failed -> showCachedCharts()
-            }
-        }
-    }
-
-    /**
-     * Сеть упала на «Обзоре»: если есть годный снимок чарта — рисуем его с явной
-     * подписью возраста («из кэша, снимок на 18.10 23:41») вместо экрана ошибки.
-     * Нет снимка (или он протух/пуст) — прежнее поведение [showHomeError] с retry.
-     */
-    private fun showCachedCharts() {
-        val decision = MusicOfflineFallbackPolicy.decide(
-            items = offlineCache.getChartsSnapshot(),
-            snapshotTakenAtMs = offlineCache.getTimestamp(),
-            nowMs = System.currentTimeMillis(),
-        )
-        val cached = decision.items
-        if (cached == null) {
-            showHomeError()
-            return
-        }
-        showStatus(null)
-        showTracks(cached, header = offlineNotice(decision.label.orEmpty()))
-    }
-
-    /**
-     * Подпись офлайн-снимка под заголовком списка: пилюля цвета предупреждения.
-     * Обёрнута в контейнер на всю ширину, потому что [showTracks] растягивает header.
-     */
-    private fun offlineNotice(label: String): View {
-        val pill = TextView(this).apply {
-            text = label
-            textSize = 12f
-            setTextColor(MarsTheme.STATUS_WARNING)
-            background = MarsTheme.pill(this@MusicActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(pill, LinearLayout.LayoutParams(-2, -2))
-        }
-    }
-
     /** Explicit loading placeholder for the chart list (also shown before a retry). */
-    private fun showLoading() {
+    internal fun showLoading() {
         showStatus(null)
         resetList()
         results.addView(TextView(this).apply {
@@ -834,19 +769,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         })
     }
 
-    /** Chart fetch failed (both endpoints): say so and offer an explicit retry. */
-    private fun showHomeError() = showListError(
-        message = "Чарт недоступен — проверьте сеть",
-        retryDescription = "Повторить загрузку чарта",
-        onRetry = { loadHome() },
-    )
-
     /**
      * Shared error/retry state for the track list. Clears the previous cards and the
      * [tracks] backing list first, so a failed load can never leave a stale chart on
      * screen that still starts playback on tap; then shows [message] with a retry.
      */
-    private fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
+    internal fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
         tracks = emptyList()
         resetList()
         val box = LinearLayout(this).apply {
@@ -1112,7 +1040,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * [action] adds one extra button to every row; a long press anywhere offers
      * «Добавить в плейлист» and opens [promptAddToPlaylist] for that track.
      */
-    private fun showTracks(items: List<MusicTrack>, header: View? = null, action: RowAction? = null) {
+    internal fun showTracks(items: List<MusicTrack>, header: View? = null, action: RowAction? = null) {
         tracks = items
         resetList()
         header?.let { results.addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }) }
@@ -2109,7 +2037,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun showStatus(message: String?) {
+    internal fun showStatus(message: String?) {
         if (!::statusText.isInitialized) return
         statusText.text = message.orEmpty()
         statusText.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
