@@ -13,10 +13,8 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -25,13 +23,10 @@ import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -134,13 +129,13 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
     internal lateinit var lyricsBtn: ImageButton
     /** «Звук» in the header: opens the equalizer/preset/Bass Boost dialog. */
-    private lateinit var eqBtn: ImageButton
+    internal lateinit var eqBtn: ImageButton
     /** Persisted sound settings (preset, on/off, Bass Boost); pure logic in [AudioFxPolicy]. */
     private lateinit var audioFx: AudioFxSettings
     /** Persisted stream profile; the player owns the live URL/rebind contract. */
     private lateinit var streamQuality: StreamQualitySettings
     /** Header button for the explicit original/standard/economy picker. */
-    private lateinit var qualityBtn: ImageButton
+    internal lateinit var qualityBtn: ImageButton
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
     internal var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
@@ -180,7 +175,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        repository = MusicRepository(BASE_URL)
+        repository = MusicRepository()
         // Real remote music event stream (Mars Connect): SESSION_RESTORE snapshot plus
         // every later DEVICES_UPDATE broadcast, resolved against the local player state
         // by the pure RemoteQueueSyncPolicy inside remoteSync.
@@ -238,7 +233,19 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         remoteSubscription = null
         MarsMusicPlayer.unregisterListener(this)
         seek.removeCallbacks(ticker)
-        job?.cancel()
+        // Ни один фоновый запрос не переживает экран: отменяется весь набор, а не только
+        // чартовый job (иначе колбэк приходит в уничтоженную Activity). Состав набора и
+        // его отмена закреплены тестом MusicJobSetTest.
+        MusicJobSet.cancelAll(
+            charts = job,
+            library = libraryJob,
+            radio = radioJob,
+            lyrics = lyricsJob,
+            artist = artistJob,
+            albums = albumsJob,
+            album = albumJob,
+            suggestions = suggestionsJob,
+        )
         super.onDestroy()
     }
 
@@ -479,26 +486,23 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (currentTab == tab) return
         currentTab = tab
         updateTabStyles()
+        loadTab(tab)
+    }
+
+    /** Re-loads the content of the currently active tab (used by the clear-search button). */
+    internal fun reloadActiveTab() = loadTab(currentTab)
+
+    /**
+     * Единственная точка «показать содержимое вкладки»: гасит статус, отменяет прежний
+     * запрос и грузит контент. `selectTab` и `reloadActiveTab` различались только тем,
+     * откуда берётся [tab], — два одинаковых `when` держали одну и ту же маршрутизацию
+     * в двух копиях (план §7 D7).
+     */
+    private fun loadTab(tab: MusicTab) {
         showStatus(null)
         job?.cancel()
         libraryJob?.cancel()
         when (tab) {
-            MusicTab.CHART -> loadHome()
-            MusicTab.FLOW -> loadFlow()
-            MusicTab.FOR_YOU -> loadForYou()
-            MusicTab.FAVORITES -> loadFavorites()
-            MusicTab.QUEUE -> renderQueue()
-            MusicTab.PLAYLISTS -> loadPlaylists()
-            MusicTab.HISTORY -> loadHistory()
-        }
-    }
-
-    /** Re-loads the content of the currently active tab (used by the clear-search button). */
-    internal fun reloadActiveTab() {
-        showStatus(null)
-        job?.cancel()
-        libraryJob?.cancel()
-        when (currentTab) {
             MusicTab.CHART -> loadHome()
             MusicTab.FLOW -> loadFlow()
             MusicTab.FOR_YOU -> loadForYou()
@@ -1305,7 +1309,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * deduplicated additions (pure [RadioQueuePolicy]) to the queue — playback continues
      * seamlessly because enqueuing never restarts a track that is already playing.
      */
-    private fun onRadioClicked() {
+    internal fun onRadioClicked() {
         val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
         if (radioJob?.isActive == true) return
         radioBtn.isEnabled = false
@@ -1337,7 +1341,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * fills it when `/api/lyrics` answers. The answer→view mapping is pure
      * ([LyricsViewPolicy]): plain lyrics win, synced LRC loses its timestamps.
      */
-    private fun onLyricsClicked() {
+    internal fun onLyricsClicked() {
         val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
         if (lyricsJob?.isActive == true) return
 
@@ -2071,7 +2075,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Каждое изменение сразу уходит в живой плеер ([MarsMusicPlayer.setAudioFx]) и
      * сохраняется через [AudioFxSettings]; тело диалога перерисовывается на месте.
      */
-    private fun onEqClicked() {
+    internal fun onEqClicked() {
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var dialogRef: Dialog? = null
         dialogRef = MarsDialog.show(this) { root ->
@@ -2163,7 +2167,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Opens the explicit original/standard/economy stream profile picker. */
-    private fun onQualityClicked() {
+    internal fun onQualityClicked() {
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var dialogRef: Dialog? = null
         dialogRef = MarsDialog.show(this) { root ->
@@ -2211,8 +2215,13 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun bassBoostCaption(strength: Int): String =
         "BASS BOOST · ${AudioFxPolicy.sanitizeStrength(strength) / 10}%"
 
+    // Карта секций (W1): каркас/шапка/вкладки/статус — MusicShellSection.kt; строка
+    // поиска, подсказки и история — MusicSearchSection.kt; панель плеера и отрисовка
+    // состояния — MusicPlayerBarSection.kt; список треков и строка трека —
+    // MusicTrackListSection.kt (+ MusicTrackSubtitleBinder.kt); отменяемый набор
+    // запросов — MusicJobSet.kt. В хосте остались поля, lifecycle, диспетчер вкладок
+    // ([loadTab]) и геттеры готовности видов.
     companion object {
-        private const val BASE_URL = "https://marscore.ru/music"
         /** Request code for the Android 13+ POST_NOTIFICATIONS runtime prompt. */
         private const val REQUEST_NOTIFICATIONS = 0x4D54
         /** Progress ticker period while the screen is visible (thumb + time label). */
