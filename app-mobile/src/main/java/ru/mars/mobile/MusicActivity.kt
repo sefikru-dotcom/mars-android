@@ -63,14 +63,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private val remoteSync = RemoteQueueSyncController()
     /** Live Mars Connect subscription; opened in [onCreate], closed in [onDestroy]. */
     private var remoteSubscription: Closeable? = null
-    private lateinit var results: LinearLayout
+    internal lateinit var results: LinearLayout
     private lateinit var title: TextView
     private lateinit var artistView: TextView
     private lateinit var time: TextView
     private lateinit var seek: SeekBar
     private lateinit var playButton: ImageButton
     private lateinit var artwork: ImageView
-    private var tracks = emptyList<MusicTrack>()
+    internal var tracks = emptyList<MusicTrack>()
     private var job: Job? = null
     /**
      * Офлайн-снимок вкладок музыки ([MusicOfflineCache]): при сбое сети «Обзор» и
@@ -100,23 +100,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
     private var currentTab = MusicTab.CHART
-    private val favoriteIds = linkedSetOf<String>()
-    private val heartButtons = HashMap<String, MutableList<ImageButton>>()
+    internal val favoriteIds = linkedSetOf<String>()
+    internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
-    /** Rendered chart/search row views per track id, so playback state can re-style them live. */
-    private class TrackRowHolder(
-        val trackId: String,
-        val row: View,
-        val titleView: TextView,
-        /**
-         * Подпись строки целиком («исполнитель · альбом · 3:24»): её раскладку и текст
-         * держит [TrackSubtitleBinder] — экран не склеивает сегменты сам, поэтому
-         * перекраска «Сейчас играет» не может разъехаться с разделителями.
-         */
-        val subtitle: TrackSubtitleBinder,
-        val playButton: ImageButton,
-    )
-    private val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
+    internal val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
     private lateinit var chartTabButton: TextView
     private lateinit var flowTabButton: TextView
     private lateinit var forYouTabButton: TextView
@@ -296,7 +283,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * render swaps instantly (nothing to fade from) and unchanged glyphs are no-ops,
      * so list refreshes never restart the effect. Reduced motion → instant swap.
      */
-    private fun setPlayPauseGlyph(button: ImageButton, showPause: Boolean) {
+    internal fun setPlayPauseGlyph(button: ImageButton, showPause: Boolean) {
         val targetRes = if (showPause) R.drawable.ic_pause else R.drawable.ic_play
         val currentRes = button.tag as? Int
         if (currentRes == targetRes) return // already showing (or crossfading toward) the target
@@ -1160,321 +1147,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         search(entry)
     }
 
-    /**
-     * Optional extra per-row control (icon, TalkBack description, tap handler). Used by the
-     * playlist drill-down for «убрать из плейлиста», which has no place on other lists.
-     */
-    private data class RowAction(
-        val iconRes: Int,
-        val description: String,
-        val onTap: (MusicTrack) -> Unit,
-    )
-
-    /**
-     * Renders a track list (chart/search/favorites/flow rows). [header] is an optional
-     * section card placed above the rows — used by «Волна» for its stream action.
-     * [action] adds one extra button to every row; a long press anywhere offers
-     * «Добавить в плейлист» and opens [promptAddToPlaylist] for that track.
-     */
-    private fun showTracks(items: List<MusicTrack>, header: View? = null, action: RowAction? = null) {
-        tracks = items
-        resetList()
-        header?.let { results.addView(it, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }) }
-        if (items.isEmpty()) {
-            results.addView(TextView(this).apply {
-                text = "Треки не найдены"
-                setTextColor(MarsTheme.TEXT_MUTED)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(32), 0, dp(32))
-            })
-            return
-        }
-
-        items.forEachIndexed { i, t ->
-            results.addView(trackRow(t, i, action), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
-        }
-    }
-
-    /**
-     * Подпись строки трека: «исполнитель · альбом · 3:24» — и её раскладка под ширину экрана.
-     *
-     * Зачем отдельный класс, а не три строки в [trackRow]: подпись перерисовывается из
-     * двух источников — ширины (после первой меры) и состояния плеера («Сейчас играет»
-     * вместо длительности). Оба пути обязаны собирать текст ОДНОЙ политикой
-     * ([TrackSubtitlePolicy]), иначе перекраска активного трека возвращала бы
-     * длительность на место альбома или удваивала разделитель.
-     *
-     * Почему раскладка по ширине: на POCO F5 (411dp) под подпись остаётся ~141dp после
-     * обложки и трёх кнопок. Имя альбома там не влезает рядом с длительностью, и
-     * прежний `maxWidth = 140dp` выдавливал длительность за правый край строки — она
-     * физически обрезалась. Теперь длительность получает бюджет первой, а альбом при
-     * нехватке места уходит на собственную строку, где обрезается он сам.
-     */
-    private inner class TrackSubtitleBinder(
-        private val artist: String,
-        private val album: String?,
-        private val duration: String,
-        private val artistLabel: TextView,
-        private val albumInline: TextView,
-        private val albumSecondLine: TextView,
-        private val metaView: TextView,
-    ) {
-
-        /** До первой меры альбом считаем «не влез»: так длительность не может обрезаться. */
-        private var placement = TrackSubtitlePolicy.AlbumPlacement.SECOND_LINE
-        private var measuredWidthPx = -1
-        private var active = false
-        private var playing = false
-
-        /**
-         * Ширина блока текста стала известна (или изменилась после поворота): выбираем
-         * раскладку по измеренным ширинам сегментов и перерисовываем подпись.
-         * Повторный вызов с той же шириной ничего не делает — иначе слушатель меры и
-         * смена видимости зациклили бы layout.
-         */
-        fun onAvailableWidth(widthPx: Int) {
-            if (album == null || widthPx <= 0 || widthPx == measuredWidthPx) return
-            measuredWidthPx = widthPx
-            val density = resources.displayMetrics.density
-            placement = TrackSubtitlePolicy.albumPlacement(
-                availableDp = widthPx / density,
-                albumSegmentDp = albumInline.paint.measureText(
-                    TrackSubtitlePolicy.albumSegment(artist, album),
-                ) / density,
-                tailSegmentDp = metaView.paint.measureText(
-                    TrackSubtitlePolicy.tailSegment(artist, album, tailText()),
-                ) / density,
-            )
-            render()
-        }
-
-        /** Перекраска под состояние плеера: активный играющий трек показывает статус вместо длительности. */
-        fun render(active: Boolean, playing: Boolean) {
-            this.active = active
-            this.playing = playing
-            render()
-        }
-
-        private fun tailText(): String =
-            if (active && playing) TrackSubtitlePolicy.NOW_PLAYING else duration
-
-        private fun render() {
-            val tail = tailText()
-            artistLabel.text = artist
-            if (album == null) {
-                albumInline.visibility = View.GONE
-                albumSecondLine.visibility = View.GONE
-                metaView.text = TrackSubtitlePolicy.tailSegment(artist, null, tail)
-                return
-            }
-            when (placement) {
-                TrackSubtitlePolicy.AlbumPlacement.INLINE -> {
-                    albumInline.text = TrackSubtitlePolicy.albumSegment(artist, album)
-                    albumInline.contentDescription = album
-                    albumInline.visibility = View.VISIBLE
-                    albumSecondLine.visibility = View.GONE
-                    metaView.text = TrackSubtitlePolicy.tailSegment(artist, album, tail)
-                }
-                TrackSubtitlePolicy.AlbumPlacement.SECOND_LINE -> {
-                    albumInline.visibility = View.GONE
-                    albumSecondLine.text = album
-                    albumSecondLine.contentDescription = album
-                    albumSecondLine.visibility = View.VISIBLE
-                    metaView.text = TrackSubtitlePolicy.tailSegment(artist, null, tail)
-                }
-            }
-        }
-    }
-
-    /**
-     * Одна строка трека (карточка списка: обложка, play, избранное, очередь).
-     * [index] — позиция трека в списке [tracks]: тап по строке запускает
-     * воспроизведение очереди именно с неё. [action] добавляет одну дополнительную
-     * кнопку (drill-down плейлиста). Долгий тап предлагает «Добавить в плейлист».
-     * Строка регистрируется в [trackRows], чтобы состояние плеера перекрашивало её живьём.
-     */
-    private fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
-        val row = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(8), dp(8))
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 12)
-            setOnClickListener { onTrackRowClicked(index) }
-            setOnLongClickListener {
-                if (action == null) promptAddToPlaylist(t)
-                true
-            }
-        }
-
-        val image = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 6)
-            clipToOutline = true
-        }
-        val thumb = t.thumbnail
-        if (!thumb.isNullOrBlank()) {
-            ImageLoader.load(thumb, image)
-        }
-        row.addView(image, LinearLayout.LayoutParams(dp(44), dp(44)))
-
-        val trackInfo = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, dp(8), 0)
-        }
-        val titleView = TextView(this).apply {
-            text = t.title
-            textSize = 15f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        trackInfo.addView(titleView)
-        // Подпись строки разделена: имя исполнителя — отдельная кликабельная вьюха
-        // (переход к исполнителю), длительность/статус — некликабельный хвост.
-        // Иначе тап по нижней половине строки перестал бы включать трек.
-        val subRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val artistLabel = TextView(this).apply {
-            text = t.artist
-            textSize = 12f
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { onArtistClicked(t.artist) }
-        }
-        subRow.addView(artistLabel, LinearLayout.LayoutParams(0, -2, 1f))
-        // Альбом — отдельный кликабельный сегмент подписи. Строка трека знает свой
-        // альбом (см. MusicTrack.albumBrowseId): тап открывает тот же альбомный диалог,
-        // что и карточка альбома на вкладке «Обзор». Если у трека нет browseId, имя
-        // остаётся просто подписью без перехода.
-        //
-        // Две вьюхи на один альбом — не дублирование, а два места одной политики:
-        // в узкой строке (POCO F5 даёт под подпись ~141dp) имя альбома не влезает
-        // вместе с длительностью, и [TrackSubtitlePolicy] уводит его на отдельную
-        // строку вместо того, чтобы выдавить длительность за край. Видимой остаётся
-        // ровно одна из них.
-        val albumName = TrackSubtitlePolicy.albumLine(t.albumTitle)
-        val albumBrowseId = t.albumBrowseId
-        val albumInline = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            visibility = View.GONE
-        }
-        val albumSecondLine = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, dp(1), 0, 0)
-            visibility = View.GONE
-        }
-        if (albumName != null) {
-            // Цвет акцента и кликабельность — только когда альбом реально открывается:
-            // подсказка «сюда можно нажать» не должна врать.
-            val openable = !albumBrowseId.isNullOrBlank()
-            listOf(albumInline, albumSecondLine).forEach { label ->
-                if (openable) {
-                    label.setTextColor(MarsTheme.ACCENT_TEXT)
-                    label.isClickable = true
-                    label.isFocusable = true
-                    label.setOnClickListener { onAlbumClicked(albumBrowseId) }
-                }
-            }
-            subRow.addView(albumInline, LinearLayout.LayoutParams(-2, -2))
-        }
-        val metaView = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            isSingleLine = true
-        }
-        subRow.addView(metaView, LinearLayout.LayoutParams(-2, -2))
-        trackInfo.addView(subRow)
-        if (albumName != null) {
-            trackInfo.addView(albumSecondLine, LinearLayout.LayoutParams(-1, -2))
-        }
-        // Раскладка подписи зависит от фактической ширины блока текста, а она известна
-        // только после первой меры: LinearLayout отдаёт weight-вьюхе остаток уже после
-        // того, как отнял обложку и кнопки. Слушатель срабатывает один раз на ширину.
-        val subtitle = TrackSubtitleBinder(
-            artist = t.artist,
-            album = albumName,
-            duration = t.duration,
-            artistLabel = artistLabel,
-            albumInline = albumInline,
-            albumSecondLine = albumSecondLine,
-            metaView = metaView,
-        )
-        trackInfo.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-            subtitle.onAvailableWidth(view.width - view.paddingLeft - view.paddingRight)
-        }
-        row.addView(trackInfo, LinearLayout.LayoutParams(0, -2, 1f))
-
-        val playTrackBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_play,
-            MusicA11yPolicy.ACTION_PLAY,
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.ACCENT,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onTrackRowClicked(index) }
-        }
-        row.addView(playTrackBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
-
-        // Favorite heart: filled+accent when the track is already in favorites
-        val isFav = favoriteIds.contains(t.id)
-        val heartBtn = MarsTheme.circleIconButton(
-            this,
-            if (isFav) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
-            MusicA11yPolicy.heartAction(isFav),
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = if (isFav) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onHeartClicked(t, this) }
-        }
-        heartButtons.getOrPut(t.id) { mutableListOf() }.add(heartBtn)
-        row.addView(heartBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-        // Quick add to the playback queue
-        val enqueueBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_playlist_add,
-            "В очередь",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onQueueAddClicked(t) }
-        }
-        row.addView(enqueueBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-
-        // Playlist drill-down only: «убрать из плейлиста» next to the usual actions.
-        action?.let { extra ->
-            val extraBtn = MarsTheme.circleIconButton(
-                this,
-                extra.iconRes,
-                extra.description,
-                bg = MarsTheme.SURFACE_SUBTLE,
-                iconTint = MarsTheme.TEXT_MUTED,
-                sizeDp = 34
-            ).apply {
-                setOnClickListener { extra.onTap(t) }
-            }
-            row.addView(extraBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
-        }
-
-        // Register the row so player state changes can highlight the current track live.
-        val holder = TrackRowHolder(t.id, row, titleView, subtitle, playTrackBtn)
-        trackRows.getOrPut(t.id) { mutableListOf() }.add(holder)
-        applyTrackRowState(holder)
-        return row
-    }
 
     private fun tabButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
         text = label
@@ -1946,7 +1618,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * «Добавить в плейлист»: long-pressing any track row opens the list of server
      * playlists and the tap adds that track there (POST .../add with the video id).
      */
-    private fun promptAddToPlaylist(track: MusicTrack) {
+    internal fun promptAddToPlaylist(track: MusicTrack) {
         var dialogRef: Dialog? = null
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val errorStrip = MarsDialog.errorStrip(this)
@@ -2513,7 +2185,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * пустой id и просто показывает статус, вместо того чтобы уйти в сеть за
      * заведомо отвергаемым запросом.
      */
-    private fun onAlbumClicked(rawBrowseId: String?) {
+    internal fun onAlbumClicked(rawBrowseId: String?) {
         val target = MusicAlbumPolicy.requestTarget(rawBrowseId)
         if (target == null) {
             showStatus(MusicAlbumPolicy.NOT_FOUND)
@@ -2528,7 +2200,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * исполнителя. Пока запрос в полёте, повторный тап игнорируется: второй запрос
      * ничего не добавит, а ответ всё равно перерисует тот же диалог.
      */
-    private fun onArtistClicked(rawName: String?) {
+    internal fun onArtistClicked(rawName: String?) {
         val target = MusicArtistPolicy.requestTarget(rawName)
         if (target == null) {
             showStatus(MusicArtistPolicy.UNKNOWN_ARTIST)
@@ -3069,41 +2741,21 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Clears the rendered list plus per-row caches (hearts, highlighted rows). */
-    private fun resetList() {
+    internal fun resetList() {
         results.removeAllViews()
         heartButtons.clear()
         trackRows.clear()
     }
 
-    /** Applies the pure [TrackRowUiState] to a rendered row: accent card, title, play/pause icon. */
-    private fun applyTrackRowState(holder: TrackRowHolder) {
-        val state = TrackRowUiState.resolve(holder.trackId, MarsMusicPlayer.currentTrack?.id, MarsMusicPlayer.isPlaying)
-        holder.row.background = MarsTheme.card(
-            this,
-            if (state.active) MarsTheme.ACCENT_BG else MarsTheme.SURFACE,
-            radiusDp = 12,
-            strokeColor = if (state.active) MarsTheme.ACCENT else MarsTheme.BORDER,
-        )
-        holder.titleView.setTextColor(if (state.active) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_STRONG)
-        holder.titleView.typeface = if (state.active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-        holder.subtitle.render(active = state.active, playing = MarsMusicPlayer.isPlaying)
-        setPlayPauseGlyph(holder.playButton, state.showPauseIcon)
-        holder.playButton.contentDescription = MusicA11yPolicy.playPauseAction(state.showPauseIcon)
-    }
-
-    /** Re-styles every rendered chart/search row from the current player state (UI thread). */
-    private fun refreshTrackRows() {
-        trackRows.values.forEach { holders -> holders.forEach(::applyTrackRowState) }
-    }
 
     /** Row tap: an inactive row starts playback, the active row toggles play/pause. */
-    private fun onTrackRowClicked(index: Int) {
+    internal fun onTrackRowClicked(index: Int) {
         val track = tracks.getOrNull(index) ?: return
         val state = TrackRowUiState.resolve(track.id, MarsMusicPlayer.currentTrack?.id, MarsMusicPlayer.isPlaying)
         if (state.tapStartsPlayback) MarsMusicPlayer.playTrack(index, tracks) else MarsMusicPlayer.togglePlay()
     }
 
-    private fun onHeartClicked(track: MusicTrack, button: ImageButton) {
+    internal fun onHeartClicked(track: MusicTrack, button: ImageButton) {
         button.isEnabled = false // debounce double taps while the request is in flight
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -3130,7 +2782,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun onQueueAddClicked(track: MusicTrack) {
+    internal fun onQueueAddClicked(track: MusicTrack) {
         MarsMusicPlayer.enqueue(track)
         // Real state feedback: a finished/empty session resumes on this very track.
         showStatus(
@@ -3155,7 +2807,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
-    private fun dp(v: Int) = MarsTheme.dp(this, v)
+    internal fun dp(v: Int) = MarsTheme.dp(this, v)
 
     /**
      * «Звук»: тёмный обсидиановый [MarsDialog] с тумблером обработки звука, выбором

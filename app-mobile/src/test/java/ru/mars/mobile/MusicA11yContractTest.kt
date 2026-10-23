@@ -36,6 +36,9 @@ class MusicA11yContractTest {
 
     private val activity by lazy { source("src/main/java/ru/mars/mobile/MusicActivity.kt") }
 
+    /** Список треков вынесен (W1, шаг 13): строка и её кнопки живут здесь. */
+    private val trackList by lazy { source("src/main/java/ru/mars/mobile/MusicTrackListSection.kt") }
+
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
 
     @Test fun statusTextIsPoliteLiveRegion() {
@@ -105,7 +108,7 @@ class MusicA11yContractTest {
     }
 
     @Test fun heartLabelFollowsFavoriteState() {
-        val creation = activity
+        val creation = trackList
             .substringAfter("// Favorite heart")
             .substringBefore("heartButtons.getOrPut")
         assertTrue(
@@ -136,11 +139,11 @@ class MusicA11yContractTest {
     @Test fun trackRowButtonsUseTheSharedPolicyLabels() {
         assertTrue(
             "Кнопка строки обязана брать подпись из общей политики, а не из своих литералов",
-            activity.contains(
+            trackList.contains(
                 "holder.playButton.contentDescription = MusicA11yPolicy.playPauseAction(state.showPauseIcon)",
             ),
         )
-        val rowCreation = activity
+        val rowCreation = trackList
             .substringAfter("val playTrackBtn = MarsTheme.circleIconButton(")
             .substringBefore("row.addView(playTrackBtn")
         assertTrue(rowCreation.contains("MusicA11yPolicy.ACTION_PLAY"))
