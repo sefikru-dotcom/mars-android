@@ -71,7 +71,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var playButton: ImageButton
     private lateinit var artwork: ImageView
     internal var tracks = emptyList<MusicTrack>()
-    private var job: Job? = null
+    internal var job: Job? = null
     /**
      * Офлайн-снимок вкладок музыки ([MusicOfflineCache]): при сбое сети «Обзор» и
      * «Плейлисты» показывают последний успешный ответ с подписью возраста вместо
@@ -97,11 +97,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var suggestionsRunId = 0
 
     /** Which pill tab is active: chart, flow, home feed, favorites, queue, server playlists, server history. */
-    private enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
+    internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
-    private var currentTab = MusicTab.CHART
-    private val favoriteIds = linkedSetOf<String>()
-    private val heartButtons = HashMap<String, MutableList<ImageButton>>()
+    internal var currentTab = MusicTab.CHART
+    internal val favoriteIds = linkedSetOf<String>()
+    internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
     /** Rendered chart/search row views per track id, so playback state can re-style them live. */
     private class TrackRowHolder(
@@ -125,9 +125,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var playlistsTabButton: TextView
     private lateinit var historyTabButton: TextView
     /** Server-side playlists of the «Плейлисты» tab, newest first as the service returns them. */
-    internal var playlists = emptyList<Playlist>()
+    private var playlists = emptyList<Playlist>()
     /** Server-side listening history of the «История» tab; also the queue for history playback. */
-    internal var historyEntries = emptyList<HistoryEntry>()
+    private var historyEntries = emptyList<HistoryEntry>()
     /** Opened playlist: its id/title drive the drill-down header and the tracks shown. */
     internal var openPlaylist: Playlist? = null
     /** In-flight playlists/history fetch, separate from the chart [job] so tabs never cancel each other. */
@@ -137,7 +137,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * every pause/resume/progress frame, so the raw callback would write the history many
      * times a minute; the pure [HistoryRecordPolicy] gates the duplicate writes.
      */
-    internal var lastRecordedTrackId: String? = null
+    private var lastRecordedTrackId: String? = null
     private lateinit var searchInput: EditText
     private lateinit var clearSearchBtn: ImageButton
     /** Overlay with recent searches; floats above the results list, never replaces it. */
@@ -147,40 +147,40 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
     /** «Радио по треку» in the player bar: appends similar tracks to the queue. */
-    private lateinit var radioBtn: ImageButton
+    internal lateinit var radioBtn: ImageButton
     /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
     private lateinit var lyricsBtn: ImageButton
     /** «Звук» in the header: opens the equalizer/preset/Bass Boost dialog. */
-    private lateinit var eqBtn: ImageButton
+    internal lateinit var eqBtn: ImageButton
     /** Persisted sound settings (preset, on/off, Bass Boost); pure logic in [AudioFxPolicy]. */
-    private lateinit var audioFx: AudioFxSettings
+    internal lateinit var audioFx: AudioFxSettings
     /** Persisted stream profile; the player owns the live URL/rebind contract. */
-    private lateinit var streamQuality: StreamQualitySettings
+    internal lateinit var streamQuality: StreamQualitySettings
     /** Header button for the explicit original/standard/economy picker. */
-    private lateinit var qualityBtn: ImageButton
+    internal lateinit var qualityBtn: ImageButton
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
-    private var radioJob: Job? = null
+    internal var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
-    internal var lyricsJob: Job? = null
+    private var lyricsJob: Job? = null
     /**
      * Запрос страницы исполнителя (GET /api/artist/…). Один на диалог: пока он в
      * полёте, повторный тап по имени не запускает второй (см. [MusicArtistPolicy.canStartRequest]).
      */
-    internal var artistJob: Job? = null
+    private var artistJob: Job? = null
     /**
      * Запрос альбомов исполнителя (`GET /api/search?type=albums`). Отдельный от
      * [artistJob]: песни и альбомы грузятся параллельно, и медленный поиск не
      * задерживает страницу исполнителя. Гейт тот же — [MusicArtistPolicy.canStartRequest].
      */
-    internal var albumsJob: Job? = null
+    private var albumsJob: Job? = null
     /** Запрос содержимого альбома (`GET /api/album/{browseId}`); один на диалог. */
-    internal var albumJob: Job? = null
+    private var albumJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
     private var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
     private var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
     /** Running play/pause glyph crossfades, one per button; ended at their final frame in onPause/onStop. */
-    private val iconCrossfades = HashMap<ImageButton, AnimatorSet>()
+    internal val iconCrossfades = HashMap<ImageButton, AnimatorSet>()
     private val ticker = object : Runnable {
         override fun run() {
             if (::seek.isInitialized) {
@@ -282,70 +282,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 is RemoteSyncOutcome.Kept, is RemoteSyncOutcome.IgnoredStale -> Unit
             }
         }
-    }
-
-    /** System «reduce motion» accessibility setting routed through the pure [MotionPolicy]. */
-    private fun isReducedMotion(): Boolean = MotionPolicy.isReducedMotion(
-        Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
-    )
-
-    /**
-     * Sets the play/pause glyph of [button] with an alpha-only crossfade (120 ms,
-     * [MarsMotion.fastMs] cap, no scale/bounce — pure [PlayPauseIconPolicy] decides).
-     * The glyph res id currently shown is remembered in the button's tag: the first
-     * render swaps instantly (nothing to fade from) and unchanged glyphs are no-ops,
-     * so list refreshes never restart the effect. Reduced motion → instant swap.
-     */
-    private fun setPlayPauseGlyph(button: ImageButton, showPause: Boolean) {
-        val targetRes = if (showPause) R.drawable.ic_pause else R.drawable.ic_play
-        val currentRes = button.tag as? Int
-        if (currentRes == targetRes) return // already showing (or crossfading toward) the target
-        button.tag = targetRes
-        val duration = PlayPauseIconPolicy.durationMs(isReducedMotion())
-        val old = currentRes?.let { ContextCompat.getDrawable(this, it)?.mutate() }
-        val new = ContextCompat.getDrawable(this, targetRes)?.mutate()
-        if (old == null || new == null || !PlayPauseIconPolicy.shouldCrossfade(currentRes, targetRes, duration)) {
-            button.setImageResource(targetRes)
-            return
-        }
-        // True crossfade: both glyphs are layered, the new one fades in while the old
-        // fades out (alpha only, decelerate curve); the ImageView applies its tint to
-        // the layer stack, so both children render in the button's icon color.
-        new.alpha = 0
-        button.setImageDrawable(LayerDrawable(arrayOf(old, new)))
-        val crossfade = AnimatorSet().apply {
-            playTogether(
-                ObjectAnimator.ofInt(new, "alpha", 0, 255),
-                ObjectAnimator.ofInt(old, "alpha", 255, 0),
-            )
-            this.duration = duration.toLong()
-            interpolator = DecelerateInterpolator()
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    // Land the final frame: the plain target glyph replaces the two-layer
-                    // stack. Skipped when a newer toggle already moved the button on.
-                    if (button.tag == targetRes) {
-                        new.alpha = 255
-                        button.setImageDrawable(new)
-                    }
-                }
-            })
-        }
-        // One crossfade per button: drop any in-flight one first. Its end listener is
-        // guarded by `button.tag`, which now holds the NEW target, so cancelling it is a
-        // no-op that just frees the animator — long sessions never accumulate them.
-        iconCrossfades.remove(button)?.let { runCatching { it.cancel() } }
-        iconCrossfades[button] = crossfade
-        crossfade.start()
-    }
-
-    /**
-     * Ends every tracked glyph crossfade at its final frame (the end listener lands the
-     * target glyph) and drops the references — nothing animated outlives onPause/onStop.
-     */
-    private fun finishIconCrossfades() {
-        iconCrossfades.values.forEach { runCatching { it.end() } }
-        iconCrossfades.clear()
     }
 
     /** True once [MarsMusicService] was started for the current playback run; resets on stop. */
@@ -821,73 +757,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun loadHome() {
-        job?.cancel()
-        showLoading()
-        job = lifecycleScope.launch {
-            // Charts go through the repository: {success:false,error} at HTTP 200 is an
-            // exception there, so a server rejection can never masquerade as an empty
-            // «Треки не найдены» list — both endpoints failing shows the error/retry UI.
-            // The /api/home fallback rides the SAME repository transport (OkHttp, shared
-            // interceptors/timeouts, `success:false` → exception) instead of a second
-            // hand-rolled URL connection; shelves are flattened by [MusicHomePolicy].
-            val outcome = withContext(Dispatchers.IO) {
-                MusicChartLoader.resolve(runCatching { repository.getCharts() }) {
-                    runCatching { repository.getHome() }.map(MusicHomePolicy::playbackQueue)
-                }
-            }
-            when (outcome) {
-                is MusicChartLoader.Outcome.Tracks -> {
-                    // Снимок пишется только из успешного ответа и только непустого:
-                    // кэш должен повторять то, что пользователь реально видел.
-                    if (outcome.items.isNotEmpty()) offlineCache.saveChartsSnapshot(outcome.items)
-                    showTracks(outcome.items)
-                }
-                is MusicChartLoader.Outcome.Failed -> showCachedCharts()
-            }
-        }
-    }
-
-    /**
-     * Сеть упала на «Обзоре»: если есть годный снимок чарта — рисуем его с явной
-     * подписью возраста («из кэша, снимок на 18.10 23:41») вместо экрана ошибки.
-     * Нет снимка (или он протух/пуст) — прежнее поведение [showHomeError] с retry.
-     */
-    private fun showCachedCharts() {
-        val decision = MusicOfflineFallbackPolicy.decide(
-            items = offlineCache.getChartsSnapshot(),
-            snapshotTakenAtMs = offlineCache.getTimestamp(),
-            nowMs = System.currentTimeMillis(),
-        )
-        val cached = decision.items
-        if (cached == null) {
-            showHomeError()
-            return
-        }
-        showStatus(null)
-        showTracks(cached, header = offlineNotice(decision.label.orEmpty()))
-    }
-
-    /**
-     * Подпись офлайн-снимка под заголовком списка: пилюля цвета предупреждения.
-     * Обёрнута в контейнер на всю ширину, потому что [showTracks] растягивает header.
-     */
-    internal fun offlineNotice(label: String): View {
-        val pill = TextView(this).apply {
-            text = label
-            textSize = 12f
-            setTextColor(MarsTheme.STATUS_WARNING)
-            background = MarsTheme.pill(this@MusicActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(pill, LinearLayout.LayoutParams(-2, -2))
-        }
-    }
-
     /** Explicit loading placeholder for the chart list (also shown before a retry). */
-    private fun showLoading() {
+    internal fun showLoading() {
         showStatus(null)
         resetList()
         results.addView(TextView(this).apply {
@@ -898,19 +769,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         })
     }
 
-    /** Chart fetch failed (both endpoints): say so and offer an explicit retry. */
-    private fun showHomeError() = showListError(
-        message = "Чарт недоступен — проверьте сеть",
-        retryDescription = "Повторить загрузку чарта",
-        onRetry = { loadHome() },
-    )
-
     /**
      * Shared error/retry state for the track list. Clears the previous cards and the
      * [tracks] backing list first, so a failed load can never leave a stale chart on
      * screen that still starts playback on tap; then shows [message] with a retry.
      */
-    private fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
+    internal fun showListError(message: String, retryDescription: String, onRetry: () -> Unit) {
         tracks = emptyList()
         resetList()
         val box = LinearLayout(this).apply {
@@ -1293,7 +1157,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * кнопку (drill-down плейлиста). Долгий тап предлагает «Добавить в плейлист».
      * Строка регистрируется в [trackRows], чтобы состояние плеера перекрашивало её живьём.
      */
-    private fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
+    internal fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(8), dp(8), dp(8))
@@ -1619,208 +1483,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         statusText.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
-    private fun loadFavorites() {
-        job = lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { repository.getFavorites() } }
-            result.onSuccess { favs ->
-                favoriteIds.clear()
-                favoriteIds += favs.map { it.id }
-                if (favs.isEmpty()) {
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(TextView(this@MusicActivity).apply {
-                        text = "В избранном пусто — нажмите сердечко на треке"
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        gravity = Gravity.CENTER
-                        setPadding(0, dp(32), 0, dp(32))
-                    })
-                } else {
-                    showTracks(favs)
-                }
-            }.onFailure {
-                tracks = emptyList()
-                resetList()
-                showStatus("Избранное недоступно")
-            }
-        }
-    }
-
-    /**
-     * Loads the personal stream («Волна»): the server-picked Mars Flow track list with a
-     * «Включить поток» primary action that starts playback of the whole stream.
-     */
-    private fun loadFlow() {
-        job?.cancel()
-        showStatus(null)
-        resetList()
-        results.addView(TextView(this).apply {
-            text = "Настраиваем волну…"
-            setTextColor(MarsTheme.TEXT_MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(32), 0, dp(32))
-        })
-        job = lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { repository.getFlow() } }
-            result.onSuccess { flow ->
-                if (flow.isEmpty()) {
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(TextView(this@MusicActivity).apply {
-                        text = "Волна пока пуста — сервер не подобрал треки"
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        gravity = Gravity.CENTER
-                        setPadding(0, dp(32), 0, dp(32))
-                    })
-                } else {
-                    showTracks(flow, header = flowHeader(flow))
-                }
-            }.onFailure {
-                showListError(
-                    message = "Волна недоступна — проверьте сеть",
-                    retryDescription = "Повторить загрузку волны",
-                    onRetry = { loadFlow() },
-                )
-            }
-        }
-    }
-
-    /**
-     * «Для тебя»: персональная лента GET /api/home — полки «Продолжить слушать»,
-     * «Новинки», «Для тебя», «Похожие на …» (server.py build_personal_shelf).
-     * Пустая полка — нормальное состояние сервера и просто не рендерится
-     * ([MusicHomePolicy]); полностью пустая лента получает понятную заглушку,
-     * сбой сети — ошибку с повтором. Загрузка идёт в [libraryJob], как у остальных
-     * библиотечных вкладок, и не пересекается с чартовым [job].
-     */
-    private fun loadForYou() {
-        libraryJob?.cancel()
-        openPlaylist = null
-        renderLibrary(LibraryUiState.Loading, { loadForYou() }) {}
-        libraryJob = lifecycleScope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getHome() } }
-            fetched.onSuccess { shelves ->
-                val visible = MusicHomePolicy.visibleShelves(shelves)
-                if (visible.isEmpty()) {
-                    // Все полки пусты — это не ошибка: подсказываем, чем лента наполняется.
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(libraryPlaceholder(getString(R.string.music_for_you_empty)))
-                    return@onSuccess
-                }
-                renderForYouShelves(visible)
-            }.onFailure {
-                renderLibrary(
-                    LibraryUiState.Error(getString(R.string.music_for_you_error)),
-                    { loadForYou() },
-                ) {}
-            }
-        }
-    }
-
-    /**
-     * Рендер полок ленты: заголовок-карточка + вертикальный список строк на каждую полку.
-     * Все треки видимых полок складываются в [tracks] одной очередью в порядке рендера
-     * ([MusicHomePolicy.playbackQueue]), поэтому сквозной индекс строки совпадает с
-     * позицией в очереди и тап запускает воспроизведение ленты с этого трека.
-     */
-    private fun renderForYouShelves(shelves: List<MusicShelf>) {
-        tracks = MusicHomePolicy.playbackQueue(shelves)
-        resetList()
-        var index = 0
-        shelves.forEach { shelf ->
-            headerCard(title = shelf.title)?.let { results.addView(it) }
-            shelf.items.forEach { t ->
-                results.addView(
-                    trackRow(t, index++),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
-                )
-            }
-        }
-    }
-
-    /** «Волна» section card: title, stream size and the accent «Включить поток» button. */
-    private fun flowHeader(items: List<MusicTrack>): View {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 14)
-            setPadding(dp(14), dp(12), dp(14), dp(14))
-        }
-        card.addView(TextView(this).apply {
-            text = "Волна"
-            textSize = 17f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(TextView(this).apply {
-            text = "Персональный поток Марса · ${items.size} треков"
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(0, dp(2), 0, dp(12))
-        })
-        val playFlowBtn = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT, 12)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Включить поток"
-            setOnClickListener {
-                if (tracks.isEmpty()) return@setOnClickListener
-                MarsMusicPlayer.playTrack(0, tracks)
-                showStatus("Волна включена")
-            }
-        }
-        playFlowBtn.addView(ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_play))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
-        }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
-        playFlowBtn.addView(TextView(this).apply {
-            text = "Включить поток"
-            textSize = 14f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(playFlowBtn, LinearLayout.LayoutParams(-1, -2))
-        return card
-    }
-
-    /**
-     * «Радио по треку»: fetches similar tracks for the current track and appends the
-     * deduplicated additions (pure [RadioQueuePolicy]) to the queue — playback continues
-     * seamlessly because enqueuing never restarts a track that is already playing.
-     */
-    private fun onRadioClicked() {
-        val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
-        if (radioJob?.isActive == true) return
-        radioBtn.isEnabled = false
-        radioBtn.alpha = 0.4f
-        showStatus("Собираем радио по треку «${track.title}»…")
-        radioJob = lifecycleScope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getRadio(track.id) } }
-            fetched.onSuccess { candidates ->
-                val additions = RadioQueuePolicy.tracksToAdd(
-                    fetched = candidates,
-                    queuedIds = MarsMusicPlayer.tracks.map { it.id },
-                    currentTrackId = MarsMusicPlayer.currentTrack?.id,
-                )
-                additions.forEach { MarsMusicPlayer.enqueue(it) }
-                showStatus(
-                    if (additions.isEmpty()) "Радио: новых похожих треков нет"
-                    else "Радио: +${additions.size} треков в очередь"
-                )
-                if (currentTab == MusicTab.QUEUE) renderQueue()
-            }.onFailure {
-                showStatus("Радио недоступно — проверьте сеть")
-            }
-            updatePlayerActionStates()
-        }
-    }
-
     // ------------------------------------------------------------- исполнитель
 
     /** Radio/lyrics act on the current track only: dim and disable both without one. */
-    private fun updatePlayerActionStates() {
+    internal fun updatePlayerActionStates() {
         if (!::radioBtn.isInitialized || !::lyricsBtn.isInitialized) return
         val hasTrack = MarsMusicPlayer.currentTrack != null
         val busy = radioJob?.isActive == true
@@ -1828,27 +1494,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         radioBtn.alpha = if (hasTrack && !busy) 1f else 0.4f
         lyricsBtn.isEnabled = hasTrack
         lyricsBtn.alpha = if (hasTrack) 1f else 0.4f
-    }
-
-    /** Prefetches favorite ids so hearts render filled on the charts/search rows. */
-    private fun refreshFavoriteIds() {
-        lifecycleScope.launch {
-            val favs = withContext(Dispatchers.IO) { runCatching { repository.getFavorites() }.getOrNull() }
-                ?: return@launch
-            favoriteIds.clear()
-            favoriteIds += favs.map { it.id }
-            favoriteIds.toList().forEach { refreshHeart(it) }
-        }
-    }
-
-    private fun refreshHeart(id: String) {
-        val filled = favoriteIds.contains(id)
-        heartButtons[id]?.forEach { button ->
-            button.setImageResource(if (filled) R.drawable.ic_favorite else R.drawable.ic_favorite_border)
-            button.imageTintList = ColorStateList.valueOf(if (filled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
-            // MUS-M3: the heart announces the ACTION the tap performs on this track
-            button.contentDescription = MusicA11yPolicy.heartAction(filled)
-        }
     }
 
     /** Clears the rendered list plus per-row caches (hearts, highlighted rows). */
@@ -1886,33 +1531,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (state.tapStartsPlayback) MarsMusicPlayer.playTrack(index, tracks) else MarsMusicPlayer.togglePlay()
     }
 
-    private fun onHeartClicked(track: MusicTrack, button: ImageButton) {
-        button.isEnabled = false // debounce double taps while the request is in flight
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching { repository.toggleFavorite(track.id, track) }.getOrNull()
-            }
-            button.isEnabled = true
-            when (result) {
-                true -> {
-                    favoriteIds += track.id
-                    refreshHeart(track.id)
-                    showStatus("Добавлено в избранное: ${track.title}")
-                }
-                false -> {
-                    favoriteIds -= track.id
-                    refreshHeart(track.id)
-                    showStatus("Удалено из избранного: ${track.title}")
-                    if (currentTab == MusicTab.FAVORITES) {
-                        val rest = tracks.filterNot { it.id == track.id }
-                        if (rest.isEmpty()) loadFavorites() else showTracks(rest)
-                    }
-                }
-                null -> showStatus("Избранное недоступно")
-            }
-        }
-    }
-
     private fun onQueueAddClicked(track: MusicTrack) {
         MarsMusicPlayer.enqueue(track)
         // Real state feedback: a finished/empty session resumes on this very track.
@@ -1940,151 +1558,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
     internal fun dp(v: Int) = MarsTheme.dp(this, v)
 
-    /**
-     * «Звук»: тёмный обсидиановый [MarsDialog] с тумблером обработки звука, выбором
-     * пресета эквалайзера (паритет с WebUI EQ_PRESETS) и ползунком Bass Boost.
-     * Каждое изменение сразу уходит в живой плеер ([MarsMusicPlayer.setAudioFx]) и
-     * сохраняется через [AudioFxSettings]; тело диалога перерисовывается на месте.
-     */
-    private fun onEqClicked() {
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        var dialogRef: Dialog? = null
-        dialogRef = MarsDialog.show(this) { root ->
-            root.addView(MarsDialog.header(this, "Звук", audioFx.state.preset.title))
-            renderEqBody(body)
-            root.addView(body, LinearLayout.LayoutParams(-1, -2))
-            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
-            emptyList()
-        }
-    }
-
-    /** Fills the dialog body: on/off toggle, preset stack, Bass Boost slider. */
-    private fun renderEqBody(body: LinearLayout) {
-        body.removeAllViews()
-        val state = audioFx.state
-
-        body.addView(MarsDialog.caption(this, "Обработка звука"))
-        val toggle = MarsDialog.pill(
-            this,
-            if (state.enabled) "Включена" else "Выключена",
-            bg = if (state.enabled) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
-            fg = if (state.enabled) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED,
-            border = if (state.enabled) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
-        ) {
-            audioFx.setEnabled(!state.enabled)
-            onAudioFxChanged()
-            renderEqBody(body)
-        }
-        body.addView(toggle, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
-
-        body.addView(MarsDialog.caption(this, "Пресет эквалайзера"))
-        AudioFxPreset.values().forEach { preset ->
-            val selected = state.preset == preset
-            val pill = MarsDialog.pill(
-                this,
-                preset.title,
-                bg = if (selected) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
-                fg = if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_EM,
-                border = if (selected) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
-            ) {
-                audioFx.setPreset(preset)
-                onAudioFxChanged()
-                renderEqBody(body)
-            }
-            body.addView(pill, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
-        }
-
-        val bassLabel = TextView(this).apply {
-            text = bassBoostCaption(state.bassBoost)
-            textSize = 10f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        body.addView(bassLabel, LinearLayout.LayoutParams(-1, -2))
-        val bassSeek = SeekBar(this).apply {
-            max = AudioFxPolicy.MAX_BASS_BOOST
-            progress = state.bassBoost
-            progressTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-            thumbTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-            isEnabled = state.enabled
-            alpha = if (state.enabled) 1f else 0.4f
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    audioFx.setBassBoost(value)
-                    bassLabel.text = bassBoostCaption(audioFx.state.bassBoost)
-                    onAudioFxChanged()
-                }
-                override fun onStartTrackingTouch(bar: SeekBar?) {}
-                override fun onStopTrackingTouch(bar: SeekBar?) {}
-            })
-        }
-        body.addView(bassSeek, LinearLayout.LayoutParams(-1, -2))
-    }
-
-    /** Pushes the persisted state into the live player and refreshes the header icon. */
-    private fun onAudioFxChanged() {
-        MarsMusicPlayer.setAudioFx(audioFx.state)
-        updateEqIcon()
-    }
-
-    /** Header «Звук» glows ruby while sound processing is enabled. */
-    private fun updateEqIcon() {
-        if (!::eqBtn.isInitialized || !::audioFx.isInitialized) return
-        eqBtn.imageTintList = ColorStateList.valueOf(
-            if (audioFx.state.enabled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
-        )
-    }
-
-    /** Opens the explicit original/standard/economy stream profile picker. */
-    private fun onQualityClicked() {
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        var dialogRef: Dialog? = null
-        dialogRef = MarsDialog.show(this) { root ->
-            root.addView(MarsDialog.header(this, "Качество потока", streamQuality.value.label))
-            renderQualityBody(body)
-            root.addView(body, LinearLayout.LayoutParams(-1, -2))
-            root.addView(MarsDialog.quietButton(this, "Закрыть") { dialogRef?.dismiss() })
-            emptyList()
-        }
-    }
-
-    /** Renders selectable quality pills and applies a choice without rebuilding the screen. */
-    private fun renderQualityBody(body: LinearLayout) {
-        body.removeAllViews()
-        val selected = streamQuality.value
-        body.addView(MarsDialog.caption(this, "Профиль аудиопотока"))
-        StreamQuality.selectable.forEach { quality ->
-            val isSelected = quality == selected
-            val pill = MarsDialog.pill(
-                this,
-                quality.label,
-                bg = if (isSelected) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
-                fg = if (isSelected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_EM,
-                border = if (isSelected) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_MUTED,
-            ) {
-                streamQuality.set(quality)
-                MarsMusicPlayer.setStreamQuality(quality)
-                updateQualityIcon()
-                renderQualityBody(body)
-            }
-            body.addView(pill, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
-        }
-    }
-
-    /** Highlights the active explicit quality profile in the header. */
-    private fun updateQualityIcon() {
-        if (!::qualityBtn.isInitialized || !::streamQuality.isInitialized) return
-        qualityBtn.imageTintList = ColorStateList.valueOf(
-            if (streamQuality.value.isExplicit) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
-        )
-        qualityBtn.contentDescription = "Качество потока: ${streamQuality.value.label}"
-    }
-
-    /** «BASS BOOST · 65%»: hardware scale 0..1000 shown as percent, WebUI-style caption. */
-    private fun bassBoostCaption(strength: Int): String =
-        "BASS BOOST · ${AudioFxPolicy.sanitizeStrength(strength) / 10}%"
+    // Проверки lateinit-полей для секций-расширений: `::x.isInitialized` компилятор разрешает
+    // только внутри самого класса, поэтому хост отдаёт готовые предикаты. Поведение то же:
+    // false — поле ещё не инициализировано (шапка экрана не до конца поднята).
+    internal fun isEqReady(): Boolean = ::eqBtn.isInitialized && ::audioFx.isInitialized
+    internal fun isQualityReady(): Boolean = ::qualityBtn.isInitialized && ::streamQuality.isInitialized
 
     companion object {
         private const val BASE_URL = "https://marscore.ru/music"
@@ -2093,48 +1571,4 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         /** Progress ticker period while the screen is visible (thumb + time label). */
         private const val TICKER_INTERVAL_MS = 500L
     }
-}
-
-/**
- * Pure seek-bar drag policy for [MusicActivity]: while the user's finger owns the thumb,
- * the periodic progress ticker and player callbacks must not snap it back (on a touch
- * screen the thumb visibly fights the drag), and the player is seeked exactly once — on
- * release — instead of on every intermediate progress change. Android-free for JVM tests.
- */
-object SeekDragPolicy {
-    /** Initial/reset value of the pending drag position: nothing has been dragged. */
-    const val NO_PENDING_SEEK = -1
-
-    /** The ticker may move the thumb and time label only when no drag is in progress. */
-    fun tickerMayUpdate(isDragging: Boolean): Boolean = !isDragging
-
-    /**
-     * The position to seek to on release: [pendingMs] clamped into the track, or null when
-     * nothing is pending (any negative value) — then the player must not be touched.
-     */
-    fun pendingSeekTarget(pendingMs: Int, durationMs: Int): Int? =
-        if (pendingMs < 0) null else pendingMs.coerceIn(0, durationMs.coerceAtLeast(0))
-}
-
-/**
- * Pure policy for the play/pause glyph crossfade in the music flow: alpha only — never
- * scale, never bounce/overshoot, capped at [MarsMotion.fastMs] (120 ms) so the effect
- * stays a discreet micro-feedback, and collapsed to an instant swap under reduced motion.
- * Android-free for JVM tests.
- */
-object PlayPauseIconPolicy {
-    /**
-     * Crossfade duration in ms: [MarsMotion.fastMs] normally, 0 (instant swap) when
-     * [reducedMotion] — routed through [MotionPolicy] like every other effect.
-     */
-    fun durationMs(reducedMotion: Boolean): Int =
-        MotionPolicy.durationFor(MotionCue.MICRO_TAP, reducedMotion).coerceIn(0, MarsMotion.fastMs)
-
-    /**
-     * Crossfade only a real glyph change on a button that already rendered its first
-     * glyph ([currentResId] != null — the first render is instant, there is nothing to
-     * fade from) and only while animation is allowed (duration > 0).
-     */
-    fun shouldCrossfade(currentResId: Int?, targetResId: Int, durationMs: Int): Boolean =
-        currentResId != null && currentResId != targetResId && durationMs > 0
 }

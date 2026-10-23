@@ -36,6 +36,21 @@ class MusicA11yContractTest {
 
     private val activity by lazy { source("src/main/java/ru/mars/mobile/MusicActivity.kt") }
 
+    /**
+     * Секции-расширения экрана после раскладки (шаги 0–6): вынесенный код — тот же
+     * production-код экрана, поэтому проверки доступности читают его вместе с Activity.
+     */
+    private val sections by lazy {
+        listOf(
+            "MusicPlaybackGlyphSection.kt",
+            "MusicAudioSettingsSection.kt",
+            "MusicForYouSection.kt",
+            "MusicChartSection.kt",
+            "MusicFlowSection.kt",
+            "MusicFavoritesSection.kt",
+        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
+
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
 
     @Test fun statusTextIsPoliteLiveRegion() {
@@ -112,9 +127,9 @@ class MusicA11yContractTest {
             "Кнопка избранного в строке создаётся с подписью из политики",
             creation.contains("MusicA11yPolicy.heartAction(isFav)"),
         )
-        val refresh = activity
-            .substringAfter("private fun refreshHeart(id: String)")
-            .substringBefore("/** Clears the rendered list")
+        val refresh = sections
+            .substringAfter("fun MusicActivity.refreshHeart(id: String)")
+            .substringBefore("fun MusicActivity.onHeartClicked(")
         assertTrue(
             "refreshHeart обязан обновлять contentDescription вместе с иконкой",
             refresh.contains("button.contentDescription = MusicA11yPolicy.heartAction(filled)"),
