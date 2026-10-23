@@ -50,4 +50,7 @@
     </plurals>
     <string name="settings_profiles_open">Профили сервера</string>
     <string name="settings_profiles_hint">Смотреть</string>
+    <string name="settings_voice_section">ГОЛОС</string>
+    <string name="settings_voice_barge_in">Перебивать ответ голосом</string>
+    <string name="settings_voice_barge_in_hint">Скажите вслух — Марс замолчит</string>
 </resources>

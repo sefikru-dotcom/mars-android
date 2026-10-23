@@ -235,7 +235,9 @@ internal fun ChatActivity.initializeVoiceStack() {
             // доказательство (partial ASR, слов которого нет в произносимом ответе), на
             // наушниках/Bluetooth — энергия. Голое «включить и слушать» перебивало бы цикл
             // собственным динамиком. Живые замеры на устройстве остаются обязательными.
-            bargeInEnabled = voiceOutputPrefs.getBoolean(KEY_VOICE_BARGE_IN, DEFAULT_VOICE_BARGE_IN),
+            // Значение — из настройки (экран «Настройки», секция «Голос»), а не литерал:
+            // иначе переключатель писал бы флаг, который никто не читает.
+            bargeInEnabled = bargeInSetting().isEnabled(),
             stt = streamingStt,
             // Ход уже идёт: вторая реплика уходит steer-ом, а не новым сообщением.
             turnActive = { uiState.status == ChatStatus.TYPING },
@@ -392,6 +394,10 @@ internal fun ChatActivity.destroyChatStack() {
 /** Возврат на передний план: озвучка, хвост стрима, мини-плеер, воркспейс. */
 internal fun ChatActivity.resumeChat() {
         if (isVoiceOutputReady()) voiceOutput.onResume()
+        // Настройки — отдельная Activity: переключатель перебивания голосом живёт там, а цикл
+        // создан здесь и живёт до onDestroy. Возврат на экран — единственная точка, где выбор
+        // пользователя доходит до уже созданного цикла без перезапуска приложения.
+        if (isVoiceLoopReady()) voiceLoop.bargeInEnabled = bargeInSetting().isEnabled()
         // Возврат на передний план: хвост стрима не должен ждать trailing-окно —
         // отложенная перерисовка выполняется немедленно (renderMessages гасит job сам).
         if (streamFlushJob != null) renderMessages()
