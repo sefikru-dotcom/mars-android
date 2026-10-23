@@ -1,7 +1,11 @@
 package ru.mars.network
 
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
@@ -226,25 +230,43 @@ class LiveEventsRepositoryTest {
 
     @Test
     fun pollingRecoversToStreamingAndAnnouncesTheTransition() = runBlocking {
+        // Path-based dispatcher instead of a response queue: the exact number of polls before
+        // the retry is an implementation detail, the observable contract is the mode sequence.
         MockWebServer().use { server ->
-            server.enqueue(MockResponse().setResponseCode(503)) // SSE unavailable
-            server.enqueue(json("""{"pending":null,"pending_count":0}""")) // fallback poll
-            server.enqueue( // SSE is back: the first event after recovery
-                sse(
-                    "event: approval\n" +
-                        "data: {\"pending\":{\"approval_id\":\"a-3\",\"command\":\"id\",\"description\":\"whoami\"},\"pending_count\":1}\n\n",
-                )
-            )
+            val streamHits = java.util.concurrent.atomic.AtomicInteger(0)
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse =
+                    when {
+                        // SSE is unavailable at first, then comes back.
+                        request.path?.startsWith("/api/approval/stream") == true ->
+                            if (streamHits.getAndIncrement() == 0) {
+                                MockResponse().setResponseCode(503)
+                            } else {
+                                sse(
+                                    "event: approval\n" +
+                                        "data: {\"pending\":{\"approval_id\":\"a-3\",\"command\":\"id\",\"description\":\"whoami\"},\"pending_count\":1}\n\n",
+                                )
+                            }
+                        // The fallback poll reports an empty queue.
+                        else -> json("""{"pending":null,"pending_count":0}""")
+                    }
+            }
 
-            val collected = withTimeout(10_000) {
-                LiveEventsRepository(
-                    reconnectPolicyFactory = noReconnect(),
-                    attentionPollIntervalMs = 1L,
-                    sseRetryAfterPolls = 1,
-                )
-                    .subscribeToApprovalStream(server.url("/").toString(), credential(), "s-1")
-                    .take(5)
-                    .toList()
+            val collected = java.util.concurrent.CopyOnWriteArrayList<LiveChannelEvent<ApprovalStreamUpdate>>()
+            coroutineScope {
+                val job = launch {
+                    LiveEventsRepository(
+                        reconnectPolicyFactory = noReconnect(),
+                        attentionPollIntervalMs = 1L,
+                        sseRetryAfterPolls = 1,
+                    )
+                        .subscribeToApprovalStream(server.url("/").toString(), credential(), "s-1")
+                        .collect { event -> collected += event }
+                }
+                withTimeout(15_000) {
+                    while (collected.none { it.payloadOrNull?.payload?.approvalId == "a-3" }) delay(10)
+                }
+                job.cancelAndJoin()
             }
 
             val modes = collected.filterIsInstance<LiveChannelEvent.Mode>().map { it.mode }
