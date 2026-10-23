@@ -21,6 +21,7 @@ import ru.mars.network.model.KanbanAssignees
 import ru.mars.network.model.KanbanBoard
 import ru.mars.network.model.KanbanBoardFilters
 import ru.mars.network.model.KanbanBoards
+import ru.mars.network.model.KanbanBulkEntry
 import ru.mars.network.model.KanbanColumn
 import ru.mars.network.model.KanbanComment
 import ru.mars.network.model.KanbanConfig
@@ -92,6 +93,52 @@ sealed interface KanbanDispatchResult {
 }
 
 /**
+ * Outcome of a task-shaped write — create (`POST /api/kanban/tasks`), patch
+ * (`PATCH /api/kanban/tasks/{id}/patch`) and block/unblock
+ * (`POST /api/kanban/tasks/{id}/block|unblock`). All three answer the same
+ * `{"task": {...}, "read_only": false}` envelope, so one result type covers them
+ * and the caller always sees the SERVER's view of the card, not its own guess.
+ */
+sealed interface KanbanTaskWriteResult {
+    /** 2xx with a parseable task — the new card on create, the updated one on patch. */
+    data class Updated(val task: KanbanTask) : KanbanTaskWriteResult
+
+    /** 404 — the card was deleted/archived between load and write. */
+    data class NotFound(val message: String) : KanbanTaskWriteResult
+
+    /** 400/409/503 (`{"error": …}`) or transport failure. */
+    data class Failed(val message: String) : KanbanTaskWriteResult
+}
+
+/** Outcome of `POST /api/kanban/tasks/{id}/comments` (`{"ok":true,"comment_id":n}`). */
+sealed interface KanbanCommentResult {
+    data class Added(val commentId: Long?) : KanbanCommentResult
+    data class NotFound(val message: String) : KanbanCommentResult
+    data class Failed(val message: String) : KanbanCommentResult
+}
+
+/**
+ * Outcome of `POST /api/kanban/tasks/bulk`. The bridge applies the mutation per id
+ * and reports a verdict for each, so a batch is [Applied] even when some ids failed.
+ */
+sealed interface KanbanBulkResult {
+    data class Applied(val entries: List<KanbanBulkEntry>) : KanbanBulkResult {
+        val failures: List<KanbanBulkEntry> get() = entries.filterNot { it.ok }
+        val allOk: Boolean get() = entries.isNotEmpty() && failures.isEmpty()
+    }
+
+    data class Failed(val message: String) : KanbanBulkResult
+}
+
+/** Outcome of `POST /api/kanban/links` / `/links/delete`. */
+sealed interface KanbanLinkResult {
+    /** [changed] is null for a created link and the bridge's flag for an unlink. */
+    data class Linked(val changed: Boolean?) : KanbanLinkResult
+    data class NotFound(val message: String) : KanbanLinkResult
+    data class Failed(val message: String) : KanbanLinkResult
+}
+
+/**
  * One decoded frame of the kanban event stream, as delivered by [KanbanRepository.streamEvents].
  * The raw SSE vocabulary is kept (`hello` / `events`) instead of being folded into a single
  * "event" type: the first frame tells the client which board the server bound it to and where
@@ -109,7 +156,7 @@ sealed interface KanbanStreamFrame {
 }
 
 /**
- * Kanban bridge of the WebUI backend (contract verified read-only against
+ * Kanban bridge of the WebUI backend (contract verified against
  * `/opt/hermes-webui/api/kanban_bridge.py`; errors are `{"error": "<msg>"}` with
  * 400 ValueError / 404 LookupError / 409 RuntimeError / 503 ImportError per the
  * bridge's `handle_kanban_get`/`handle_kanban_post` except-ladder):
@@ -118,19 +165,43 @@ sealed interface KanbanStreamFrame {
  * - `GET  /api/kanban/tasks/{id}?board=`
  * - `GET  /api/kanban/stats?board=`
  * - `GET  /api/kanban/config?board=`
+ * - `GET  /api/kanban/boards`, `GET /api/kanban/assignees`, `GET /api/kanban/events/stream`
  * - `POST /api/kanban/dispatch?board=&dry_run=&max=`
  *
- * SAFETY of the mutating surface: [dispatch] is the ONLY write here and it never
- * mutates task content — it asks the server's dispatcher for one tick. All gating
- * (claim locks, failure breaker, per-profile caps, single-writer tick lock) lives
- * server-side; `dryRun = true` performs a no-op scan and is the safe probe. Board
- * creation/patch, task create/patch, comments and links are deliberately NOT
- * exposed: a phone client mutating cards needs product decisions this layer must
- * not pre-empt.
+ * Writes (all board-scoped through the `?board=` query, mirroring the WebUI):
+ *
+ * - `POST  /api/kanban/tasks`                    — [createTask]
+ * - `PATCH /api/kanban/tasks/{id}/patch`         — [patchTask]
+ * - `POST  /api/kanban/tasks/{id}/comments`      — [addComment]
+ * - `POST  /api/kanban/tasks/{id}/block|unblock` — [setBlocked]
+ * - `POST  /api/kanban/tasks/bulk`               — [bulkUpdate]
+ * - `POST  /api/kanban/links` (and `/links/delete`) — [linkTasks]
+ *
+ * SAFETY of the mutating surface: every write here is admitted for the device
+ * Bearer only on the exact route+verb pair the bridge answers
+ * (`api/auth.py`: `NATIVE_BEARER_KANBAN_WRITE_PATHS` +
+ * `NATIVE_BEARER_KANBAN_TASK_WRITE_SUFFIXES`). Board creation/rename/archive,
+ * dispatch and config changes are NOT exposed — the phone mutates cards only.
+ * `status = "running"` is rejected server-side: the running state belongs to the
+ * dispatcher's claim protocol, so the UI moves cards through ready/blocked/done.
  */
 class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
 
     private val jsonMediaType = "application/json".toMediaType()
+
+    companion object {
+        /** `author` of comments written from the phone (server default is `webui`). */
+        const val CLIENT_AUTHOR = "android"
+
+        // Local refusals reuse the bridge's own ValueError texts, so the UI shows the
+        // same wording whether the guard fired here or server-side.
+        internal const val REQUIRED_TITLE = "title is required"
+        internal const val REQUIRED_COMMENT = "body is required"
+        internal const val REQUIRED_IDS = "ids is required"
+        internal const val REQUIRED_LINK_IDS = "parent_id and child_id are required"
+        internal const val EMPTY_PATCH = "patch body is empty"
+        internal const val MISSING_TASK = "task_id is required"
+    }
 
     /**
      * `GET /api/kanban/board`. [since] is the client's `latest_event_id` cursor: when
@@ -399,7 +470,260 @@ class KanbanRepository(private val client: OkHttpClient = HttpClients.rest) {
         }
     }
 
+    // ── writes (task-shaped; device-Bearer allowlisted per route+verb) ──
+
+    /**
+     * `POST /api/kanban/tasks` — create a card on [board] (query `?board=`, like
+     * the WebUI; the board is NOT a body field there).
+     *
+     * The bridge defaults `assignee` to `kanban.default_assignee` (then `"default"`)
+     * when omitted, so leaving [assignee] null is a normal, owned card — not an
+     * unassigned orphan. `status` is applied as a second step server-side; leaving
+     * it null lands the card in the board's initial column.
+     *
+     * A blank [title] is refused locally with the server's own message instead of
+     * burning a round-trip that can only 400.
+     */
+    suspend fun createTask(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        title: String,
+        body: String? = null,
+        assignee: String? = null,
+        priority: Int? = null,
+        tenant: String? = null,
+        status: String? = null,
+        board: String? = null,
+    ): KanbanTaskWriteResult = withContext(Dispatchers.IO) {
+        if (title.isBlank()) return@withContext KanbanTaskWriteResult.Failed(REQUIRED_TITLE)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks")
+            .boardParam(board)
+            .build()
+        execute(
+            request = write(url, credential, "POST", KanbanRequestBodies.createTask(
+                title = title, body = body, assignee = assignee,
+                priority = priority, tenant = tenant, status = status,
+            )),
+            networkFailure = { KanbanTaskWriteResult.Failed(it) },
+            map = ::taskWriteResult,
+        )
+    }
+
+    /**
+     * `PATCH /api/kanban/tasks/{id}/patch` — partial update; only the non-null
+     * arguments travel (the bridge keys off field PRESENCE, so null means
+     * "leave as is"). [assignee] `""` deliberately unassigns.
+     *
+     * `status = "running"` is rejected by the server (the state belongs to the
+     * dispatcher's claim protocol) — the screen moves cards through
+     * `ready`/`blocked`/`done` instead.
+     */
+    suspend fun patchTask(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        taskId: String,
+        title: String? = null,
+        body: String? = null,
+        status: String? = null,
+        assignee: String? = null,
+        priority: Int? = null,
+        tenant: String? = null,
+        result: String? = null,
+        summary: String? = null,
+        blockReason: String? = null,
+        board: String? = null,
+    ): KanbanTaskWriteResult = withContext(Dispatchers.IO) {
+        if (taskId.isBlank()) return@withContext KanbanTaskWriteResult.NotFound(MISSING_TASK)
+        val payload = KanbanRequestBodies.patchTask(
+            title = title, body = body, status = status, assignee = assignee,
+            priority = priority, tenant = tenant, result = result,
+            summary = summary, blockReason = blockReason,
+        )
+        // `{}` would be an accepted no-op on the server; refuse it so a UI bug can't
+        // silently "succeed" while the card stays untouched.
+        if (payload == "{}") return@withContext KanbanTaskWriteResult.Failed(EMPTY_PATCH)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks")
+            .addPathSegment(taskId)
+            .addPathSegment("patch")
+            .boardParam(board)
+            .build()
+        execute(
+            request = write(url, credential, "PATCH", payload),
+            networkFailure = { KanbanTaskWriteResult.Failed(it) },
+            map = ::taskWriteResult,
+        )
+    }
+
+    /** `POST /api/kanban/tasks/{id}/comments` — comment authored by this client ([author]). */
+    suspend fun addComment(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        taskId: String,
+        body: String,
+        author: String = CLIENT_AUTHOR,
+        board: String? = null,
+    ): KanbanCommentResult = withContext(Dispatchers.IO) {
+        if (taskId.isBlank()) return@withContext KanbanCommentResult.NotFound(MISSING_TASK)
+        if (body.isBlank()) return@withContext KanbanCommentResult.Failed(REQUIRED_COMMENT)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks")
+            .addPathSegment(taskId)
+            .addPathSegment("comments")
+            .boardParam(board)
+            .build()
+        execute(
+            request = write(url, credential, "POST", KanbanRequestBodies.comment(body, author)),
+            networkFailure = { KanbanCommentResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanCommentResult.Failed(unparseable(code))
+                code == 404 -> KanbanCommentResult.NotFound(errorMessage(root, code))
+                code in 200..299 -> KanbanCommentResult.Added(TolerantJson.longOrNull(root, "comment_id"))
+                else -> KanbanCommentResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * Block (`POST …/block`, with [reason]) or unblock (`POST …/unblock`) — the two
+     * structured verbs the bridge exposes, so the `blocked`/`unblocked` events fire
+     * server-side instead of a raw status overwrite.
+     */
+    suspend fun setBlocked(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        taskId: String,
+        blocked: Boolean,
+        reason: String? = null,
+        board: String? = null,
+    ): KanbanTaskWriteResult = withContext(Dispatchers.IO) {
+        if (taskId.isBlank()) return@withContext KanbanTaskWriteResult.NotFound(MISSING_TASK)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks")
+            .addPathSegment(taskId)
+            .addPathSegment(if (blocked) "block" else "unblock")
+            .boardParam(board)
+            .build()
+        val payload = if (blocked) KanbanRequestBodies.block(reason) else "{}"
+        execute(
+            request = write(url, credential, "POST", payload),
+            networkFailure = { KanbanTaskWriteResult.Failed(it) },
+            map = ::taskWriteResult,
+        )
+    }
+
+    /**
+     * `POST /api/kanban/tasks/bulk` — one mutation over many cards. The bridge
+     * applies `archive` OR `status` (archive wins), then `assignee`/`priority`, and
+     * answers a per-id verdict list; partial failures are [KanbanBulkResult.Applied]
+     * with [KanbanBulkResult.Applied.failures] populated.
+     */
+    suspend fun bulkUpdate(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        ids: List<String>,
+        status: String? = null,
+        archive: Boolean? = null,
+        assignee: String? = null,
+        priority: Int? = null,
+        board: String? = null,
+    ): KanbanBulkResult = withContext(Dispatchers.IO) {
+        val cleanIds = ids.map(String::trim).filter(String::isNotEmpty).distinct()
+        if (cleanIds.isEmpty()) return@withContext KanbanBulkResult.Failed(REQUIRED_IDS)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/tasks/bulk")
+            .boardParam(board)
+            .build()
+        execute(
+            request = write(
+                url, credential, "POST",
+                KanbanRequestBodies.bulk(cleanIds, status = status, archive = archive, assignee = assignee, priority = priority),
+            ),
+            networkFailure = { KanbanBulkResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanBulkResult.Failed(unparseable(code))
+                code in 200..299 -> KanbanBulkResult.Applied(parseBulkEntries(root))
+                else -> KanbanBulkResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
+    /**
+     * Parent → child dependency link: `POST /api/kanban/links`, or
+     * `POST /api/kanban/links/delete` when [unlink] (the bridge's dedicated unlink
+     * route — its DELETE sibling is not device-Bearer allowlisted).
+     */
+    suspend fun linkTasks(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        parentId: String,
+        childId: String,
+        unlink: Boolean = false,
+        board: String? = null,
+    ): KanbanLinkResult = withContext(Dispatchers.IO) {
+        if (parentId.isBlank() || childId.isBlank()) {
+            return@withContext KanbanLinkResult.Failed(REQUIRED_LINK_IDS)
+        }
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegments("api/kanban/links")
+            .apply { if (unlink) addPathSegment("delete") }
+            .boardParam(board)
+            .build()
+        execute(
+            request = write(url, credential, "POST", KanbanRequestBodies.link(parentId, childId)),
+            networkFailure = { KanbanLinkResult.Failed(it) },
+        ) { code, root ->
+            when {
+                root == null -> KanbanLinkResult.Failed(unparseable(code))
+                code == 404 -> KanbanLinkResult.NotFound(errorMessage(root, code))
+                code in 200..299 -> KanbanLinkResult.Linked(
+                    // `changed` only exists on the unlink answer; create has no flag.
+                    if (unlink) TolerantJson.bool(root, "changed") else null
+                )
+                else -> KanbanLinkResult.Failed(errorMessage(root, code))
+            }
+        }
+    }
+
     // ── request plumbing ──
+
+    private fun write(
+        url: HttpUrl,
+        credential: ConsumedDeviceCredential,
+        method: String,
+        body: String,
+    ): Request {
+        val payload = body.toRequestBody(jsonMediaType)
+        val builder = Request.Builder().url(url).authHeader(credential)
+        return if (method == "PATCH") builder.patch(payload).build() else builder.post(payload).build()
+    }
+
+    private fun taskWriteResult(code: Int, root: Map<String, Any?>?): KanbanTaskWriteResult {
+        val task = parseTaskOrNull(TolerantJson.mapField(root, "task"))
+        return when {
+            root == null -> KanbanTaskWriteResult.Failed(unparseable(code))
+            code == 404 -> KanbanTaskWriteResult.NotFound(errorMessage(root, code))
+            code in 200..299 && task != null -> KanbanTaskWriteResult.Updated(task)
+            code in 200..299 -> KanbanTaskWriteResult.Failed(unparseable(code))
+            else -> KanbanTaskWriteResult.Failed(errorMessage(root, code))
+        }
+    }
+
+    internal fun parseBulkEntries(root: Map<String, Any?>): List<KanbanBulkEntry> =
+        TolerantJson.listField(root, "results").mapNotNull { entry ->
+            val map = entry as? Map<*, *> ?: return@mapNotNull null
+            val id = TolerantJson.string(map, "id") ?: return@mapNotNull null
+            KanbanBulkEntry(
+                id = id,
+                // Absent `ok` is treated as success: the bridge only writes the key on
+                // refusal (`entry.update(ok=False, ...)`), so a row without it applied.
+                ok = TolerantJson.bool(map, "ok", default = true),
+                error = TolerantJson.string(map, "error"),
+            )
+        }
 
     private fun get(url: HttpUrl, credential: ConsumedDeviceCredential): Request =
         Request.Builder().url(url).authHeader(credential).get().build()

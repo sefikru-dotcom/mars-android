@@ -25,8 +25,9 @@ import ru.mars.network.repository.KanbanStreamFrame
  * best-effort статистика и — главное — контракт polling-конверта
  * (`changed:false` никогда не рендерится пустой доской и не мигает LOADING).
  *
- * Контракт read-only: у презентера нет и не тестируется никаких операций
- * create/edit/move/delete/dispatch — только GET-порты.
+ * Здесь — только ЧТЕНИЕ (GET-порты). Запись экрана (create/patch/comment/
+ * block/bulk/link) живёт в [KanbanPresenterWritesTest]; dispatch и управление
+ * досками презентеру недоступны вовсе.
  */
 class KanbanPresenterTest {
 

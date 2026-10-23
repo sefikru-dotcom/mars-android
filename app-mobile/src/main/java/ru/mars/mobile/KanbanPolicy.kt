@@ -7,7 +7,7 @@ import ru.mars.network.model.KanbanTask
 import ru.mars.network.model.KanbanTaskDetail
 
 /**
- * Фаза экрана «Канбан» (read-only доска). Чистая JVM-модель — UI-слой
+ * Фаза экрана «Канбан». Чистая JVM-модель — UI-слой
  * (KanbanActivity) только сопоставляет фазу с видимостью прогресса/доски/
  * статуса; все тексты, колонки и карточки считает [KanbanPolicy].
  */
@@ -52,8 +52,8 @@ enum class KanbanStatusTone {
 
 /**
  * Одна карточка задачи на доске. [id] — стабильный идентификатор для клика
- * (read-only detail). Все подписи уже отформатированы [KanbanPolicy]:
- * UI ничего не вычисляет.
+ * (detail-диалог и действия записи по этой карточке). Все подписи уже
+ * отформатированы [KanbanPolicy]: UI ничего не вычисляет.
  */
 data class KanbanTaskCardUi(
     val id: String,
@@ -69,11 +69,20 @@ data class KanbanTaskCardUi(
     val isGoalMode: Boolean,
 )
 
-/** Одна колонка доски: имя в серверном порядке + счётчик + карточки. */
+/**
+ * Одна колонка доски: имя в серверном порядке + счётчик + карточки.
+ *
+ * [statuses] — статусы, которые сервер относит к этой дорожке (`column.statuses`
+ * из board-конверта). Нужны записи: перемещение карточки — это PATCH `status`,
+ * и предлагать пользователю можно только те статусы, которые доска реально
+ * показывает. Пустой список — дорожка из конфига/скелета без задач, цели
+ * перемещения из неё не строятся.
+ */
 data class KanbanColumnUi(
     val name: String,
     val count: Int,
     val cards: List<KanbanTaskCardUi>,
+    val statuses: List<String> = emptyList(),
 )
 
 /** Чип статистики: «готово · 3» (тон для цвета точки/цифры). */
@@ -107,7 +116,7 @@ data class KanbanUiState(
     val notice: String? = null,
     val message: String? = null,
     val canRetry: Boolean = false,
-    /** Серверный флаг `read_only` из board-конверта (экран в любом случае read-only). */
+    /** Серверный флаг `read_only` из board-конверта: true — доска без записи, кнопки скрыты. */
     val serverReadOnly: Boolean = false,
     val latestEventId: Long = 0L,
     val taskCount: Int = 0,
@@ -147,16 +156,17 @@ data class KanbanAssigneeChipUi(
     val isSelected: Boolean,
 )
 
-/** Одна строка read-only диалога задачи («Исполнитель: mars»). */
+/** Одна строка диалога задачи («Исполнитель: mars»). */
 data class KanbanDetailRowUi(val label: String, val value: String)
 
 /** Один комментарий задачи в диалоге. */
 data class KanbanDetailCommentUi(val author: String, val body: String, val whenLabel: String?)
 
 /**
- * Модель read-only диалога задачи (`GET /api/kanban/tasks/{id}`). Никаких
- * действий кроме «Закрыть»: канбан на мобильном строго read-only
- * (server Bearer allowlist допускает только GET/HEAD /api/kanban/).
+ * Модель диалога задачи (`GET /api/kanban/tasks/{id}`): данные карточки плюс
+ * списки связей, по которым UI строит действия записи (перемещение, комментарий,
+ * блокировка, связь). Само чтение остаётся GET — действия идут отдельными
+ * запросами [KanbanPresenter].
  */
 data class KanbanTaskDetailUi(
     val id: String,
@@ -172,13 +182,34 @@ data class KanbanTaskDetailUi(
 )
 
 /**
+ * Цель перемещения карточки: подпись дорожки для пикера и `status`, который
+ * уйдёт в `PATCH /api/kanban/tasks/{id}/patch`. Одно поле — одна цель: статусы
+ * разных дорожек не схлопываются, даже если подписи похожи.
+ */
+data class KanbanMoveTargetUi(val label: String, val status: String)
+
+/**
+ * Итог действия записи для UI: [ok] — сервер подтвердил изменение, [message] —
+ * готовая строка («Задача создана», «Задача не найдена на доске», текст ошибки
+ * бриджа). Activity только показывает её, ничего не формулирует сама.
+ */
+data class KanbanActionOutcome(val ok: Boolean, val message: String?) {
+    companion object {
+        fun ok(message: String) = KanbanActionOutcome(true, message)
+        fun failed(message: String?) = KanbanActionOutcome(false, message)
+    }
+}
+
+/**
  * Чистая политика экрана «Канбан» (UI -> state/domain -> network): тексты,
- * колонки, карточки, статистика и модель detail-диалога. Не знает ни про
- * Android, ни про сеть — данные приходят из
+ * колонки, карточки, статистика, модель detail-диалога и цели перемещения.
+ * Не знает ни про Android, ни про сеть — данные приходят из
  * [ru.mars.network.repository.KanbanRepository] через [KanbanPresenter].
  *
- * Контракт read-only: policy/presenter не содержат и не порождают никаких
- * операций dispatch/create/edit/move/delete — только отображение GET-данных.
+ * Границы записи: экран создаёт карточки, двигает их по статусам, комментирует,
+ * блокирует/разблокирует, связывает и делает массовые операции — ровно те
+ * маршруты, которые `api/auth.py` допускает для device-Bearer. Управление
+ * досками, dispatch и правка конфига из приложения недоступны.
  */
 object KanbanPolicy {
 
@@ -210,7 +241,53 @@ object KanbanPolicy {
     const val LIVE_BADGE = "в эфире"
     const val MSG_LIVE_LOST = "Поток событий прерван"
 
-    /** Заголовки блоков read-only диалога задачи (связи и хвост ленты событий). */
+    /** ── Запись: подписи действий, подсказки полей и итоги ── */
+
+    const val CREATE_LABEL = "Новая задача"
+    const val CREATE_HINT_TITLE = "Название задачи"
+    const val CREATE_HINT_BODY = "Описание (необязательно)"
+    const val CREATE_HINT_ASSIGNEE = "Исполнитель (необязательно)"
+    const val CREATE_HINT = "Карточка появится на доске сразу и станет доступна диспетчеру."
+    const val COMMENT_LABEL = "Комментарий"
+    const val COMMENT_HINT = "Текст комментария"
+    const val MOVE_LABEL = "Переместить"
+    const val BLOCK_LABEL = "Блокировать"
+    const val UNBLOCK_LABEL = "Разблокировать"
+    const val BLOCK_REASON_HINT = "Причина (необязательно)"
+    const val LINK_LABEL = "Связать"
+    const val LINK_HINT = "id дочерней задачи"
+    const val LINK_PARENT_HINT = "Текущая задача станет родительской: укажите id задачи-потомка."
+    const val ARCHIVE_LABEL = "В архив"
+    const val CANCEL_LABEL = "Отмена"
+    const val SELECT_LABEL = "Выбрать"
+    const val MSG_TASK_CREATED = "Задача создана"
+    const val MSG_TASK_MOVED = "Задача перемещена"
+    const val MSG_COMMENT_ADDED = "Комментарий добавлен"
+    const val MSG_TASK_BLOCKED = "Задача заблокирована"
+    const val MSG_TASK_UNBLOCKED = "Задача разблокирована"
+    const val MSG_LINK_ADDED = "Связь добавлена"
+    const val MSG_LINK_GONE = "Связи не было"
+    const val MSG_TASK_GONE = "Задача не найдена на доске"
+    const val MSG_TITLE_REQUIRED = "Нужно название задачи"
+    const val MSG_COMMENT_REQUIRED = "Нужен текст комментария"
+    const val MSG_LINK_IDS_REQUIRED = "Нужен id задачи для связи"
+    const val MSG_SELECTION_EMPTY = "Ничего не выбрано"
+    const val MSG_WRITE_UNAVAILABLE = "Запись на доску недоступна"
+    const val MSG_BULK_PARTIAL = "Не всё удалось: "
+    const val MSG_NO_MOVE_TARGETS = "На доске нет другой колонки для перемещения"
+
+    /** Бейджи режима выбора на карточке: состояние выбора и подсказка жеста. */
+    const val SELECTED_BADGE = "выбрано"
+    const val SELECT_HINT = "выбрать"
+
+    /** «Выбрано: 3 задачи» в панели массовых действий; пустой выбор — прямо. */
+    fun selectionLabel(count: Int): String =
+        taskCountLabel(count)?.let { "Выбрано: $it" } ?: "Ничего не выбрано"
+
+    /** «Обновлено: 3 задачи» — итог массовой операции; 0 задач не скрываем. */
+    fun bulkDoneLabel(applied: Int): String = "Обновлено: ${taskCountLabel(applied) ?: "$applied задач"}"
+
+    /** Заголовки блоков диалога задачи (связи и хвост ленты событий). */
     const val LINKS_LABEL = "Связи"
     const val LINK_PARENTS_LABEL = "Родители"
     const val LINK_CHILDREN_LABEL = "Подзадачи"
@@ -389,6 +466,7 @@ object KanbanPolicy {
                 name = column.name.ifBlank { "(колонка)" },
                 count = cards.size,
                 cards = cards,
+                statuses = column.statuses,
             )
         }
         val order = configColumns.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
@@ -399,6 +477,29 @@ object KanbanPolicy {
         val extras = ui.filterNot { column -> column.name.lowercase() in orderLower }
         return known + extras
     }
+
+    /**
+     * Статусы, которые пикер перемещения не предлагает: `running` принадлежит
+     * диспетчеру/claim-протоколу и сервер отклоняет такой PATCH с 400.
+     */
+    private val UNMOVABLE_STATUSES = setOf("running")
+
+    /**
+     * Цели перемещения для detail-диалога: дорожка доски + её статус. Строится из
+     * фактического board-конверта (не из канонического списка), поэтому в пикере
+     * нет статусов, которых на этой доске не существует. Дорожка без статусов
+     * (скелет из конфига) деградирует к статусам своих карточек.
+     */
+    fun moveTargets(columns: List<KanbanColumnUi>): List<KanbanMoveTargetUi> =
+        columns.flatMap { column ->
+            val statuses = column.statuses.ifEmpty { column.cards.map { it.status } }
+            statuses.asSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && it.lowercase() !in UNMOVABLE_STATUSES }
+                .distinctBy { it.lowercase() }
+                .map { KanbanMoveTargetUi(label = column.name, status = it) }
+                .toList()
+        }.distinctBy { it.status.lowercase() }
 
     /**
      * Чипы статистики: канонические статусы первыми (даже с нулём — структура
@@ -447,7 +548,7 @@ object KanbanPolicy {
     }
 
     /**
-     * Полная модель read-only диалога задачи. [nowEpochSeconds] — необязательные
+     * Полная модель диалога задачи. [nowEpochSeconds] — необязательные
      * «сейчас» (Activity передаёт системные часы): нужны только для возрастных
      * меток комментариев; без них whenLabel = null и UI прячет метку.
      */
