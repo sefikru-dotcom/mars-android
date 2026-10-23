@@ -270,14 +270,17 @@ class LiveEventsRepositoryTest {
             }
 
             val modes = collected.filterIsInstance<LiveChannelEvent.Mode>().map { it.mode }
+            // Prefix, not the whole list: the collector is cancelled right after the recovered
+            // event lands, so a trailing re-poll may or may not have been appended by then.
             assertEquals(
                 "expected POLLING then STREAMING (no CONNECTING flicker on retry), got $modes",
                 listOf(LiveChannelMode.CONNECTING, LiveChannelMode.POLLING, LiveChannelMode.STREAMING),
-                modes,
+                modes.take(3),
             )
             val payloads = collected.filterIsInstance<LiveChannelEvent.Update<*>>()
                 .map { (it.value as ApprovalStreamUpdate).payload?.approvalId }
-            assertEquals(listOf(null, "a-3"), payloads)
+            assertNull("the first poll reports an empty queue", payloads.first())
+            assertEquals("the recovered stream delivers the card", "a-3", payloads.first { it != null })
         }
     }
 
