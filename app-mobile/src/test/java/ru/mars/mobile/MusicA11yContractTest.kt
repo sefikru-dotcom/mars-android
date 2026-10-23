@@ -34,8 +34,6 @@ class MusicA11yContractTest {
         throw AssertionError("Не найден исходник: $relative")
     }
 
-    private val activity by lazy { source("src/main/java/ru/mars/mobile/MusicActivity.kt") }
-
     /**
      * Секции-расширения экрана после раскладки (шаги 0–6): вынесенный код — тот же
      * production-код экрана, поэтому проверки доступности читают его вместе с Activity.
@@ -53,8 +51,34 @@ class MusicA11yContractTest {
 
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
 
+
+    /**
+     * Тело функции по сигнатуре: от объявления до её сбалансированной закрывающей скобки.
+     * Нужен потому, что после декомпозиции «следующая функция» живёт в другом файле,
+     * и грубый substringBefore захватывает чужие строки — контракт становится ложно-зелёным.
+     */
+    private fun funBody(signature: String): String {
+        val start = musicSources.indexOf(signature)
+        require(start >= 0) { "не найдена сигнатура: $signature" }
+        var i = musicSources.indexOf('{', start + signature.length)
+        require(i >= 0) { "нет тела у: $signature" }
+        var depth = 0
+        val from = i
+        while (i < musicSources.length) {
+            when (musicSources[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return musicSources.substring(from, i + 1)
+                }
+            }
+            i++
+        }
+        throw AssertionError("не закрыто тело: $signature")
+    }
+
     @Test fun statusTextIsPoliteLiveRegion() {
-        val block = activity
+        val block = musicSources
             .substringAfter("statusText = TextView(this).apply {")
             .substringBefore("root.addView(statusText")
         assertTrue(
@@ -66,7 +90,7 @@ class MusicA11yContractTest {
     // --- MUS-M1: главная кнопка Play/Pause читает действие, а не состояние ---
 
     @Test fun mainPlayButtonStartsWithPausedActionLabel() {
-        val block = activity
+        val block = musicSources
             .substringAfter("playButton = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(playButton")
         assertTrue(
@@ -76,9 +100,15 @@ class MusicA11yContractTest {
     }
 
     @Test fun mainPlayButtonLabelFollowsEveryTransportStateChange() {
-        val block = activity
-            .substringAfter("override fun onStateChanged")
-            .substringBefore("override fun onProgress")
+        val block = musicSources
+            .substringAfter("fun MusicActivity.renderPlayerState(")
+            .substringBefore("fun MusicActivity.renderProgress(")
+        assertTrue(
+            "override в хосте обязан делегировать в renderPlayerState, иначе подпись не обновится",
+            musicSources.contains(
+                "override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) = renderPlayerState(track, isPlaying)",
+            ),
+        )
         assertTrue(
             "onStateChanged обязан обновлять contentDescription главной кнопки из политики",
             block.contains("playButton.contentDescription = MusicA11yPolicy.playPauseAction(isPlaying)"),
@@ -88,16 +118,14 @@ class MusicA11yContractTest {
     @Test fun noStaleStateBasedMainLabelRemains() {
         assertFalse(
             "Статическая state-подпись «Воспроизведение» на Play/Pause запрещена",
-            activity.contains("\"Воспроизведение\""),
+            musicSources.contains("\"Воспроизведение\""),
         )
     }
 
     // --- MUS-M3: shuffle/repeat/heart/tabs озвучивают текущее состояние действием ---
 
     @Test fun shuffleAndRepeatLabelsUpdateWithQueueState() {
-        val block = activity
-            .substringAfter("private fun updateQueueIcons()")
-            .substringBefore("/** Raw body")
+        val block = funBody("fun MusicActivity.updateQueueIcons()")
         assertTrue(
             "Подпись shuffle обязана обновляться из политики вместе с тонировкой",
             block.contains("shuffleBtn.contentDescription = MusicA11yPolicy.shuffleAction("),
@@ -109,18 +137,18 @@ class MusicA11yContractTest {
     }
 
     @Test fun shuffleAndRepeatButtonsAreBornWithPolicyLabels() {
-        val shuffle = activity
+        val shuffle = musicSources
             .substringAfter("shuffleBtn = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(shuffleBtn")
         assertTrue(shuffle.contains("MusicA11yPolicy.shuffleAction(shuffleOn = false)"))
-        val repeat = activity
+        val repeat = musicSources
             .substringAfter("repeatBtn = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(repeatBtn")
         assertTrue(repeat.contains("MusicA11yPolicy.repeatAction(MusicQueueManager.RepeatMode.OFF)"))
     }
 
     @Test fun heartLabelFollowsFavoriteState() {
-        val creation = activity
+        val creation = musicSources
             .substringAfter("// Favorite heart")
             .substringBefore("heartButtons.getOrPut")
         assertTrue(
@@ -137,9 +165,9 @@ class MusicA11yContractTest {
     }
 
     @Test fun tabsAnnounceTheActiveTab() {
-        val block = activity
-            .substringAfter("private fun updateTabStyles()")
-            .substringBefore("private fun selectTab(")
+        val block = musicSources
+            .substringAfter("fun MusicActivity.updateTabStyles()")
+            .substringBefore("fun MusicActivity.showStatus(")
         assertTrue(
             "Активная вкладка обязана озвучиваться («… — активная вкладка») через политику",
             block.contains("MusicA11yPolicy.tabDescription("),
@@ -151,11 +179,11 @@ class MusicA11yContractTest {
     @Test fun trackRowButtonsUseTheSharedPolicyLabels() {
         assertTrue(
             "Кнопка строки обязана брать подпись из общей политики, а не из своих литералов",
-            activity.contains(
+            musicSources.contains(
                 "holder.playButton.contentDescription = MusicA11yPolicy.playPauseAction(state.showPauseIcon)",
             ),
         )
-        val rowCreation = activity
+        val rowCreation = musicSources
             .substringAfter("val playTrackBtn = MarsTheme.circleIconButton(")
             .substringBefore("row.addView(playTrackBtn")
         assertTrue(rowCreation.contains("MusicA11yPolicy.ACTION_PLAY"))
