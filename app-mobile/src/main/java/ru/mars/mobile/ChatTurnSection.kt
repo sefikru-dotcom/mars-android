@@ -138,15 +138,27 @@ internal fun ChatActivity.startSendStream(
             explicitStatus = "Создаю сессию…"
             setStatus()
         }
-        when (val ensured = firstSessionFlow.ensureSession(targetSessionId, credential)) {
+        // Сессия экрана ДО мятки: по нему видно, создал ли её именно этот ход (или её уже
+        // успела создать «скрепка» файла — тогда привязка модели/очереди не наша работа).
+        val hadSession = currentSessionId != null
+        when (
+            // Мятка идёт через общий гейт: параллельное прикрепление файла в новом чате
+            // ждёт её и переиспользует id, а не создаёт вторую сессию (R5).
+            val ensured = firstSessionGate.ensure(
+                requestedSessionId = targetSessionId,
+                credential = credential,
+                boundSessionId = { currentSessionId },
+                bind = { currentSessionId = it },
+            )
+        ) {
             is EnsureSessionResult.Ready -> {
-                currentSessionId = ensured.sessionId
+                // currentSessionId уже выставлен гейтом внутри критической секции.
                 // Голосовой канал привязан к сессии: первый ход нового чата создаёт её только
                 // здесь, и до этого перебивать было нечего (voice_id не к чему привязать).
                 // Проверка lateinit-поля живёт в хосте: снаружи (в extension-функции) backing
                 // field недоступен, и `::voiceInterruptChannel.isInitialized` там не компилируется.
                 if (voiceTurn) bindVoiceChannelToSession(ensured.sessionId)
-                if (targetSessionId == null) {
+                if (targetSessionId == null && !hadSession) {
                     modelSelection.setSessionModel(ensured.model, ensured.modelProvider)
                     modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 }
@@ -154,7 +166,7 @@ internal fun ChatActivity.startSendStream(
                 // Первая отправка нового чата создала сессию: остальные сообщения
                 // офлайн-всплеска (ключ null) перепривязываются к ней — продолжают
                 // тот же диалог вместо плодения отдельных сессий.
-                if (targetSessionId == null && isOfflineQueueReady()) {
+                if (targetSessionId == null && !hadSession && isOfflineQueueReady()) {
                     offlineQueue.adoptSession(null, ensured.sessionId)
                 }
             }

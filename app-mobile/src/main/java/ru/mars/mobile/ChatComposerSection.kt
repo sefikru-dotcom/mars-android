@@ -187,10 +187,42 @@ internal fun ChatActivity.chooseAttachment() {
     }, pickAttachment)
 }
 
+/**
+ * Прикрепление файла. В новом чате сессии ещё нет, а `POST /api/upload` требует
+ * `session_id`: на пустой id сервер отвечает 404 «Session not found», поэтому вложение в
+ * новом чате не прикреплялось вообще. Поэтому сначала гарантируется сессия ТЕМ ЖЕ швом,
+ * что и первый ход ([FirstSessionGate]), и только потом файл уходит с полученным id.
+ */
 internal fun ChatActivity.uploadAttachment(uri: Uri) {
     val credential = store.read() ?: return
-    statusView.text = "Прикрепляю файл…"
+    val hadSession = currentSessionId != null
+    // Мятка — сетевой шаг, а не мгновенный: показываем его, чтобы «скрепка» не выглядела
+    // зависшей (и чтобы статус не остался от предыдущего действия).
+    statusView.text = if (hadSession) "Прикрепляю файл…" else "Создаю сессию…"
     lifecycleScope.launch {
+        // Лок общий с первым ходом: одновременные «скрепка» и отправка не создают две
+        // сессии, а id привязан гейтом — первый chat/start уйдёт в ТУ ЖЕ сессию.
+        val ensured = firstSessionGate.ensure(
+            requestedSessionId = null,
+            credential = credential,
+            boundSessionId = { currentSessionId },
+            bind = { currentSessionId = it },
+        )
+        if (ensured is EnsureSessionResult.Failed) {
+            // Провал мятки — не 404 от upload: файл не грузим и чипов не добавляем.
+            if (AuthRejectionPolicy.isCredentialRejected(ensured.message)) {
+                // Мёртвый credential: уводим на переавторизацию так же, как это делает ход.
+                requestReauthentication()
+            } else {
+                statusView.text = "Сессия не создана: ${ensured.message}"
+            }
+            return@launch
+        }
+        val sessionId = (ensured as EnsureSessionResult.Ready).sessionId
+        // Сессию создала «скрепка»: сообщения офлайн-всплеска нового чата (ключ null)
+        // перепривязываются к ней, иначе флаш ищет очередь по текущему id и они застрянут.
+        if (!hadSession && isOfflineQueueReady()) offlineQueue.adoptSession(null, sessionId)
+        statusView.text = "Прикрепляю файл…"
         val outcome = withContext(Dispatchers.IO) {
             runCatching {
                 val name = queryDisplayName(uri) ?: "attachment"
@@ -198,7 +230,7 @@ internal fun ChatActivity.uploadAttachment(uri: Uri) {
                 val bytes = contentResolver.openInputStream(uri)
                     ?.use { readBoundedUploadPayload(it) }
                     ?: return@runCatching UploadOutcome.Failure("Файл недоступен")
-                ChatRepository().uploadAttachment(ChatActivity.BASE_URL, credential, name, mime, bytes, currentSessionId)
+                ChatRepository().uploadAttachment(ChatActivity.BASE_URL, credential, name, mime, bytes, sessionId)
             }.getOrElse { error ->
                 if (error is UploadTooLargeException) {
                     UploadOutcome.TooLarge(error.message ?: "Файл слишком большой")

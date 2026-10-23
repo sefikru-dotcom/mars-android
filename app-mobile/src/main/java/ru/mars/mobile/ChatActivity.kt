@@ -127,6 +127,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var authExitCleanup: AuthExitCleanup
 
     internal val firstSessionFlow = FirstSessionFlow(SessionRepository(), BASE_URL)
+    /**
+     * Сериализатор мятки первой сессии: первый ход и «скрепка» идут через один лок, иначе
+     * два жеста в новом чате создают две сессии (R5).
+     */
+    internal val firstSessionGate = FirstSessionGate(firstSessionFlow)
+
     internal var explicitStatus: String? = null
 
     /**

@@ -173,6 +173,9 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.26.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    // MockWebServer — для тестов проводов (какой запрос реально ушёл): та же версия, что
+    // в core-network. Без него «прикрепление до сессии» проверялось бы только по исходнику.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // --- Instrumented UI-тесты (src/androidTest) ---
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
