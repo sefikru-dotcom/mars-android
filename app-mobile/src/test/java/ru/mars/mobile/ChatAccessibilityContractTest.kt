@@ -42,14 +42,24 @@ class ChatAccessibilityContractTest {
      */
     private val chatSections by lazy {
         listOf(
+            "ChatInitSection.kt",
+            "ChatShellSection.kt",
+            "ChatComposerSection.kt",
+            "ChatCardHostSection.kt",
+            "ChatStatusSection.kt",
             "ChatTurnSection.kt",
-            "ChatOfflineQueueSection.kt",
             "ChatSessionSection.kt",
+            "ChatSessionLifecycleSection.kt",
             "ChatTranscriptSection.kt",
+            "ChatSearchSection.kt",
             "ChatDraftSection.kt",
+            "ChatModelSection.kt",
             "ChatUsageSection.kt",
             "ChatTodoSection.kt",
             "ChatMessageActionsSection.kt",
+            "ChatOfflineQueueSection.kt",
+            "ChatVoiceInputSection.kt",
+            "ChatVoiceSpeechSection.kt",
         ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
     }
 
@@ -120,8 +130,8 @@ class ChatAccessibilityContractTest {
         assertTrue(
             "updateControls обязан обновлять contentDescription кнопки через ChatA11yPolicy " +
                 "(typing -> «Остановить», idle -> «Отправить»)",
-            Regex("private fun updateControls\\(\\)[\\s\\S]{0,600}?sendButton\\.contentDescription = ChatA11yPolicy\\.sendButtonDescription\\(active\\)")
-                .containsMatchIn(chat)
+            Regex("(?:private|internal) fun (?:ChatActivity\\.)?updateControls\\(\\)[\\s\\S]{0,600}?sendButton\\.contentDescription = ChatA11yPolicy\\.sendButtonDescription\\(active\\)")
+                .containsMatchIn(chatUi)
         )
     }
 
@@ -131,16 +141,16 @@ class ChatAccessibilityContractTest {
     fun `expandable header helper assigns button role and state description`() {
         assertTrue(
             "В ChatActivity обязан быть хелпер applyExpandableHeaderA11y",
-            chat.contains("private fun applyExpandableHeaderA11y(")
+            Regex("(?:private|internal) fun (?:ChatActivity\\.)?applyExpandableHeaderA11y\\(").containsMatchIn(chatUi)
         )
         assertTrue(
             "Хелпер обязан назначать button-role через AccessibilityDelegateCompat",
-            chat.contains("AccessibilityDelegateCompat()") &&
-                chat.contains("info.className = Button::class.java.name")
+            chatUi.contains("AccessibilityDelegateCompat()") &&
+                chatUi.contains("info.className = Button::class.java.name")
         )
         assertTrue(
             "Хелпер обязан выставлять stateDescription через ViewCompat",
-            chat.contains("ViewCompat.setStateDescription(")
+            chatUi.contains("ViewCompat.setStateDescription(")
         )
     }
 
@@ -200,14 +210,14 @@ class ChatAccessibilityContractTest {
 
     @Test
     fun `drawer, back and mini-player semantics are preserved`() {
-        assertTrue("Шторка разделов обязана открываться прежним путём", chat.contains("openDrawer(GravityCompat.START)"))
+        assertTrue("Шторка разделов обязана открываться прежним путём", chatUi.contains("openDrawer(GravityCompat.START)"))
         assertTrue(
             "Back-навигация обязана оставаться на onBackPressedDispatcher",
-            chat.contains("onBackPressedDispatcher")
+            chatUi.contains("onBackPressedDispatcher")
         )
         assertTrue(
             "Кнопка мини-плеера обязана сохранять озвученный статус из MiniPlayerPresenter",
-            chat.contains("miniPlayerPlayBtn.contentDescription = state.statusLabel")
+            chatUi.contains("miniPlayerPlayBtn.contentDescription = state.statusLabel")
         )
     }
 
@@ -241,7 +251,7 @@ class ChatAccessibilityContractTest {
         )
         assertTrue(
             "Живой заголовок пишется в шапку одной точкой (текст + видимость)",
-            chat.contains("view.text = text") && chat.contains("view.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE")
+            chatUi.contains("view.text = text") && chatUi.contains("view.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE")
         )
     }
 

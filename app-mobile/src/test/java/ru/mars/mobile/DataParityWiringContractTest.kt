@@ -35,14 +35,24 @@ class DataParityWiringContractTest {
             // Секции-расширения Activity (разбиение файла W2): тот же production-код экрана,
             // поэтому проводка проверяется по Activity + секциям, а не только по одному файлу.
             listOf(
+                "ChatInitSection.kt",
+                "ChatShellSection.kt",
+                "ChatComposerSection.kt",
+                "ChatCardHostSection.kt",
+                "ChatStatusSection.kt",
                 "ChatTurnSection.kt",
-                "ChatOfflineQueueSection.kt",
                 "ChatSessionSection.kt",
+                "ChatSessionLifecycleSection.kt",
                 "ChatTranscriptSection.kt",
+                "ChatSearchSection.kt",
                 "ChatDraftSection.kt",
+                "ChatModelSection.kt",
                 "ChatUsageSection.kt",
                 "ChatTodoSection.kt",
                 "ChatMessageActionsSection.kt",
+                "ChatOfflineQueueSection.kt",
+                "ChatVoiceInputSection.kt",
+                "ChatVoiceSpeechSection.kt",
             ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
     }
     private val kanban by lazy { source("src/main/java/ru/mars/mobile/KanbanActivity.kt") }
@@ -121,7 +131,10 @@ class DataParityWiringContractTest {
     fun `goal frames drive the card and the command is handled locally`() {
         assertTrue("Кадр goal рисует карточку", chat.contains("GoalLoopPolicy.card(event)"))
         assertTrue("Кадр goal_continue рисует карточку", chat.contains("GoalLoopPolicy.continuationCard(event)"))
-        assertTrue("Карточка перерисовывается", chat.contains("private fun updateGoalCard()"))
+        assertTrue(
+            "Карточка перерисовывается",
+            Regex("(?:private|internal) fun (?:ChatActivity\\.)?updateGoalCard\\(\\)").containsMatchIn(chat)
+        )
         assertTrue(
             "Промпт продолжения уходит в обычную очередь, а не вторым путём отправки",
             chat.contains("offlineQueue.enqueue(text, currentSessionId)")
