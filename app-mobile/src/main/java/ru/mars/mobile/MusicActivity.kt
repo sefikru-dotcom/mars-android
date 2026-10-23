@@ -311,7 +311,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         })
     }
 
-    )
 
     /**
      * Shared error/retry state for the track list. Clears the previous cards and the
@@ -469,48 +468,10 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
     internal fun dp(v: Int) = MarsTheme.dp(this, v)
 
-}
+    // Проверки lateinit-полей для секций-расширений: ::x.isInitialized компилятор
+    // разрешает только внутри самого класса, поэтому хост отдаёт готовые предикаты
+    // (образец — ChatActivity). false = шапка экрана ещё не достроена.
+    internal fun isEqReady(): Boolean = ::eqBtn.isInitialized && ::audioFx.isInitialized
+    internal fun isQualityReady(): Boolean = ::qualityBtn.isInitialized && ::streamQuality.isInitialized
 
-/**
- * Pure seek-bar drag policy for [MusicActivity]: while the user's finger owns the thumb,
- * the periodic progress ticker and player callbacks must not snap it back (on a touch
- * screen the thumb visibly fights the drag), and the player is seeked exactly once — on
- * release — instead of on every intermediate progress change. Android-free for JVM tests.
- */
-object SeekDragPolicy {
-    /** Initial/reset value of the pending drag position: nothing has been dragged. */
-    const val NO_PENDING_SEEK = -1
-
-    /** The ticker may move the thumb and time label only when no drag is in progress. */
-    fun tickerMayUpdate(isDragging: Boolean): Boolean = !isDragging
-
-    /**
-     * The position to seek to on release: [pendingMs] clamped into the track, or null when
-     * nothing is pending (any negative value) — then the player must not be touched.
-     */
-    fun pendingSeekTarget(pendingMs: Int, durationMs: Int): Int? =
-        if (pendingMs < 0) null else pendingMs.coerceIn(0, durationMs.coerceAtLeast(0))
-}
-
-/**
- * Pure policy for the play/pause glyph crossfade in the music flow: alpha only — never
- * scale, never bounce/overshoot, capped at [MarsMotion.fastMs] (120 ms) so the effect
- * stays a discreet micro-feedback, and collapsed to an instant swap under reduced motion.
- * Android-free for JVM tests.
- */
-object PlayPauseIconPolicy {
-    /**
-     * Crossfade duration in ms: [MarsMotion.fastMs] normally, 0 (instant swap) when
-     * [reducedMotion] — routed through [MotionPolicy] like every other effect.
-     */
-    fun durationMs(reducedMotion: Boolean): Int =
-        MotionPolicy.durationFor(MotionCue.MICRO_TAP, reducedMotion).coerceIn(0, MarsMotion.fastMs)
-
-    /**
-     * Crossfade only a real glyph change on a button that already rendered its first
-     * glyph ([currentResId] != null — the first render is instant, there is nothing to
-     * fade from) and only while animation is allowed (duration > 0).
-     */
-    fun shouldCrossfade(currentResId: Int?, targetResId: Int, durationMs: Int): Boolean =
-        currentResId != null && currentResId != targetResId && durationMs > 0
 }

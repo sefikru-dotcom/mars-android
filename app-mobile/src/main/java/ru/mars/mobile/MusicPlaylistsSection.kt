@@ -228,7 +228,7 @@ internal fun MusicActivity.openPlaylistTracks(playlist: Playlist) {
                 ),
                 // RowAction — вложенный тип MusicActivity (в шаг 13 он переедет в MusicTrackListSection),
                 // поэтому из другого файла он требует квалификации.
-                action = MusicActivity.RowAction(
+                action = RowAction(
                     iconRes = R.drawable.ic_trash,
                     description = "Убрать из плейлиста ${playlist.title}",
                     onTap = { track -> removeFromPlaylist(playlist, track) },
