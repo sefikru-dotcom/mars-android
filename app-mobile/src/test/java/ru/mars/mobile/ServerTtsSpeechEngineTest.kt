@@ -482,4 +482,23 @@ class ServerTtsSpeechEngineTest {
         assertEquals(listOf("edge"), engines)
         assertEquals("natural-svetlana", client.lastProfileId)
     }
+
+    @Test
+    fun `exhausted chain reports which profile failed and why`() {
+        val client = bridge { _, _, request ->
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Unavailable("http_400", 400)
+            }
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        // Причина каждого шага видна снаружи: «голос сменился» без причины необъяснимо.
+        assertEquals(
+            listOf("natural-svetlana" to 503, "local-irina" to 400),
+            client.lastAttempts.map { it.profileId to it.httpCode },
+        )
+    }
 }

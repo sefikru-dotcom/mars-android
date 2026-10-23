@@ -175,11 +175,17 @@ internal fun ChatActivity.initializeVoiceStack() {
                 runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
             },
         )
+        // Одно знание о голосе на экран: и обычная озвучка ответа, и потоковая фразовая
+        // идут через ОДИН селектор профилей. Раньше у них были разные экземпляры, и
+        // успех/отказ piper в одном пути не был виден другому: каждая половина заново
+        // проверяла один и тот же мёртвый профиль и заново получала 503.
+        val voiceSelector = SpeechVoiceProfileSelector()
         serverTtsEngine = ServerTtsSpeechEngine(
             fallback = speechEngine,
             client = RepositoryServerTtsClient(
                 baseUrl = ChatActivity.BASE_URL,
                 credentialProvider = { store.read() },
+                selector = voiceSelector,
             ),
             playback = serverTtsPlayback,
             scope = lifecycleScope,
@@ -200,6 +206,7 @@ internal fun ChatActivity.initializeVoiceStack() {
             client = RepositoryServerTtsClient(
                 baseUrl = ChatActivity.BASE_URL,
                 credentialProvider = { store.read() },
+                selector = voiceSelector,
             ),
             scope = lifecycleScope,
             onFirstAudio = { runOnUiThread { onStreamSpeechStarted() } },

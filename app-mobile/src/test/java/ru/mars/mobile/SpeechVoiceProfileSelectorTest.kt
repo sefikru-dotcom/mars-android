@@ -205,4 +205,44 @@ class SpeechVoiceProfileSelectorTest {
 
         assertEquals("natural-svetlana", selector.current()!!.id)
     }
+
+    @Test
+    fun `server error keeps its cause so the switch is explainable`() {
+        val selector = selector()
+
+        selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("server_error", 503))
+
+        // 503 «Edge TTS engine not installed» — свойство сервера, а не текста: профиль
+        // понижается ненадолго, но причина остаётся видимой для разбора.
+        val failure = selector.lastFailure!!
+        assertEquals("natural-svetlana", failure.profileId)
+        assertEquals("server_error", failure.reason)
+        assertEquals(503, failure.httpCode)
+        assertEquals("local-irina", selector.current()!!.id)
+    }
+
+    @Test
+    fun `rate limit is remembered as the cause without demoting the profile`() {
+        val selector = selector()
+
+        selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("rate_limited", 429))
+
+        assertEquals("rate_limited", selector.lastFailure!!.reason)
+        assertEquals("желаемый голос не подменяется из-за чужого лимитера", "natural-svetlana", selector.current()!!.id)
+    }
+
+    @Test
+    fun `success records which voice actually sounded`() {
+        val selector = selector()
+        assertNull("до первого звука факта нет", selector.lastSuccessfulProfile)
+
+        selector.onAudio(ServerTtsVoices.LOCAL_IRINA)
+
+        assertEquals("local-irina", selector.lastSuccessfulProfile!!.id)
+        assertEquals(
+            "успех локального голоса — это факт установленности, а не догадка",
+            SpeechVoiceProfileSelector.LocalVoiceAvailability.INSTALLED,
+            selector.localVoiceAvailability,
+        )
+    }
 }
