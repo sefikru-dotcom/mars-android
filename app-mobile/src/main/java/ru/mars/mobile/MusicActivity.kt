@@ -60,12 +60,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Live Mars Connect subscription; opened in [onCreate], closed in [onDestroy]. */
     private var remoteSubscription: Closeable? = null
     internal lateinit var results: LinearLayout
-    private lateinit var title: TextView
-    private lateinit var artistView: TextView
-    private lateinit var time: TextView
-    private lateinit var seek: SeekBar
-    private lateinit var playButton: ImageButton
-    private lateinit var artwork: ImageView
+    internal lateinit var title: TextView
+    internal lateinit var artistView: TextView
+    internal lateinit var time: TextView
+    internal lateinit var seek: SeekBar
+    internal lateinit var playButton: ImageButton
+    internal lateinit var artwork: ImageView
     internal var tracks = emptyList<MusicTrack>()
     internal var job: Job? = null
     /**
@@ -93,9 +93,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal var suggestionsRunId = 0
 
     /** Which pill tab is active: chart, flow, home feed, favorites, queue, server playlists, server history. */
-    private enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
+    internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
-    private var currentTab = MusicTab.CHART
+    internal var currentTab = MusicTab.CHART
     internal val favoriteIds = linkedSetOf<String>()
     internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
@@ -127,12 +127,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var historyOverlay: ScrollView
     internal lateinit var historyPanel: LinearLayout
     private lateinit var statusText: TextView
-    private lateinit var shuffleBtn: ImageButton
-    private lateinit var repeatBtn: ImageButton
+    internal lateinit var shuffleBtn: ImageButton
+    internal lateinit var repeatBtn: ImageButton
     /** «Радио по треку» in the player bar: appends similar tracks to the queue. */
-    private lateinit var radioBtn: ImageButton
+    internal lateinit var radioBtn: ImageButton
     /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
-    private lateinit var lyricsBtn: ImageButton
+    internal lateinit var lyricsBtn: ImageButton
     /** «Звук» in the header: opens the equalizer/preset/Bass Boost dialog. */
     private lateinit var eqBtn: ImageButton
     /** Persisted sound settings (preset, on/off, Bass Boost); pure logic in [AudioFxPolicy]. */
@@ -142,7 +142,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Header button for the explicit original/standard/economy picker. */
     private lateinit var qualityBtn: ImageButton
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
-    private var radioJob: Job? = null
+    internal var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
     private var lyricsJob: Job? = null
     /**
@@ -159,9 +159,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Запрос содержимого альбома (`GET /api/album/{browseId}`); один на диалог. */
     private var albumJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
-    private var isDraggingSeek = false
+    internal var isDraggingSeek = false
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
-    private var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
+    internal var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
     /** Running play/pause glyph crossfades, one per button; ended at their final frame in onPause/onStop. */
     private val iconCrossfades = HashMap<ImageButton, AnimatorSet>()
     private val ticker = object : Runnable {
@@ -246,6 +246,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // компилятор разрешает только внутри класса, поэтому хост отдаёт предикаты.
     internal fun isHistoryOverlayReady(): Boolean = ::historyOverlay.isInitialized
     internal fun isSearchHistoryReady(): Boolean = ::searchHistory.isInitialized
+    internal fun isResultsReady(): Boolean = ::results.isInitialized
+    internal fun isPlayerActionBtnsReady(): Boolean = ::radioBtn.isInitialized && ::lyricsBtn.isInitialized
+    internal fun isQueueIconBtnsReady(): Boolean = ::shuffleBtn.isInitialized && ::repeatBtn.isInitialized
 
     /**
      * One frame of the remote music event stream. The repository delivers on its WebSocket
@@ -337,22 +340,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** True once [MarsMusicService] was started for the current playback run; resets on stop. */
-    private var musicServiceStarted = false
-
-    /**
-     * Keeps the shade notification in step with playback: a track starting raises the
-     * foreground service (the activity is visible here, so the Android 12+ background-FGS
-     * ban does not apply); the service tears itself down when playback dies, so we only
-     * reset the flag and let it own its lifecycle.
-     */
-    private fun syncMusicService(track: MusicTrack?, isPlaying: Boolean) {
-        if (track != null && !musicServiceStarted) {
-            MarsMusicService.start(this)
-            musicServiceStarted = true
-        } else if (track == null && !isPlaying) {
-            musicServiceStarted = false
-        }
-    }
+    internal var musicServiceStarted = false
 
     /** Android 13+: без POST_NOTIFICATIONS медиа-нотификация в шторке не видна. */
     private fun requestNotificationPermission() {
@@ -503,238 +491,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         root.addView(listArea, LinearLayout.LayoutParams(-1, 0, 1f))
 
         // Bottom Player Bar
-        val playerPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_CARD, radiusDp = 18, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-        }
-
-        val trackRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        artwork = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_SUBTLE, radiusDp = 8)
-            clipToOutline = true
-        }
-        trackRow.addView(artwork, LinearLayout.LayoutParams(dp(52), dp(52)))
-
-        val info = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, dp(8), 0)
-        }
-        title = TextView(this).apply {
-            text = "Ничего не играет"
-            textSize = 15f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        info.addView(title)
-
-        artistView = TextView(this).apply {
-            text = "Mars Audio"
-            textSize = 13f
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, 0)
-            // Переход к исполнителю текущего трека: цвет акцента — единственная
-            // подсказка кликабельности, поэтому он же и в палитре.
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { onArtistClicked(MarsMusicPlayer.currentTrack?.artist) }
-        }
-        info.addView(artistView)
-
-        trackRow.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-
-        // Per-track actions: «Радио» (append similar tracks) and «Текст песни» (lyrics dialog).
-        // Disabled until something is loaded in the player (see updatePlayerActionStates).
-        radioBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_radio,
-            "Радио по треку",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onRadioClicked() }
-        }
-        trackRow.addView(radioBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
-
-        lyricsBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_lyrics,
-            "Текст песни",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onLyricsClicked() }
-        }
-        trackRow.addView(lyricsBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(6) })
-
-        playerPanel.addView(trackRow)
-
-        // Progress Seek Bar
-        seek = SeekBar(this).apply {
-            max = 1
-            progressTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-            thumbTintList = ColorStateList.valueOf(MarsTheme.ACCENT)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(b: SeekBar?, p: Int, u: Boolean) {
-                    if (!u) return
-                    // During the drag only the time label previews the position; the player
-                    // is seeked once on release — no MediaPlayer.seekTo spam mid-gesture.
-                    pendingSeekMs = p
-                    time.text = "${fmt(p)} / ${fmt(MarsMusicPlayer.duration)}"
-                }
-                override fun onStartTrackingTouch(b: SeekBar?) { isDraggingSeek = true }
-                override fun onStopTrackingTouch(b: SeekBar?) {
-                    isDraggingSeek = false
-                    SeekDragPolicy.pendingSeekTarget(pendingSeekMs, MarsMusicPlayer.duration)
-                        ?.let { MarsMusicPlayer.seekTo(it) }
-                    pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
-                }
-            })
-        }
-        playerPanel.addView(seek, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-
-        val timeRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        time = TextView(this).apply {
-            text = "00:00 / 00:00"
-            textSize = 11f
-            setTextColor(MarsTheme.TEXT_MUTED)
-        }
-        timeRow.addView(time, LinearLayout.LayoutParams(0, -2, 1f))
-        playerPanel.addView(timeRow)
-
-        // Controls (Shuffle, Previous, Play/Pause, Next, Repeat)
-        val controls = LinearLayout(this).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, 0)
-        }
-
-        shuffleBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_shuffle,
-            MusicA11yPolicy.shuffleAction(shuffleOn = false),
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 38
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.toggleShuffle(); updateQueueIcons() }
-        }
-        controls.addView(shuffleBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(8) })
-
-        val prevBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_skip_prev,
-            "Предыдущий трек",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 42
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.previous() }
-        }
-        controls.addView(prevBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
-
-        playButton = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_play,
-            MusicA11yPolicy.playPauseAction(isPlaying = false),
-            bg = MarsTheme.ACCENT,
-            iconTint = MarsTheme.TEXT_STRONG,
-            sizeDp = 50,
-            strokeColor = 0
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.togglePlay() }
-        }
-        val playParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply {
-            marginStart = dp(10)
-            marginEnd = dp(10)
-        }
-        controls.addView(playButton, playParams)
-
-        val nextBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_skip_next,
-            "Следующий трек",
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT,
-            sizeDp = 42
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.next() }
-        }
-        controls.addView(nextBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
-
-        repeatBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_repeat,
-            MusicA11yPolicy.repeatAction(MusicQueueManager.RepeatMode.OFF),
-            bg = MarsTheme.SURFACE_SUBTLE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 38
-        ).apply {
-            setOnClickListener { MarsMusicPlayer.cycleRepeatMode(); updateQueueIcons() }
-        }
-        controls.addView(repeatBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) })
-
-        playerPanel.addView(controls)
-        root.addView(playerPanel, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        root.addView(buildPlayerBar(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         return root
     }
 
-    override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) {
-        runOnUiThread {
-            syncMusicService(track, isPlaying)
-            title.text = track?.title ?: "Ничего не играет"
-            // Мини-плеер: альбом дописывается в ТУ ЖЕ строку, что и исполнитель —
-            // второй строки у подписи нет (на 411dp после обложки и двух кнопок
-            // остаётся ~229dp, третья строка выломала бы однострочную вёрстку блока).
-            // Исполнитель стоит первым, поэтому ellipsize срезает хвост альбома, а не
-            // имя; навигация к альбому остаётся в строке трека — тап по мини-плееру
-            // по-прежнему ведёт к исполнителю (см. artistView.setOnClickListener).
-            artistView.text = track
-                ?.let { TrackSubtitlePolicy.subtitle(it.artist, it.albumTitle, null) }
-                ?: "Mars Audio"
-            setPlayPauseGlyph(playButton, isPlaying)
-            // MUS-M1: the main button's description is the ACTION the tap performs —
-            // «Пауза» while playing, «Воспроизвести» while paused — refreshed on every
-            // transport state change from the shared pure policy.
-            playButton.contentDescription = MusicA11yPolicy.playPauseAction(isPlaying)
-            seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
-            updateQueueIcons()
-            updatePlayerActionStates()
-            refreshTrackRows()
-            // Keep the queue tab in sync with player state (active track, play/pause,
-            // auto-advance): re-render it whenever the queue view is on screen.
-            if (currentTab == MusicTab.QUEUE && ::results.isInitialized) renderQueue()
-            recordPlayedTrack(track)
-            track?.thumbnail?.let {
-                artwork.visibility = View.VISIBLE
-                ImageLoader.load(it, artwork)
-            } ?: run {
-                artwork.visibility = View.GONE
-            }
-        }
-    }
+    override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) = renderPlayerState(track, isPlaying)
 
-    override fun onProgress(currentMs: Int, totalMs: Int) {
-        runOnUiThread {
-            seek.max = totalMs.coerceAtLeast(1)
-            if (isDraggingSeek) return@runOnUiThread // thumb belongs to the finger, not the player
-            seek.progress = currentMs
-            time.text = "${fmt(currentMs)} / ${fmt(totalMs)}"
-        }
-    }
+    override fun onProgress(currentMs: Int, totalMs: Int) = renderProgress(currentMs, totalMs)
 
     private fun loadHome() {
         job?.cancel()
@@ -1407,7 +1171,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * track is recorded — a pause/resume or a re-broadcast of the same id must not spam
      * the history ([HistoryRecordPolicy] decides on the pure id comparison).
      */
-    private fun recordPlayedTrack(track: MusicTrack?) {
+    internal fun recordPlayedTrack(track: MusicTrack?) {
         if (track == null) return
         if (!HistoryRecordPolicy.shouldRecord(track.id, lastRecordedTrackId)) return
         lastRecordedTrackId = track.id
@@ -1422,7 +1186,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * then one row per queued track. The active track gets an accent border and accent
      * title; tapping a row jumps to it, the trash button removes it from the queue.
      */
-    private fun renderQueue() {
+    internal fun renderQueue() {
         tracks = emptyList() // stale chart cards must not stay clickable under the queue
         resetList()
 
@@ -2407,17 +2171,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         load()
     }
 
-    /** Radio/lyrics act on the current track only: dim and disable both without one. */
-    private fun updatePlayerActionStates() {
-        if (!::radioBtn.isInitialized || !::lyricsBtn.isInitialized) return
-        val hasTrack = MarsMusicPlayer.currentTrack != null
-        val busy = radioJob?.isActive == true
-        radioBtn.isEnabled = hasTrack && !busy
-        radioBtn.alpha = if (hasTrack && !busy) 1f else 0.4f
-        lyricsBtn.isEnabled = hasTrack
-        lyricsBtn.alpha = if (hasTrack) 1f else 0.4f
-    }
-
     /** Prefetches favorite ids so hearts render filled on the charts/search rows. */
     private fun refreshFavoriteIds() {
         lifecycleScope.launch {
@@ -2489,22 +2242,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         )
     }
 
-    private fun updateQueueIcons() {
-        if (!::shuffleBtn.isInitialized || !::repeatBtn.isInitialized) return
-        shuffleBtn.imageTintList = ColorStateList.valueOf(
-            if (MarsMusicPlayer.isShuffled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
-        )
-        // MUS-M3: the toggles announce the action the tap performs next
-        shuffleBtn.contentDescription = MusicA11yPolicy.shuffleAction(MarsMusicPlayer.isShuffled)
-        val repeatOne = MarsMusicPlayer.repeatMode == MusicQueueManager.RepeatMode.ONE
-        repeatBtn.setImageResource(if (repeatOne) R.drawable.ic_repeat_one else R.drawable.ic_repeat)
-        repeatBtn.imageTintList = ColorStateList.valueOf(
-            if (MarsMusicPlayer.repeatMode == MusicQueueManager.RepeatMode.OFF) MarsTheme.TEXT_MUTED else MarsTheme.ACCENT
-        )
-        repeatBtn.contentDescription = MusicA11yPolicy.repeatAction(MarsMusicPlayer.repeatMode)
-    }
-
-    private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
+    internal fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
     internal fun dp(v: Int) = MarsTheme.dp(this, v)
 
     /**

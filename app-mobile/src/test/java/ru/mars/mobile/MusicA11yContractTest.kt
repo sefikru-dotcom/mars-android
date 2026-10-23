@@ -39,6 +39,9 @@ class MusicA11yContractTest {
     /** Список треков вынесен (W1, шаг 13): строка и её кнопки живут здесь. */
     private val trackList by lazy { source("src/main/java/ru/mars/mobile/MusicTrackListSection.kt") }
 
+    /** Панель плеера вынесена (W1, шаг 15): сборка, подписи и перерисовка — здесь. */
+    private val playerBar by lazy { source("src/main/java/ru/mars/mobile/MusicPlayerBarSection.kt") }
+
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
 
     @Test fun statusTextIsPoliteLiveRegion() {
@@ -54,7 +57,7 @@ class MusicA11yContractTest {
     // --- MUS-M1: главная кнопка Play/Pause читает действие, а не состояние ---
 
     @Test fun mainPlayButtonStartsWithPausedActionLabel() {
-        val block = activity
+        val block = playerBar
             .substringAfter("playButton = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(playButton")
         assertTrue(
@@ -64,12 +67,18 @@ class MusicA11yContractTest {
     }
 
     @Test fun mainPlayButtonLabelFollowsEveryTransportStateChange() {
-        val block = activity
-            .substringAfter("override fun onStateChanged")
-            .substringBefore("override fun onProgress")
+        val block = playerBar
+            .substringAfter("internal fun MusicActivity.renderPlayerState(")
+            .substringBefore("internal fun MusicActivity.renderProgress(")
         assertTrue(
             "onStateChanged обязан обновлять contentDescription главной кнопки из политики",
             block.contains("playButton.contentDescription = MusicA11yPolicy.playPauseAction(isPlaying)"),
+        )
+        assertTrue(
+            "override в хосте обязан делегировать в renderPlayerState — иначе подпись не обновится",
+            activity.contains(
+                "override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) = renderPlayerState(track, isPlaying)",
+            ),
         )
     }
 
@@ -83,8 +92,8 @@ class MusicA11yContractTest {
     // --- MUS-M3: shuffle/repeat/heart/tabs озвучивают текущее состояние действием ---
 
     @Test fun shuffleAndRepeatLabelsUpdateWithQueueState() {
-        val block = activity
-            .substringAfter("private fun updateQueueIcons()")
+        val block = playerBar
+            .substringAfter("internal fun MusicActivity.updateQueueIcons()")
             .substringBefore("/** Raw body")
         assertTrue(
             "Подпись shuffle обязана обновляться из политики вместе с тонировкой",
@@ -97,11 +106,11 @@ class MusicA11yContractTest {
     }
 
     @Test fun shuffleAndRepeatButtonsAreBornWithPolicyLabels() {
-        val shuffle = activity
+        val shuffle = playerBar
             .substringAfter("shuffleBtn = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(shuffleBtn")
         assertTrue(shuffle.contains("MusicA11yPolicy.shuffleAction(shuffleOn = false)"))
-        val repeat = activity
+        val repeat = playerBar
             .substringAfter("repeatBtn = MarsTheme.circleIconButton(")
             .substringBefore("controls.addView(repeatBtn")
         assertTrue(repeat.contains("MusicA11yPolicy.repeatAction(MusicQueueManager.RepeatMode.OFF)"))
