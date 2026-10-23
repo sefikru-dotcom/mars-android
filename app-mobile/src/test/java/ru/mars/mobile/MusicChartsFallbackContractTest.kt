@@ -33,26 +33,32 @@ class MusicChartsFallbackContractTest {
         throw AssertionError("Не найден исходник: $relative")
     }
 
-    private val activity by lazy { source("src/main/java/ru/mars/mobile/MusicActivity.kt") }
+    private val sourceDir: File by lazy {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            val candidate = File(dir, "app-mobile/src/main/java/ru/mars/mobile")
+            if (candidate.isDirectory) return@lazy candidate
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден каталог исходников app-mobile")
+    }
 
     /**
-     * Секции-расширения экрана после раскладки (шаги 0–6): вынесенный код — тот же
-     * production-код, поэтому контракт читает его вместе с Activity и не сужается.
+     * Все исходники экрана «Музыка»: хост плюс каждая `Music*.kt` (секции и политики).
+     * Glob, а не перечисление: проверка «нет прямого HTTP» должна покрывать весь экран,
+     * включая код, вынесенный позже, — иначе она молча слабеет.
      */
-    private val sections by lazy {
-        listOf(
-            "MusicPlaybackGlyphSection.kt",
-            "MusicAudioSettingsSection.kt",
-            "MusicForYouSection.kt",
-            "MusicChartSection.kt",
-            "MusicFlowSection.kt",
-            "MusicFavoritesSection.kt",
-        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    private val musicSources: String by lazy {
+        val parts = mutableListOf(source("src/main/java/ru/mars/mobile/MusicActivity.kt"))
+        sourceDir.listFiles { f -> f.isFile && f.name.startsWith("Music") && f.name.endsWith(".kt") }
+            ?.sortedBy { it.name }
+            ?.forEach { parts += it.readText() }
+        parts.joinToString("\n")
     }
 
     /** Тело [MusicActivity.loadHome] — единственное место, где решается исход чартов. */
     private val loadHome by lazy {
-        sections.substringAfter("fun MusicActivity.loadHome() {")
+        musicSources.substringAfter("fun MusicActivity.loadHome() {")
             .substringBefore("fun MusicActivity.showCachedCharts()")
     }
 
@@ -64,9 +70,9 @@ class MusicChartsFallbackContractTest {
         )
         assertFalse(
             "Второго транспорта для /api/home в экране быть не должно",
-            (activity + "\n" + sections).contains("fetchHomeText") ||
-                (activity + "\n" + sections).contains("HttpURLConnection") ||
-                (activity + "\n" + sections).contains("openConnection"),
+            musicSources.contains("fetchHomeText") ||
+                musicSources.contains("HttpURLConnection") ||
+                musicSources.contains("openConnection"),
         )
     }
 
