@@ -1054,7 +1054,10 @@ class InteractiveRequestControllerTest {
         // гасить карточку, которую уже показал кадр хода. Следующий push её подтвердит.
         val view = FakeView(); val state = ChatUiState()
         val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
-        controller.onEvent(approvalEvent("appr-9"))
+        // Проводка Activity: состояние и контроллер получают один и тот же кадр хода.
+        val event = approvalEvent("appr-9")
+        state.onEvent(event)
+        controller.onEvent(event)
 
         controller.onApprovalStreamUpdate(ApprovalStreamUpdate(null, pendingCount = 0))
 
