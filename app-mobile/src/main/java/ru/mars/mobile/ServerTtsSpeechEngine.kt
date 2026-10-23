@@ -9,6 +9,8 @@ import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsSpeechRequest
+import ru.mars.network.repository.ServerTtsVoiceProfile
+import ru.mars.network.repository.ServerTtsVoices
 
 /**
  * Порты серверного синтеза — единственное, что нужно движку озвучки, чтобы не знать
@@ -223,6 +225,17 @@ class ServerTtsSpeechEngine(
  * piper — только резерв. Понижение профиля идёт по фактическому ответу `api/tts`, а
  * `429`/`401` профиль НЕ понижают (это лимитер и токен, а не отсутствие голоса).
  *
+ * Одна реплика перебирает ЦЕПОЧКУ профилей, а не один профиль. Раньше здесь стоял
+ * `selector.current()` и один запрос: любой отказ по голосу (`503` «Edge TTS engine not
+ * installed», `400` invalid voice, таймаут) выбрасывал фразу на системный Android TTS,
+ * хотя локальный piper объявлен именно резервом для этих случаев. Порядок
+ * [ServerTtsVoices.VOICE_DIALOG] был объявлен, но не исполнялся.
+ *
+ * Отказ, который говорит о ГОЛОСЕ (5xx, 4xx кроме 429/401, таймаут, битый ответ),
+ * понижает профиль и передаёт текст следующему. Отказ, который говорит о КЛИЕНТЕ или
+ * СЕРВЕРЕ в целом (`429` лимитер, `401` токен), цепочку не перебирает: другой голос не
+ * поможет, а лишний запрос только добьёт лимитер.
+ *
  * @param selector выбор профиля голоса; `null` — «пусть сервер решит сам» (старое поведение,
  *   нужное только тестам контракта).
  * @param transport точка подмены для тестов; по умолчанию — боевой HTTP-репозиторий.
@@ -236,31 +249,90 @@ class RepositoryServerTtsClient(
     },
 ) : ServerTtsClient {
 
+    /** Исход попытки одним профилем — только метаданные, без текста реплики. */
+    data class Attempt(val profileId: String?, val reason: String?, val httpCode: Int?)
+
     /** Последний профиль, которым реально синтезировали (диагностика, без текста). */
     var lastProfileId: String? = null
         private set
 
+    /** Что произошло с каждым профилем в последней реплике (диагностика, без текста). */
+    @Volatile
+    var lastAttempts: List<Attempt> = emptyList()
+        private set
+
     override suspend fun synthesize(text: String): ServerTtsResult {
         val credential = credentialProvider() ?: return ServerTtsResult.Unavailable("unauthorized")
-        val profile = selector?.current()
-        lastProfileId = profile?.id
-        val request = ServerTtsSpeechRequest.of(text, profile)
-        val result = try {
-            transport.synthesize(baseUrl, credential, request)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            // Репозиторий и сам не бросает; страховка — фолбэк вместо падения.
-            ServerTtsResult.Unavailable("transport")
+        val selector = this.selector
+        // Старое поведение «пусть сервер выберет сам» — только для контрактных тестов.
+        if (selector == null) {
+            lastProfileId = null
+            lastAttempts = emptyList()
+            return request(text, credential, null)
         }
-        // Обратная связь только по факту ответа сервера: удача снимает понижение, отказ по
-        // голосу понижает профиль, а лимитер/токен — нет (см. SpeechVoiceProfileSelector).
-        if (profile != null) {
-            when (result) {
-                is ServerTtsResult.Audio -> selector?.onAudio(profile)
-                is ServerTtsResult.Unavailable -> selector?.onUnavailable(profile, result)
+        val candidates = selector.candidates()
+        if (candidates.isEmpty()) {
+            // Все профили на паузе. Запрос БЕЗ профиля здесь запрещён: сервер подставит
+            // свой дефолт (piper/dmitri) и приложение заговорит чужим голосом молча.
+            // Честнее явный отказ — вызывающий слой уйдёт на системный TTS.
+            lastProfileId = null
+            lastAttempts = emptyList()
+            return ServerTtsResult.Unavailable(PROFILES_COOLING)
+        }
+        val attempts = ArrayList<Attempt>(candidates.size)
+        var last: ServerTtsResult.Unavailable? = null
+        for (profile in candidates) {
+            lastProfileId = profile.id
+            when (val result = request(text, credential, profile)) {
+                is ServerTtsResult.Audio -> {
+                    attempts += Attempt(profile.id, null, null)
+                    lastAttempts = attempts
+                    selector.onAudio(profile)
+                    return result
+                }
+                is ServerTtsResult.Unavailable -> {
+                    attempts += Attempt(profile.id, result.reason, result.httpCode)
+                    last = result
+                    // false — отказ не про голос (лимитер/токен): следующий голос не поможет.
+                    if (!selector.onUnavailable(profile, result)) {
+                        lastAttempts = attempts
+                        return result
+                    }
+                }
             }
         }
-        return result
+        lastAttempts = attempts
+        // Цепочка исчерпана: явная ошибка с последней причиной, а не тишина. Движок
+        // увидит Unavailable и озвучит системным TTS — это видимая деградация, не молчание.
+        // Повтор на уровне очереди это не отменяет: на реплику по-прежнему уходит не больше
+        // двух запросов (раньше их давал SpeechQueue с maxAttempts=2 по одному голосу),
+        // просто второй теперь идёт ДРУГИМ голосом — то есть с новым шансом на звук.
+        return ServerTtsResult.Unavailable(
+            reason = PROFILES_EXHAUSTED,
+            httpCode = last?.httpCode,
+            retryAfterMs = last?.retryAfterMs,
+        )
+    }
+
+    /** Один запрос одним профилем; исключение транспорта — это `Unavailable`, не падение. */
+    private suspend fun request(
+        text: String,
+        credential: ConsumedDeviceCredential,
+        profile: ServerTtsVoiceProfile?,
+    ): ServerTtsResult = try {
+        transport.synthesize(baseUrl, credential, ServerTtsSpeechRequest.of(text, profile))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        // Репозиторий и сам не бросает; страховка — фолбэк вместо падения.
+        ServerTtsResult.Unavailable("transport")
+    }
+
+    companion object {
+        /** Ни один профиль не дал аудио: цепочка пройдена до конца. */
+        const val PROFILES_EXHAUSTED: String = "profiles_exhausted"
+
+        /** Все профили на паузе после отказов — запрос не отправлялся. */
+        const val PROFILES_COOLING: String = "profiles_cooling"
     }
 }
