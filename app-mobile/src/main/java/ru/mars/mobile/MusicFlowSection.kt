@@ -43,7 +43,7 @@ internal fun MusicActivity.loadFlow() {
             if (flow.isEmpty()) {
                 tracks = emptyList()
                 resetList()
-                results.addView(TextView(this@MusicActivity).apply {
+                results.addView(TextView(this@loadFlow).apply {
                     text = "Волна пока пуста — сервер не подобрал треки"
                     setTextColor(MarsTheme.TEXT_MUTED)
                     gravity = Gravity.CENTER
@@ -66,7 +66,7 @@ internal fun MusicActivity.loadFlow() {
 private fun MusicActivity.flowHeader(items: List<MusicTrack>): View {
     val card = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 14)
+        background = MarsTheme.card(this@flowHeader, MarsTheme.SURFACE, radiusDp = 14)
         setPadding(dp(14), dp(12), dp(14), dp(14))
     }
     card.addView(TextView(this).apply {
@@ -84,7 +84,7 @@ private fun MusicActivity.flowHeader(items: List<MusicTrack>): View {
     val playFlowBtn = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
-        background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT, 12)
+        background = MarsTheme.button(this@flowHeader, MarsTheme.ACCENT, 12)
         setPadding(dp(16), dp(10), dp(16), dp(10))
         isClickable = true
         isFocusable = true
@@ -96,7 +96,7 @@ private fun MusicActivity.flowHeader(items: List<MusicTrack>): View {
         }
     }
     playFlowBtn.addView(ImageView(this).apply {
-        setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_play))
+        setImageDrawable(ContextCompat.getDrawable(this@flowHeader, R.drawable.ic_play))
         imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
     }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
     playFlowBtn.addView(TextView(this).apply {

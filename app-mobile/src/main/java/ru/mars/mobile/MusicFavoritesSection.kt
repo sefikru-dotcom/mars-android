@@ -28,7 +28,7 @@ internal fun MusicActivity.loadFavorites() {
             if (favs.isEmpty()) {
                 tracks = emptyList()
                 resetList()
-                results.addView(TextView(this@MusicActivity).apply {
+                results.addView(TextView(this@loadFavorites).apply {
                     text = "В избранном пусто — нажмите сердечко на треке"
                     setTextColor(MarsTheme.TEXT_MUTED)
                     gravity = Gravity.CENTER

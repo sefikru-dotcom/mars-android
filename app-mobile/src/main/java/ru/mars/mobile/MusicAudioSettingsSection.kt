@@ -107,7 +107,7 @@ private fun MusicActivity.onAudioFxChanged() {
 
 /** Header «Звук» glows ruby while sound processing is enabled. */
 internal fun MusicActivity.updateEqIcon() {
-    if (!::eqBtn.isInitialized || !::audioFx.isInitialized) return
+    if (!isEqReady()) return
     eqBtn.imageTintList = ColorStateList.valueOf(
         if (audioFx.state.enabled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
     )
@@ -151,7 +151,7 @@ private fun MusicActivity.renderQualityBody(body: LinearLayout) {
 
 /** Highlights the active explicit quality profile in the header. */
 internal fun MusicActivity.updateQualityIcon() {
-    if (!::qualityBtn.isInitialized || !::streamQuality.isInitialized) return
+    if (!isQualityReady()) return
     qualityBtn.imageTintList = ColorStateList.valueOf(
         if (streamQuality.value.isExplicit) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED
     )

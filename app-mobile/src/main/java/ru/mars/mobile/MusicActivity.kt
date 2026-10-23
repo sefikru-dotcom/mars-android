@@ -1028,7 +1028,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Optional extra per-row control (icon, TalkBack description, tap handler). Used by the
      * playlist drill-down for «убрать из плейлиста», which has no place on other lists.
      */
-    private data class RowAction(
+    internal data class RowAction(
         val iconRes: Int,
         val description: String,
         val onTap: (MusicTrack) -> Unit,
@@ -2774,6 +2774,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)
     internal fun dp(v: Int) = MarsTheme.dp(this, v)
+
+    // Проверки lateinit-полей для секций-расширений: `::x.isInitialized` компилятор разрешает
+    // только внутри самого класса, поэтому хост отдаёт готовые предикаты. Поведение то же:
+    // false — поле ещё не инициализировано (шапка экрана не до конца поднята).
+    internal fun isEqReady(): Boolean = ::eqBtn.isInitialized && ::audioFx.isInitialized
+    internal fun isQualityReady(): Boolean = ::qualityBtn.isInitialized && ::streamQuality.isInitialized
 
     companion object {
         private const val BASE_URL = "https://marscore.ru/music"

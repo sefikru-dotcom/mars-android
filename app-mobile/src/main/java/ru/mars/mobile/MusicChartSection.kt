@@ -73,7 +73,7 @@ internal fun MusicActivity.offlineNotice(label: String): View {
         text = label
         textSize = 12f
         setTextColor(MarsTheme.STATUS_WARNING)
-        background = MarsTheme.pill(this@MusicActivity, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
+        background = MarsTheme.pill(this@offlineNotice, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER)
         setPadding(dp(10), dp(4), dp(10), dp(4))
     }
     return LinearLayout(this).apply {
