@@ -474,4 +474,11 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun isEqReady(): Boolean = ::eqBtn.isInitialized && ::audioFx.isInitialized
     internal fun isQualityReady(): Boolean = ::qualityBtn.isInitialized && ::streamQuality.isInitialized
 
+    companion object {
+        private const val BASE_URL = "https://marscore.ru/music"
+        /** Request code for the Android 13+ POST_NOTIFICATIONS runtime prompt. */
+        private const val REQUEST_NOTIFICATIONS = 0x4D54
+        /** Progress ticker period while the screen is visible (thumb + time label). */
+        private const val TICKER_INTERVAL_MS = 500L
+    }
 }
