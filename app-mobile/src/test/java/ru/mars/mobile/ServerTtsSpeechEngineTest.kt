@@ -319,4 +319,167 @@ class ServerTtsSpeechEngineTest {
             .filter { it.startsWith("android.") }
         assertTrue("Android-зависимость в движке озвучки: $androidFields", androidFields.isEmpty())
     }
+
+    // --- Цепочка профилей: откат по ФАКТИЧЕСКОМУ ответу сервера --------------------------
+    //
+    // Требование: естественный голос остаётся первым, но его отказ (503 «движок не
+    // установлен», 400 «невалидный голос», таймаут) не съедает фразу — тот же текст уходит
+    // следующим профилем [ServerTtsVoices.VOICE_DIALOG], а не сразу в системный TTS.
+    // Проверяется наблюдаемое: какой engine реально ушёл в запрос и что вернулось наружу.
+
+    private val credential = ConsumedDeviceCredential(
+        accessToken = "native-token", tokenType = "Bearer", deviceId = "device-1",
+        scopes = listOf("chat:send"), expiresIn = 3600,
+    )
+
+    /** Мост с записывающим транспортом: единственное место, где видно ушедший профиль. */
+    private fun bridge(
+        selector: SpeechVoiceProfileSelector = SpeechVoiceProfileSelector(),
+        transport: ServerTtsTransport,
+    ) = RepositoryServerTtsClient(
+        baseUrl = "https://marscore.ru",
+        credentialProvider = { credential },
+        selector = selector,
+        transport = transport,
+    )
+
+    @Test
+    fun `edge engine unavailable falls back to the local profile inside the same utterance`() {
+        val engines = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(5), "audio/wav")
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("503 по естественному голосу не должен съедать фразу", result is ServerTtsResult.Audio)
+        assertEquals(listOf("edge", "piper"), engines)
+        assertEquals("local-irina", client.lastProfileId)
+    }
+
+    @Test
+    fun `invalid natural voice on the server falls back to the local profile`() {
+        val voices = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            voices += request.voice
+            if (request.voice == "ru-RU-SvetlanaNeural") {
+                ServerTtsResult.Unavailable("http_400", 400)
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(6), "audio/wav")
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("400 invalid voice не должен оставлять фразу без звука", result is ServerTtsResult.Audio)
+        assertEquals(listOf("ru-RU-SvetlanaNeural", "ru_RU-irina-medium"), voices)
+    }
+
+    @Test
+    fun `transport timeout on the natural voice falls back to the local profile`() {
+        val engines = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("transport")
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(7), "audio/wav")
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("таймаут не должен съедать фразу", result is ServerTtsResult.Audio)
+        assertEquals(listOf("edge", "piper"), engines)
+    }
+
+    @Test
+    fun `exhausted chain is an explicit failure instead of a silent one`() {
+        val engines = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Unavailable("http_400", 400)
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertEquals("цепочка должна быть пройдена целиком", listOf("edge", "piper"), engines)
+        assertTrue("исчерпанная цепочка — это ошибка, а не пустой ответ", result is ServerTtsResult.Unavailable)
+        assertEquals("profiles_exhausted", (result as ServerTtsResult.Unavailable).reason)
+    }
+
+    @Test
+    fun `rate limit is not a reason to switch the voice`() {
+        val engines = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            engines += request.engine
+            ServerTtsResult.Unavailable("rate_limited", 429)
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertEquals("лимитер общий для всех голосов — второй запрос бесполезен", listOf("edge"), engines)
+        assertEquals("rate_limited", (result as ServerTtsResult.Unavailable).reason)
+    }
+
+    @Test
+    fun `cooling chain never sends a request without a voice profile`() {
+        val engines = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Unavailable("http_400", 400)
+            }
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("первая") }
+        val afterFirst = engines.size
+        val second = kotlinx.coroutines.runBlocking { client.synthesize("вторая") }
+
+        assertEquals("все профили на паузе — запрос без engine/voice не отправляется", afterFirst, engines.size)
+        assertTrue("профиль-less запрос вернул бы чужой голос сервера", second is ServerTtsResult.Unavailable)
+    }
+
+    @Test
+    fun `after a demotion the next utterance starts local and the natural voice returns after the pause`() {
+        var now = 0L
+        var edgeHealthy = false
+        val engines = mutableListOf<String?>()
+        val selector = SpeechVoiceProfileSelector(nowMs = { now })
+        val client = bridge(selector) { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge" && !edgeHealthy) {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(8), if (request.engine == "edge") "audio/mpeg" else "audio/wav")
+            }
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("раз") }
+        assertEquals(listOf("edge", "piper"), engines)
+
+        // Тот же экран, следующий ответ: естественный голос на паузе — сразу локальный, без 503.
+        engines.clear()
+        kotlinx.coroutines.runBlocking { client.synthesize("два") }
+        assertEquals(listOf("piper"), engines)
+
+        // Сервер ожил: после паузы снова пробуем ЖЕЛАННЫЙ голос, а не остаёмся на резерве.
+        edgeHealthy = true
+        now += SpeechVoiceProfileSelector.DEFAULT_TRANSIENT_COOLDOWN_MS + 1
+        engines.clear()
+        kotlinx.coroutines.runBlocking { client.synthesize("три") }
+        assertEquals(listOf("edge"), engines)
+        assertEquals("natural-svetlana", client.lastProfileId)
+    }
 }
