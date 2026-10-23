@@ -515,6 +515,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun isHandsFreeCaptureReady(): Boolean = ::handsFreeCapture.isInitialized
     internal fun isVoiceLoopReady(): Boolean = ::voiceLoop.isInitialized
     internal fun isNetworkObserverReady(): Boolean = ::networkObserver.isInitialized
+    internal fun isCredentialStoreReady(): Boolean = ::store.isInitialized
     internal fun isInteractiveControllerReady(): Boolean = ::interactiveController.isInitialized
     internal fun isInteractiveViewReady(): Boolean = ::interactiveView.isInitialized
     internal fun isMiniPlayerBoxReady(): Boolean = ::miniPlayerBox.isInitialized

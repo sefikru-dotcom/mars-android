@@ -35,7 +35,7 @@ internal fun ChatActivity.startAttentionFeed() {
         return
     }
     // Экран ещё не инициализирован (onCreate не дошёл до хранилища) — подписку откроет onResume.
-    if (!::store.isInitialized) return
+    if (!isCredentialStoreReady()) return
     val credential = store.read() ?: return
 
     stopAttentionFeed()
@@ -43,13 +43,13 @@ internal fun ChatActivity.startAttentionFeed() {
     approvalFeedJob = lifecycleScope.launch {
         liveEvents.subscribeToApprovalStream(ChatActivity.BASE_URL, credential, sessionId).collect { event ->
             val update = event.payloadOrNull ?: return@collect
-            if (::interactiveController.isInitialized) interactiveController.onApprovalStreamUpdate(update)
+            if (isInteractiveControllerReady()) interactiveController.onApprovalStreamUpdate(update)
         }
     }
     clarifyFeedJob = lifecycleScope.launch {
         liveEvents.subscribeToClarifyStream(ChatActivity.BASE_URL, credential, sessionId).collect { event ->
             val update = event.payloadOrNull ?: return@collect
-            if (::interactiveController.isInitialized) interactiveController.onClarifyStreamUpdate(update)
+            if (isInteractiveControllerReady()) interactiveController.onClarifyStreamUpdate(update)
         }
     }
 }
