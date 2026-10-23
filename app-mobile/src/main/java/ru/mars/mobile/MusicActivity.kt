@@ -97,9 +97,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private var suggestionsRunId = 0
 
     /** Which pill tab is active: chart, flow, home feed, favorites, queue, server playlists, server history. */
-    private enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
+    internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
-    private var currentTab = MusicTab.CHART
+    internal var currentTab = MusicTab.CHART
     private val favoriteIds = linkedSetOf<String>()
     private val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
@@ -147,7 +147,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var shuffleBtn: ImageButton
     private lateinit var repeatBtn: ImageButton
     /** «Радио по треку» in the player bar: appends similar tracks to the queue. */
-    private lateinit var radioBtn: ImageButton
+    internal lateinit var radioBtn: ImageButton
     /** «Текст песни» in the player bar: opens the lyrics dialog for the current track. */
     private lateinit var lyricsBtn: ImageButton
     /** «Звук» in the header: opens the equalizer/preset/Bass Boost dialog. */
@@ -159,7 +159,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Header button for the explicit original/standard/economy picker. */
     internal lateinit var qualityBtn: ImageButton
     /** In-flight radio fetch; guards against double taps (same debounce as [lyricsJob]). */
-    private var radioJob: Job? = null
+    internal var radioJob: Job? = null
     /** In-flight lyrics fetch; the dialog body is updated when it completes. */
     private var lyricsJob: Job? = null
     /**
@@ -1915,7 +1915,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * then one row per queued track. The active track gets an accent border and accent
      * title; tapping a row jumps to it, the trash button removes it from the queue.
      */
-    private fun renderQueue() {
+    internal fun renderQueue() {
         tracks = emptyList() // stale chart cards must not stay clickable under the queue
         resetList()
 
@@ -2066,124 +2066,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 resetList()
                 showStatus("Избранное недоступно")
             }
-        }
-    }
-
-    /**
-     * Loads the personal stream («Волна»): the server-picked Mars Flow track list with a
-     * «Включить поток» primary action that starts playback of the whole stream.
-     */
-    private fun loadFlow() {
-        job?.cancel()
-        showStatus(null)
-        resetList()
-        results.addView(TextView(this).apply {
-            text = "Настраиваем волну…"
-            setTextColor(MarsTheme.TEXT_MUTED)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(32), 0, dp(32))
-        })
-        job = lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { repository.getFlow() } }
-            result.onSuccess { flow ->
-                if (flow.isEmpty()) {
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(TextView(this@MusicActivity).apply {
-                        text = "Волна пока пуста — сервер не подобрал треки"
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        gravity = Gravity.CENTER
-                        setPadding(0, dp(32), 0, dp(32))
-                    })
-                } else {
-                    showTracks(flow, header = flowHeader(flow))
-                }
-            }.onFailure {
-                showListError(
-                    message = "Волна недоступна — проверьте сеть",
-                    retryDescription = "Повторить загрузку волны",
-                    onRetry = { loadFlow() },
-                )
-            }
-        }
-    }
-
-    /** «Волна» section card: title, stream size and the accent «Включить поток» button. */
-    private fun flowHeader(items: List<MusicTrack>): View {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE, radiusDp = 14)
-            setPadding(dp(14), dp(12), dp(14), dp(14))
-        }
-        card.addView(TextView(this).apply {
-            text = "Волна"
-            textSize = 17f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(TextView(this).apply {
-            text = "Персональный поток Марса · ${items.size} треков"
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(0, dp(2), 0, dp(12))
-        })
-        val playFlowBtn = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            background = MarsTheme.button(this@MusicActivity, MarsTheme.ACCENT, 12)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Включить поток"
-            setOnClickListener {
-                if (tracks.isEmpty()) return@setOnClickListener
-                MarsMusicPlayer.playTrack(0, tracks)
-                showStatus("Волна включена")
-            }
-        }
-        playFlowBtn.addView(ImageView(this).apply {
-            setImageDrawable(ContextCompat.getDrawable(this@MusicActivity, R.drawable.ic_play))
-            imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
-        }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(8) })
-        playFlowBtn.addView(TextView(this).apply {
-            text = "Включить поток"
-            textSize = 14f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(playFlowBtn, LinearLayout.LayoutParams(-1, -2))
-        return card
-    }
-
-    /**
-     * «Радио по треку»: fetches similar tracks for the current track and appends the
-     * deduplicated additions (pure [RadioQueuePolicy]) to the queue — playback continues
-     * seamlessly because enqueuing never restarts a track that is already playing.
-     */
-    private fun onRadioClicked() {
-        val track = MarsMusicPlayer.currentTrack ?: run { showStatus("Сначала включите трек"); return }
-        if (radioJob?.isActive == true) return
-        radioBtn.isEnabled = false
-        radioBtn.alpha = 0.4f
-        showStatus("Собираем радио по треку «${track.title}»…")
-        radioJob = lifecycleScope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getRadio(track.id) } }
-            fetched.onSuccess { candidates ->
-                val additions = RadioQueuePolicy.tracksToAdd(
-                    fetched = candidates,
-                    queuedIds = MarsMusicPlayer.tracks.map { it.id },
-                    currentTrackId = MarsMusicPlayer.currentTrack?.id,
-                )
-                additions.forEach { MarsMusicPlayer.enqueue(it) }
-                showStatus(
-                    if (additions.isEmpty()) "Радио: новых похожих треков нет"
-                    else "Радио: +${additions.size} треков в очередь"
-                )
-                if (currentTab == MusicTab.QUEUE) renderQueue()
-            }.onFailure {
-                showStatus("Радио недоступно — проверьте сеть")
-            }
-            updatePlayerActionStates()
         }
     }
 
@@ -2847,7 +2729,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Radio/lyrics act on the current track only: dim and disable both without one. */
-    private fun updatePlayerActionStates() {
+    internal fun updatePlayerActionStates() {
         if (!::radioBtn.isInitialized || !::lyricsBtn.isInitialized) return
         val hasTrack = MarsMusicPlayer.currentTrack != null
         val busy = radioJob?.isActive == true
