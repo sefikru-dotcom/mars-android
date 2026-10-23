@@ -348,6 +348,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     internal val streamThrottle = StreamRenderThrottle()
 
+    /**
+     * Владелец плана кадра транскрипта: FullRebuild или Patch «грязных» карточек.
+     * Единственная точка, где Activity спрашивает, что перерисовывать (см. [MessageListPresenter]).
+     */
+    internal val messageListPresenter = MessageListPresenter()
+
+    /**
+     * Локальный буфер прерванного хода: последний видимый текст ответа переживает смерть
+     * процесса/поворот. Создаётся лениво — prefs нужны только на первом кадре стрима.
+     */
+    internal val interruptedTurn: InterruptedTurnStore by lazy { InterruptedTurnStore(this) }
+
     /** Отложенный trailing-flush стрима (ровно один; отменяется любым состоявшимся рендером). */
     internal var streamFlushJob: Job? = null
 
@@ -449,6 +461,30 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun isStreamSpeechReady(): Boolean = ::streamingSpeech.isInitialized
     internal fun isRecoveryReady(): Boolean = ::recovery.isInitialized
     internal fun isOfflineQueueReady(): Boolean = ::offlineQueue.isInitialized
+    internal fun isMessagesReady(): Boolean = ::messages.isInitialized
+    internal fun isInputReady(): Boolean = ::input.isInitialized
+    internal fun isDraftsReady(): Boolean = ::drafts.isInitialized
+    internal fun isAuthExitCleanupReady(): Boolean = ::authExitCleanup.isInitialized
+    internal fun isTodoWidgetPlateReady(): Boolean = ::todoWidgetPlate.isInitialized
+    internal fun isSearchPlateReady(): Boolean = ::searchPlate.isInitialized
+    internal fun isQueuePlateReady(): Boolean = ::queuePlate.isInitialized
+    internal fun isCompressionControllerReady(): Boolean = ::compressionController.isInitialized
+    internal fun isComposerQuoteViewReady(): Boolean = ::composerQuoteView.isInitialized
+    internal fun isHandsFreeCaptureReady(): Boolean = ::handsFreeCapture.isInitialized
+    internal fun isVoiceLoopReady(): Boolean = ::voiceLoop.isInitialized
+    internal fun isNetworkObserverReady(): Boolean = ::networkObserver.isInitialized
+    internal fun isInteractiveControllerReady(): Boolean = ::interactiveController.isInitialized
+    internal fun isInteractiveViewReady(): Boolean = ::interactiveView.isInitialized
+    internal fun isMiniPlayerBoxReady(): Boolean = ::miniPlayerBox.isInitialized
+    internal fun isVoiceRecorderReady(): Boolean = ::voiceRecorder.isInitialized
+    internal fun isVoiceInterruptChannelReady(): Boolean = ::voiceInterruptChannel.isInitialized
+    internal fun isWorkspaceSelectionReady(): Boolean = ::workspaceSelection.isInitialized
+    internal fun isNetworkBannerReady(): Boolean = ::networkBanner.isInitialized
+    internal fun isSmartChipsRowReady(): Boolean = ::smartChipsRow.isInitialized
+    internal fun isScrollReady(): Boolean = ::scroll.isInitialized
+    internal fun isGoalPlateReady(): Boolean = ::goalPlate.isInitialized
+    internal fun isLiveRunPlateReady(): Boolean = ::liveRunPlate.isInitialized
+    internal fun isVoiceSessionReady(): Boolean = ::voiceSession.isInitialized
     /** Хост каркаса экрана: колбэки шапки/чипов/композера (объект создаётся один раз). */
     internal val scaffoldHost = createScaffoldHost()
 

@@ -105,9 +105,9 @@ internal fun ChatActivity.startVoiceInput() {
     // вторую запись, а перебивает звук (или закрывает текущую реплику), иначе «тап по
     // красной кнопке» означал бы разное в зависимости от того, что успел сделать Марс.
     when (voiceGestures.onTap(
-        dialogActive = ::voiceLoop.isInitialized && voiceLoop.isActive,
+        dialogActive = isVoiceLoopReady() && voiceLoop.isActive,
         speaking = isVoiceSpeakingNow(),
-        manualRecording = ::voiceSession.isInitialized &&
+        manualRecording = isVoiceSessionReady() &&
             voiceSession.state == VoiceSessionController.State.LISTENING,
         transcribing = voiceTranscribeJob?.isActive == true,
     )) {
@@ -269,13 +269,13 @@ internal fun ChatActivity.createHandsFreeListener(): HandsFreeCapture.Listener =
         // Колбэки захвата приходят с потока чтения микрофона, а дальше цикл меняет
         // состояние и трогает TextView — только на главном потоке.
         runOnUiThread {
-            if (::voiceLoop.isInitialized) voiceLoop.onSpeechStarted()
+            if (isVoiceLoopReady()) voiceLoop.onSpeechStarted()
         }
     }
 
     override fun onSegment(recording: Recording) {
         runOnUiThread {
-            if (!::voiceLoop.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+            if (!isVoiceLoopReady() || isFinishing || isDestroyed) return@runOnUiThread
             voiceLoop.onSegment(recording)
         }
     }
@@ -290,14 +290,14 @@ internal fun ChatActivity.createHandsFreeListener(): HandsFreeCapture.Listener =
      */
     override fun onSpeechProgress(voicedMs: Long) {
         runOnUiThread {
-            if (!::voiceLoop.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+            if (!isVoiceLoopReady() || isFinishing || isDestroyed) return@runOnUiThread
             voiceLoop.onSpeechProgress(voicedMs)
         }
     }
 
     override fun onCaptureFailed() {
         runOnUiThread {
-            if (!::voiceLoop.isInitialized) return@runOnUiThread
+            if (!isVoiceLoopReady()) return@runOnUiThread
             voiceLoop.stop()
             statusView.text = VOICE_MIC_UNAVAILABLE_STATUS
         }
@@ -310,10 +310,10 @@ internal fun ChatActivity.toggleHandsFree(): Boolean {
     // первой: пока диалог активен, удержание ВСЕГДА выключает его, в любой фазе (слушаю,
     // думаю, говорю). Потерять этот жест — значит оставить человека в режиме без выхода.
     when (voiceGestures.onHold(
-        dialogActive = ::voiceLoop.isInitialized && voiceLoop.isActive,
+        dialogActive = isVoiceLoopReady() && voiceLoop.isActive,
         permissionGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED,
-        manualRecording = ::voiceSession.isInitialized &&
+        manualRecording = isVoiceSessionReady() &&
             voiceSession.state == VoiceSessionController.State.LISTENING,
     )) {
         VoiceMicHoldAction.DISABLE_DIALOG -> {
@@ -329,7 +329,7 @@ internal fun ChatActivity.toggleHandsFree(): Boolean {
         VoiceMicHoldAction.ENABLE_DIALOG_AFTER_PERMISSION,
         VoiceMicHoldAction.ENABLE_DIALOG -> startHandsFree()
     }
-    return ::voiceLoop.isInitialized && voiceLoop.isActive
+    return isVoiceLoopReady() && voiceLoop.isActive
 }
 
 internal fun ChatActivity.startHandsFree() {
@@ -410,7 +410,7 @@ internal fun ChatActivity.createAsrPort(): AsrEnginePort? {
  * человек выключил микрофон — значит, слушать больше нечего.
  */
 internal fun ChatActivity.stopHandsFree() {
-    if (!::voiceLoop.isInitialized) return
+    if (!isVoiceLoopReady()) return
     voiceLoop.stop()
     handsFreeCapture.cancel()
     voiceOutput.stopSpeaking()
@@ -418,7 +418,7 @@ internal fun ChatActivity.stopHandsFree() {
     // иначе он висел бы до TTL и занимал слот потока. Отписка от маршрута — там же:
     // колбэк AudioManager держит ссылку на Activity.
     audioRouteMonitor?.stop()
-    if (::voiceInterruptChannel.isInitialized) voiceInterruptChannel.close()
+    if (isVoiceInterruptChannelReady()) voiceInterruptChannel.close()
     partialPreview.reset()
     // Режим выключен: кнопка возвращается в нейтральное состояние тем же кадром, а не
     // остаётся красной до следующего случайного setStatus().
@@ -494,14 +494,14 @@ internal fun ChatActivity.transcribeFailureStatus(outcome: TranscribeOutcome.Fai
 
 /** Режим автоозвучивания виден на композере: акцентная тонировка кнопки, пока включён. */
 internal fun ChatActivity.updateVolumeBtn() {
-    val enabled = ::voiceOutput.isInitialized && voiceOutput.autoSpeakEnabled
+    val enabled = isVoiceOutputReady() && voiceOutput.autoSpeakEnabled
     volumeBtn?.imageTintList = ColorStateList.valueOf(
         if (enabled) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED
     )
 }
 
 /** Слушает ли цикл прямо сейчас (микрофон может быть открыт, но цикл уже выключен). */
-internal fun ChatActivity.voiceLoopActive(): Boolean = ::voiceLoop.isInitialized && voiceLoop.isActive
+internal fun ChatActivity.voiceLoopActive(): Boolean = isVoiceLoopReady() && voiceLoop.isActive
 
 /**
  * Начат ли текущий ход голосовым диалогом — источник поля `voice_mode` в теле `chat/start`.
@@ -528,7 +528,7 @@ internal fun ChatActivity.voiceTurnFromDialog(): Boolean = voiceLoopActive()
  * ([OfflineQueuePresenter.onVoiceModeRejected]) — там же и осознанный повтор.
  */
 internal fun ChatActivity.onVoiceModeRejectedTurn(text: String, restoreComposer: Boolean) {
-    if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
+    if (isVoiceLoopReady() && voiceLoop.isActive) stopHandsFree()
     // Озвучка хода, которого не было: очередь фраз могла успеть получить дельты до отказа.
     if (isStreamSpeechReady()) cancelStreamSpeech()
     if (restoreComposer && text.isNotBlank() && isInputReady() && input.text.isNullOrBlank()) {
@@ -547,6 +547,6 @@ internal fun ChatActivity.onVoiceModeRejectedTurn(text: String, restoreComposer:
  * делает — `bindSession` сам выходит, если привязки нет.
  */
 internal fun ChatActivity.bindVoiceChannelToSession(sessionId: String?) {
-    if (!::voiceInterruptChannel.isInitialized) return
+    if (!isVoiceInterruptChannelReady()) return
     voiceInterruptChannel.bindSession(sessionId)
 }

@@ -99,7 +99,7 @@ internal fun ChatActivity.initializeChatStores() {
         // (покрывает первый вход, перезапуск и пропущенную офлайн ротацию), и
         // запрашиваем POST_NOTIFICATIONS на Android 13+ — без него баннеры молчат.
         PushTokenSync.syncNow(this)
-        ru.mars.mobile.service.PushNotifications.ensurePostPermission(this)
+        ru.mars.mobile.fcm.PushNotifications.ensurePostPermission(this)
         interactiveView = MarsInteractiveView(this)
         interactiveController = InteractiveRequestController(
             view = interactiveView,
@@ -156,12 +156,12 @@ internal fun ChatActivity.initializeVoiceStack() {
         speechEngine = AndroidSpeechEngine(
             context = this,
             onInitFinished = { available ->
-                if (::voiceOutput.isInitialized) voiceOutput.onEngineReady(available)
+                if (isVoiceOutputReady()) voiceOutput.onEngineReady(available)
                 else speechEngineInitResult = available
             },
             // Движок дочитал: контроллер снимает флаг озвучки, hands-free-цикл снова слушает.
             onSpeechFinished = {
-                runOnUiThread { if (::voiceOutput.isInitialized) voiceOutput.notifySpeakingFinished() }
+                runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
             },
         )
         // Серверный TTS с прозрачным фолбэком на системный: контроллер видит один движок
@@ -172,7 +172,7 @@ internal fun ChatActivity.initializeVoiceStack() {
             context = this,
             // Серверное аудио доиграло — тот же сигнал, что и у системного TTS.
             onFinished = {
-                runOnUiThread { if (::voiceOutput.isInitialized) voiceOutput.notifySpeakingFinished() }
+                runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
             },
         )
         serverTtsEngine = ServerTtsSpeechEngine(
@@ -242,7 +242,7 @@ internal fun ChatActivity.initializeVoiceStack() {
             // Фактический маршрут вывода и наличие AEC у текущего захвата — политике
             // перебивания, а не догадке «наверное, динамик».
             audioRoute = { audioRouteMonitor?.route ?: AudioRoute.UNKNOWN },
-            aecActive = { ::handsFreeCapture.isInitialized && handsFreeCapture.echoCanceled },
+            aecActive = { isHandsFreeCaptureReady() && handsFreeCapture.echoCanceled },
         )
         // Слушатель передаётся в start(): у захвата нет «постоянного» получателя.
         handsFreeCapture = HandsFreeCapture()
@@ -266,7 +266,7 @@ internal fun ChatActivity.initializeVoiceStack() {
         // серверный — конец воспроизведения). Только после этого цикл снова слушает.
         voiceOutput.onSpeakingFinished = {
             runOnUiThread {
-                if (::voiceLoop.isInitialized) voiceLoop.onAnswerFinished()
+                if (isVoiceLoopReady()) voiceLoop.onAnswerFinished()
             }
         }
         // Voice-input state machine: guards the capture session, delivers haptic feedback on
@@ -349,7 +349,7 @@ internal fun ChatActivity.installBackNavigation() {
             override fun handleOnBackPressed() {
                 when (NavBackPolicy.resolve(
                     level = NavBackPolicy.Level.CHAT,
-                    searchOpen = ::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE,
+                    searchOpen = isSearchPlateReady() && searchPlate.visibility == View.VISIBLE,
                     drawerOpen = drawer.isDrawerOpen(GravityCompat.START),
                 )) {
                     NavBackPolicy.Action.CLOSE_SEARCH -> closeTranscriptSearch()
@@ -363,42 +363,42 @@ internal fun ChatActivity.installBackNavigation() {
 
 /** Освобождение ресурсов экрана: сеть, контроллеры, микрофон, TTS, ASR-модель. */
 internal fun ChatActivity.destroyChatStack() {
-        if (::networkObserver.isInitialized) networkObserver.stop()
-        if (::interactiveController.isInitialized) interactiveController.destroy()
-        if (::compressionController.isInitialized) compressionController.destroy()
-        if (::interactiveView.isInitialized) interactiveView.dismissAllNow()
-        if (::miniPlayerBox.isInitialized) miniPlayerBox.animate().cancel()
+        if (isNetworkObserverReady()) networkObserver.stop()
+        if (isInteractiveControllerReady()) interactiveController.destroy()
+        if (isCompressionControllerReady()) compressionController.destroy()
+        if (isInteractiveViewReady()) interactiveView.dismissAllNow()
+        if (isMiniPlayerBoxReady()) miniPlayerBox.animate().cancel()
         MarsMusicPlayer.unregisterListener(this)
         // Живой ход умирает вместе с экраном (destroy — точка прерывания collect send-пути
         // и recovery-цикла).
         teardownLiveTurn()
         // Запись умирает вместе с экраном: AudioRecord освобождается, буфер не держится.
-        if (::voiceRecorder.isInitialized) voiceRecorder.cancel()
+        if (isVoiceRecorderReady()) voiceRecorder.cancel()
         // Hands-free-цикл тоже: микрофон не должен остаться открытым после закрытия экрана.
-        if (::handsFreeCapture.isInitialized) handsFreeCapture.cancel()
-        if (::voiceLoop.isInitialized) voiceLoop.stop()
+        if (isHandsFreeCaptureReady()) handsFreeCapture.cancel()
+        if (isVoiceLoopReady()) voiceLoop.stop()
         // Голосовой канал на сервере и подписка на маршрут: экран ушёл — voice_id закрываем,
         // иначе он висит до TTL, а AudioDeviceCallback держит ссылку на Activity.
         audioRouteMonitor?.stop()
-        if (::voiceInterruptChannel.isInitialized) voiceInterruptChannel.close()
+        if (isVoiceInterruptChannelReady()) voiceInterruptChannel.close()
         // Нативный движок ASR держит модель в памяти (~50 МБ RSS): освобождаем явно.
         runCatching { streamingStt?.release() }
         runCatching { asrPort?.release() }
-        if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
+        if (isVoiceOutputReady()) voiceOutput.onDestroy()
         // Потоковая озвучка владеет своим плеером и временными файлами — освобождается тоже.
-        if (::streamingSpeech.isInitialized) streamingSpeech.release()
+        if (isStreamSpeechReady()) streamingSpeech.release()
 }
 
 /** Возврат на передний план: озвучка, хвост стрима, мини-плеер, воркспейс. */
 internal fun ChatActivity.resumeChat() {
-        if (::voiceOutput.isInitialized) voiceOutput.onResume()
+        if (isVoiceOutputReady()) voiceOutput.onResume()
         // Возврат на передний план: хвост стрима не должен ждать trailing-окно —
         // отложенная перерисовка выполняется немедленно (renderMessages гасит job сам).
         if (streamFlushJob != null) renderMessages()
         updateMiniPlayer(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
         // Выбор пространства мог измениться на другом экране (общее
         // хранилище mars-workspace-choice): перечитываем chip из storage.
-        if (::workspaceSelection.isInitialized) {
+        if (isWorkspaceSelectionReady()) {
             workspaceSelection.reloadFromStorage()
             updateWorkspaceButton()
         }
@@ -409,7 +409,7 @@ internal fun ChatActivity.pauseChat() {
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
-        if (::voiceOutput.isInitialized) voiceOutput.onPause()
+        if (isVoiceOutputReady()) voiceOutput.onPause()
         /*
          * Потоковая озвучка тоже молчит в фоне: это речь по ходу генерации, и дочитывать
          * её из кармана — не то, чего ждёт пользователь. Ход при этом продолжается, а
@@ -418,22 +418,18 @@ internal fun ChatActivity.pauseChat() {
         cancelStreamSpeech()
         // Hands-free в фоне не слушает: микрофон без foreground-сервиса всё равно отнимут,
         // а «слушающий» в фоне цикл — это расход батареи и лишние запросы распознавания.
-        if (::voiceLoop.isInitialized && voiceLoop.isActive) stopHandsFree()
+        if (isVoiceLoopReady() && voiceLoop.isActive) stopHandsFree()
 }
 
 /** Результат запроса микрофона: старт записи либо причина отказа в статусе. */
 internal fun ChatActivity.handleVoicePermissionResult(requestCode: Int, grantResults: IntArray) {
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        if (requestCode != recognizeVoice) return
-        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-        // Разрешение просили для hands-free (долгое нажатие) — продолжаем именно его.
-        if (pendingHandsFree) {
-            pendingHandsFree = false
-            if (granted) startHandsFree() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
-            return
-        }
-        if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
+    if (requestCode != recognizeVoice) return
+    val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+    // Разрешение просили для hands-free (долгое нажатие) — продолжаем именно его.
+    if (pendingHandsFree) {
+        pendingHandsFree = false
+        if (granted) startHandsFree() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
+        return
+    }
+    if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
 }

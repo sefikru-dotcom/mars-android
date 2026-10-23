@@ -136,7 +136,7 @@ internal fun ChatActivity.finishSession() {
     val wasStreaming = uiState.status == ChatStatus.TYPING
     val capturedApproval = uiState.pendingApproval
     val capturedClarify = uiState.pendingClarify
-    val textAtStart = if (::input.isInitialized) input.text.toString() else ""
+    val textAtStart = if (isInputReady()) input.text.toString() else ""
     // Pending-загрузка закрываемой сессии инвалидируется: её callback не должен
     // «воскресить» диалог, который сейчас завершается.
     sessionNavigation.invalidatePending()

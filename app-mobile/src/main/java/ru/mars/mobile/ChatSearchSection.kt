@@ -111,7 +111,7 @@ internal fun ChatActivity.closeTranscriptSearch() {
 
 /** Панель поиска открыта — Back сначала закрывает её (см. NavBackPolicy). */
 internal fun ChatActivity.isTranscriptSearchOpen(): Boolean =
-    ::searchPlate.isInitialized && searchPlate.visibility == View.VISIBLE
+    isSearchPlateReady() && searchPlate.visibility == View.VISIBLE
 
 /**
  * Хост-контракт контроллера поиска: узкие адаптеры к транскрипту вместо передачи

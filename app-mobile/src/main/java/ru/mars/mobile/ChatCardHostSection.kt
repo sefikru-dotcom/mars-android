@@ -1,5 +1,7 @@
 package ru.mars.mobile
 
+import android.content.Intent
+import android.net.Uri
 import android.view.View
 
 /**
@@ -70,13 +72,3 @@ internal fun ChatActivity.createCardRendererHost(): ChatMessageCardRenderer.Host
             applyExpandableHeaderA11y(header, description, state)
         }
     }
-
-/** View-дерево экрана готово к отрисовке транскрипта. */
-internal fun isMessagesReady(): Boolean = ::messages.isInitialized
-internal fun isInputReady(): Boolean = ::input.isInitialized
-internal fun isDraftsReady(): Boolean = ::drafts.isInitialized
-internal fun isAuthExitCleanupReady(): Boolean = ::authExitCleanup.isInitialized
-internal fun isTodoWidgetPlateReady(): Boolean = ::todoWidgetPlate.isInitialized
-internal fun isSearchPlateReady(): Boolean = ::searchPlate.isInitialized
-internal fun isQueuePlateReady(): Boolean = ::queuePlate.isInitialized
-internal fun isCompressionControllerReady(): Boolean = ::compressionController.isInitialized

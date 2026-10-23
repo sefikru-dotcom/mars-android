@@ -445,7 +445,7 @@ internal fun ChatActivity.onNetworkTransition(transition: NetworkTransition) {
     restoreComposerFocusIfNeeded()
     // Сеть кормится в recovery-цикл: offline → парковка (WaitForNetwork), online →
     // пробуждение и немедленный reattach. LOSING трактуется как offline (сеть сейчас умрёт).
-    if (::recovery.isInitialized) recovery.onNetworkChanged(transition.current.sendAllowed)
+    if (isRecoveryReady()) recovery.onNetworkChanged(transition.current.sendAllowed)
     if (transition.restored) {
         flushOfflineQueue()
         // Список сессий на восстановлении связи обновляется через throttle: моргающая
@@ -458,11 +458,11 @@ internal fun ChatActivity.onNetworkTransition(transition: NetworkTransition) {
 
 /** Баннер: решение (видимость/текст/тон) — чистая NetworkBannerPolicy; хост мапит тон на MarsTheme. */
 internal fun ChatActivity.updateNetworkBanner() {
-    if (!::networkBanner.isInitialized) return
+    if (!isNetworkBannerReady()) return
     // Карточка очереди живёт по тем же триггерам, что и баннер (сеть + размер очереди),
     // поэтому обновляется здесь же — до раннего выхода «баннер не нужен».
     updateOfflineQueuePanel()
-    val pendingCount = if (::offlineQueue.isInitialized) offlineQueue.size else 0
+    val pendingCount = if (isOfflineQueueReady()) offlineQueue.size else 0
     val banner = bannerPolicy.bannerFor(networkPolicy.state, pendingCount)
     networkBanner.visibility = if (banner.visible) View.VISIBLE else View.GONE
     if (!banner.visible) return
@@ -507,7 +507,7 @@ internal fun ChatActivity.applyExpandableHeaderA11yFromSection(header: View, des
  * monochrome vectors per the design system (no emoji).
  */
 internal fun ChatActivity.renderSmartChips() {
-    if (!::smartChipsRow.isInitialized) return
+    if (!isSmartChipsRowReady()) return
     val lastAssistant = uiState.messages.lastOrNull { it.role == "assistant" }
     val hasReply = lastAssistant != null &&
         (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty())
@@ -630,7 +630,7 @@ internal fun ChatActivity.syncScrollToBottomFab() {
  * viewport; 0 while pinned at the latest message and before the views exist.
  */
 internal fun ChatActivity.distanceFromBottomPx(): Int {
-    if (!::scroll.isInitialized) return 0
+    if (!isScrollReady()) return 0
     val child = scroll.getChildAt(0) ?: return 0
     return (child.bottom - (scroll.height + scroll.scrollY)).coerceAtLeast(0)
 }

@@ -239,7 +239,7 @@ internal fun ChatActivity.clearContextStatus() {
  * запрашивает у сервера: текст приходит кадрами `goal`/`goal_continue`.
  */
 internal fun ChatActivity.updateGoalCard() {
-    if (!::goalPlate.isInitialized) return
+    if (!isGoalPlateReady()) return
     if (!goalCard.visible) {
         goalPlate.visibility = View.GONE
         return
@@ -265,7 +265,7 @@ internal fun ChatActivity.updateGoalCard() {
  */
 internal fun ChatActivity.enqueueGoalContinuation(prompt: String) {
     val text = prompt.trim()
-    if (text.isEmpty() || !::offlineQueue.isInitialized) return
+    if (text.isEmpty() || !isOfflineQueueReady()) return
     if (lastGoalContinuation == text) return
     lastGoalContinuation = text
     val queued = offlineQueue.enqueue(text, currentSessionId)
@@ -308,7 +308,7 @@ internal fun ChatActivity.handleGoalCommand(text: String) {
 }
 
 internal fun ChatActivity.updateLiveRunPlate() {
-    if (!::liveRunPlate.isInitialized) return
+    if (!isLiveRunPlateReady()) return
     val runningTool = uiState.messages.lastOrNull()?.tools?.lastOrNull { it.result == null }?.name
     val lastAssistant = uiState.messages.lastOrNull { it.role == "assistant" }
     val plate = LiveRunStatusPresenter.resolve(

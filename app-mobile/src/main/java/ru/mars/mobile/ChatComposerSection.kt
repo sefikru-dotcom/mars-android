@@ -96,7 +96,7 @@ import ru.mars.network.repository.readBoundedUploadPayload
  * до тишины, иначе клавиатура мигает на каждом переходе. Одноразовость — на политике.
  */
 internal fun ChatActivity.restoreComposerFocusIfNeeded() {
-    if (!::input.isInitialized) return
+    if (!isInputReady()) return
     when (composerGuard.resolveFocusRestore(FocusRequestOrigin.NETWORK_SETTLED)) {
         ComposerFocusDecision.RestoreWithKeyboard -> {
             input.requestFocus()
@@ -136,7 +136,7 @@ internal fun ChatActivity.updateControls() {
 internal fun ChatActivity.updateControlsFromSection() = updateControls()
 
 internal fun ChatActivity.updateQuotePlate() {
-    if (!::composerQuoteView.isInitialized) return
+    if (!isComposerQuoteViewReady()) return
     val plate = composerLayoutPresenter.quotePlate
     if (plate.visible) {
         composerQuoteView.visibility = View.VISIBLE

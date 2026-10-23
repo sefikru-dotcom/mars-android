@@ -99,7 +99,7 @@ import ru.mars.network.repository.readBoundedUploadPayload
  * LISTENING посреди звучащего ответа (микрофон слышал динамик).
  */
 internal fun ChatActivity.onVoiceTurnCompleted() {
-    if (!::voiceLoop.isInitialized || !voiceLoop.isActive) return
+    if (!isVoiceLoopReady() || !voiceLoop.isActive) return
     if (isVoiceSpeakingNow()) voiceLoop.onAnswerStarted(spokenAnswerText()) else voiceLoop.onAnswerFinished()
 }
 
@@ -111,15 +111,15 @@ internal fun ChatActivity.onVoiceTurnCompleted() {
  * на динамике перебивание по тексту не подтвердится, и это правильный отказ, а не догадка.
  */
 internal fun ChatActivity.spokenAnswerText(): String? {
-    val streamed = if (::streamingSpeech.isInitialized) streamingSpeech.spokenText else null
+    val streamed = if (isStreamSpeechReady()) streamingSpeech.spokenText else null
     if (!streamed.isNullOrBlank()) return streamed
     return latestAssistantAnswer()?.takeIf { it.isNotBlank() }
 }
 
 /** Звучит ли ответ прямо сейчас: платформенный TTS или потоковая очередь фраз. */
 internal fun ChatActivity.isVoiceSpeakingNow(): Boolean =
-    (::voiceOutput.isInitialized && voiceOutput.speaking) ||
-        (::streamingSpeech.isInitialized && streamingSpeech.isSpeaking)
+    (isVoiceOutputReady() && voiceOutput.speaking) ||
+        (isStreamSpeechReady() && streamingSpeech.isSpeaking)
 
 /**
  * Текущее описание вида: фаза выводится из состояния цикла и факта звука.
@@ -128,7 +128,7 @@ internal fun ChatActivity.isVoiceSpeakingNow(): Boolean =
  * и «выключен пользователем» — для интерфейса это одно и то же (кнопка нейтральная).
  */
 internal fun ChatActivity.currentVoiceUi(): VoiceDialogUi {
-    val loopState = if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.state else null
+    val loopState = if (isVoiceLoopReady() && voiceLoop.isActive) voiceLoop.state else null
     val phase = voicePresentation.phaseFor(loopState, isVoiceSpeakingNow())
     return voicePresentation.uiFor(phase, voiceIcons)
 }
@@ -159,7 +159,7 @@ internal fun ChatActivity.renderVoiceButton() {
  * вызывать нельзя — он убил бы ход, а перебивание означает лишь «замолчи и слушай».
  */
 internal fun ChatActivity.bargeIn() {
-    if (::voiceOutput.isInitialized) voiceOutput.stopSpeaking()
+    if (isVoiceOutputReady()) voiceOutput.stopSpeaking()
     cancelStreamSpeech()
     requestVoiceInterrupt()
     setStatus()
@@ -224,7 +224,7 @@ internal fun ChatActivity.onAssistantThought(text: String) {
  * микрофонный цикл при этом не в диалоге (иначе озвучка накладывалась бы на запись).
  */
 internal fun ChatActivity.streamSpeechEnabled(): Boolean =
-    ::streamingSpeech.isInitialized && isVoiceOutputReady() && voiceOutput.wantsSpeech
+    isStreamSpeechReady() && isVoiceOutputReady() && voiceOutput.wantsSpeech
 
 /**
  * Начало хода: взять решение об озвучке ОДИН раз. Дальше все дельты этого хода идут в
@@ -279,9 +279,9 @@ internal fun ChatActivity.endStreamSpeech() {
 /** Ход отменён/прерван/экран ушёл: тишина немедленно, хвост ответа не догоняет. */
 internal fun ChatActivity.cancelStreamSpeech() {
     streamSpeech.cancel()
-    if (!::streamingSpeech.isInitialized) return
+    if (!isStreamSpeechReady()) return
     streamingSpeech.stop()
-    if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
+    if (isVoiceOutputReady()) voiceOutput.setExternalSpeaking(false)
 }
 
 /**
@@ -293,7 +293,7 @@ internal fun ChatActivity.cancelStreamSpeech() {
  */
 internal fun ChatActivity.onStreamSpeechStarted() {
     if (!streamSpeech.isSpeechEnabled) { streamingSpeech.stop(); return }
-    if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(true)
+    if (isVoiceOutputReady()) voiceOutput.setExternalSpeaking(true)
 }
 
 /**
@@ -306,16 +306,16 @@ internal fun ChatActivity.onStreamSpeechStarted() {
  */
 internal fun ChatActivity.onStreamSpeechPhraseStarted(spokenText: String) {
     if (!streamSpeech.isSpeechEnabled) { streamingSpeech.stop(); return }
-    if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(true)
-    if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerSpeechStarted(spokenText)
+    if (isVoiceOutputReady()) voiceOutput.setExternalSpeaking(true)
+    if (isVoiceLoopReady() && voiceLoop.isActive) voiceLoop.onAnswerSpeechStarted(spokenText)
 }
 
 /** Очередь фраз пуста и всё доиграно: цикл снова слушает. */
 internal fun ChatActivity.onStreamSpeechDrained() {
     if (!streamSpeech.isSpeechEnabled) return
-    if (::voiceOutput.isInitialized) voiceOutput.setExternalSpeaking(false)
+    if (isVoiceOutputReady()) voiceOutput.setExternalSpeaking(false)
     if (!streamSpeech.onQueueDrained()) return
-    if (::voiceLoop.isInitialized && voiceLoop.isActive) voiceLoop.onAnswerFinished()
+    if (isVoiceLoopReady() && voiceLoop.isActive) voiceLoop.onAnswerFinished()
 }
 
 /** Speak a message through [VoiceOutputController] (markdown is filtered inside). */
