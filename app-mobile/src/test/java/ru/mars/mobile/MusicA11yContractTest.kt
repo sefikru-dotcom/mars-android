@@ -42,10 +42,13 @@ class MusicA11yContractTest {
     /** Панель плеера вынесена (W1, шаг 15): сборка, подписи и перерисовка — здесь. */
     private val playerBar by lazy { source("src/main/java/ru/mars/mobile/MusicPlayerBarSection.kt") }
 
+    /** Каркас экрана вынесен (W1, шаг 16): статусная строка и вкладки живут здесь. */
+    private val shell by lazy { source("src/main/java/ru/mars/mobile/MusicShellSection.kt") }
+
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
 
     @Test fun statusTextIsPoliteLiveRegion() {
-        val block = activity
+        val block = shell
             .substringAfter("statusText = TextView(this).apply {")
             .substringBefore("root.addView(statusText")
         assertTrue(
@@ -134,9 +137,9 @@ class MusicA11yContractTest {
     }
 
     @Test fun tabsAnnounceTheActiveTab() {
-        val block = activity
-            .substringAfter("private fun updateTabStyles()")
-            .substringBefore("private fun selectTab(")
+        val block = shell
+            .substringAfter("internal fun MusicActivity.updateTabStyles()")
+            .substringBefore("internal fun MusicActivity.showStatus(")
         assertTrue(
             "Активная вкладка обязана озвучиваться («… — активная вкладка») через политику",
             block.contains("MusicA11yPolicy.tabDescription("),

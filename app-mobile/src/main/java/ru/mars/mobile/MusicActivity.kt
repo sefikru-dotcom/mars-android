@@ -100,13 +100,13 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
     internal val trackRows = HashMap<String, MutableList<TrackRowHolder>>()
-    private lateinit var chartTabButton: TextView
-    private lateinit var flowTabButton: TextView
-    private lateinit var forYouTabButton: TextView
-    private lateinit var favoritesTabButton: TextView
-    private lateinit var queueTabButton: TextView
-    private lateinit var playlistsTabButton: TextView
-    private lateinit var historyTabButton: TextView
+    internal lateinit var chartTabButton: TextView
+    internal lateinit var flowTabButton: TextView
+    internal lateinit var forYouTabButton: TextView
+    internal lateinit var favoritesTabButton: TextView
+    internal lateinit var queueTabButton: TextView
+    internal lateinit var playlistsTabButton: TextView
+    internal lateinit var historyTabButton: TextView
     /** Server-side playlists of the «Плейлисты» tab, newest first as the service returns them. */
     private var playlists = emptyList<Playlist>()
     /** Server-side listening history of the «История» tab; also the queue for history playback. */
@@ -126,7 +126,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Overlay with recent searches; floats above the results list, never replaces it. */
     internal lateinit var historyOverlay: ScrollView
     internal lateinit var historyPanel: LinearLayout
-    private lateinit var statusText: TextView
+    internal lateinit var statusText: TextView
     internal lateinit var shuffleBtn: ImageButton
     internal lateinit var repeatBtn: ImageButton
     /** «Радио по треку» in the player bar: appends similar tracks to the queue. */
@@ -246,6 +246,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     // компилятор разрешает только внутри класса, поэтому хост отдаёт предикаты.
     internal fun isHistoryOverlayReady(): Boolean = ::historyOverlay.isInitialized
     internal fun isSearchHistoryReady(): Boolean = ::searchHistory.isInitialized
+    internal fun isStatusTextReady(): Boolean = ::statusText.isInitialized
     internal fun isResultsReady(): Boolean = ::results.isInitialized
     internal fun isPlayerActionBtnsReady(): Boolean = ::radioBtn.isInitialized && ::lyricsBtn.isInitialized
     internal fun isQueueIconBtnsReady(): Boolean = ::shuffleBtn.isInitialized && ::repeatBtn.isInitialized
@@ -352,148 +353,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                 this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS
             )
         }
-    }
-
-    private fun buildView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
-
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(dp(16), systemBars.top + dp(10), dp(16), systemBars.bottom + dp(10))
-            insets
-        }
-
-        // Header
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(14))
-        }
-        val backBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_ui_arrow_back,
-            "Назад",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT
-        ).apply {
-            setOnClickListener { finish() }
-        }
-        header.addView(backBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
-
-        val titleHeader = TextView(this).apply {
-            text = "Музыка Марса"
-            textSize = 22f
-            setTextColor(MarsTheme.TEXT_STRONG)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-        }
-        header.addView(titleHeader, LinearLayout.LayoutParams(0, -2, 1f))
-
-        eqBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_volume,
-            "Эквалайзер и звук",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onEqClicked() }
-        }
-        header.addView(eqBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
-        qualityBtn = MarsTheme.circleIconButton(
-            this,
-            R.drawable.ic_settings,
-            "Качество потока",
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34
-        ).apply {
-            setOnClickListener { onQualityClicked() }
-        }
-        header.addView(qualityBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-            marginStart = dp(8)
-        })
-        root.addView(header)
-
-        // Tabs: Чарт / Волна / Избранное / Очередь / Плейлисты / История (pill toggles).
-        // Horizontally scrollable: six weighted pills clip «Избранное» on narrow screens,
-        // chips must stay whole.
-        val tabRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        chartTabButton = tabButton("Чарт") { selectTab(MusicTab.CHART) }
-        flowTabButton = tabButton("Волна") { selectTab(MusicTab.FLOW) }
-        forYouTabButton = tabButton(getString(R.string.music_tab_for_you)) { selectTab(MusicTab.FOR_YOU) }
-        favoritesTabButton = tabButton("Избранное") { selectTab(MusicTab.FAVORITES) }
-        playlistsTabButton = tabButton("Плейлисты") { selectTab(MusicTab.PLAYLISTS) }
-        historyTabButton = tabButton("История") { selectTab(MusicTab.HISTORY) }
-        queueTabButton = tabButton("Очередь") { selectTab(MusicTab.QUEUE) }
-        tabRow.addView(chartTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        tabRow.addView(flowTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        // «Для тебя» — персональная лента /api/home: в общем ряду вкладок, на узком
-        // экране ряд листается горизонтально (перенос ломал бы быструю навигацию).
-        tabRow.addView(forYouTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        tabRow.addView(favoritesTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        tabRow.addView(playlistsTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        tabRow.addView(historyTabButton, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
-        tabRow.addView(queueTabButton, LinearLayout.LayoutParams(-2, -2))
-        val tabScroll = android.widget.HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(tabRow, ViewGroup.LayoutParams(-2, -2))
-        }
-        root.addView(tabScroll, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
-
-        // Transient status line (favorites/queue feedback), hidden by default.
-        // POLITE live region (MUS-M2): TalkBack announces the feedback on its own,
-        // without moving focus to the line — parity with SectionStateViews and the
-        // TV section status views.
-        statusText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            setPadding(dp(4), 0, dp(4), dp(8))
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-            visibility = View.GONE
-        }
-        root.addView(statusText, LinearLayout.LayoutParams(-1, -2))
-
-        // Search Bar (Floating Capsule)
-        root.addView(buildSearchBar(), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
-
-        // Track list; the search-history overlay floats above it (FrameLayout),
-        // so showing history never displaces the tab content or the player.
-        results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val listScroll = ScrollView(this).apply {
-            addView(results, ViewGroup.LayoutParams(-1, -2))
-            isFillViewport = true
-        }
-        historyPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = MarsTheme.card(this@MusicActivity, MarsTheme.SURFACE_CARD, radiusDp = 14, strokeColor = MarsTheme.BORDER)
-            setPadding(dp(6), dp(10), dp(6), dp(10))
-        }
-        historyOverlay = ScrollView(this).apply {
-            addView(historyPanel, ViewGroup.LayoutParams(-1, -2))
-            visibility = View.GONE
-            // Swallow taps so they don't fall through to the list underneath.
-            isClickable = true
-            isFocusable = true
-        }
-        val listArea = FrameLayout(this).apply {
-            addView(listScroll, FrameLayout.LayoutParams(-1, -1))
-            addView(historyOverlay, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        }
-        root.addView(listArea, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        // Bottom Player Bar
-        root.addView(buildPlayerBar(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-
-        return root
     }
 
     override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) = renderPlayerState(track, isPlaying)
@@ -616,40 +475,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         results.addView(box, LinearLayout.LayoutParams(-1, -2))
     }
 
-    private fun tabButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        textSize = 13f
-        setTextColor(MarsTheme.TEXT_MUTED)
-        typeface = Typeface.DEFAULT_BOLD
-        gravity = Gravity.CENTER
-        isSingleLine = true
-        setPadding(dp(14), dp(9), dp(14), dp(9))
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-    }
-
-    private fun updateTabStyles() {
-        fun style(button: TextView, active: Boolean) {
-            button.setTextColor(if (active) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED)
-            button.background = if (active) {
-                MarsTheme.pill(this, MarsTheme.ACCENT_BG, MarsTheme.ACCENT)
-            } else {
-                MarsTheme.pill(this, MarsTheme.SURFACE)
-            }
-            // MUS-M3: TalkBack reads which tab is currently open
-            button.contentDescription = MusicA11yPolicy.tabDescription(button.text.toString(), active)
-        }
-        style(chartTabButton, currentTab == MusicTab.CHART)
-        style(flowTabButton, currentTab == MusicTab.FLOW)
-        style(forYouTabButton, currentTab == MusicTab.FOR_YOU)
-        style(favoritesTabButton, currentTab == MusicTab.FAVORITES)
-        style(playlistsTabButton, currentTab == MusicTab.PLAYLISTS)
-        style(historyTabButton, currentTab == MusicTab.HISTORY)
-        style(queueTabButton, currentTab == MusicTab.QUEUE)
-    }
-
-    private fun selectTab(tab: MusicTab) {
+    internal fun selectTab(tab: MusicTab) {
         if (currentTab == tab) return
         currentTab = tab
         updateTabStyles()
@@ -1306,12 +1132,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
             results.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         }
-    }
-
-    internal fun showStatus(message: String?) {
-        if (!::statusText.isInitialized) return
-        statusText.text = message.orEmpty()
-        statusText.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
     private fun loadFavorites() {
