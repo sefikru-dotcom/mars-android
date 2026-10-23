@@ -100,8 +100,8 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
     internal var currentTab = MusicTab.CHART
-    private val favoriteIds = linkedSetOf<String>()
-    private val heartButtons = HashMap<String, MutableList<ImageButton>>()
+    internal val favoriteIds = linkedSetOf<String>()
+    internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
 
     /** Rendered chart/search row views per track id, so playback state can re-style them live. */
     private class TrackRowHolder(
@@ -2043,32 +2043,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         statusText.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
-    private fun loadFavorites() {
-        job = lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { repository.getFavorites() } }
-            result.onSuccess { favs ->
-                favoriteIds.clear()
-                favoriteIds += favs.map { it.id }
-                if (favs.isEmpty()) {
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(TextView(this@MusicActivity).apply {
-                        text = "В избранном пусто — нажмите сердечко на треке"
-                        setTextColor(MarsTheme.TEXT_MUTED)
-                        gravity = Gravity.CENTER
-                        setPadding(0, dp(32), 0, dp(32))
-                    })
-                } else {
-                    showTracks(favs)
-                }
-            }.onFailure {
-                tracks = emptyList()
-                resetList()
-                showStatus("Избранное недоступно")
-            }
-        }
-    }
-
     /**
      * «Текст песни»: opens the themed lyrics dialog immediately (with a loading body) and
      * fills it when `/api/lyrics` answers. The answer→view mapping is pure
@@ -2739,27 +2713,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         lyricsBtn.alpha = if (hasTrack) 1f else 0.4f
     }
 
-    /** Prefetches favorite ids so hearts render filled on the charts/search rows. */
-    private fun refreshFavoriteIds() {
-        lifecycleScope.launch {
-            val favs = withContext(Dispatchers.IO) { runCatching { repository.getFavorites() }.getOrNull() }
-                ?: return@launch
-            favoriteIds.clear()
-            favoriteIds += favs.map { it.id }
-            favoriteIds.toList().forEach { refreshHeart(it) }
-        }
-    }
-
-    private fun refreshHeart(id: String) {
-        val filled = favoriteIds.contains(id)
-        heartButtons[id]?.forEach { button ->
-            button.setImageResource(if (filled) R.drawable.ic_favorite else R.drawable.ic_favorite_border)
-            button.imageTintList = ColorStateList.valueOf(if (filled) MarsTheme.ACCENT else MarsTheme.TEXT_MUTED)
-            // MUS-M3: the heart announces the ACTION the tap performs on this track
-            button.contentDescription = MusicA11yPolicy.heartAction(filled)
-        }
-    }
-
     /** Clears the rendered list plus per-row caches (hearts, highlighted rows). */
     internal fun resetList() {
         results.removeAllViews()
@@ -2793,33 +2746,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         val track = tracks.getOrNull(index) ?: return
         val state = TrackRowUiState.resolve(track.id, MarsMusicPlayer.currentTrack?.id, MarsMusicPlayer.isPlaying)
         if (state.tapStartsPlayback) MarsMusicPlayer.playTrack(index, tracks) else MarsMusicPlayer.togglePlay()
-    }
-
-    private fun onHeartClicked(track: MusicTrack, button: ImageButton) {
-        button.isEnabled = false // debounce double taps while the request is in flight
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching { repository.toggleFavorite(track.id, track) }.getOrNull()
-            }
-            button.isEnabled = true
-            when (result) {
-                true -> {
-                    favoriteIds += track.id
-                    refreshHeart(track.id)
-                    showStatus("Добавлено в избранное: ${track.title}")
-                }
-                false -> {
-                    favoriteIds -= track.id
-                    refreshHeart(track.id)
-                    showStatus("Удалено из избранного: ${track.title}")
-                    if (currentTab == MusicTab.FAVORITES) {
-                        val rest = tracks.filterNot { it.id == track.id }
-                        if (rest.isEmpty()) loadFavorites() else showTracks(rest)
-                    }
-                }
-                null -> showStatus("Избранное недоступно")
-            }
-        }
     }
 
     private fun onQueueAddClicked(track: MusicTrack) {
