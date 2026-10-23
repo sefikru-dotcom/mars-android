@@ -34,19 +34,30 @@ class MusicA11yContractTest {
         throw AssertionError("Не найден исходник: $relative")
     }
 
+    private val sourceDir: File by lazy {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            val candidate = File(dir, "app-mobile/src/main/java/ru/mars/mobile")
+            if (candidate.isDirectory) return@lazy candidate
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден каталог исходников app-mobile")
+    }
+
     /**
-     * Секции-расширения экрана после раскладки (шаги 0–6): вынесенный код — тот же
-     * production-код экрана, поэтому проверки доступности читают его вместе с Activity.
+     * Все исходники экрана «Музыка» одной строкой: хост (lifecycle, поля, диспетчер
+     * вкладок) плюс каждая `Music*.kt` — секции-расширения и вынесенные политики.
+     *
+     * После декомпозиции строки разъехались по файлам, поэтому контракт проверяет
+     * ПОВЕДЕНИЕ, а не место хранения строки. Glob, а не перечисление: следующий
+     * вынос подхватится сам, тест править не придётся.
      */
-    private val sections by lazy {
-        listOf(
-            "MusicPlaybackGlyphSection.kt",
-            "MusicAudioSettingsSection.kt",
-            "MusicForYouSection.kt",
-            "MusicChartSection.kt",
-            "MusicFlowSection.kt",
-            "MusicFavoritesSection.kt",
-        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    private val musicSources: String by lazy {
+        val parts = mutableListOf(source("src/main/java/ru/mars/mobile/MusicActivity.kt"))
+        sourceDir.listFiles { f -> f.isFile && f.name.startsWith("Music") && f.name.endsWith(".kt") }
+            ?.sortedBy { it.name }
+            ?.forEach { parts += it.readText() }
+        parts.joinToString("\n")
     }
 
     // --- MUS-M2: статусная строка озвучивается без переноса фокуса ---
@@ -155,7 +166,7 @@ class MusicA11yContractTest {
             "Кнопка избранного в строке создаётся с подписью из политики",
             creation.contains("MusicA11yPolicy.heartAction(isFav)"),
         )
-        val refresh = sections
+        val refresh = musicSources
             .substringAfter("fun MusicActivity.refreshHeart(id: String)")
             .substringBefore("fun MusicActivity.onHeartClicked(")
         assertTrue(
