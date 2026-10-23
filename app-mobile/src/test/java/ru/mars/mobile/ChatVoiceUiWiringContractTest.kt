@@ -49,6 +49,36 @@ class ChatVoiceUiWiringContractTest {
     private val turnSection by lazy { source("src/main/java/ru/mars/mobile/ChatTurnSection.kt") }
     private val sessionSection by lazy { source("src/main/java/ru/mars/mobile/ChatSessionSection.kt") }
 
+    /**
+     * Секции-расширения Activity после разбиения файла (W2): вынесенный код остаётся тем же
+     * production-кодом экрана, поэтому проводка голоса читается по Activity + секциям.
+     * Набор требований не сужен — те же строки ищутся шире.
+     */
+    private val chatSections by lazy {
+        listOf(
+            "ChatInitSection.kt",
+            "ChatShellSection.kt",
+            "ChatComposerSection.kt",
+            "ChatCardHostSection.kt",
+            "ChatStatusSection.kt",
+            "ChatTurnSection.kt",
+            "ChatSessionSection.kt",
+            "ChatSessionLifecycleSection.kt",
+            "ChatTranscriptSection.kt",
+            "ChatSearchSection.kt",
+            "ChatDraftSection.kt",
+            "ChatModelSection.kt",
+            "ChatUsageSection.kt",
+            "ChatTodoSection.kt",
+            "ChatMessageActionsSection.kt",
+            "ChatOfflineQueueSection.kt",
+            "ChatVoiceInputSection.kt",
+            "ChatVoiceSpeechSection.kt",
+        ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
+    }
+
+    private val chatUi by lazy { chat + "\n" + chatSections }
+
     /** Тело функции по имени: от `fun name(` до парной закрывающей скобки. */
     private fun body(src: String, name: String): String {
         // `private fun` первым: у `startVoiceInput`/`toggleHandsFree` есть ещё и override-делегат
@@ -85,16 +115,16 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `streaming speech starts on deltas and resets the turn policy`() {
-        val begin = body(chat, "beginStreamSpeech")
+        val begin = body(chatUi, "beginStreamSpeech")
         assertTrue(begin.contains("voiceTurnSpeech.onTurnStarted()"))
-        val delta = body(chat, "onAssistantDelta")
+        val delta = body(chatUi, "onAssistantDelta")
         assertTrue(delta.contains("voiceTurnSpeech.onGeneratedText"))
         assertTrue(delta.contains("streamingSpeech.onDelta"))
     }
 
     @Test
     fun `turn end goes through one finishVoiceTurn decision`() {
-        val finish = body(chat, "finishVoiceTurn")
+        val finish = body(chatUi, "finishVoiceTurn")
         // Финал спрашивается у политики, а не читается напрямую: политика помнит, звучал ли ответ.
         assertTrue(finish.contains("voiceTurnSpeech.onFinal"))
         assertTrue(finish.contains("endStreamSpeech()"))
@@ -115,7 +145,7 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `turn end drains on an empty queue, not on silent playback`() {
-        val end = body(chat, "endStreamSpeech")
+        val end = body(chatUi, "endStreamSpeech")
         // Решение «доиграло» принимается по очереди, а не по факту звука: хвостовая фраза,
         // ушедшая в синтез на конце хода, ещё не играет — `isSpeaking == false` при непустой
         // очереди означает «звук впереди». На этом предикате ранний drained гасил streamSpeech,
@@ -134,7 +164,7 @@ class ChatVoiceUiWiringContractTest {
         val drainAt = end.indexOf("hasPendingSpeech")
         assertTrue("хвост флашится до решения о drained", flushAt in 0 until drainAt)
         // И очередь действительно сообщает о конце хода сама, когда доиграет.
-        assertTrue(chat.contains("onDrained = { runOnUiThread { onStreamSpeechDrained() } }"))
+        assertTrue(chatUi.contains("onDrained = { runOnUiThread { onStreamSpeechDrained() } }"))
     }
 
     @Test
@@ -150,7 +180,7 @@ class ChatVoiceUiWiringContractTest {
     @Test
     fun `thoughts are routed to the silent policy branch`() {
         assertTrue(turnSection.contains("if (event is ChatEvent.Thought) onAssistantThought(event.text)"))
-        val thought = body(chat, "onAssistantThought")
+        val thought = body(chatUi, "onAssistantThought")
         assertTrue(thought.contains("voiceTurnSpeech.onDeliberation"))
         // Размышления не должны попадать в потоковую озвучку ни под каким видом.
         assertFalse(thought.contains("streamingSpeech"))
@@ -159,7 +189,7 @@ class ChatVoiceUiWiringContractTest {
     @Test
     fun `tool start announces one progress line and nothing else`() {
         assertTrue(turnSection.contains("if (event is ChatEvent.ToolCall) announceToolProgress(event.name)"))
-        val progress = body(chat, "announceToolProgress")
+        val progress = body(chatUi, "announceToolProgress")
         assertTrue(progress.contains("voiceTurnSpeech.onToolStarted"))
         assertTrue(progress.contains("streamingSpeech.speakWhole(line)"))
         // Результат инструмента не произносится: ToolResult в проводке озвучки отсутствует.
@@ -170,7 +200,7 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `barge-in stops sound locally and never cancels the agent turn`() {
-        val barge = body(chat, "bargeIn")
+        val barge = body(chatUi, "bargeIn")
         assertTrue(barge.contains("voiceOutput.stopSpeaking()"))
         assertTrue(barge.contains("cancelStreamSpeech()"))
         assertTrue(barge.contains("requestVoiceInterrupt()"))
@@ -181,7 +211,7 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `loop barge-in callback also reaches the network seam`() {
-        val listener = chat.substringAfter("override fun onStopSpeaking()")
+        val listener = chatUi.substringAfter("override fun onStopSpeaking()")
         val stopBody = listener.substringBefore("override fun onSegmentDropped")
         assertTrue(stopBody.contains("cancelStreamSpeech()"))
         assertTrue(stopBody.contains("requestVoiceInterrupt()"))
@@ -190,17 +220,17 @@ class ChatVoiceUiWiringContractTest {
     @Test
     fun `network interrupt is a documented seam, not a second channel`() {
         assertTrue(chat.contains("internal var voiceInterruptHook"))
-        val request = body(chat, "requestVoiceInterrupt")
+        val request = body(chatUi, "requestVoiceInterrupt")
         assertTrue(request.contains("currentSessionId"))
         // Голосовой SSE-канал не встроен в Activity: живой путь — существующий chat SSE.
-        assertFalse("второй канал не должен появляться в UI-слое", chat.contains("VoiceGatewayClient"))
+        assertFalse("второй канал не должен появляться в UI-слое", chatUi.contains("VoiceGatewayClient"))
     }
 
     // --- 4. кнопка и статус ---------------------------------------------------------------------
 
     @Test
     fun `status line and button are driven by one call`() {
-        val status = body(chat, "setStatus")
+        val status = body(chatUi, "setStatus")
         assertTrue(status.contains("voiceStatusLabel()"))
         assertTrue(status.contains("renderVoiceButton()"))
         // Явный статус (обрыв/восстановление) остаётся сильнее голосового.
@@ -209,13 +239,13 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `button rendering is phase-gated and delegates to the renderer`() {
-        val render = body(chat, "renderVoiceButton")
+        val render = body(chatUi, "renderVoiceButton")
         assertTrue(render.contains("VoiceMicButtonRenderer.render"))
         // Перерисовка только на смене фазы: setStatus зовётся на каждый кадр стрима.
         assertTrue(render.contains("renderedVoicePhase"))
         // Размер кнопки не трогаем — layout-параметры принадлежат каркасу композера.
         assertFalse(render.contains("layoutParams"))
-        assertFalse(chat.contains("voiceBtn?.layoutParams"))
+        assertFalse(chatUi.contains("voiceBtn?.layoutParams"))
     }
 
     @Test
@@ -232,10 +262,10 @@ class ChatVoiceUiWiringContractTest {
 
     @Test
     fun `tap and hold are decided by the gesture policy`() {
-        val tap = body(chat, "startVoiceInput")
+        val tap = body(chatUi, "ChatActivity.startVoiceInput")
         assertTrue(tap.contains("voiceGestures.onTap("))
         assertTrue(tap.contains("VoiceMicTapAction.STOP_SPEECH -> bargeIn()"))
-        val hold = body(chat, "toggleHandsFree")
+        val hold = body(chatUi, "ChatActivity.toggleHandsFree")
         assertTrue(hold.contains("voiceGestures.onHold("))
         assertTrue(hold.contains("VoiceMicHoldAction.DISABLE_DIALOG"))
     }

@@ -43,14 +43,24 @@ class ChatClickPathContractTest {
      */
     private val chatSections by lazy {
         listOf(
+            "ChatInitSection.kt",
+            "ChatShellSection.kt",
+            "ChatComposerSection.kt",
+            "ChatCardHostSection.kt",
+            "ChatStatusSection.kt",
             "ChatTurnSection.kt",
-            "ChatOfflineQueueSection.kt",
             "ChatSessionSection.kt",
+            "ChatSessionLifecycleSection.kt",
             "ChatTranscriptSection.kt",
+            "ChatSearchSection.kt",
             "ChatDraftSection.kt",
+            "ChatModelSection.kt",
             "ChatUsageSection.kt",
             "ChatTodoSection.kt",
             "ChatMessageActionsSection.kt",
+            "ChatOfflineQueueSection.kt",
+            "ChatVoiceInputSection.kt",
+            "ChatVoiceSpeechSection.kt",
         ).joinToString("\n") { source("src/main/java/ru/mars/mobile/$it") }
     }
 
@@ -64,6 +74,37 @@ class ChatClickPathContractTest {
      * в каком файле физически собирается view.
      */
     private val chatUi by lazy { chat + "\n" + scaffold + "\n" + chatSections }
+
+    /**
+     * Тело функции по имени в склеенном исходнике (Activity + секции). Имя можно
+     * квалифицировать (`ChatActivity.chooseModel`), когда рядом живёт одноимённый
+     * override-делегат хоста каркаса: его тело ничего не доказывает про проводку.
+     */
+    private fun body(src: String, name: String): String {
+        var start = src.indexOf("private fun $name(")
+        if (start < 0) start = src.indexOf("internal fun $name(")
+        if (start < 0) start = src.indexOf("fun $name(")
+        if (start < 0) {
+            val match = Regex("""fun\s+(?:[\w.]+\.)?${Regex.escape(name)}\s*\(""").find(src)
+            if (match != null) start = match.range.first
+        }
+        assertTrue("функция $name не найдена", start >= 0)
+        val open = src.indexOf('{', start)
+        assertTrue("у $name нет тела", open > start)
+        var depth = 0
+        var i = open
+        while (i < src.length) {
+            when (src[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return src.substring(open, i + 1)
+                }
+            }
+            i++
+        }
+        throw AssertionError("не закрыто тело $name")
+    }
     private val searchController by lazy { source("src/main/java/ru/mars/mobile/TranscriptSearchHighlightController.kt") }
     private val main by lazy { source("src/main/java/ru/mars/mobile/MainActivity.kt") }
     private val manifest by lazy { source("src/main/AndroidManifest.xml") }
@@ -126,9 +167,9 @@ class ChatClickPathContractTest {
 
     @Test
     fun `drawer - menu button opens the sections drawer`() {
-        assertTrue("Кнопка разделов должна быть wired в ChatActivity", chat.contains("openDrawer(GravityCompat.START)"))
-        assertTrue("Левый бар должен строиться через AppSectionsBar", chat.contains("AppSectionsBar("))
-        assertTrue("Список диалогов должен быть отдельным экраном", chat.contains("ChatSessionsActivity"))
+        assertTrue("Кнопка разделов должна быть wired в ChatActivity", chatUi.contains("openDrawer(GravityCompat.START)"))
+        assertTrue("Левый бар должен строиться через AppSectionsBar", chatUi.contains("AppSectionsBar("))
+        assertTrue("Список диалогов должен быть отдельным экраном", chatUi.contains("ChatSessionsActivity"))
     }
 
     @Test
@@ -192,8 +233,8 @@ class ChatClickPathContractTest {
 
     @Test
     fun `back - policy wires chat to sessions and sessions to sections`() {
-        assertTrue("ChatActivity должна использовать NavBackPolicy", chat.contains("NavBackPolicy.resolve"))
-        assertTrue("ChatActivity должна вести в список диалогов", chat.contains("GO_TO_SESSION_LIST"))
+        assertTrue("ChatActivity должна использовать NavBackPolicy", chatUi.contains("NavBackPolicy.resolve"))
+        assertTrue("ChatActivity должна вести в список диалогов", chatUi.contains("GO_TO_SESSION_LIST"))
         assertTrue("Список должен использовать NavBackPolicy", sessions.contains("NavBackPolicy.resolve"))
         assertTrue("Список должен открывать разделы по Back", sessions.contains("Action.OPEN_DRAWER"))
         assertTrue("Повторный Back из открытых разделов должен завершать экран", sessions.contains("Action.SYSTEM_EXIT"))
@@ -211,7 +252,7 @@ class ChatClickPathContractTest {
             chip.contains("setOnClickListener { host.chooseModel() }")
         )
 
-        val choose = chat.substringAfter("private fun chooseModel() {").substringBefore("private fun ")
+        val choose = body(chatUi, "ChatActivity.chooseModel")
         assertTrue(
             "Пикер обязан строиться из живого каталога через modelSelection.pickerEntries",
             choose.contains("modelSelection.pickerEntries(")
@@ -235,15 +276,14 @@ class ChatClickPathContractTest {
             chip.contains("setOnClickListener { host.chooseReasoningEffort() }")
         )
 
-        val update = chat.substringAfter("private fun updateReasoningButton() {").substringBefore("/** Activity display mode")
+        val update = body(chatUi, "ChatActivity.updateReasoningButton")
         assertTrue(
             "Подпись чипа — только reasoningSelection.buttonLabel(); null прячет чип",
             update.contains("reasoningSelection.buttonLabel()") &&
                 update.contains("if (label == null) View.GONE else View.VISIBLE")
         )
 
-        val apply = chat.substringAfter("private fun applyReasoningEffort(effort: String?) {")
-            .substringBefore("/**\n     * Silent status sync")
+        val apply = body(chatUi, "ChatActivity.applyReasoningEffort")
         val successIdx = apply.indexOf("is ReasoningStatusResult.Status ->")
         val selectIdx = apply.indexOf("reasoningSelection.select(effort)")
         val failedIdx = apply.indexOf("is ReasoningStatusResult.Failed ->")
@@ -257,7 +297,7 @@ class ChatClickPathContractTest {
 
     @Test
     fun `startup refresh - reasoning status failure hides chip instead of showing stale ladder`() {
-        val refresh = chat.substringAfter("private fun refreshReasoningStatus() {").substringBefore("private fun updateReasoningButton")
+        val refresh = body(chatUi, "ChatActivity.refreshReasoningStatus")
         assertTrue(
             "Провал статуса обязан сбрасывать состояние (applyStatus(null))",
             refresh.contains("is ReasoningStatusResult.Failed -> reasoningSelection.applyStatus(null)")
@@ -281,7 +321,7 @@ class ChatClickPathContractTest {
         )
         assertTrue(
             "Кольцо рисует только решение ContextBudgetPolicy.pill (никаких своих порогов)",
-            chat.contains("view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))")
+            chatUi.contains("view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))")
         )
         assertTrue(
             "View кольца обязана нести contentDescription из политики (TalkBack)",
@@ -297,24 +337,24 @@ class ChatClickPathContractTest {
     fun `live title - title frame renames header through SessionTitlePolicy`() {
         assertTrue(
             "Side-канал обязан принимать кадр title и отдавать его потребителю экрана",
-            chat.contains("event is ru.mars.network.model.SessionTitleUpdate") &&
-                chat.contains("onSessionTitle(event, boundSessionId)")
+            chatUi.contains("event is ru.mars.network.model.SessionTitleUpdate") &&
+                chatUi.contains("onSessionTitle(event, boundSessionId)")
         )
         assertTrue(
             "Кому достаётся кадр — решает чистая SessionTitlePolicy",
-            chat.contains("SessionTitlePolicy.decide(")
+            chatUi.contains("SessionTitlePolicy.decide(")
         )
         assertTrue(
             "Заголовок обязан доезжать до шапки через единственную точку записи",
-            chat.contains("applySessionTitle(decision.title)")
+            chatUi.contains("applySessionTitle(decision.title)")
         )
         assertTrue(
             "Строка списка переименовывается тем же кадром (общая модель сессий)",
-            chat.contains("uiState.applySessionTitle(decision.sessionId, decision.title)")
+            chatUi.contains("uiState.applySessionTitle(decision.sessionId, decision.title)")
         )
         assertTrue(
             "Смена сессии/новый чат обязаны обновлять шапку, а не оставлять старый title",
-            chat.contains("applySessionTitle(uiState.sessionTitle)")
+            chatUi.contains("applySessionTitle(uiState.sessionTitle)")
         )
         assertTrue(
             "Строка списка переименовывается тем же решением",
@@ -326,15 +366,16 @@ class ChatClickPathContractTest {
     fun `empty chat - starter suggestions render in the chips ribbon`() {
         assertTrue(
             "Пустой диалог обязан показывать стартовые подсказки SmartSuggestionsPolicy",
-            chat.contains("SmartSuggestionsPolicy.suggestionsFor(")
+            chatUi.contains("SmartSuggestionsPolicy.suggestionsFor(")
         )
         assertTrue(
             "Стартеры живут в той же ленте и уходят при появлении сообщений",
-            chat.contains("val emptyChat = uiState.messages.isEmpty()")
+            chatUi.contains("val emptyChat = uiState.messages.isEmpty()")
         )
         assertTrue(
             "Кнопка ленты обязана нести иконку и текст (без эмодзи)",
-            chat.contains("private fun buildRibbonChip(label: String, iconRes: Int, message: String)")
+            Regex("fun (?:ChatActivity\\.)?buildRibbonChip\\(label: String, iconRes: Int, message: String\\)")
+                .containsMatchIn(chatUi)
         )
     }
 
@@ -346,12 +387,12 @@ class ChatClickPathContractTest {
         )
         assertTrue(
             "Фокус композера обязан транслироваться в политику",
-            chat.contains("composerGuard.onComposerFocusChanged(focused)")
+            chatUi.contains("composerGuard.onComposerFocusChanged(focused)")
         )
         assertTrue(
             "Возврат фокуса после обрыва — по решению политики, с отложенным повтором",
-            chat.contains("composerGuard.resolveFocusRestore(FocusRequestOrigin.NETWORK_SETTLED)") &&
-                chat.contains("ComposerFocusDecision.DeferUntilQuiet")
+            chatUi.contains("composerGuard.resolveFocusRestore(FocusRequestOrigin.NETWORK_SETTLED)") &&
+                chatUi.contains("ComposerFocusDecision.DeferUntilQuiet")
         )
     }
 }
