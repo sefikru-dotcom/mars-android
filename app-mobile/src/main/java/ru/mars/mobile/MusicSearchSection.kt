@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.text.Editable
@@ -332,6 +333,8 @@ internal fun MusicActivity.onHistoryEntryClicked(entry: String) {
 }
 
 internal fun MusicActivity.hideKeyboard() {
-    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+    // INPUT_METHOD_SERVICE — статическая константа Context: в extension-функции она
+    // не видна через receiver, поэтому обращаемся к ней по имени класса.
+    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
     imm.hideSoftInputFromWindow(searchInput.windowToken, 0)
 }

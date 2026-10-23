@@ -87,9 +87,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Монотонный id запуска подсказок; устаревшие ответы отбрасывает [SearchRunGuard]. */
     internal var suggestionsRunId = 0
 
-    /** Which pill tab is active: chart, flow, home feed, favorites, queue, server playlists, server history. */
-    internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
-
     internal var currentTab = MusicTab.CHART
     internal val favoriteIds = linkedSetOf<String>()
     internal val heartButtons = HashMap<String, MutableList<ImageButton>>()
@@ -2228,6 +2225,17 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         private const val TICKER_INTERVAL_MS = 500L
     }
 }
+
+/**
+ * Вкладка экрана «Музыка»: чарт, волна, лента «Для тебя», избранное, очередь, серверные
+ * плейлисты, серверная история.
+ *
+ * Верхнеуровневый, а не вложенный в [MusicActivity]: секции-расширения ссылаются на него
+ * из своих файлов, а вложенный классификатор через receiver extension-функции не виден
+ * (видимы только члены). План (шаг 13, §4.3) предполагал вложенный `internal` — это
+ * единственная правка, которую пришлось сделать иначе.
+ */
+internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
 
 /**
  * Pure seek-bar drag policy for [MusicActivity]: while the user's finger owns the thumb,
