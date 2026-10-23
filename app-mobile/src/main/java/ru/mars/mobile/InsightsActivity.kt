@@ -191,10 +191,16 @@ class InsightsActivity : ComponentActivity() {
                 setPadding(h, v, h, v)
                 isClickable = true
                 isFocusable = true
+                // Тап-цель вкладки — не меньше 48dp по высоте: полоса из иконки и
+                // 13sp-подписи сама по себе ~34dp, и по ней промахивается палец.
+                minimumHeight = MarsTheme.dp(this@InsightsActivity, 48)
                 addView(ImageView(context).apply {
                     setImageResource(spec.first)
                     imageTintList = android.content.res.ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
                     tag = "icon"
+                    // Иконка декоративна: смысл несёт подпись, и дубль в TalkBack
+                    // («вкладка, вкладка») только мешает.
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 }, LinearLayout.LayoutParams(
                     MarsTheme.dp(this@InsightsActivity, 16),
                     MarsTheme.dp(this@InsightsActivity, 16),
@@ -327,6 +333,10 @@ class InsightsActivity : ComponentActivity() {
             val selected = chip.tag == tab
             // Selected-состояние вкладки — сервисам доступности (TalkBack: «выбрано»).
             chip.isSelected = selected
+            // Подпись вкладки для TalkBack: имя + состояние выбора. Контейнер с
+            // contentDescription читается одной нодой, без обхода иконки и текста.
+            val tabLabel = chip.findViewWithTag<TextView>("label")?.text?.toString().orEmpty()
+            chip.contentDescription = if (selected) "$tabLabel, выбрано" else tabLabel
             val color = if (selected) MarsTheme.ACCENT_TEXT else MarsTheme.TEXT_MUTED
             chip.background = MarsTheme.pill(
                 this,
@@ -495,6 +505,9 @@ class InsightsActivity : ComponentActivity() {
         val h = MarsTheme.dp(this@InsightsActivity, 16)
         val v = MarsTheme.dp(this@InsightsActivity, 9)
         setPadding(h, v, h, v)
+        // Тап-цель «Повторить»: 48dp по высоте и ширине (13sp + 9dp давали ~33dp).
+        minimumWidth = MarsTheme.dp(this@InsightsActivity, 48)
+        minimumHeight = MarsTheme.dp(this@InsightsActivity, 48)
         isClickable = true
         isFocusable = true
         tag = SectionStateViews.RETRY_TAG
@@ -566,6 +579,10 @@ class InsightsActivity : ComponentActivity() {
         val h = MarsTheme.dp(this@InsightsActivity, 12)
         val v = MarsTheme.dp(this@InsightsActivity, 7)
         setPadding(h, v, h, v)
+        // Тап-цель чипа: 48dp по обеим сторонам (12.5sp + 7dp давали ~30dp).
+        minimumWidth = MarsTheme.dp(this@InsightsActivity, 48)
+        minimumHeight = MarsTheme.dp(this@InsightsActivity, 48)
+        gravity = Gravity.CENTER
         isClickable = true
         isFocusable = true
         setOnClickListener { onClick() }

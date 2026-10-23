@@ -54,6 +54,11 @@ object SectionScaffold {
             setPadding(0, 0, 0, dp(if (compact) 8 else 12))
         }
         val buttonSize = if (compact) 40 else 48
+        // Тап-цель кнопок шапки — не меньше 48dp. В компактной шапке
+        // circleIconButton рисует только иконку (bg = 0, без обводки), поэтому бокс
+        // можно расширить до 48dp без видимого изменения круга; прежний marginEnd
+        // уменьшен на ту же разницу, чтобы заголовок не съехал.
+        val touchSize = 48
         header.addView(
             MarsTheme.circleIconButton(
                 activity,
@@ -64,8 +69,8 @@ object SectionScaffold {
                 sizeDp = buttonSize,
                 strokeColor = if (compact) 0 else MarsTheme.BORDER,
             ).apply { setOnClickListener { activity.finish() } },
-            LinearLayout.LayoutParams(dp(buttonSize), dp(buttonSize)).apply {
-                marginEnd = dp(if (compact) 16 else 8)
+            LinearLayout.LayoutParams(dp(touchSize), dp(touchSize)).apply {
+                marginEnd = dp(8)
             },
         )
         header.addView(TextView(activity).apply {
@@ -108,7 +113,7 @@ object SectionScaffold {
                 sizeDp = buttonSize,
                 strokeColor = if (compact) 0 else MarsTheme.BORDER,
             ).apply { setOnClickListener { onRefresh() } },
-            LinearLayout.LayoutParams(dp(buttonSize), dp(buttonSize)),
+            LinearLayout.LayoutParams(dp(touchSize), dp(touchSize)),
         )
         root.addView(header)
 

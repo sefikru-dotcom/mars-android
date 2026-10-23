@@ -328,6 +328,9 @@ class KanbanActivity : ComponentActivity() {
                 gravity = Gravity.CENTER
                 background = MarsTheme.button(this@KanbanActivity, MarsTheme.ACCENT_BG, radiusDp = 999, strokeColor = MarsTheme.ACCENT_BORDER)
                 setPadding(dp(22), dp(10), dp(22), dp(10))
+                // Тап-цель «Повторить»: 14sp + 10dp давали ~41dp, ниже минимума 48dp.
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { load() }
@@ -419,6 +422,17 @@ class KanbanActivity : ComponentActivity() {
             MarsTheme.pill(this@KanbanActivity, MarsTheme.SURFACE_SUBTLE, MarsTheme.BORDER)
         }
         setPadding(dp(12), dp(6), dp(12), dp(6))
+        gravity = Gravity.CENTER
+        // Тап-цель плашки: 12sp + 6dp давали ~30dp, а по такой полосе палец
+        // промахивается. 48dp — минимум по гайдлайну доступности.
+        minimumWidth = dp(48)
+        minimumHeight = dp(48)
+        // TalkBack: имя плашки + состояние выбора одной нодой (текст ребёнка
+        // иначе читается отдельно от «выбрано»).
+        isSelected = selected
+        contentDescription = if (selected) "$text, выбрано" else text.toString()
+        isClickable = true
+        isFocusable = true
         setOnClickListener { onClick() }
     }
 
@@ -502,6 +516,17 @@ class KanbanActivity : ComponentActivity() {
                 strokeColor = if (card.isBlocked) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER_SUBTLE,
             )
             setPadding(dp(12), dp(10), dp(12), dp(10))
+            // Тап-цель карточки: минимум 48dp по высоте даже у карточки без футера.
+            minimumHeight = dp(48)
+            // Карточка — одна нода для TalkBack: заголовок, статус и возраст
+            // читаются вместе с подсказкой о тапе. Без contentDescription фокус
+            // идёт по каждому TextView отдельно и контекст «это задача» теряется.
+            contentDescription = buildString {
+                append(card.title)
+                append(", ")
+                append(card.status.ifBlank { KanbanPolicy.STATUS_UNKNOWN_LABEL })
+                card.ageLabel?.let { append(", ").append(it) }
+            }
             isClickable = true
             isFocusable = true
             setOnClickListener { showTaskDetail(card) }

@@ -133,12 +133,16 @@ class TodosActivity : ComponentActivity() {
                 text = filter.label
                 textSize = 12f
                 isAllCaps = false
-                setPadding(dp(12), dp(4), dp(12), dp(4))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                // Тап-цель фильтра: раньше ряд жёстко задавал 34dp высоты, и по
+                // чипу нельзя было попасть пальцем. 48dp — минимум доступности.
+                minimumHeight = dp(48)
+                minimumWidth = dp(48)
                 setOnClickListener { selectFilter(filter) }
             }
             applyChipStyle(chip, selected = filter == currentFilter)
             filterChips[filter] = chip
-            filterRow.addView(chip, LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) })
+            filterRow.addView(chip, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(6) })
         }
         filterScroll.addView(filterRow)
         scaffold.content.addView(filterScroll)

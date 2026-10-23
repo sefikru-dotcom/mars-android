@@ -18,7 +18,7 @@ import java.io.IOException
  * - [AdaptiveSseReconnectPolicy] owns the failure streak: its budget resets on the first
  *   healthy stream event ([onStreamHealthy]), and it supplies the jittered delay for the
  *   next reattach ([AdaptiveSseReconnectPolicy.onStreamFailure]);
- * - [ServerHealthPolicy] maps the latest `/api/health` probe onto a [HealthLevel]; while
+ * - [ServerHealthPolicy] maps the latest `GET /health` probe onto a [HealthLevel]; while
  *   the server measures OFFLINE an armed immediate retry is NOT consumed (the radio came
  *   back but the backend is still down — a 0 ms hammer helps nobody), so the one-shot
  *   survives until the server actually recovers.
@@ -284,7 +284,7 @@ class MidTurnRecoveryCoordinator(
     }
 
     /**
-     * Feeds a `/api/health` probe result; returns the computed [HealthLevel] (pure
+     * Feeds a `GET /health` probe result; returns the computed [HealthLevel] (pure
      * [ServerHealthPolicy.evaluateStatus] — error or non-2xx means OFFLINE regardless of
      * latency). An OFFLINE verdict suppresses immediate-retry consumption in [decide].
      */

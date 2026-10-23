@@ -79,12 +79,15 @@ sealed interface PendingClarifyLookup {
  * Data-layer client for the interactive attention contracts of hermes-webui:
  * `POST /api/approval/respond`, `POST /api/clarify/respond` and the matching `pending` GETs.
  *
- * Auth: `Authorization: Bearer <accessToken>` like every other repository. NOTE (verified live
- * 2026-10-08 against marscore.ru): the server's `check_auth` Bearer fast-path currently covers only
- * the `/api/chat`, `/api/session(s)`, `/api/models`, `/api/upload`, `/api/profiles` prefixes, so
- * the `/api/approval` and `/api/clarify` trees answer native credentials with 401 until the server
- * allow-list is extended. This client sends the correct contract regardless; the 401 surfaces as
- * [InteractiveRespondResult.Rejected] — do NOT work around it by weakening server auth.
+ * Auth: the device credential travels in the `Authorization` header (Bearer scheme), like every
+ * other repository. All four routes are in the server device-Bearer allow-list:
+ * `NATIVE_BEARER_EXACT_PATHS` in `api/auth.py` (lines 95-98) lists
+ * `/api/approval/pending`, `/api/approval/respond`, `/api/clarify/pending` and
+ * `/api/clarify/respond`, and `check_auth` admits a verified native credential on an exact path
+ * regardless of method. A device token therefore works directly, with no browser cookie session
+ * and no server-side debt. A 401 here means the token itself is invalid or revoked, not a missing
+ * allow-list entry — it surfaces as [InteractiveRespondResult.Rejected]; do NOT work around it by
+ * weakening server auth.
  *
  * Security: the access token is only ever placed into the Authorization header. It is never logged
  * and never copied into result messages (result text comes from the server `error` field, the HTTP

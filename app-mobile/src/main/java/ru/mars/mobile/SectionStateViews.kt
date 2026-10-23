@@ -37,6 +37,9 @@ object SectionStateViews {
                 setTextColor(MarsTheme.ACCENT_TEXT)
                 background = MarsTheme.button(context, MarsTheme.ACCENT_BG, radiusDp = 999, strokeColor = MarsTheme.ACCENT_BORDER)
                 setPadding(MarsTheme.dp(context, 22), MarsTheme.dp(context, 12), MarsTheme.dp(context, 22), MarsTheme.dp(context, 12))
+                // Тап-цель «Повторить»: 14sp + 12dp давали ~41dp, ниже минимума 48dp.
+                minimumWidth = MarsTheme.dp(context, 48)
+                minimumHeight = MarsTheme.dp(context, 48)
                 isClickable = true
                 isFocusable = true
                 tag = RETRY_TAG

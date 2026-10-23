@@ -279,9 +279,10 @@ internal fun ChatActivity.enqueueGoalContinuation(prompt: String) {
  * Команда `/goal` в композере (O14).
  *
  * `/goal` и `/goal status` обслуживаются локально по последнему кадру карточки.
- * Управляющие подкоманды требуют `POST /api/goal`, которого нет в device-Bearer
- * allowlist: отправлять их обычным сообщением нельзя (сервер поймёт это как
- * текст промпта и цель не изменится), поэтому отвечаем прямо и не тратим ход.
+ * Управляющие подкоманды требуют `POST /api/goal`: маршрут device-токену открыт
+ * (`api/auth.py:106`, NATIVE_BEARER_EXACT_PATHS), но метода в транспортном слое
+ * пока нет, поэтому отправлять их обычным сообщением нельзя (сервер поймёт это
+ * как текст промпта и цель не изменится) — отвечаем прямо и не тратим ход.
  */
 internal fun ChatActivity.handleGoalCommand(text: String) {
     val args = GoalLoopPolicy.commandArgs(text)

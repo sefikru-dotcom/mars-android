@@ -38,8 +38,8 @@ sealed interface AutonomyToggleResult {
  * session), so the client NEVER persists it locally — it re-fetches after every session
  * load/switch, exactly like the web frontend.
  *
- * Auth/security conventions match [InteractiveRequestsRepository]: `Authorization: Bearer ***
- * only in the header, token never in URLs, logs or result messages. Blocking by design;
+ * Auth/security conventions match [InteractiveRequestsRepository]: the device credential goes
+ * into the `Authorization` header only, never into URLs, logs or result messages. Blocking by design;
  * callers run it on a background dispatcher/executor.
  */
 class SessionAutonomyRepository(private val client: OkHttpClient = HttpClients.rest) {

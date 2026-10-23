@@ -48,8 +48,12 @@ sealed interface ServerTtsResult {
 
 /**
  * Контракт `POST /api/tts`, снятый чтением боевого `api/route_tts.py` и проверенный
- * живым запросом (401 на device Bearer — пока серверный блокер, см.
- * `parity-contracts-verified.md`, A5).
+ * живым запросом с device Bearer.
+ *
+ * Авторизация: ручка входит в `NATIVE_BEARER_EXACT_PATHS` (`api/auth.py:121`), а
+ * `api/route_tts.py:272-284` уважает выставленный `check_auth` флаг
+ * `_native_auth_device` и делает cookie-проверку ТОЛЬКО когда device-токена нет.
+ * То есть синтез с телефона разрешён по device-Bearer без браузерной сессии.
  *
  * Форма запроса:
  * - JSON-тело, обязательное поле `text` (после `strip()` непустое, максимум 5000 символов);
@@ -251,10 +255,11 @@ class ServerTtsRetryPolicy(
  * как [ServerTtsResult.Unavailable], чтобы вызывающий слой мог ПРОЗРАЧНО откатиться на
  * системный TTS без обработки ошибок в UI.
  *
- * Известный серверный блокер (не баг клиента): `/api/tts` делает собственную cookie-проверку
- * и не входит в `NATIVE_BEARER_EXACT_PATHS`, поэтому device-Bearer сейчас получает 401. Код
- * синтеза всё равно реализован: когда сервер откроет маршрут, фолбэк перестанет срабатывать
- * без единой правки клиента.
+ * Серверный маршрут открыт для device-Bearer: `/api/tts` перечислен в
+ * `NATIVE_BEARER_EXACT_PATHS` (`api/auth.py:121`), а cookie-проверка внутри
+ * `api/route_tts.py:272-284` выполняется только при отсутствии `_native_auth_device`.
+ * 401 отсюда означает невалидный/отозванный токен, а не закрытый маршрут; фолбэк на
+ * системный TTS остаётся страховкой на транспортные сбои и `429`.
  */
 class ServerTtsRepository(
     private val client: OkHttpClient = HttpClients.rest,
