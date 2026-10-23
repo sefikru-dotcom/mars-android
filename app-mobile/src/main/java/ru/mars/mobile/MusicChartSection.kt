@@ -12,9 +12,9 @@ import kotlinx.coroutines.withContext
  * Вкладка «Обзор» (чарт): GET /api/charts с fallback на GET /api/home через тот же
  * транспорт репозитория ([MusicChartLoader]) и офлайн-снимок при падении сети.
  *
- * Дубль D2 (`fetchHomeText` — второй, сырой HTTP-транспорт для того же эндпоинта)
- * удалён: оба запроса идут через [MusicRepository], поэтому `{success:false}` при
- * HTTP 200 не может притвориться пустым чартом.
+ * Дубль D2 (второй, сырой HTTP-транспорт для того же эндпоинта) удалён: оба запроса
+ * идут через [MusicRepository], поэтому `{success:false}` при HTTP 200 не может
+ * притвориться пустым чартом.
  */
 
 internal fun MusicActivity.loadHome() {
