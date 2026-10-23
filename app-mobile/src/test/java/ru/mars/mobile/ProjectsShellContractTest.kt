@@ -46,9 +46,16 @@ class ProjectsShellContractTest {
 
     @Test
     fun `projects screen is built on the shared shell`() {
+        val buildView = projects.substringAfter("private fun buildView").substringBefore("private fun loadMetrics")
         assertTrue(
-            "Экран обязан создаваться через SectionScaffold с заголовком «Проекты» и refresh-колбэком loadMetrics",
-            projects.contains("SectionScaffold.create(this, \"Проекты\", ::loadMetrics)")
+            "Экран обязан создаваться через SectionScaffold с заголовком «Проекты» и refresh-колбэком",
+            buildView.contains("SectionScaffold.create(") &&
+                buildView.contains("\"Проекты\"") &&
+                buildView.contains("onRefresh = {")
+        )
+        assertTrue(
+            "«Обновить» обязан перезагружать и метрики, и живой список проектов",
+            buildView.contains("loadMetrics()") && buildView.contains("loadProjects()")
         )
         assertTrue("Контент обязан добавляться в scaffold.content", projects.contains("scaffold.content.addView"))
         assertTrue("Корень экрана — scaffold.root", projects.contains("return scaffold.root"))
@@ -183,13 +190,46 @@ class ProjectsShellContractTest {
 
     @Test
     fun `retry entry points are wired to loadMetrics with a re-entry guard`() {
+        val buildView = projects.substringAfter("private fun buildView").substringBefore("private fun loadMetrics")
         assertTrue(
-            "«Обновить» shell — это loadMetrics",
-            projects.contains("SectionScaffold.create(this, \"Проекты\", ::loadMetrics)")
+            "«Обновить» shell обязан запускать загрузку метрик",
+            buildView.contains("onRefresh = {") && buildView.contains("loadMetrics()")
         )
         assertTrue(
             "Параллельные загрузки отсечены guard'ом",
             projects.contains("if (loading || isFinishing) return")
+        )
+        assertTrue(
+            "Параллельные загрузки списка проектов отсечены своим guard'ом",
+            projects.contains("if (projectsLoading || isFinishing) return")
+        )
+    }
+
+    // --- Живой список проектов ------------------------------------------------------------
+
+    @Test
+    fun `bundled project list is only the final fallback of the live section`() {
+        assertTrue(
+            "Источник секции выбирает чистая политика",
+            projects.contains("ProjectsListPolicy.decide(")
+        )
+        assertTrue(
+            "Список приходит из GET /api/projects через общий репозиторий",
+            projects.contains("projectsFeedLoader.load(MarsApi.BASE_URL, credential)")
+        )
+        val fallback = projects.substringAfter("private fun renderFallback").substringBefore("private fun addService")
+        assertFalse(
+            "Вшитый MarsProjects.all нельзя рисовать мимо политики (он — окончательный фолбэк)",
+            fallback.contains("MarsProjects.all.forEach")
+        )
+        assertTrue(
+            "Offline-строка сохранена и считает реально показанные проекты",
+            fallback.contains("ProjectsSummary.offlineLine(")
+        )
+        assertEquals(
+            "Снимок списка проектов живёт в отдельном prefs-файле, а не в кэше метрик",
+            "mars_projects_list_offline",
+            Regex("PROJECTS_LIST_OFFLINE_PREFS = \"([^\"]+)\"").find(projects)?.groupValues?.get(1),
         )
     }
 

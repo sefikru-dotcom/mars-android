@@ -21,8 +21,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import ru.mars.network.api.MarsApi
 import ru.mars.network.cache.ProjectsOfflineCache
 import ru.mars.network.cache.SharedPreferencesKeyValueStore
+import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.repository.ProjectsFeed
+import ru.mars.network.repository.ProjectsFeedLoader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -37,6 +41,14 @@ import java.util.Locale
  * показанный кэш (бейдж + ненавязчивый баннер), без годного снимка — честный
  * фолбэк [MarsProjects] с offline-строкой ([OfflineCacheUiPolicy]).
  *
+ * Список проектов — живой: секция «Проекты» (первая на экране) рисуется из
+ * `GET /api/projects` (device Bearer), при сбое сети — из офлайн-снимка с бейджем
+ * возраста, и только когда нет ни сети, ни пригодного снимка — из вшитого
+ * [MarsProjects.all] (окончательный фолбэк, предупреждающий бейдж). Источник
+ * выбирает чистая [ProjectsListPolicy]; лестницу «сеть -> кэш -> нет данных» —
+ * [ProjectsFeedLoader]. Метрики хостов/сервисов остаются прежними и независимыми:
+ * свой контейнер [list], своя периодичность, свой офлайн-кэш.
+ *
  * P0-4 (волна 4): каждый хост показывается ПОД СВОИМ именем — Aeza из блока
  * «local», прод 45.129.2.36 из «prod.host» (раньше прод-метрики подписывались
  * чужим именем); мёртвая строка про пинг удалена (сервер поле задержки не
@@ -46,6 +58,9 @@ import java.util.Locale
 class ProjectsActivity : ComponentActivity() {
     private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var list: LinearLayout
+
+    /** Контейнер живой секции «Проекты» (GET /api/projects): над метриками, независим от них. */
+    private lateinit var projectsBox: LinearLayout
 
     /**
      * Статус-строка и спиннер общего shell. В shell статус-строка по умолчанию
@@ -75,15 +90,43 @@ class ProjectsActivity : ComponentActivity() {
         )
     }
 
+    /** Device Bearer для `GET /api/projects` — тот же credential-путь, что у остальных экранов. */
+    private val credentialStore by lazy { AndroidKeyStoreCredentialStore(this) }
+
+    /**
+     * Список проектов с сервера: сеть -> пригодный снимок -> «данных нет» (последнее
+     * уже рисует вшитый [MarsProjects.all]). Свой prefs-файл, не общий с метриками:
+     * два разных контракта не должны вытеснять снимки друг друга.
+     */
+    private val projectsFeedLoader by lazy {
+        ProjectsFeedLoader(
+            cache = ProjectsOfflineCache(
+                SharedPreferencesKeyValueStore(
+                    getSharedPreferences(PROJECTS_LIST_OFFLINE_PREFS, Context.MODE_PRIVATE),
+                ),
+            ),
+            maxAgeMs = OfflineCacheUiPolicy.PROJECTS_MAX_AGE_MS,
+        )
+    }
+
+    /** Запрос списка в полёте: периодический тик не наслаивается на предыдущий. */
+    private var projectsLoading = false
+
+    /** Сколько карточек проектов сейчас на экране (для offline-строки метрик). */
+    private var projectsShown = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildView())
         showCachedMetrics()
         loadMetrics()
+        showCachedProjects()
+        loadProjects()
         refreshJob = lifecycleScope.launch {
             while (isActive) {
                 delay(25_000)
                 loadMetrics()
+                loadProjects()
             }
         }
     }
@@ -94,16 +137,31 @@ class ProjectsActivity : ComponentActivity() {
     }
 
     private fun buildView(): View {
-        scaffold = SectionScaffold.create(this, "Проекты", ::loadMetrics)
+        scaffold = SectionScaffold.create(
+            this,
+            "Проекты",
+            onRefresh = {
+                loadMetrics()
+                loadProjects()
+            },
+        )
 
         updated.visibility = View.VISIBLE
         updated.text = "Загрузка метрик…"
         updated.setTextColor(MarsTheme.TEXT_MUTED)
 
+        projectsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // Секция живых проектов стоит над метриками в том же ScrollView: safe-area,
+        // отступы и прокрутка остаются у общего shell.
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(projectsBox, ViewGroup.LayoutParams(-1, -2))
+            addView(list, ViewGroup.LayoutParams(-1, -2))
+        }
         scaffold.content.addView(
             ScrollView(this).apply {
-                addView(list, ViewGroup.LayoutParams(-1, -2))
+                addView(content, ViewGroup.LayoutParams(-1, -2))
                 isFillViewport = true
             },
             LinearLayout.LayoutParams(-1, 0, 1f)
@@ -186,6 +244,85 @@ class ProjectsActivity : ComponentActivity() {
         if (!cacheShown) list.removeAllViews()
     }
 
+    /** Мгновенный показ снимка списка проектов (до ответа сети), если он пригоден. */
+    private fun showCachedProjects() {
+        val feed = projectsFeedLoader.readCache()
+        if (feed is ProjectsFeed.Cached) renderProjects(feed)
+    }
+
+    /**
+     * Загрузка списка проектов. Без device-credential (устройство не спарено) в сеть
+     * не идём — секция сразу честно уходит на вшитый фолбэк.
+     */
+    private fun loadProjects() {
+        if (projectsLoading || isFinishing) return
+        val credential = credentialStore.read()
+        if (credential == null) {
+            renderProjects(ProjectsFeed.Unavailable(NO_CREDENTIAL))
+            return
+        }
+        projectsLoading = true
+        lifecycleScope.launch {
+            val feed = projectsFeedLoader.load(MarsApi.BASE_URL, credential)
+            projectsLoading = false
+            if (isFinishing) return@launch
+            renderProjects(feed)
+        }
+    }
+
+    /**
+     * Рендер секции по решению [ProjectsListPolicy]: карточки и бейдж источника.
+     * Секция живёт в своём контейнере, поэтому рендер метрик ([render]/[renderFallback])
+     * её не затирает.
+     */
+    private fun renderProjects(feed: ProjectsFeed) {
+        val decision = ProjectsListPolicy.decide(feed, MarsProjects.all, System.currentTimeMillis())
+        projectsBox.removeAllViews()
+        projectsShown = decision.cards.size
+        val card = newSectionCard()
+        card.addView(sectionHeader("Проекты", decision.badgeText, toneColor(decision.tone)))
+        if (decision.cards.isEmpty()) {
+            card.addView(sectionBody("Проектов нет", topPadDp = 8))
+        } else {
+            decision.cards.forEach { card.addView(projectRow(it)) }
+        }
+        projectsBox.addView(card, margin())
+    }
+
+    /** Строка проекта: имя + бейдж профиля, ниже серверный путь (если сервер его отдал). */
+    private fun projectRow(project: ProjectStatus): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(10), 0, 0)
+        }
+        val line = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        line.addView(
+            TextView(this).apply {
+                text = project.name
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(MarsTheme.TEXT_STRONG)
+            },
+            LinearLayout.LayoutParams(0, -2, 1f),
+        )
+        line.addView(
+            statusBadge(
+                project.status,
+                if (project.status in ACTIVE_STATUSES) MarsTheme.STATUS_ONLINE else MarsTheme.TEXT_MUTED,
+            ),
+        )
+        row.addView(line)
+        if (project.description.isNotBlank()) row.addView(sectionBody(project.description, topPadDp = 2))
+        return row
+    }
+
+    /** Тон бейджа секции -> цвет темы. */
+    private fun toneColor(tone: ProjectsListTone): Int = when (tone) {
+        ProjectsListTone.OK -> MarsTheme.STATUS_ONLINE
+        ProjectsListTone.NEUTRAL -> MarsTheme.TEXT_MUTED
+        ProjectsListTone.WARNING -> MarsTheme.STATUS_WARNING
+    }
+
     /** Решение политики свежести по фактам: фаза запроса + возраст снимка в кэше. */
     private fun decisionFor(state: OfflineFetchState): OfflineUiDecision =
         OfflineCacheUiPolicy.evaluate(
@@ -241,9 +378,12 @@ class ProjectsActivity : ComponentActivity() {
     )
 
     private fun renderFallback() {
+        // Вшитый [MarsProjects.all] больше не рисуется здесь: список проектов ведёт своя
+        // секция ([renderProjects]), и статика — лишь её окончательный фолбэк. Метрики
+        // недоступны — говорим об этом честно и называем, сколько проектов на экране.
         list.removeAllViews()
-        MarsProjects.all.forEach { addCard(it.name, it.description, it.url, it.status, null) }
-        updated.text = ProjectsSummary.offlineLine(MarsProjects.all.size)
+        val shown = if (projectsShown > 0) projectsShown else MarsProjects.all.size
+        updated.text = ProjectsSummary.offlineLine(shown)
         updated.setTextColor(MarsTheme.STATUS_WARNING)
     }
 
@@ -488,6 +628,12 @@ class ProjectsActivity : ComponentActivity() {
         private const val METRICS_URL = "https://marscore.ru/dashboard/api/metrics"
         /** Приватный prefs-файл офлайн-кэша метрик проектов (входит в logout-cleanup). */
         private const val PROJECTS_OFFLINE_PREFS = "mars_projects_offline"
+        /** Приватный prefs-файл офлайн-кэша СПИСКА проектов (GET /api/projects), отдельный от метрик. */
+        private const val PROJECTS_LIST_OFFLINE_PREFS = "mars_projects_list_offline"
+        /** Причина отказа без сети: device-credential не сохранён (устройство не спарено). */
+        private const val NO_CREDENTIAL = "no_credential"
+        /** Бейджи, означающие активный проект (вшитый список использует «OK»). */
+        private val ACTIVE_STATUSES = setOf(ProjectsListPolicy.ACTIVE_BADGE, "OK")
         private val URL_PATTERN = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
     }
 }
