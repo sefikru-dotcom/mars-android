@@ -32,8 +32,11 @@ import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.export.SessionMarkdownExporter
+import ru.mars.network.model.LiveChannelMode
 import ru.mars.network.model.SessionAttention
 import ru.mars.network.model.SessionItem
+import ru.mars.network.model.SessionListEvent
+import ru.mars.network.repository.LiveEventsRepository
 import ru.mars.network.repository.SessionExportOutcome
 import ru.mars.network.repository.SessionImportOutcome
 import ru.mars.network.repository.SessionMutationOutcome
@@ -141,6 +144,24 @@ class ChatSessionsActivity : ComponentActivity() {
         )
     }
 
+    /**
+     * Живая лента списка диалогов (`GET /api/sessions/events`, SSE).
+     *
+     * Сервер присылает НЕ строки, а инвалидацию (`{type, version, reason, profile, session_id}`),
+     * поэтому обработка события — это тот же `GET /api/sessions`, что и раньше, только
+     * запускается он сервером, а не рукой/onResume: задержка «диалог появился/переименован/
+     * получил бейдж внимания» падает с «до следующего возврата на экран» до сотен миллисекунд.
+     *
+     * Падение потока не теряет событий: [LiveEventsRepository] сам уходит в polling
+     * (синтетический REFRESH раз в 15 с) и возвращается на SSE, когда сеть оживёт, — экран
+     * об этом не думает и продолжает получать тот же тип события.
+     */
+    private val liveEvents = LiveEventsRepository()
+    private var liveFeedJob: Job? = null
+
+    /** Последний режим ленты: по переходу POLLING → STREAMING делаем догоняющий refresh. */
+    private var liveFeedMode: LiveChannelMode? = null
+
     /** Id раскрытых родительских карточек: дочерние сессии живут внутри родителя. */
     private val expandedParents: MutableSet<String> = mutableSetOf()
 
@@ -207,6 +228,17 @@ class ChatSessionsActivity : ComponentActivity() {
         // throttle: возврат с чата сразу после мутации не должен давать второй
         // запрос поверх только что завершённого — он схлопывается/откладывается.
         refreshScheduler.trigger()
+        // Живая лента: подписка живёт ровно столько, сколько экран на переднем плане.
+        // Переподписка в onResume, а не в onCreate, — после фона SSE-соединение всё равно
+        // мертво (радио/NAT), поэтому честнее открыть новое, чем ждать обрыва по таймауту.
+        startLiveFeed()
+    }
+
+    override fun onPause() {
+        // Экран ушёл в фон/на другой уровень: держать SSE-поток и его сокет незачем.
+        // Job отменяется, а отмена в LiveEventsRepository закрывает in-flight OkHttp call.
+        stopLiveFeed()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -216,9 +248,48 @@ class ChatSessionsActivity : ComponentActivity() {
         renderJob?.cancel()
         searchJob?.cancel()
         refreshJob?.cancel()
+        stopLiveFeed()
         // Колбэк сети снимаем: Activity-подписчик не должен держаться ConnectivityManager'ом.
         if (::networkObserver.isInitialized) runCatching { networkObserver.stop() }
         super.onDestroy()
+    }
+
+    /** Открывает SSE-подписку на инвалидации списка; повторный вызов идемпотентен. */
+    private fun startLiveFeed() {
+        if (liveFeedJob?.isActive == true) return
+        val credential = store.read() ?: return
+        liveFeedMode = null
+        liveFeedJob = lifecycleScope.launch {
+            liveEvents.subscribeToSessionsEvents(ChatActivity.BASE_URL, credential).collect { event ->
+                event.payloadOrNull?.let { onSessionListEvent(it) }
+                event.modeOrNull?.let { mode ->
+                    val recovered = liveFeedMode == LiveChannelMode.POLLING && mode == LiveChannelMode.STREAMING
+                    liveFeedMode = mode
+                    // Пока лента опрашивала, часть событий могла пройти между опросами:
+                    // после возврата на SSE один догоняющий refresh закрывает разрыв.
+                    if (recovered) refreshScheduler.trigger()
+                }
+            }
+        }
+    }
+
+    private fun stopLiveFeed() {
+        liveFeedJob?.cancel()
+        liveFeedJob = null
+        liveFeedMode = null
+    }
+
+    /**
+     * Событие живой ленты. Профиль события намеренно не фильтруется: сервер присылает
+     * `profile` только для не-root профилей, а активный профиль этого экрана знает лишь
+     * сервер. Лишний refresh ограничен throttle, пропущенный — это устаревший список.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    private fun onSessionListEvent(event: SessionListEvent) {
+        // Любое действие — ADDED, REMOVED, UPDATED или REFRESH — это один и тот же
+        // `GET /api/sessions`: строк на проводе нет, список читается целиком, а точечные
+        // патчи здесь только рисковали бы разъехаться с сервером.
+        refreshScheduler.trigger()
     }
 
     // --- Навигация (живая модель) ---------------------------------------------------------------

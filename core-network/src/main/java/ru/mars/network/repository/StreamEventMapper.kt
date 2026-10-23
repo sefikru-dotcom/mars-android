@@ -3,13 +3,17 @@ package ru.mars.network.repository
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import ru.mars.network.model.ApprovalPayload
+import ru.mars.network.model.ApprovalStreamUpdate
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ChatStartResponse
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.ClarifyStreamUpdate
 import ru.mars.network.model.ContextStatusUpdate
 import ru.mars.network.model.ErrorOrigin
 import ru.mars.network.model.GoalContinuation
 import ru.mars.network.model.GoalUpdate
+import ru.mars.network.model.SessionListAction
+import ru.mars.network.model.SessionListEvent
 import ru.mars.network.model.SessionTitleUpdate
 import ru.mars.network.model.StreamSideEvent
 import ru.mars.network.model.SubagentStatusUpdate
@@ -475,6 +479,103 @@ object StreamEventMapper {
             riskLevel = stringField(obj, "risk_level"),
             choices = stringList(obj["choices"]),
         )
+    }
+
+    /**
+     * `/api/sessions/events` frame → [SessionListEvent].
+     *
+     * Wire contract (hermes-webui `api/route_session_events.py` + `api/session_events.py`
+     * `_sessions_changed_payload`): the event name is the payload's own `type`
+     * (`sessions_changed`) and the data is `{type, version, reason, profile?, session_id?}`.
+     * There are NO row fields on the wire — the server only says "something changed", so the
+     * caller refetches `GET /api/sessions` exactly like the manual refresh does.
+     *
+     * Returns null for frames that are not session invalidations (another event name, a
+     * non-JSON body, an empty object) so the transport never refreshes on garbage.
+     */
+    fun sessionListEvent(eventName: String?, payload: String): SessionListEvent? {
+        val obj = parseObject(payload) ?: return null
+        val name = eventName?.trim()?.ifEmpty { null }
+        val type = stringOnly(obj, "type") ?: name ?: SessionListEvent.SESSIONS_CHANGED_TYPE
+        // `type` wins when present (the server sets it to the same event name); a frame that
+        // names a different type is not ours.
+        if (type != SessionListEvent.SESSIONS_CHANGED_TYPE) return null
+        if (obj.isEmpty()) return null
+        val reason = stringOnly(obj, "reason").orEmpty()
+        val sessionId = idField(obj, "session_id")
+        return SessionListEvent(
+            action = sessionAction(reason, sessionId),
+            reason = reason,
+            version = (obj["version"] as? Number)?.toLong(),
+            profile = stringOnly(obj, "profile"),
+            sessionId = sessionId,
+            rawType = type,
+        )
+    }
+
+    /**
+     * `/api/approval/stream` frame → [ApprovalStreamUpdate].
+     *
+     * Wire contract (`api/route_approvals.py::_handle_approval_sse_stream`): events `initial`
+     * (atomic snapshot at subscribe time) and `approval` (every later change) both carry
+     * `{pending: {...}|null, pending_count: N}` — the same shape `GET /api/approval/pending`
+     * returns, so the payload parser is shared with the polling path ([approvalPayload]).
+     *
+     * `pending: null` maps to a non-null update with [ApprovalStreamUpdate.isEmpty] — the card
+     * must come down. Only an unparsable body / a non-state frame returns null.
+     */
+    fun approvalStreamUpdate(eventName: String?, payload: String): ApprovalStreamUpdate? {
+        val name = eventName?.trim()?.ifEmpty { null }
+        if (name != null && name !in APPROVAL_STREAM_EVENTS) return null
+        val obj = parseObject(payload) ?: return null
+        if (!obj.containsKey("pending") && !obj.containsKey("pending_count")) return null
+        val parsed = approvalPayload(obj["pending"] as? Map<String, Any?>)
+        val count = (obj["pending_count"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
+        if (parsed == null) return ApprovalStreamUpdate(null, 0)
+        return ApprovalStreamUpdate(
+            payload = if (count > 0) parsed.copy(pendingCount = count) else parsed,
+            pendingCount = if (count > 0) count else 1,
+        )
+    }
+
+    /**
+     * `/api/clarify/stream` frame → [ClarifyStreamUpdate].
+     *
+     * Wire contract (`api/clarify.py::_handle_clarify_sse_stream`): events `initial` and
+     * `clarify` with `{pending: {...}|null, pending_count: N}`. Same null-is-a-state rule as
+     * [approvalStreamUpdate].
+     */
+    fun clarifyStreamUpdate(eventName: String?, payload: String): ClarifyStreamUpdate? {
+        val name = eventName?.trim()?.ifEmpty { null }
+        if (name != null && name !in CLARIFY_STREAM_EVENTS) return null
+        val obj = parseObject(payload) ?: return null
+        if (!obj.containsKey("pending") && !obj.containsKey("pending_count")) return null
+        val parsed = clarifyPayload(obj["pending"] as? Map<String, Any?>)
+        val count = (obj["pending_count"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
+        if (parsed == null) return ClarifyStreamUpdate(null, 0)
+        return ClarifyStreamUpdate(
+            payload = if (count > 0) parsed.copy(pendingCount = count) else parsed,
+            pendingCount = if (count > 0) count else 1,
+        )
+    }
+
+    /** Event names the approval SSE handler emits (`initial` + every change). */
+    private val APPROVAL_STREAM_EVENTS = setOf("initial", "approval")
+
+    /** Event names the clarify SSE handler emits (`initial` + every change). */
+    private val CLARIFY_STREAM_EVENTS = setOf("initial", "clarify")
+
+    /**
+     * Maps the server's free-form `reason` tag onto a sidebar action.
+     *
+     * Unknown reasons REFRESH instead of guessing: a full refetch is always correct, a
+     * single-row patch against the wrong row is a visible bug (a deleted dialog lingering in
+     * the list, or a new one missing until the next manual refresh).
+     */
+    private fun sessionAction(reason: String, sessionId: String?): SessionListAction = when (reason) {
+        "session_new", "session_import", "session_create" -> SessionListAction.ADDED
+        "session_delete", "session_removed" -> SessionListAction.REMOVED
+        else -> if (sessionId != null) SessionListAction.UPDATED else SessionListAction.REFRESH
     }
 
     private fun stringList(value: Any?): List<String> =

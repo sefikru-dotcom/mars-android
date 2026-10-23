@@ -219,3 +219,59 @@ queued entry.
 Client states: idle (options enabled) → sending (all options disabled, indeterminate "Отправка…"
 row) → failed (inline error strip + retry action). No silent automatic re-post: an approval is a
 consent, so the retry is always an explicit user action.
+
+# Live channels: sessions / approval / clarify
+
+Three long-lived GET SSE feeds replace polling. Wire shapes were verified read-only against
+`/opt/hermes-webui`; the client contract is `LiveEventsRepository` (core-network) and the
+parsers live in `StreamEventMapper` (`sessionListEvent`, `approvalStreamUpdate`,
+`clarifyStreamUpdate`).
+
+| Channel | Path | Event names | Data |
+|---|---|---|---|
+| dialog list | `GET /api/sessions/events` | `sessions_changed` | `{type, version, reason, profile?, session_id?}` |
+| approvals | `GET /api/approval/stream?session_id=` | `initial`, `approval` | `{pending: {...}\|null, pending_count: N}` |
+| clarifications | `GET /api/clarify/stream?session_id=` | `initial`, `clarify` | `{pending: {...}\|null, pending_count: N}` |
+
+- **The session feed carries no rows.** It is an invalidation: the client re-runs
+  `GET /api/sessions` (the same request the manual refresh makes) and uses `reason` /
+  `session_id` only to decide what kind of change happened (`session_new` → added,
+  `session_delete` → removed, otherwise updated/refresh). Unknown reasons degrade to a full
+  refresh.
+- **`pending: null` is a state, not an error.** The server pushes it when the queue empties
+  (answer accepted, stale sweep, session reset) and the card must come down. The client ignores
+  only the FIRST empty snapshot after subscribing — it describes the state *before* the
+  subscription and must not kill a card that the turn stream already showed.
+- **Auth:** device Bearer on all three. `/api/sessions/events` is covered by the `/api/sessions`
+  prefix in `api/auth.py`; the two attention streams are GET-only entries in
+  `NATIVE_BEARER_READONLY_EXACT_PATHS` (POST on them never authenticates that way, answering
+  still goes through `NATIVE_BEARER_EXACT_PATHS`).
+- **Resilience:** reconnect with jittered exponential backoff (`AdaptiveSseReconnectPolicy`,
+  500 ms → 30 s, ±20%); liveness is proven by any byte (the server's 5 s `: keepalive`
+  comment), not by the 200 alone. When the retry budget is spent the flow polls
+  (`GET /api/approval/pending`, `GET /api/clarify/pending`, or a synthetic list refresh) and
+  retries SSE every 5 polls; a successful re-open emits `STREAMING` again so the screen can
+  reconcile.
+- **Lifecycle:** the feeds are owned by the screen — `ChatActivity`/`ChatSessionsActivity` open
+  them in `onResume` and cancel in `onPause`/`onStop`. Cancelling the collector cancels the
+  in-flight OkHttp call, so no socket survives in the background.
+
+## Manual device checks (POCO F5, not covered by CI)
+
+1. **Card latency.** With the chat open on a dialog, trigger an approval from another client
+   (web UI on the same session) and measure the time until the card appears — target < 300 ms.
+   Repeat for a clarify prompt.
+2. **Background.** Send the app to the background (home) while the chat is open; the two
+   `/api/*/stream` requests must disappear from `adb shell dumpsys netstats`/server logs within a
+   second, not after the 90 s read timeout. Return to the app: both feeds must reconnect on
+   their own (server log shows new `stream` requests without a manual refresh).
+3. **Airplane mode.** Enable airplane mode while a card is pending → the card must stay (no
+   stuck spinner), the app must fall back to polling (server log: `GET /api/approval/pending`
+   every ~2 s) and no card may disappear. Disable airplane mode → within ~10 s the SSE
+   subscription must come back and a newly injected approval must appear without touching the
+   screen.
+4. **Queue of two.** Inject two approvals for one session; answer the first — the card must
+   switch to the second (`pending_count` 2 → 1) and come down only after the second is answered.
+5. **Dialog list.** Create/rename/delete a dialog from the web UI while the Android dialog list
+   is open: the row must appear/change/disappear without leaving the screen. With the app in the
+   background the list must be correct on return (onResume refresh + reconnect reconcile).

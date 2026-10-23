@@ -507,6 +507,17 @@ class ChatUiState(
     /** Called by the interactive controller once a clarify was answered or dismissed. */
     fun resolveClarify() { pendingClarify = null }
 
+    /**
+     * Карточка пришла живым каналом (`/api/approval/stream`), а не кадром хода: запоминаем
+     * только состояние очереди — трейс в транскрипте здесь был бы артефактом хода, которого
+     * уже нет. Состояние нужно хосту: по нему [ChatSessionLifecycleSection] отказывает
+     * висящему запросу при закрытии диалога.
+     */
+    fun recordPendingApproval(payload: ApprovalPayload) { pendingApproval = payload }
+
+    /** То же для clarify. */
+    fun recordPendingClarify(payload: ClarifyPayload) { pendingClarify = payload }
+
     private fun clearPendingInteractive() { pendingApproval = null; pendingClarify = null }
 
     /** Drops the active-turn banner state (attention / queued message) — the turn has settled or the session was swapped. */

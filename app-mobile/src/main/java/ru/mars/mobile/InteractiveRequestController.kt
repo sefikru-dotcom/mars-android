@@ -1,8 +1,10 @@
 package ru.mars.mobile
 
 import ru.mars.network.model.ApprovalPayload
+import ru.mars.network.model.ApprovalStreamUpdate
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.ClarifyStreamUpdate
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.AutonomyToggleResult
@@ -193,6 +195,14 @@ class InteractiveRequestController(
     private var clarifyResponding = false
 
     /**
+     * Живой канал уже показал непустой approval/clarify. Нужен ровно для одной развилки:
+     * первый пустой снапшот после подписки описывает состояние ДО неё и не должен гасить
+     * карточку, показанную кадром хода; последующие пустые снапшоты — это «очередь опустела».
+     */
+    private var approvalStreamHadPayload = false
+    private var clarifyStreamHadPayload = false
+
+    /**
      * The decision the user already submitted, retained across a failed respond call so the
      * retry action re-sends exactly that choice — "не терять выбор" (the user never has to find
      * and re-tap the button, and the retry can never send a different decision than the one they
@@ -240,6 +250,52 @@ class InteractiveRequestController(
             is ChatEvent.Error -> dismissAll()
             else -> Unit
         }
+    }
+
+    /**
+     * Живой канал approval (`GET /api/approval/stream`): карточка появляется по push сервера,
+     * а не по кадру хода — то есть и тогда, когда в приложении не идёт стрим (ход завершился,
+     * экран открыли заново, агент ждёт команду в фоне). Вызывать на UI-диспетчере.
+     *
+     * Пустое обновление — это НЕ «нет данных»: сервер присылает `pending: null`, когда очередь
+     * опустела (ответ принят, стейл-свип, сброс сессии), и карточка обязана сняться. Единственное
+     * исключение — самый первый пустой снапшот сразу после подписки: он описывает состояние ДО
+     * подписки и не должен гасить карточку, которую только что показал кадр хода (сервер
+     * пришлёт push, если approval действительно есть).
+     */
+    fun onApprovalStreamUpdate(update: ApprovalStreamUpdate) {
+        if (destroyed) return
+        val payload = update.payload
+        if (payload == null || update.isEmpty) {
+            if (!approvalStreamHadPayload) return
+            approvalStreamHadPayload = false
+            // Ответ в полёте: карточку снимет его результат (успех/стейл/ошибка), а не гонка
+            // с уже устаревшим снапшотом.
+            if (approvalResponding) return
+            clearApproval()
+            view.dismissApproval()
+            return
+        }
+        approvalStreamHadPayload = true
+        state?.recordPendingApproval(payload)
+        showApproval(ChatEvent.ApprovalRequired(payload))
+    }
+
+    /** Живой канал clarify; контракт пустого снапшота — как у [onApprovalStreamUpdate]. */
+    fun onClarifyStreamUpdate(update: ClarifyStreamUpdate) {
+        if (destroyed) return
+        val payload = update.payload
+        if (payload == null || update.isEmpty) {
+            if (!clarifyStreamHadPayload) return
+            clarifyStreamHadPayload = false
+            if (clarifyResponding) return
+            clearClarify()
+            view.dismissClarify()
+            return
+        }
+        clarifyStreamHadPayload = true
+        state?.recordPendingClarify(payload)
+        showClarify(ChatEvent.ClarifyRequired(payload))
     }
 
     private fun showApproval(event: ChatEvent.ApprovalRequired) {
@@ -483,6 +539,10 @@ class InteractiveRequestController(
      */
     fun dismissAll() {
         generation++
+        // Новая подписка начнётся с нового снапшота: прежний «видел payload» не должен
+        // разрешать первому пустому обновлению гасить чужую карточку.
+        approvalStreamHadPayload = false
+        clarifyStreamHadPayload = false
         clearApproval()
         clearClarify()
         view.setApprovalResponding(false)

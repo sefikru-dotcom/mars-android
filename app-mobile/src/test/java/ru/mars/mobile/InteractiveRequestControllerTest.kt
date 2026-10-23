@@ -6,8 +6,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ApprovalPayload
+import ru.mars.network.model.ApprovalStreamUpdate
 import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.ClarifyPayload
+import ru.mars.network.model.ClarifyStreamUpdate
 import ru.mars.network.repository.ApprovalChoice
 import ru.mars.network.repository.InteractiveRespondResult
 import ru.mars.network.repository.PendingApprovalLookup
@@ -1003,4 +1005,107 @@ class InteractiveRequestControllerTest {
         executor.runAll()
         assertEquals(2, gateway.clarifyCalls.size)
     }
+    // --- живые каналы /api/approval/stream и /api/clarify/stream ---------------------------------
+
+    @Test
+    fun approvalStreamShowsTheCardWithoutAnyTurnEvent() {
+        // Сервер пушит очередь сам: карточка обязана появиться, даже когда в приложении
+        // не идёт стрим ответа (ход завершён, экран открыли заново).
+        val view = FakeView(); val state = ChatUiState()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
+
+        val payload = ApprovalPayload(approvalId = "appr-7", command = "ls", description = "list")
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(payload, pendingCount = 1))
+
+        assertEquals(listOf(payload), view.shownApprovals)
+        assertEquals(payload, state.pendingApproval)
+    }
+
+    @Test
+    fun approvalStreamRepeatsAreDedupedById() {
+        val view = FakeView()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor(), inlineUi)
+        val payload = ApprovalPayload(approvalId = "appr-7", command = "ls", description = "")
+
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(payload, 1))
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(payload, 1))
+
+        assertEquals(1, view.shownApprovals.size)
+    }
+
+    @Test
+    fun approvalStreamEmptyQueueTakesTheCardDown() {
+        // pending: null — реальное состояние (очередь опустела), карточка не должна висеть.
+        val view = FakeView(); val state = ChatUiState()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
+        controller.onApprovalStreamUpdate(
+            ApprovalStreamUpdate(ApprovalPayload(approvalId = "appr-7", command = "ls", description = ""), 1)
+        )
+
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(null, pendingCount = 0))
+
+        assertEquals(1, view.approvalDismissals)
+        assertNull(state.pendingApproval)
+    }
+
+    @Test
+    fun approvalStreamFirstEmptySnapshotDoesNotKillTheCardFromTheTurnStream() {
+        // Подписка берёт снапшот ДО того, как approval появился: пустой initial не должен
+        // гасить карточку, которую уже показал кадр хода. Следующий push её подтвердит.
+        val view = FakeView(); val state = ChatUiState()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
+        // Проводка Activity: состояние и контроллер получают один и тот же кадр хода.
+        val event = approvalEvent("appr-9")
+        state.onEvent(event)
+        controller.onEvent(event)
+
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(null, pendingCount = 0))
+
+        assertEquals(0, view.approvalDismissals)
+        assertEquals("appr-9", state.pendingApproval?.approvalId)
+    }
+
+    @Test
+    fun approvalStreamEmptySnapshotIsIgnoredWhileTheAnswerIsInFlight() {
+        // Ответ уже улетел: карточку снимет результат respond'а, а не гонка со снапшотом.
+        val view = FakeView(); val gateway = FakeGateway()
+        val executor = QueueExecutor()
+        val controller = InteractiveRequestController(view, gateway, { "sess-1" }, null, executor, inlineUi)
+        controller.onApprovalStreamUpdate(
+            ApprovalStreamUpdate(ApprovalPayload(approvalId = "appr-7", command = "ls", description = ""), 1)
+        )
+        controller.onApprovalChoice(ApprovalChoice.ONCE) // ответ в полёте (executor ещё не выполнен)
+
+        controller.onApprovalStreamUpdate(ApprovalStreamUpdate(null, pendingCount = 0))
+
+        assertEquals(0, view.approvalDismissals)
+        executor.runAll()
+        assertEquals(1, view.approvalDismissals)
+    }
+
+    @Test
+    fun clarifyStreamShowsAndThenClearsThePrompt() {
+        val view = FakeView(); val state = ChatUiState()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, state, QueueExecutor(), inlineUi)
+        val payload = ClarifyPayload(clarifyId = "clr-7", question = "Ветка?", choices = listOf("main"))
+
+        controller.onClarifyStreamUpdate(ClarifyStreamUpdate(payload, pendingCount = 1))
+        assertEquals(listOf(payload), view.shownClarifies)
+
+        controller.onClarifyStreamUpdate(ClarifyStreamUpdate(null, pendingCount = 0))
+        assertEquals(1, view.clarifyDismissals)
+        assertNull(state.pendingClarify)
+    }
+
+    @Test
+    fun clarifyStreamFirstEmptySnapshotKeepsTheTurnStreamCard() {
+        val view = FakeView()
+        val controller = InteractiveRequestController(view, FakeGateway(), { "sess-1" }, null, QueueExecutor(), inlineUi)
+        controller.onEvent(clarifyEvent("clr-1", "main"))
+
+        controller.onClarifyStreamUpdate(ClarifyStreamUpdate(null, pendingCount = 0))
+
+        assertEquals(0, view.clarifyDismissals)
+    }
+
 }
