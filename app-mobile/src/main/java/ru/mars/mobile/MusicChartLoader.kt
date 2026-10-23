@@ -30,32 +30,38 @@ object MusicChartLoader {
      * `MusicRepository.getCharts()`, which already surfaces `success:false` as an
      * exception) wins; only when it fails is the `/api/home` fallback consulted.
      * A failure of both is [Outcome.Failed] — never an empty list.
+     *
+     * [homeFallback] is `suspend` because the only allowed source of `/api/home` is the
+     * repository (`getHome()` over the shared OkHttp transport) — a hand-rolled blocking
+     * HTTP call is exactly the second transport this seam exists to prevent.
      */
-    fun resolve(
+    suspend fun resolve(
         charts: Result<List<MusicTrack>>,
-        homeFallback: () -> Result<List<MusicTrack>>,
-    ): Outcome = charts.fold(
-        onSuccess = { Outcome.Tracks(it) },
-        onFailure = { chartsError ->
-            homeFallback().fold(
-                onSuccess = { Outcome.Tracks(it) },
-                onFailure = { homeError ->
-                    Outcome.Failed(
-                        homeError.message ?: chartsError.message ?: "charts unavailable",
-                    )
-                },
-            )
-        },
-    )
+        homeFallback: suspend () -> Result<List<MusicTrack>>,
+    ): Outcome {
+        // Plain `if` instead of Result.fold: fold's lambdas are non-suspending and the
+        // fallback now goes through the (suspend) repository call.
+        charts.exceptionOrNull()?.let { chartsError ->
+            val home = homeFallback()
+            home.exceptionOrNull()?.let { homeError ->
+                return Outcome.Failed(
+                    homeError.message ?: chartsError.message ?: "charts unavailable",
+                )
+            }
+            return Outcome.Tracks(home.getOrThrow())
+        }
+        return Outcome.Tracks(charts.getOrThrow())
+    }
 
     /**
      * Typed parse of a raw `/api/home` payload. `success:false` throws
      * [ServerRejectedException]; only a genuinely empty `tracks`/`results` array
      * yields an empty list.
      *
-     * Поле `album` разбирается здесь же ([albumRef]): главная и чарты шли через этот
-     * ручной парсер, а не через `MusicRepository`, и без него трек терял свой альбом —
-     * сервер поле отдаёт, а строка на экране показывала только исполнителя.
+     * Поле `album` разбирается здесь же ([albumRef]): исторически главная и чарты шли
+     * через этот ручной парсер, а не через `MusicRepository`, и без него трек терял свой
+     * альбом — сервер поле отдаёт, а строка на экране показывала только исполнителя.
+     * (Сейчас экран берёт `/api/home` через репозиторий; разбор формы — зона D3.)
      */
     fun parseHomePayload(payload: String): List<MusicTrack> {
         val root = JSONObject(payload)

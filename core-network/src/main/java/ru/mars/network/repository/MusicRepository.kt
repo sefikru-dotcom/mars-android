@@ -109,30 +109,12 @@ class MusicRepository(
     private val albumListAdapter = moshi.adapter(AlbumSummaryListEnvelope::class.java)
 
     suspend fun getStatus(): MusicPlayerState = connect(WsAction.Status)
-    suspend fun play() { command("playPause") }
-    suspend fun pause() { command("playPause") }
-    suspend fun next() { command("next") }
-    suspend fun previous() { command("prev") }
+
     suspend fun setVolume(volume: Double) {
         require(volume in 0.0..1.0) { "volume must be between 0 and 1" }
         command("setVolume", "{\"volume\":$volume}")
     }
     suspend fun getQueue(): List<MusicTrack> = getStatus().queue
-
-    /**
-     * Stream URL for the media player: `{base}/api/stream/{trackId}`.
-     *
-     * Built through the OkHttp URL builder like every other call in this class —
-     * a raw `"$baseUrl/..."` concatenation leaks a DOUBLE SLASH onto the wire for a
-     * trailing-slash base (`https://…/music/` → `music//api/stream/…`), which
-     * strict routers answer with 404. `addPathSegment` also percent-encodes the
-     * id, so a malformed id can never bend the path.
-     */
-    fun getStreamUrl(trackId: String): String = baseUrl.toHttpUrl().newBuilder()
-        .addPathSegments("api/stream")
-        .addPathSegment(trackId)
-        .build()
-        .toString()
 
     /** Real `/api/charts` payload is the same `{success,results}` envelope as `/api/search`. */
     suspend fun getCharts(): List<MusicTrack> = fetchTracks("api/charts")
@@ -424,8 +406,10 @@ class MusicRepository(
 
     /**
      * Shared path builder for `/…/{segment}` calls: [addPathSegment] percent-encodes the
-     * id, so a malformed one can never introduce an extra path level (same rule as
-     * [getStreamUrl]). `pathWithSegment("api/playlist", "2e0d0d47")` → `api/playlist/2e0d0d47`.
+     * id, so a malformed one can never introduce an extra path level. It also keeps the
+     * base path intact — a trailing-slash base (`https://…/music/`) never leaks a DOUBLE
+     * SLASH onto the wire, which strict routers answer with 404.
+     * `pathWithSegment("api/playlist", "2e0d0d47")` → `api/playlist/2e0d0d47`.
      */
     private fun pathWithSegment(path: String, segment: String): String =
         baseUrl.toHttpUrl().newBuilder().addPathSegments(path).addPathSegment(segment).build()

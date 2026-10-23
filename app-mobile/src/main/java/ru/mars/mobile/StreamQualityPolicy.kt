@@ -5,8 +5,8 @@ package ru.mars.mobile
  * явный query-параметр `quality` в `GET /api/stream/{id}`).
  *
  * Контракт «обратного дефолта»: [DEFAULT] НЕ добавляет параметр в URL — запрос
- * байт-в-байт совпадает с историческим `{base}/api/stream/{id}`
- * ([ru.mars.network.repository.MusicRepository.getStreamUrl]), и сервер отдаёт поток
+ * байт-в-байт совпадает с историческим `{base}/api/stream/{id}` (единственный
+ * владелец адреса потока — [StreamUrlPolicy]), и сервер отдаёт поток
  * своего стандартного качества. Приложение никогда не ухудшает качество принудительно:
  * профиль выбирает только пользователь, а неизвестное/пустое значение деградирует
  * в [DEFAULT] ([fromQueryValue]), а не в «экономию».
@@ -54,9 +54,11 @@ enum class StreamQuality(val queryValue: String?) {
  * Чистый конструктор URL аудиопотока: `{base}/api/stream/{id}` + опциональный
  * `?quality=…` для явного профиля [StreamQuality].
  *
- * Паритет с [ru.mars.network.repository.MusicRepository.getStreamUrl] (тот же путь,
- * то же percent-кодирование id, нормализация завершающего слэша base) — контракт
- * закрепляет StreamUrlPolicyTest, включая сравнение с живым маппером репозитория.
+ * Единственный владелец адреса потока в мобильном клиенте: URL строит только этот
+ * объект (через [MarsMusicPlayer.streamUrlFor]); в репозитории второго построителя
+ * больше нет, поэтому расхождению «мобильный/сервер» взяться неоткуда.
+ * Контракт закрепляет StreamUrlPolicyTest (путь, percent-кодирование id,
+ * нормализация завершающего слэша).
  * Android-free: только строки, без Uri/HttpUrl, чтобы policy была тестируемой на JVM.
  */
 object StreamUrlPolicy {
@@ -70,8 +72,7 @@ object StreamUrlPolicy {
      * Полный URL потока для [trackId] на [baseUrl] с профилем [quality]:
      * - [StreamQuality.DEFAULT] → параметр отсутствует (исторический URL);
      * - явный профиль → `?quality=original|standard|economy`;
-     * - завершающий слэш base отбрасывается (защита от `music//api/stream`,
-     *   как в MusicRepository.getStreamUrl);
+     * - завершающий слэш base отбрасывается (защита от `music//api/stream`);
      * - id percent-кодируется как path-сегмент (пробел → `%20`, `/` → `%2F`),
      *   поэтому «кривой» id не может согнуть путь или протащить свой query.
      */

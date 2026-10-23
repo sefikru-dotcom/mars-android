@@ -51,8 +51,9 @@ import ru.mars.network.model.MusicTrack
  *   SecurityException once rendering starts).
  * - [positionMs] is crash-safe: any engine anomaly yields 0, never an exception.
  *
- * Stream URL contract: `GET {MUSIC_BASE_URL}/api/stream/{id}` — MusicRepository.getStreamUrl
- * parity. A dead/unreachable stream is recorded in [lastError] and never crashes the app.
+ * Stream URL contract: `GET {MUSIC_BASE_URL}/api/stream/{id}` — the same wire address the
+ * mobile client builds via StreamUrlPolicy. A dead/unreachable stream is recorded in
+ * [lastError] and never crashes the app.
  *
  * THREADING: the engine is built on the calling thread's looper (main in production —
  * every call site is a UI handler or the controller's UI-thread dispatch) and its
@@ -553,7 +554,7 @@ object TvMusicPlayer : TvMusicTransport {
         isPlaying = false
     }
 
-    /** Stream URL (MusicRepository.getStreamUrl parity): `{base}/api/stream/{id}`. */
+    /** Stream URL: `{base}/api/stream/{id}` — same wire address as the mobile client. */
     fun streamUrlFor(trackId: String): String =
         "${RepositoryTvMusicGateway.MUSIC_BASE_URL}/api/stream/$trackId"
 }

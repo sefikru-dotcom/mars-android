@@ -92,7 +92,7 @@ class RepositoryTvMusicGatewayTest {
     fun productionFactoryUsesMusicBasePath() {
         // The wiring constant must match mobile parity: BASE_URL + /music (MusicRepository default).
         assertEquals("https://marscore.ru/music", RepositoryTvMusicGateway.MUSIC_BASE_URL)
-        // Transport stream URL parity with MusicRepository.getStreamUrl: {base}/api/stream/{id}.
+        // Transport stream URL parity with the mobile client: {base}/api/stream/{id}.
         assertEquals("https://marscore.ru/music/api/stream/t1", TvMusicPlayer.streamUrlFor("t1"))
     }
 

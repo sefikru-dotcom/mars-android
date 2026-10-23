@@ -48,7 +48,7 @@ class MarsMusicPlayerNoMediaPlayerTest {
 
     @Test
     fun `stream url contract survives the engine rewrite`() {
-        // MusicRepository.getStreamUrl parity: {BASE_URL}/api/stream/{id} with the default
+        // StreamUrlPolicy parity: {BASE_URL}/api/stream/{id} with the default
         // quality profile — the same address the TV client plays; the engine swap and the
         // quality parameter must not touch the query-free default.
         MarsMusicPlayer.setStreamQuality(StreamQuality.DEFAULT)

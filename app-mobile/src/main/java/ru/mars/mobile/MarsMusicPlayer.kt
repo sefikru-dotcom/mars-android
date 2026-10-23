@@ -37,10 +37,11 @@ import ru.mars.network.model.MusicTrack
  * same callbacks as before. [currentPosition] is now LIVE: it reads the engine while one is
  * bound, so the 500 ms UI ticker advances between callbacks instead of showing a stale snapshot.
  *
- * Stream URL: `{BASE_URL}/api/stream/{id}` (MusicRepository.getStreamUrl parity) plus the manual
- * quality profile of [StreamUrlPolicy] — [streamQuality] (`original`/`standard`/`economy`),
- * DEFAULT omits the query parameter entirely (backward-compatible server default). Switching
- * quality mid-track rebinds the stream from the current position without touching the queue.
+ * Stream URL: `{BASE_URL}/api/stream/{id}` built ONLY by the pure [StreamUrlPolicy] (the
+ * single owner of the wire address) plus the manual quality profile — [streamQuality]
+ * (`original`/`standard`/`economy`), DEFAULT omits the query parameter entirely
+ * (backward-compatible server default). Switching quality mid-track rebinds the stream
+ * from the current position without touching the queue.
  */
 @OptIn(UnstableApi::class)
 object MarsMusicPlayer {
@@ -138,8 +139,8 @@ object MarsMusicPlayer {
 
     /**
      * Stream URL for [trackId] under the current [streamQuality]
-     * (`{BASE_URL}/api/stream/{id}[?quality=…]` — MusicRepository.getStreamUrl parity,
-     * built by the pure [StreamUrlPolicy]).
+     * (`{BASE_URL}/api/stream/{id}[?quality=…]`), built by the pure [StreamUrlPolicy] —
+     * the single owner of the stream address.
      */
     fun streamUrlFor(trackId: String): String =
         StreamUrlPolicy.streamUrl(BASE_URL, trackId, streamQuality)

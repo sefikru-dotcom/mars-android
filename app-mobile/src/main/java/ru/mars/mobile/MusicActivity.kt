@@ -53,8 +53,6 @@ import ru.mars.network.repository.MusicAlbumSummary
 import ru.mars.network.repository.MusicArtist
 import ru.mars.network.repository.MusicRepository
 import java.io.Closeable
-import java.net.HttpURLConnection
-import java.net.URL
 
 class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private lateinit var repository: MusicRepository
@@ -830,9 +828,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             // Charts go through the repository: {success:false,error} at HTTP 200 is an
             // exception there, so a server rejection can never masquerade as an empty
             // «Треки не найдены» list — both endpoints failing shows the error/retry UI.
+            // The /api/home fallback rides the SAME repository transport (OkHttp, shared
+            // interceptors/timeouts, `success:false` → exception) instead of a second
+            // hand-rolled URL connection; shelves are flattened by [MusicHomePolicy].
             val outcome = withContext(Dispatchers.IO) {
                 MusicChartLoader.resolve(runCatching { repository.getCharts() }) {
-                    runCatching { MusicChartLoader.parseHomePayload(fetchHomeText()) }
+                    runCatching { repository.getHome() }.map(MusicHomePolicy::playbackQueue)
                 }
             }
             when (outcome) {
@@ -3151,18 +3152,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             if (MarsMusicPlayer.repeatMode == MusicQueueManager.RepeatMode.OFF) MarsTheme.TEXT_MUTED else MarsTheme.ACCENT
         )
         repeatBtn.contentDescription = MusicA11yPolicy.repeatAction(MarsMusicPlayer.repeatMode)
-    }
-
-    /** Raw body of the `/api/home` fallback; typed parsing lives in [MusicChartLoader]. */
-    private fun fetchHomeText(): String {
-        val c = URL("$BASE_URL/api/home").openConnection() as HttpURLConnection
-        try {
-            c.connectTimeout = 8000
-            c.readTimeout = 10000
-            return c.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            c.disconnect() // also on timeouts/parse failures, not just the happy path
-        }
     }
 
     private fun fmt(ms: Int) = String.format("%02d:%02d", ms / 60000, (ms / 1000) % 60)

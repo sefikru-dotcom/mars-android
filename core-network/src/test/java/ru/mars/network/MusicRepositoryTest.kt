@@ -40,11 +40,10 @@ class MusicRepositoryTest {
     }
 
     @Test
-    fun streamUrlAndChartsUseMusicBasePath() = runBlocking {
+    fun chartsUseMusicBasePath() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{\"success\":true,\"results\":[{\"type\":\"song\",\"id\":\"v1\",\"title\":\"Song\",\"artist\":\"Artist\"}]}"))
             val repo = MusicRepository(server.url("/music").toString().removeSuffix("/"))
-            assertEquals("${server.url("/music").toString().removeSuffix("/")}/api/stream/v1", repo.getStreamUrl("v1"))
             assertEquals("v1", repo.getCharts().single().id)
             assertEquals("/music/api/charts", server.takeRequest().path)
         }
@@ -289,7 +288,7 @@ class MusicRepositoryTest {
      * Regression (locked invariant "URLs never get a double slash"): a trailing-slash
      * base URL must not leak `//` onto the wire. The GET/WS calls build their URLs with
      * `addPathSegments` (which replaces the trailing empty segment), while the
-     * `toggleFavorite` POST (`postJson`) and `getStreamUrl` used to concatenate
+     * `toggleFavorite` POST (`postJson`) used to concatenate
      * `"$baseUrl/$path"` — with `https://…/music/` that sent
      * `/music//api/favorite/toggle`, which strict routers answer with 404.
      */
@@ -297,7 +296,6 @@ class MusicRepositoryTest {
     fun trailingSlashBaseUrlNeverProducesDoubleSlashes() = runBlocking {
         MockWebServer().use { server ->
             val withSlash = server.url("/music/").toString() // trailing slash kept on purpose
-            val withoutSlash = withSlash.removeSuffix("/")
             server.enqueue(MockResponse().setBody("{\"status\":\"ok\",\"favorited\":true}"))
             server.enqueue(MockResponse().setBody("{\"success\":true,\"results\":[]}"))
             val repo = MusicRepository(withSlash)
@@ -309,16 +307,7 @@ class MusicRepositoryTest {
 
             repo.getCharts() // GET seam keeps normalizing (guard against regressions)
             assertEquals("/music/api/charts", server.takeRequest().path)
-
-            assertEquals("$withoutSlash/api/stream/v1", repo.getStreamUrl("v1"))
         }
-    }
-
-    /** The stream URL percent-encodes the track id: a malformed id cannot bend the path. */
-    @Test
-    fun streamUrlEncodesTrackId() {
-        val repo = MusicRepository("https://marscore.ru/music")
-        assertEquals("https://marscore.ru/music/api/stream/a%20b", repo.getStreamUrl("a b"))
     }
 
     @Test
@@ -416,13 +405,15 @@ class MusicRepositoryTest {
                     webSocket.close(1000, null)
                 }
             }))
-            MusicRepository(server.url("/").toString().removeSuffix("/")).next()
+            // Repointed off the removed play/pause/next/previous helpers: the live
+            // command seam is setVolume, and it must hit the ACTIVE device, not "all".
+            MusicRepository(server.url("/").toString().removeSuffix("/")).setVolume(0.5)
 
             val controlCmd = awaitMessage(received, "CONTROL_CMD")
             assertNotNull("client never sent CONTROL_CMD", controlCmd)
             assertTrue(controlCmd!!.contains("\"targetDeviceId\":\"tv-1\""))
             assertFalse(controlCmd.contains("\"targetDeviceId\":\"all\""))
-            assertTrue(controlCmd.contains("\"action\":\"next\""))
+            assertTrue(controlCmd.contains("\"action\":\"setVolume\""))
 
             // Graceful shutdown: server must observe a close frame with code 1000,
             // not an abrupt cancel (which surfaces as onFailure/EOF instead).
@@ -448,7 +439,7 @@ class MusicRepositoryTest {
                     webSocket.close(1000, null)
                 }
             }))
-            MusicRepository(server.url("/").toString().removeSuffix("/")).next()
+            MusicRepository(server.url("/").toString().removeSuffix("/")).setVolume(0.5)
             assertTrue(serverSawClose.await(5, TimeUnit.SECONDS))
 
             val texts = mutableListOf<String>()
@@ -481,7 +472,7 @@ class MusicRepositoryTest {
                 override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) { serverDone.countDown() }
             }))
             val error = runCatching {
-                MusicRepository(server.url("/").toString().removeSuffix("/")).play()
+                MusicRepository(server.url("/").toString().removeSuffix("/")).setVolume(0.5)
             }.exceptionOrNull()
 
             assertNotNull("command without an active device must fail, not broadcast", error)

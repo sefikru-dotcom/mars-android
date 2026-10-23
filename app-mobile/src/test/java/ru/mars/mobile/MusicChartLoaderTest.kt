@@ -1,5 +1,6 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,7 +17,7 @@ class MusicChartLoaderTest {
     private val track = MusicTrack("v1", "Song", "Artist", "3:24", "thumb")
 
     @Test
-    fun `charts rejected with success=false at HTTP 200 and failing home is Failed, not empty list`() {
+    fun `charts rejected with success=false at HTTP 200 and failing home is Failed, not empty list`() = runBlocking {
         var homeCalled = false
         val outcome = MusicChartLoader.resolve(
             // MusicRepository.getCharts() surfaces {success:false,error} as an exception.
@@ -30,6 +31,20 @@ class MusicChartLoaderTest {
         assertTrue((outcome as MusicChartLoader.Outcome.Failed).reason.contains("upstream down"))
     }
 
+    /**
+     * Тот же путь, что у реального `MusicRepository.getHome()`: репозиторий бросает на
+     * `{success:false,error}` и на сетевом сбое. Fallback обязан остаться fallback'ом —
+     * исключение ловится в `runCatching` экрана и превращается в [MusicChartLoader.Outcome.Failed],
+     * а не в молчаливый успех с пустым списком.
+     */
+    @Test
+    fun `home fallback that throws - as the repository does - is Failed, not empty tracks`() = runBlocking {
+        val outcome = MusicChartLoader.resolve(Result.failure(IllegalStateException("charts HTTP 500"))) {
+            runCatching<List<MusicTrack>> { throw IllegalStateException("rate limited") }
+        }
+        assertEquals(MusicChartLoader.Outcome.Failed("rate limited"), outcome)
+    }
+
     @Test
     fun `home fallback payload with success=false is a failure, not empty tracks`() {
         val error = runCatching {
@@ -40,7 +55,7 @@ class MusicChartLoaderTest {
     }
 
     @Test
-    fun `charts failure with healthy home fallback yields home tracks`() {
+    fun `charts failure with healthy home fallback yields home tracks`() = runBlocking {
         val outcome = MusicChartLoader.resolve(Result.failure(IllegalStateException("upstream down"))) {
             Result.success(listOf(track))
         }
@@ -48,7 +63,7 @@ class MusicChartLoaderTest {
     }
 
     @Test
-    fun `charts success wins and empty list stays a legitimate empty chart`() {
+    fun `charts success wins and empty list stays a legitimate empty chart`() = runBlocking {
         var homeCalled = false
         val outcome = MusicChartLoader.resolve(Result.success(emptyList())) {
             homeCalled = true

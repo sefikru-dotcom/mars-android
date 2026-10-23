@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Test
-import ru.mars.network.repository.MusicRepository
 
 /**
  * Contract tests for the stream-URL builder and the manual quality model
@@ -16,8 +15,9 @@ import ru.mars.network.repository.MusicRepository
  *    server-side default is never overridden by the client.
  * 2. EXPLICIT PROFILES: original/standard/economy each add exactly `?quality=<value>`
  *    and nothing else (the server-side streaming API contract of the parent task).
- * 3. PARITY: the default URL equals [MusicRepository.getStreamUrl] byte-for-byte —
- *    mobile, TV and the repository must never drift apart on the wire address.
+ * 3. SINGLE OWNER: this policy is the only stream-URL builder in the client —
+ *    [MarsMusicPlayer.streamUrlFor] delegates here and `MusicRepository` no longer has a
+ *    second mapper, so mobile/TV/server cannot drift apart on the wire address.
  * 4. ROBUSTNESS: trailing-slash base normalization (no double slash) and path-segment
  *    percent-encoding (an id can never bend the path or inject a query).
  * 5. FALLBACK: any unknown/blank/garbage quality string falls back to DEFAULT — a bad
@@ -66,44 +66,36 @@ class StreamUrlPolicyTest {
         assertEquals("quality", StreamUrlPolicy.QUALITY_PARAM)
     }
 
-    // --- 3. parity with MusicRepository.getStreamUrl ---------------------------------
+    // --- 3. single owner: the mobile player builds through this policy -----------------
 
     @Test
-    fun `default url matches MusicRepository getStreamUrl byte for byte`() {
-        val repo = MusicRepository(base)
-        for (id in listOf("t42", "abc-123", "x")) {
-            assertEquals(
-                repo.getStreamUrl(id),
-                StreamUrlPolicy.streamUrl(base, id, StreamQuality.DEFAULT)
-            )
-        }
-    }
-
-    @Test
-    fun `explicit quality differs from repository url only by the query`() {
-        val repo = MusicRepository(base)
+    fun `mobile player builds the wire address through this policy`() {
+        // The only mapper left in the client: the player delegates, and DEFAULT quality
+        // must reproduce the historical address byte-for-byte.
+        MarsMusicPlayer.setStreamQuality(StreamQuality.DEFAULT)
         assertEquals(
-            repo.getStreamUrl("t42") + "?quality=economy",
-            StreamUrlPolicy.streamUrl(base, "t42", StreamQuality.ECONOMY)
+            StreamUrlPolicy.streamUrl("https://marscore.ru/music", "t42", StreamQuality.DEFAULT),
+            MarsMusicPlayer.streamUrlFor("t42"),
         )
+        assertEquals("https://marscore.ru/music/api/stream/t42", MarsMusicPlayer.streamUrlFor("t42"))
     }
 
     @Test
-    fun `trailing slash base is normalized - parity with repository`() {
-        val repo = MusicRepository("https://marscore.ru/music/")
-        val expected = repo.getStreamUrl("t1")
-        assertEquals(expected, StreamUrlPolicy.streamUrl("https://marscore.ru/music/", "t1", StreamQuality.DEFAULT))
-        assertEquals("$expected?quality=original", StreamUrlPolicy.streamUrl("https://marscore.ru/music/", "t1", StreamQuality.ORIGINAL))
+    fun `trailing slash base is normalized`() {
+        assertEquals(
+            "https://marscore.ru/music/api/stream/t1",
+            StreamUrlPolicy.streamUrl("https://marscore.ru/music/", "t1", StreamQuality.DEFAULT),
+        )
+        assertEquals(
+            "https://marscore.ru/music/api/stream/t1?quality=original",
+            StreamUrlPolicy.streamUrl("https://marscore.ru/music/", "t1", StreamQuality.ORIGINAL),
+        )
     }
 
     // --- 4. robustness -----------------------------------------------------------------
 
     @Test
-    fun `id percent encoding matches the repository mapper`() {
-        // MusicRepositoryTest pins getStreamUrl("a b") == …/api/stream/a%20b (OkHttp
-        // addPathSegment parity) — the hand-rolled encoder must produce the same bytes.
-        val repo = MusicRepository(base)
-        assertEquals(repo.getStreamUrl("a b"), StreamUrlPolicy.streamUrl(base, "a b", StreamQuality.DEFAULT))
+    fun `id percent encoding keeps the id inside one path segment`() {
         assertEquals("https://marscore.ru/music/api/stream/a%20b", StreamUrlPolicy.streamUrl(base, "a b", StreamQuality.DEFAULT))
     }
 

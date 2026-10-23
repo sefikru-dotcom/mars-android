@@ -39,7 +39,7 @@ class TvMusicPlayerNoMediaPlayerTest {
 
     @Test
     fun `stream url contract survives the engine rewrite`() {
-        // MusicRepository.getStreamUrl parity: {MUSIC_BASE_URL}/api/stream/{id} — the
+        // Mobile client parity: {MUSIC_BASE_URL}/api/stream/{id} — the
         // same address the mobile client plays; the engine swap must not touch it.
         assertEquals("https://marscore.ru/music/api/stream/t42", TvMusicPlayer.streamUrlFor("t42"))
     }
