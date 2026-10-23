@@ -12,7 +12,6 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import ru.mars.mobile.MusicActivity.MusicTab
 import ru.mars.network.model.MusicTrack
 
 /**
