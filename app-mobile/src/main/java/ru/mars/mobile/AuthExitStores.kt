@@ -45,6 +45,13 @@ object AuthExitStores {
     const val PROJECTS_OFFLINE_PREFS = "mars_projects_offline"
 
     /**
+     * Офлайн-кэш списка проектов (`GET /api/projects`, секция «Проекты» на экране
+     * [ProjectsActivity]). Отдельный файл от [PROJECTS_OFFLINE_PREFS]: метрики и список
+     * проектов — разные контракты и не должны вытеснять снимки друг друга.
+     */
+    const val PROJECTS_LIST_OFFLINE_PREFS = "mars_projects_list_offline"
+
+    /**
      * Офлайн-кэш базы знаний/скиллов ([ru.mars.network.cache.KnowledgeOfflineCache]).
      * Имя следует конвенции остальных офлайн-кэшей; стирание несозданного файла —
      * безопасный no-op, зато подключение кэша к экрану не сможет обойти гигиену
@@ -74,6 +81,7 @@ object AuthExitStores {
         OFFLINE_CACHE_PREFS,
         TODOS_OFFLINE_PREFS,
         PROJECTS_OFFLINE_PREFS,
+        PROJECTS_LIST_OFFLINE_PREFS,
         KNOWLEDGE_OFFLINE_PREFS,
         MUSIC_OFFLINE_PREFS,
         PENDING_QUEUE_PREFS,
