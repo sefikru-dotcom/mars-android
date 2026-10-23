@@ -63,14 +63,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     private val remoteSync = RemoteQueueSyncController()
     /** Live Mars Connect subscription; opened in [onCreate], closed in [onDestroy]. */
     private var remoteSubscription: Closeable? = null
-    private lateinit var results: LinearLayout
+    internal lateinit var results: LinearLayout
     private lateinit var title: TextView
     private lateinit var artistView: TextView
     private lateinit var time: TextView
     private lateinit var seek: SeekBar
     private lateinit var playButton: ImageButton
     private lateinit var artwork: ImageView
-    private var tracks = emptyList<MusicTrack>()
+    internal var tracks = emptyList<MusicTrack>()
     private var job: Job? = null
     /**
      * Офлайн-снимок вкладок музыки ([MusicOfflineCache]): при сбое сети «Обзор» и
@@ -129,9 +129,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     /** Server-side listening history of the «История» tab; also the queue for history playback. */
     private var historyEntries = emptyList<HistoryEntry>()
     /** Opened playlist: its id/title drive the drill-down header and the tracks shown. */
-    private var openPlaylist: Playlist? = null
+    internal var openPlaylist: Playlist? = null
     /** In-flight playlists/history fetch, separate from the chart [job] so tabs never cancel each other. */
-    private var libraryJob: Job? = null
+    internal var libraryJob: Job? = null
     /**
      * Last id handed to /api/history/record. Mars Connect re-broadcasts the same track on
      * every pause/resume/progress frame, so the raw callback would write the history many
@@ -1229,7 +1229,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * кнопку (drill-down плейлиста). Долгий тап предлагает «Добавить в плейлист».
      * Строка регистрируется в [trackRows], чтобы состояние плеера перекрашивало её живьём.
      */
-    private fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
+    internal fun trackRow(t: MusicTrack, index: Int, action: RowAction? = null): View {
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(8), dp(8), dp(8))
@@ -1539,7 +1539,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * get their own placeholder (the error one carries a retry), [content] fills the rows.
      * A failed fetch never leaves the previous cards on screen.
      */
-    private fun renderLibrary(state: LibraryUiState, onRetry: () -> Unit, content: () -> Unit) {
+    internal fun renderLibrary(state: LibraryUiState, onRetry: () -> Unit, content: () -> Unit) {
         tracks = emptyList() // stale chart cards must not stay clickable under a library section
         resetList()
         when (state) {
@@ -1554,7 +1554,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
-    private fun libraryPlaceholder(text: String): TextView = TextView(this).apply {
+    internal fun libraryPlaceholder(text: String): TextView = TextView(this).apply {
         this.text = text
         setTextColor(MarsTheme.TEXT_MUTED)
         gravity = Gravity.CENTER
@@ -1565,7 +1565,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * Section header card: a left caption plus an optional right action pill. Returns
      * null when there is nothing to caption and no action to offer.
      */
-    private fun headerCard(title: String, action: String? = null, onAction: (() -> Unit)? = null): View? {
+    internal fun headerCard(title: String, action: String? = null, onAction: (() -> Unit)? = null): View? {
         if (action == null && title.isBlank()) return null
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -2175,60 +2175,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     message = "Волна недоступна — проверьте сеть",
                     retryDescription = "Повторить загрузку волны",
                     onRetry = { loadFlow() },
-                )
-            }
-        }
-    }
-
-    /**
-     * «Для тебя»: персональная лента GET /api/home — полки «Продолжить слушать»,
-     * «Новинки», «Для тебя», «Похожие на …» (server.py build_personal_shelf).
-     * Пустая полка — нормальное состояние сервера и просто не рендерится
-     * ([MusicHomePolicy]); полностью пустая лента получает понятную заглушку,
-     * сбой сети — ошибку с повтором. Загрузка идёт в [libraryJob], как у остальных
-     * библиотечных вкладок, и не пересекается с чартовым [job].
-     */
-    private fun loadForYou() {
-        libraryJob?.cancel()
-        openPlaylist = null
-        renderLibrary(LibraryUiState.Loading, { loadForYou() }) {}
-        libraryJob = lifecycleScope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { repository.getHome() } }
-            fetched.onSuccess { shelves ->
-                val visible = MusicHomePolicy.visibleShelves(shelves)
-                if (visible.isEmpty()) {
-                    // Все полки пусты — это не ошибка: подсказываем, чем лента наполняется.
-                    tracks = emptyList()
-                    resetList()
-                    results.addView(libraryPlaceholder(getString(R.string.music_for_you_empty)))
-                    return@onSuccess
-                }
-                renderForYouShelves(visible)
-            }.onFailure {
-                renderLibrary(
-                    LibraryUiState.Error(getString(R.string.music_for_you_error)),
-                    { loadForYou() },
-                ) {}
-            }
-        }
-    }
-
-    /**
-     * Рендер полок ленты: заголовок-карточка + вертикальный список строк на каждую полку.
-     * Все треки видимых полок складываются в [tracks] одной очередью в порядке рендера
-     * ([MusicHomePolicy.playbackQueue]), поэтому сквозной индекс строки совпадает с
-     * позицией в очереди и тап запускает воспроизведение ленты с этого трека.
-     */
-    private fun renderForYouShelves(shelves: List<MusicShelf>) {
-        tracks = MusicHomePolicy.playbackQueue(shelves)
-        resetList()
-        var index = 0
-        shelves.forEach { shelf ->
-            headerCard(title = shelf.title)?.let { results.addView(it) }
-            shelf.items.forEach { t ->
-                results.addView(
-                    trackRow(t, index++),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
                 )
             }
         }
@@ -3005,7 +2951,7 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     /** Clears the rendered list plus per-row caches (hearts, highlighted rows). */
-    private fun resetList() {
+    internal fun resetList() {
         results.removeAllViews()
         heartButtons.clear()
         trackRows.clear()
