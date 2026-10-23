@@ -2227,17 +2227,6 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 }
 
 /**
- * Вкладка экрана «Музыка»: чарт, волна, лента «Для тебя», избранное, очередь, серверные
- * плейлисты, серверная история.
- *
- * Верхнеуровневый, а не вложенный в [MusicActivity]: секции-расширения ссылаются на него
- * из своих файлов, а вложенный классификатор через receiver extension-функции не виден
- * (видимы только члены). План (шаг 13, §4.3) предполагал вложенный `internal` — это
- * единственная правка, которую пришлось сделать иначе.
- */
-internal enum class MusicTab { CHART, FLOW, FOR_YOU, FAVORITES, QUEUE, PLAYLISTS, HISTORY }
-
-/**
  * Pure seek-bar drag policy for [MusicActivity]: while the user's finger owns the thumb,
  * the periodic progress ticker and player callbacks must not snap it back (on a touch
  * screen the thumb visibly fights the drag), and the player is seeked exactly once — on
