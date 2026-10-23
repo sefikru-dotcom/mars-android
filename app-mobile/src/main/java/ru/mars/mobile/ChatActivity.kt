@@ -18,6 +18,7 @@ import ru.mars.network.model.ChatEvent
 import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionUsage
 import ru.mars.network.repository.CompressionSummary
+import ru.mars.network.repository.LiveEventsRepository
 import ru.mars.network.repository.SessionRepository
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
@@ -104,7 +105,32 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal var sessionRefreshJob: Job? = null
 
     internal var stream: Job? = null
+
+    /**
+     * Открытый диалог. Смена значения — единственная точка, где меняется адресат живых
+     * каналов внимания (approval/clarify подписаны на конкретный session_id), поэтому
+     * подписка перезапускается прямо здесь, а не в каждом из четырёх мест, где экран
+     * переключает диалог (загрузка из списка, восстановление, deep-link, новый чат).
+     */
     internal var currentSessionId: String? = null
+        set(value) {
+            val previous = field
+            field = value
+            if (previous != value) onActiveSessionChanged()
+        }
+
+    /**
+     * Живые каналы внимания (`/api/approval/stream`, `/api/clarify/stream`) открытого
+     * диалога. Живут только пока экран на переднем плане: onPause их снимает, onResume
+     * открывает заново (после фона сокет всё равно мёртв).
+     */
+    internal val liveEvents = LiveEventsRepository()
+    internal var approvalFeedJob: Job? = null
+    internal var clarifyFeedJob: Job? = null
+    /** Диалог, на который сейчас подписаны каналы внимания (null — подписки нет). */
+    internal var attentionFeedSessionId: String? = null
+    /** Экран на переднем плане: onResume включает, onPause выключает. */
+    internal var attentionFeedWanted = false
     internal var currentSessionReadOnly = false
     /** A13: субагентские диалоги view-only — серверные операции над ходом запрещены. */
     internal var currentSessionIsSubagent = false
@@ -398,9 +424,19 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onResume() {
         super.onResume()
         resumeChat()
+        // Карточки approval/clarify: живые каналы открытого диалога + один опрос
+        // `GET /api/approval/pending` как страховка (запрос мог появиться, пока экран был
+        // в фоне, а push не дошёл — очередь не должна ждать следующего события).
+        attentionFeedWanted = true
+        startAttentionFeed()
+        if (::interactiveController.isInitialized) interactiveController.refreshPending()
     }
 
     override fun onPause() {
+        // Соединения живых каналов закрываются сразу (отмена job'а отменяет in-flight
+        // OkHttp call), а не по таймауту чтения: в фоне поток не нужен.
+        attentionFeedWanted = false
+        stopAttentionFeed()
         pauseChat()
         super.onPause()
     }
