@@ -49,6 +49,7 @@ class ChatClickPathContractTest {
             "ChatCardHostSection.kt",
             "ChatStatusSection.kt",
             "ChatTurnSection.kt",
+            "ChatSlashCommandsSection.kt",
             "ChatSessionSection.kt",
             "ChatSessionLifecycleSection.kt",
             "ChatTranscriptSection.kt",

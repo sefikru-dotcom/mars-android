@@ -130,6 +130,32 @@ class ReasoningRepository(private val client: OkHttpClient = HttpClients.rest) {
     }
 
     /**
+     * POST /api/reasoning with `{"display": "show"|"hide"}` — показ размышлений
+     * (`display.show_reasoning`), тот же ключ, что пишут CLI `/reasoning show|hide`
+     * и WebUI (`api/config.set_reasoning_display`). Сервер отвечает тем же статусом,
+     * что и GET, поэтому вызывающий обновляет чип из ответа, а не из догадки.
+     */
+    fun setDisplay(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        show: Boolean,
+    ): ReasoningStatusResult = execute(
+        request = Request.Builder()
+            .url(baseUrl.toHttpUrl().newBuilder().addPathSegments("api/reasoning").build())
+            .header("Authorization", "Bearer ${credential.accessToken}")
+            .post(
+                RequestBody.create(
+                    jsonMediaType,
+                    moshi.adapter<Map<String, Any?>>(mapType).toJson(
+                        mapOf("display" to if (show) "show" else "hide")
+                    ),
+                )
+            )
+            .build(),
+        onIoError = { ReasoningStatusResult.Failed(networkMessage(it)) },
+    )
+
+    /**
      * Preflights the GET status and returns the RAW `model_overrides` key pinning [model],
      * or null when the model is unpinned or the probe failed (HTTP error, unparseable body,
      * transport failure) — the caller then posts the legacy global body.
