@@ -19,6 +19,14 @@ internal fun formatTokenCount(n: Int): String = when {
 }
 
 /**
+ * Имя общего префса выбора рабочего пространства. Значение обязано совпадать с
+ * тем, что использует композер чата (`ChatInitSection`): экран «Пространства» и
+ * чип чата читают ОДНО хранилище, иначе выбор на одном экране не доходил бы до
+ * исходящих сообщений.
+ */
+const val WORKSPACE_CHOICE_PREFS = "mars-workspace-choice"
+
+/**
  * Persistence port for the chosen workspace; the app implements it with
  * SharedPreferences (same pattern as [ModelChoiceStorage]).
  */

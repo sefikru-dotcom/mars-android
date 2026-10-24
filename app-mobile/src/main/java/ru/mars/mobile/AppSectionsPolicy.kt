@@ -6,9 +6,10 @@ package ru.mars.mobile
  *
  * Контракт волны 2: бар содержит ТОЛЬКО приложенческие разделы — список
  * диалогов разделом не является (это уровень внутри [AppDestination.CHAT],
- * см. [ChatLevel.SessionList]). «Чат» первым, «Настройки» последними; дубли
- * входов сокращены — «Пространства» и «Логи» разделами бара не являются,
- * logout доступен только в «Настройках» ([AppNavPolicy.LOGOUT_HOST]).
+ * см. [ChatLevel.SessionList]). «Чат» первым, «Настройки» последними; «Логи»
+ * разделом не являются (живут внутри «Аналитики»), logout доступен только в
+ * «Настройках» ([AppNavPolicy.LOGOUT_HOST]). «Пространства» — раздел бара: экран
+ * вернулся в mobile как самостоятельный экран рабочего контекста.
  *
  * Резолвинг `iconKey → R.drawable` и сопоставление разделов Intent выполняет
  * UI-слой ([AppSectionsBar], [AppNavIntents]); здесь — только строковые ключи,
@@ -30,6 +31,7 @@ object AppSectionsPolicy {
         AppDestination.MEMORY -> "ic_nav_memory"
         AppDestination.SKILLS -> "ic_nav_skills"
         AppDestination.ANALYTICS -> "ic_nav_insights"
+        AppDestination.SPACES -> "ic_nav_spaces"
         AppDestination.SETTINGS -> "ic_nav_settings"
     }
 
