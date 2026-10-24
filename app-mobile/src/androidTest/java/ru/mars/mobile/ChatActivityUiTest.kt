@@ -6,10 +6,13 @@ import androidx.test.espresso.Espresso.pressBack
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withClassName
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withHint
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Before
@@ -77,7 +80,13 @@ class ChatActivityUiTest {
     fun transcriptSearch_opensViaHeaderButton_andBackClosesItStayingInChat() {
         ActivityScenario.launch(ChatActivity::class.java).use {
             waitUntilDisplayed(withText("МАРС"))
-            onView(withContentDescription("Поиск по диалогу")).perform(click())
+            // Описание «Поиск по диалогу» носят ДВА элемента: кнопка в шапке и поле ввода
+            // в раскрытой панели. Кликаем именно по кнопке (ImageButton), иначе Espresso
+            // валится на AmbiguousViewMatcher. Поле проверяется ниже по подсказке.
+            onView(allOf(
+                withClassName(equalTo(android.widget.ImageButton::class.java.name)),
+                withContentDescription("Поиск по диалогу"),
+            )).perform(click())
             waitUntilDisplayed(withHint("Искать в диалоге…"))
 
             // Back закрывает поиск первым (CLOSE_SEARCH), пользователь остаётся в диалоге.

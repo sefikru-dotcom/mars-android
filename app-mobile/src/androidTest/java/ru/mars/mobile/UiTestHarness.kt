@@ -8,8 +8,8 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.platform.app.InstrumentationRegistry
 import org.hamcrest.Matcher
+import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
-import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SessionItem
@@ -102,6 +102,9 @@ object UiTestHarness {
     fun resetState() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.resetState")
         AndroidKeyStoreCredentialStore(targetContext).clear()
+        // Прод-хранилище офлайн-слоя — SQLite: чистим его целиком, иначе фикстуры
+        // предыдущего теста (кэш диалогов, очередь отправки) протекают в следующий.
+        OfflineStores.clearAll(targetContext)
         listOf(
             "mars-offline-cache",
             "mars-session-drafts",
@@ -153,17 +156,18 @@ object UiTestHarness {
     }
 
     /**
-     * Кладёт в прод-кэш ([SessionOfflineCache] поверх файла `mars-offline-cache`)
-     * снимок списка диалогов и транскрипт родительской сессии. При выключенном
-     * радио список диалогов и открытый диалог показывают ровно эти данные.
+     * Кладёт в прод-кэш ([SessionOfflineCache]) снимок списка диалогов и
+     * транскрипт родительской сессии. При выключенном радио список диалогов и
+     * открытый диалог показывают ровно эти данные.
+     *
+     * Хранилище берётся из [OfflineStores] — того же слоя, что читает приложение
+     * (SQLite с TTL по умолчанию), а не из SharedPreferences: прод переехал на
+     * SQLite, и фикстура, записанная в prefs, экраном не видна — список пуст,
+     * тесты падают на «Диалогов пока нет», хотя wiring исправен.
      */
     fun seedSessionCache() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.seedSessionCache")
-        val cache = SessionOfflineCache(
-            SharedPreferencesKeyValueStore(
-                targetContext.getSharedPreferences("mars-offline-cache", Context.MODE_PRIVATE)
-            )
-        )
+        val cache = OfflineStores.sessionCache(targetContext)
         val saved = cache.saveSessions(
             listOf(
                 SessionItem(
