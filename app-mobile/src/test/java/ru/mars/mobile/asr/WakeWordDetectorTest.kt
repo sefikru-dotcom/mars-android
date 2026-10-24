@@ -361,6 +361,25 @@ class WakeWordDetectorTest {
     }
 
     @Test
+    fun `stop после отказа native возвращает состояние в не слушаю`() {
+        val port = FakePort(initResult = false)
+        val source = FakeSource()
+        val detector = detector(modelStore(installed = true), port, source)
+
+        detector.start(onDetection = { })
+        waitUntil("состояние UNAVAILABLE") { detector.state == WakeWordDetector.State.UNAVAILABLE }
+
+        detector.stop()
+
+        assertEquals(
+            "после stop сессии нет: снаружи «не слушаю», а не причина прошлого отказа",
+            WakeWordDetector.State.IDLE,
+            detector.state,
+        )
+        assertFalse(detector.isListening)
+    }
+
+    @Test
     fun `stop и reset без start безопасны`() {
         val detector = detector(modelStore(installed = true), FakePort(), FakeSource())
         detector.stop()

@@ -220,8 +220,13 @@ class WakeWordDetector(
             }
         }
         synchronized(lock) {
-            if (worker === thread) {
-                worker = null
+            if (worker === thread) worker = null
+            // Поток мог закрыться сам (finish) до нашего join — тогда worker уже null, а
+            // состояние терминальное (например UNAVAILABLE). Снаружи сессии больше нет, поэтому
+            // «не слушаю» (IDLE), а не причина прошлого отказа: иначе stop() оставлял бы
+            // detector.state в недоступном состоянии при выключенном прослушивании.
+            // Живую новую сессию (worker != null и running) чужой stop не гасит.
+            if (worker == null && !running) {
                 listener = null
                 stateListener = null
                 activePolicy = null
