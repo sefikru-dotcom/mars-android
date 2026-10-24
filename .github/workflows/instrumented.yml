@@ -85,6 +85,9 @@ jobs:
 
       # AVD-образ кэшируется: скачивание system image — самая долгая часть
       # холодного прогона, а он не меняется между коммитами.
+      # Снапшот НЕ кэшируется (только образ): сохранённый снапшот возвращает
+      # эмулятор в состояние «экран заблокирован», из-за чего окно приложения
+      # остаётся без фокуса и весь прогон ложно краснеет.
       - name: Cache AVD snapshot
         uses: actions/cache@v4
         with:
@@ -107,7 +110,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             # Блокировка экрана — главная причина ложных «красных» UI-прогонов.
             # Headless-эмулятор стартует с keyguard, а затем экран гаснет по
@@ -125,6 +128,13 @@ jobs:
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
+            # Системные оверлеи отбирают window focus, и Espresso падает на
+            # RootViewWithoutFocusException: экран логина с полем пароля
+            # провоцирует диалог автозаполнения, а уведомления — heads-up окно.
+            adb shell settings put secure autofill_service null || true
+            adb shell settings put global heads_up_notifications_enabled 0 || true
+            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+            adb shell input keyevent KEYCODE_HOME || true
             # Диагностика: если фокус снова отвалится, в логе будет видно, что
             # именно занимало foreground.
             adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true
