@@ -1,20 +1,55 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Фон ТВ-клиента Марса: фотография планеты под двумя слоями затемнения.
+
+     Порядок слоёв критичен: bitmap идёт ПЕРВЫМ (нижним), иначе он перекроет
+     затемнение и вместе с ним весь интерфейс. Порядок держит тест
+     TvBackgroundLayerTest.
+
+     Почему drawable-nodpi: снимок 1920x1080 не должен масштабироваться по
+     плотности экрана. nodpi кладёт его 1:1, а растяжение под фактические
+     размеры вью делает layer-list — поэтому 1080p и 4K получают одно и то же
+     кадрирование без повторной пересэмплировки по density bucket. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Radial obsidian vignette: deeper edges, slightly lifted center -->
+
+    <!-- 0. Фотография. gravity="fill" — единственный способ растянуть кадр под
+         фактические размеры экрана: у <bitmap> в layer-list нет centerCrop
+         (AAPT: "'centerCrop' is incompatible with attribute gravity"), есть
+         только флаги Gravity. Искажения нет: исходник 16:9 и целевой экран
+         16:9 (1080p/4K), nodpi отдаёт снимок 1:1 без density-пересэмплинга. -->
+    <item>
+        <bitmap
+            android:src="@drawable/bg_mars_photo"
+            android:gravity="fill" />
+    </item>
+
+    <!-- 1. Затемняющий слой под интерфейс: слева плотный @color/mars_bg_scrim
+         (там заголовки, кнопки, списки), к правому краю сходит на нет.
+         Сплошная заливка #E007080B по всему кадру не годится: снимок сам по
+         себе тёмный (пик планеты 69/255), и 88% чёрного поверх него гасят
+         планету до 14/255 — фон превращается в пустое чёрное поле. -->
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="@color/mars_background" />
+            <gradient
+                android:type="linear"
+                android:angle="0"
+                android:startColor="@color/mars_bg_scrim"
+                android:centerColor="@color/mars_bg_scrim_soft"
+                android:endColor="#0007080B" />
         </shape>
     </item>
+
+    <!-- 2. Виньетка: центр смещён на планету (0.78/0.45), поэтому диск
+         остаётся самым светлым участком кадра, а края тонут в
+         @color/mars_background и не спорят с текстом. -->
     <item>
         <shape android:shape="rectangle">
             <gradient
                 android:type="radial"
                 android:gradientRadius="70%p"
-                android:centerX="0.5"
-                android:centerY="0.38"
-                android:startColor="#141A26"
-                android:endColor="#07080B" />
+                android:centerX="0.78"
+                android:centerY="0.45"
+                android:startColor="#33141A26"
+                android:endColor="#B307080B" />
         </shape>
     </item>
 </layer-list>
