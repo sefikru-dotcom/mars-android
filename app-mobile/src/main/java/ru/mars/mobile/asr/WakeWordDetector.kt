@@ -206,11 +206,18 @@ class WakeWordDetector(
      * Идемпотентно.
      */
     fun stop() {
-        val thread: Thread
-        synchronized(lock) {
-            thread = worker ?: return
+        // Ранний выход при пустой сессии раньше оставлял state терминальным (UNAVAILABLE):
+        // поток закрылся сам, а индикатор продолжал бы показывать отказ. Поэтому выход идёт
+        // через forget: сессии нет — «не слушаю».
+        val thread = synchronized(lock) {
+            val current = worker
             running = false
-        }
+            if (current == null) {
+                // Поток закрылся сам (native не поднялся, микрофон отвалился) — забываем сессию.
+                clearSessionLocked()
+            }
+            current
+        } ?: return
         thread.interrupt()
         if (thread !== Thread.currentThread()) {
             try {
@@ -222,18 +229,28 @@ class WakeWordDetector(
         synchronized(lock) {
             if (worker === thread) worker = null
             // Поток мог закрыться сам (finish) до нашего join — тогда worker уже null, а
-            // состояние терминальное (например UNAVAILABLE). Снаружи сессии больше нет, поэтому
-            // «не слушаю» (IDLE), а не причина прошлого отказа: иначе stop() оставлял бы
-            // detector.state в недоступном состоянии при выключенном прослушивании.
+            // состояние терминальное. Снаружи сессии больше нет, поэтому «не слушаю» (IDLE),
+            // а не причина прошлого отказа.
             // Живую новую сессию (worker != null и running) чужой stop не гасит.
             if (worker == null && !running) {
-                listener = null
-                stateListener = null
-                activePolicy = null
-                activePort = null
-                state = State.IDLE
+                clearSessionLocked()
             }
         }
+    }
+
+    /**
+     * Забыть сессию: слушателей, политику, порт и состояние.
+     *
+     * Вызывается под [lock] и только когда сессии заведомо нет (`worker == null`, `running` снят).
+     * Восстановление после терминального состояния (UNAVAILABLE) и обычная остановка обязаны
+     * проходить через одно место, иначе «не слушаю» и «недоступно» разъезжаются по разным веткам.
+     */
+    private fun clearSessionLocked() {
+        listener = null
+        stateListener = null
+        activePolicy = null
+        activePort = null
+        state = State.IDLE
     }
 
     /**
