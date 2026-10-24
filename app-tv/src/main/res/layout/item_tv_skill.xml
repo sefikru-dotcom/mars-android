@@ -4,9 +4,9 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
     android:background="@drawable/bg_focus_card"
-    android:padding="24dp"
+    android:padding="@dimen/tv_card_pad"
     android:focusable="true"
-    android:layout_marginTop="14dp"
+    android:layout_marginTop="@dimen/tv_card_gap"
     android:layout_width="match_parent"
     android:layout_height="wrap_content">
 
@@ -19,7 +19,7 @@
         <TextView
             android:id="@+id/skillName"
             android:textColor="@color/mars_text_strong"
-            android:textSize="24sp"
+            android:textAppearance="@style/AppText.Title"
             android:textStyle="bold"
             android:maxLines="1"
             android:ellipsize="end"
@@ -29,29 +29,33 @@
 
         <TextView
             android:id="@+id/skillBadge"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:textColor="@color/mars_status_online"
-            android:textSize="18sp"
+            android:textAppearance="@style/AppText.Body"
             android:textStyle="bold"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="@dimen/tv_gap_s"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/skillCategory"
+        android:maxLines="1"
+        android:ellipsize="end"
         android:textColor="@color/mars_accent_text"
-        android:textSize="16sp"
-        android:layout_marginTop="6dp"
+        android:textAppearance="@style/AppText.Label"
+        android:layout_marginTop="@dimen/tv_gap_s"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
     <TextView
         android:id="@+id/skillDescription"
         android:textColor="@color/mars_muted"
-        android:textSize="18sp"
+        android:textAppearance="@style/AppText.Body"
         android:maxLines="3"
         android:ellipsize="end"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="@dimen/tv_gap_s"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 </LinearLayout>
