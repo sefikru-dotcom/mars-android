@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.text.ClipboardManager
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
@@ -46,6 +47,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.asr.WakeWordDetector
+import ru.mars.mobile.asr.wakeWordSetting
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
@@ -423,6 +426,165 @@ internal fun ChatActivity.stopHandsFree() {
     // Режим выключен: кнопка возвращается в нейтральное состояние тем же кадром, а не
     // остаётся красной до следующего случайного setStatus().
     setStatus()
+    // Диалог закончился — детектор wake word взводится снова (если экран активен и флаг включён):
+    // иначе после первого же разговора «Марс, слушай» переставало бы работать до перезапуска.
+    startWakeWordListening()
+}
+
+/*
+ * --- Wake word «Марс, слушай» ---
+ *
+ * Требование владельца: детектор НЕ пишет новый голосовой цикл, а поднимает существующий
+ * hands-free-путь. Поэтому здесь только жизненный цикл детектора и проброс события в
+ * [startHandsFree]; сама логика (BPE-keywords, дебаунс, native) — в asr/WakeWord*.
+ *
+ * Организационное ограничение волны: микрофон слушается ТОЛЬКО при активном экране. Фоновый
+ * wake word требует foreground-сервиса с `foregroundServiceType="microphone"` и разрешения
+ * FOREGROUND_SERVICE_MICROPHONE (Android 14+); это отдельное решение с уведомлением, которое
+ * видит человек, и в эту волну сознательно не входит.
+ */
+
+/** Индикатор «слушаю»: короткая строка, без крупного элемента и без растягивания вширь. */
+internal const val WAKE_WORD_ARMED_STATUS = "Слушаю «Марс»"
+
+/** Флаг включён, но модель ASR ещё не скачана: честная причина вместо молчания. */
+internal const val WAKE_WORD_NO_MODEL_STATUS = "«Марс» не слушаю: модель ASR не скачана"
+
+/** Микрофон занят или native не поднялся: деградация, а не падение. */
+internal const val WAKE_WORD_UNAVAILABLE_STATUS = "«Марс» не слушаю: микрофон занят"
+
+/**
+ * Взвести детектор (если экран активен, флаг включён и микрофон свободен).
+ *
+ * Вызывается из [ChatActivity.onResume] и из [stopHandsFree]: обе точки — «экран активен, диалог
+ * не слушает». Повторный вызов при уже работающем детекторе ничего не делает.
+ */
+internal fun ChatActivity.startWakeWordListening() {
+    // Фон: микрофон без foreground-сервиса всё равно отнимут, а слушать в фоне — расход батареи.
+    if (!wakeWordScreenActive) return
+    if (!wakeWordSetting().isEnabled()) {
+        disarmWakeWord()
+        return
+    }
+    // Голосовой диалог уже держит микрофон — второй AudioRecord не открываем.
+    if (voiceLoopActive()) {
+        hideWakeWordIndicator()
+        return
+    }
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        != PackageManager.PERMISSION_GRANTED
+    ) {
+        // Разрешения нет — не просим его сами: тумблер не повод показывать системный диалог
+        // поверх чата, разрешение всё равно спросится при первом голосовом действии.
+        hideWakeWordIndicator()
+        return
+    }
+    val detector = wakeWordDetector ?: WakeWordDetector(applicationContext).also {
+        wakeWordDetector = it
+    }
+    detector.start(
+        // Детекция приходит с потока чтения микрофона — на UI её перекладываем здесь.
+        onDetection = { runOnUiThread { onWakeWordDetected() } },
+        onState = { state -> runOnUiThread { renderWakeWordIndicator(state) } },
+    )
+    renderWakeWordIndicator(detector.state)
+}
+
+/**
+ * Погасить детектор на уходе экрана в фон: флаг «экран активен» и микрофон закрываются вместе.
+ *
+ * Идемпотентно; если детектор не создавался, ничего не происходит.
+ */
+internal fun ChatActivity.stopWakeWordListening() {
+    wakeWordScreenActive = false
+    disarmWakeWord()
+}
+
+/**
+ * Закрыть микрофон детектора, не трогая флаг экрана.
+ *
+ * Отдельно от [stopWakeWordListening], потому что детектор гасится ещё и без ухода экрана:
+ * при выключенном флаге, при уже идущем диалоге и сразу после собственной детекции.
+ */
+internal fun ChatActivity.disarmWakeWord() {
+    wakeWordDetector?.stop()
+    hideWakeWordIndicator()
+}
+
+/** Освободить детектор вместе с экраном (onDestroy): нативная модель не должна пережить чат. */
+internal fun ChatActivity.releaseWakeWord() {
+    wakeWordScreenActive = false
+    wakeWordDetector?.stop()
+    wakeWordDetector = null
+    wakeWordIndicator = null
+}
+
+/**
+ * Детекция: микрофон уже свободен, дальше — обычный hands-free-путь.
+ *
+ * Порядок важен: [disarmWakeWord] вызывается ДО [startHandsFree], потому что `AudioRecord` один
+ * на приложение — hands-free не откроет микрофон, пока его держит детектор.
+ */
+internal fun ChatActivity.onWakeWordDetected() {
+    if (isFinishing || isDestroyed) return
+    disarmWakeWord()
+    voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    startHandsFree()
+}
+
+/** Показать состояние детектора в компактной строке; [WakeWordDetector.State.IDLE] её прячет. */
+internal fun ChatActivity.renderWakeWordIndicator(state: WakeWordDetector.State) {
+    if (isFinishing || isDestroyed) return
+    val text = when (state) {
+        WakeWordDetector.State.LISTENING -> WAKE_WORD_ARMED_STATUS
+        WakeWordDetector.State.MODEL_MISSING -> WAKE_WORD_NO_MODEL_STATUS
+        WakeWordDetector.State.UNAVAILABLE -> WAKE_WORD_UNAVAILABLE_STATUS
+        WakeWordDetector.State.IDLE -> null
+    }
+    if (text == null) {
+        hideWakeWordIndicator()
+        return
+    }
+    val indicator = wakeWordIndicatorView() ?: return
+    indicator.text = text
+    indicator.visibility = View.VISIBLE
+}
+
+/** Погасить индикатор, не создавая его: при выключенном флаге лишних View в дереве нет. */
+internal fun ChatActivity.hideWakeWordIndicator() {
+    wakeWordIndicator?.visibility = View.GONE
+}
+
+/**
+ * Компактный индикатор состояния — одна строка 11sp под статусной строкой.
+ *
+ * Почему отдельный TextView, а не общая статусная строка: статусом владеет [setStatus] (голосовой
+ * цикл, сеть, задачи), и «Слушаю „Марс“» там было бы затёрто первым же обновлением. Почему не
+ * баннер: индикатор нужен постоянно, пока тумблер включён, а баннеры в этом экране — про события.
+ *
+ * Ширина — match_parent с ellipsize: длинная причина отказа не растягивает композер вширь и не
+ * ломает вёрстку на узких экранах.
+ */
+internal fun ChatActivity.wakeWordIndicatorView(): TextView? {
+    wakeWordIndicator?.let { return it }
+    val parent = statusView.parent as? ViewGroup ?: return null
+    val indicator = TextView(this).apply {
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setPadding(dp(4), 0, dp(4), dp(4))
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        visibility = View.GONE
+        // Скринридер узнаёт о смене состояния (появилось «слушаю»/«не слушаю»), но не перебивает.
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+    }
+    parent.addView(
+        indicator,
+        parent.indexOfChild(statusView) + 1,
+        LinearLayout.LayoutParams(-1, -2),
+    )
+    wakeWordIndicator = indicator
+    return indicator
 }
 
 /** Реплика из hands-free-цикла → `POST /api/transcribe` → [VoiceDialogLoop.onTranscript]. */

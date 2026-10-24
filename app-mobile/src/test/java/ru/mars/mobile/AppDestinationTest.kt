@@ -8,15 +8,15 @@ import org.junit.Test
 class AppDestinationTest {
 
     @Test
-    fun `exactly ten app-level sections`() {
-        assertEquals(10, AppDestination.entries.size)
+    fun `exactly eleven app-level sections`() {
+        assertEquals(11, AppDestination.entries.size)
     }
 
     @Test
     fun `order is stable and matches product contract`() {
         val expected = listOf(
             "chat", "tasks", "kanban", "scheduler", "projects",
-            "music", "memory", "skills", "analytics", "settings"
+            "music", "memory", "skills", "analytics", "spaces", "settings"
         )
         assertEquals(expected, AppDestination.entries.map { it.key })
     }
@@ -90,6 +90,7 @@ class AppDestinationTest {
             AppDestination.SKILLS to NavTarget.SKILLS,
             AppDestination.KANBAN to NavTarget.KANBAN,
             AppDestination.ANALYTICS to NavTarget.INSIGHTS,
+            AppDestination.SPACES to NavTarget.SPACES,
             AppDestination.SETTINGS to NavTarget.SETTINGS,
         )
         expected.forEach { (destination, target) ->
