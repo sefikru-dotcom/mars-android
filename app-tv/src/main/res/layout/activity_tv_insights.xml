@@ -23,18 +23,18 @@
         <Button
             android:id="@+id/backButton"
             android:text="Назад"
-            android:textSize="20sp"
+            android:textAppearance="@style/AppText.Body"
             android:textColor="@color/mars_text"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_arrow_back"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="10dp"
+            android:drawablePadding="@dimen/tv_gap_s"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingStart="22dp"
-            android:paddingEnd="22dp"
-            android:paddingTop="12dp"
-            android:paddingBottom="12dp"
+            android:paddingStart="@dimen/tv_gap_l"
+            android:paddingEnd="@dimen/tv_gap_l"
+            android:paddingTop="@dimen/tv_gap_m"
+            android:paddingBottom="@dimen/tv_gap_m"
             android:focusable="true"
             android:nextFocusRight="@id/refreshButton"
             android:nextFocusDown="@id/tabInsights"
@@ -42,45 +42,51 @@
             android:layout_height="wrap_content" />
 
         <TextView
+            android:minWidth="@dimen/tv_title_min_w"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="Аналитика"
             android:textColor="@color/mars_text_strong"
-            android:textSize="32sp"
+            android:textAppearance="@style/AppText.Headline"
             android:textStyle="bold"
-            android:layout_marginStart="24dp"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+            android:layout_marginStart="@dimen/tv_gap_l"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
 
         <TextView
             android:id="@+id/statusView"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="Загрузка аналитики…"
             android:textColor="@color/mars_muted"
-            android:textSize="18sp"
+            android:textAppearance="@style/AppText.Body"
             android:gravity="end"
             android:maxWidth="560dp"
             android:accessibilityLiveRegion="polite"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:minWidth="0dp"
             android:layout_height="wrap_content" />
 
         <Button
             android:id="@+id/refreshButton"
             android:text="Обновить"
-            android:textSize="20sp"
+            android:textAppearance="@style/AppText.Body"
             android:textColor="@color/mars_text"
             android:background="@drawable/bg_focus_card"
             android:drawableStart="@drawable/ic_refresh"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="10dp"
+            android:drawablePadding="@dimen/tv_gap_s"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingStart="22dp"
-            android:paddingEnd="22dp"
-            android:paddingTop="12dp"
-            android:paddingBottom="12dp"
+            android:paddingStart="@dimen/tv_gap_l"
+            android:paddingEnd="@dimen/tv_gap_l"
+            android:paddingTop="@dimen/tv_gap_m"
+            android:paddingBottom="@dimen/tv_gap_m"
             android:focusable="true"
             android:nextFocusLeft="@id/backButton"
             android:nextFocusDown="@id/tabLogs"
-            android:layout_marginStart="20dp"
+            android:layout_marginStart="@dimen/tv_gap_l"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
     </LinearLayout>
@@ -97,34 +103,34 @@
         <Button
             android:id="@+id/tabInsights"
             android:text="Аналитика"
-            android:textSize="17sp"
+            android:textAppearance="@style/AppText.Body"
             android:textColor="@color/mars_text"
             android:background="@drawable/bg_focus_chip"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="10dp"
+            android:paddingStart="@dimen/tv_gap_m"
+            android:paddingEnd="@dimen/tv_gap_m"
+            android:paddingTop="@dimen/tv_gap_s"
+            android:paddingBottom="@dimen/tv_gap_s"
             android:focusable="true"
             android:nextFocusUp="@id/backButton"
             android:nextFocusRight="@id/tabLogs"
-            android:layout_marginEnd="12dp"
+            android:layout_marginEnd="@dimen/tv_gap_s"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
 
         <Button
             android:id="@+id/tabLogs"
             android:text="Логи"
-            android:textSize="17sp"
+            android:textAppearance="@style/AppText.Body"
             android:textColor="@color/mars_text"
             android:background="@drawable/bg_focus_chip"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="10dp"
+            android:paddingStart="@dimen/tv_gap_m"
+            android:paddingEnd="@dimen/tv_gap_m"
+            android:paddingTop="@dimen/tv_gap_s"
+            android:paddingBottom="@dimen/tv_gap_s"
             android:focusable="true"
             android:nextFocusUp="@id/refreshButton"
             android:nextFocusLeft="@id/tabInsights"
@@ -173,10 +179,12 @@
                     android:layout_height="56dp" />
 
                 <TextView
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:text="Загрузка аналитики…"
                     android:textColor="@color/mars_muted"
-                    android:textSize="20sp"
-                    android:layout_marginTop="16dp"
+                    android:textAppearance="@style/AppText.Body"
+                    android:layout_marginTop="@dimen/tv_gap_l"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
             </LinearLayout>
@@ -197,31 +205,33 @@
 
                 <TextView
                     android:id="@+id/insightsErrorText"
+                    android:maxLines="3"
+                    android:ellipsize="end"
                     android:textColor="@color/mars_status_error"
-                    android:textSize="24sp"
+                    android:textAppearance="@style/AppText.Title"
                     android:gravity="center"
                     android:maxWidth="720dp"
-                    android:layout_marginTop="14dp"
+                    android:layout_marginTop="@dimen/tv_gap_m"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
 
                 <Button
                     android:id="@+id/insightsRetryButton"
                     android:text="Повторить"
-                    android:textSize="20sp"
+                    android:textAppearance="@style/AppText.Body"
                     android:textColor="@color/mars_text"
                     android:background="@drawable/bg_focus_card"
                     android:drawableStart="@drawable/ic_refresh"
                     android:drawableTint="@color/icon_focus_tint"
-                    android:drawablePadding="10dp"
+                    android:drawablePadding="@dimen/tv_gap_s"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
-                    android:paddingStart="26dp"
-                    android:paddingEnd="26dp"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
+                    android:paddingStart="@dimen/tv_gap_xl"
+                    android:paddingEnd="@dimen/tv_gap_xl"
+                    android:paddingTop="@dimen/tv_gap_m"
+                    android:paddingBottom="@dimen/tv_gap_m"
                     android:focusable="true"
-                    android:layout_marginTop="22dp"
+                    android:layout_marginTop="@dimen/tv_gap_l"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
             </LinearLayout>
@@ -241,7 +251,7 @@
                     android:orientation="vertical"
                     android:clipChildren="false"
                     android:clipToPadding="false"
-                    android:paddingBottom="16dp"
+                    android:paddingBottom="@dimen/tv_gap_l"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content" />
             </ScrollView>
@@ -274,7 +284,7 @@
             android:orientation="horizontal"
             android:clipChildren="false"
             android:clipToPadding="false"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/tv_gap_s"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
 
@@ -299,10 +309,12 @@
                     android:layout_height="56dp" />
 
                 <TextView
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:text="Загрузка логов…"
                     android:textColor="@color/mars_muted"
-                    android:textSize="20sp"
-                    android:layout_marginTop="16dp"
+                    android:textAppearance="@style/AppText.Body"
+                    android:layout_marginTop="@dimen/tv_gap_l"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
             </LinearLayout>
@@ -323,31 +335,33 @@
 
                 <TextView
                     android:id="@+id/logsErrorText"
+                    android:maxLines="3"
+                    android:ellipsize="end"
                     android:textColor="@color/mars_status_error"
-                    android:textSize="24sp"
+                    android:textAppearance="@style/AppText.Title"
                     android:gravity="center"
                     android:maxWidth="720dp"
-                    android:layout_marginTop="14dp"
+                    android:layout_marginTop="@dimen/tv_gap_m"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
 
                 <Button
                     android:id="@+id/logsRetryButton"
                     android:text="Повторить"
-                    android:textSize="20sp"
+                    android:textAppearance="@style/AppText.Body"
                     android:textColor="@color/mars_text"
                     android:background="@drawable/bg_focus_card"
                     android:drawableStart="@drawable/ic_refresh"
                     android:drawableTint="@color/icon_focus_tint"
-                    android:drawablePadding="10dp"
+                    android:drawablePadding="@dimen/tv_gap_s"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
-                    android:paddingStart="26dp"
-                    android:paddingEnd="26dp"
-                    android:paddingTop="12dp"
-                    android:paddingBottom="12dp"
+                    android:paddingStart="@dimen/tv_gap_xl"
+                    android:paddingEnd="@dimen/tv_gap_xl"
+                    android:paddingTop="@dimen/tv_gap_m"
+                    android:paddingBottom="@dimen/tv_gap_m"
                     android:focusable="true"
-                    android:layout_marginTop="22dp"
+                    android:layout_marginTop="@dimen/tv_gap_l"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content" />
             </LinearLayout>
@@ -366,24 +380,28 @@
                     android:orientation="vertical"
                     android:clipChildren="false"
                     android:clipToPadding="false"
-                    android:paddingBottom="16dp"
+                    android:paddingBottom="@dimen/tv_gap_l"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content">
 
                     <TextView
                         android:id="@+id/logsMeta"
+                        android:maxLines="1"
+                        android:ellipsize="end"
                         android:textColor="@color/mars_text_em"
-                        android:textSize="17sp"
+                        android:textAppearance="@style/AppText.Body"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content" />
 
                     <TextView
                         android:id="@+id/logsEmptyText"
+                        android:maxLines="3"
+                        android:ellipsize="end"
                         android:visibility="gone"
                         android:textColor="@color/mars_muted"
-                        android:textSize="20sp"
+                        android:textAppearance="@style/AppText.Body"
                         android:gravity="center"
-                        android:layout_marginTop="24dp"
+                        android:layout_marginTop="@dimen/tv_gap_xl"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content" />
 
@@ -392,7 +410,7 @@
                         android:orientation="vertical"
                         android:clipChildren="false"
                         android:clipToPadding="false"
-                        android:layout_marginTop="10dp"
+                        android:layout_marginTop="@dimen/tv_gap_s"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content" />
                 </LinearLayout>

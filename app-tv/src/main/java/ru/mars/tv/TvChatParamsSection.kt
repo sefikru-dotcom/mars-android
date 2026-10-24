@@ -308,7 +308,7 @@ internal fun TvChatActivity.buildPickerCard(index: Int, row: TvTurnParamsPolicy.
     }
     card.addView(TextView(this).apply {
         text = row.label
-        textSize = 20f
+        tvTextSize(R.dimen.tv_text_title)
         setTextColor(ContextCompat.getColor(
             context, if (row.current) R.color.mars_accent_text else R.color.mars_text_strong))
         isSingleLine = true
@@ -317,7 +317,7 @@ internal fun TvChatActivity.buildPickerCard(index: Int, row: TvTurnParamsPolicy.
     if (row.current) {
         card.addView(TextView(this).apply {
             text = getString(R.string.tv_picker_current)
-            textSize = 14f
+            tvTextSize(R.dimen.tv_text_label)
             setTextColor(ContextCompat.getColor(context, R.color.mars_status_info))
             isSingleLine = true
             setPadding(0, dp(2), 0, 0)

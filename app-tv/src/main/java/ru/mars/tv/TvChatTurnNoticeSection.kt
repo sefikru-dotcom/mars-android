@@ -84,9 +84,9 @@ internal fun TvChatActivity.applyTurnNotice() {
         TvTurnStatePolicy.Tone.QUEUED -> R.color.mars_status_info
     })
     val view = turnNoticeView ?: TextView(this).apply {
-        textSize = 20f
+        tvTextSize(R.dimen.tv_text_title)
         setPadding(dp(24), dp(12), dp(24), dp(12))
-        setBackgroundResource(R.drawable.bg_focus_card)
+        setBackgroundResource(R.drawable.bg_card_glass)
         isFocusable = true
         isClickable = true
         tag = TvChatActivity.TAG_TURN_NOTICE

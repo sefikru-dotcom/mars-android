@@ -17,6 +17,7 @@ import ru.mars.tv.R
 import ru.mars.tv.TvFocusLift
 import ru.mars.tv.TvOfflineCacheStatus
 import ru.mars.tv.kanban.TvKanbanPolicy.StatusToken
+import ru.mars.tv.tvTextSize
 
 /**
  * TV-экран «Канбан» (read-only паритет мобильного KanbanActivity): доска задач
@@ -201,7 +202,7 @@ class TvKanbanActivity : AppCompatActivity() {
         val header = TextView(this)
         header.text = "${column.name} · ${column.count}"
         header.setTextColor(ContextCompat.getColor(this, R.color.mars_text_strong))
-        header.textSize = 22f
+        header.tvTextSize(R.dimen.tv_text_title)
         header.setTypeface(null, android.graphics.Typeface.BOLD)
         val params = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -217,7 +218,7 @@ class TvKanbanActivity : AppCompatActivity() {
         val hint = TextView(this)
         hint.text = TvKanbanPolicy.COLUMN_EMPTY_HINT
         hint.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
-        hint.textSize = 18f
+        hint.tvTextSize(R.dimen.tv_text_body)
         val params = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,

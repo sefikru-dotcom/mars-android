@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Стеклянная карточка: полупрозрачная подложка поверх фона с планетой.
+
+     Читаемость держится двумя вещами, а не плотностью заливки:
+       1) фон-слой bg_tv_root сам содержит плотный scrim над картинкой;
+       2) здесь заливка mars_glass_fill (78% альфы) + 1dp рамка.
+     Поэтому карточки выглядят «стеклом», но текст на них не теряется
+     на светлых участках Марса.
+
+     Фокус D-pad: рубиновая рамка (паритет с bg_focus_card), заливка
+     чуть светлеет — без смены геометрии, чтобы карточка не «прыгала». -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/tv_card_corner" />
+            <solid android:color="@color/mars_glass_fill_focused" />
+            <stroke android:width="@dimen/tv_card_stroke" android:color="@color/mars_accent" />
+        </shape>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/tv_card_corner" />
+            <solid android:color="@color/mars_glass_fill_focused" />
+            <stroke android:width="@dimen/tv_card_stroke" android:color="@color/mars_accent_hover" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/tv_card_corner" />
+            <solid android:color="@color/mars_glass_fill" />
+            <stroke android:width="@dimen/tv_card_stroke" android:color="@color/mars_glass_stroke" />
+        </shape>
+    </item>
+
+</selector>

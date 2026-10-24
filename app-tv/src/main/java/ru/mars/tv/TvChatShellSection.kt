@@ -149,6 +149,7 @@ internal fun TvChatActivity.bindChatViews() {
     miniPlayerText = findViewById(R.id.miniPlayerText)
     miniPlayerToggle = findViewById(R.id.miniPlayerToggle)
     quickChipsRow = findViewById(R.id.quickChipsRow)
+    quickChipsScroll = findViewById(R.id.quickChipsScroll)
     modelButton = findViewById(R.id.modelButton)
     reasoningButton = findViewById(R.id.reasoningButton)
     back.setOnClickListener { finish() }

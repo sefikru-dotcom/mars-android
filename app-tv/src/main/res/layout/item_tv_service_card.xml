@@ -3,9 +3,9 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
     android:background="@drawable/bg_focus_card"
-    android:padding="24dp"
+    android:padding="@dimen/tv_card_pad"
     android:focusable="true"
-    android:layout_marginTop="14dp"
+    android:layout_marginTop="@dimen/tv_card_gap"
     android:layout_width="match_parent"
     android:layout_height="wrap_content">
 
@@ -17,8 +17,10 @@
 
         <TextView
             android:id="@+id/serviceTitle"
+            android:maxLines="2"
+            android:ellipsize="end"
             android:textColor="@color/mars_text_strong"
-            android:textSize="24sp"
+            android:textAppearance="@style/AppText.Title"
             android:textStyle="bold"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -32,27 +34,33 @@
 
         <TextView
             android:id="@+id/serviceStatusLabel"
-            android:textSize="18sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textAppearance="@style/AppText.Body"
             android:textStyle="bold"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="@dimen/tv_gap_s"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/serviceDesc"
+        android:maxLines="2"
+        android:ellipsize="end"
         android:textColor="@color/mars_muted"
-        android:textSize="18sp"
-        android:lineSpacingExtra="3dp"
-        android:layout_marginTop="8dp"
+        android:textAppearance="@style/AppText.Body"
+        android:lineSpacingExtra="@dimen/tv_gap_xs"
+        android:layout_marginTop="@dimen/tv_gap_s"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
     <TextView
         android:id="@+id/serviceMeta"
+        android:maxLines="1"
+        android:ellipsize="end"
         android:textColor="@color/mars_text_em"
-        android:textSize="16sp"
-        android:layout_marginTop="6dp"
+        android:textAppearance="@style/AppText.Label"
+        android:layout_marginTop="@dimen/tv_gap_s"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 </LinearLayout>
