@@ -12,6 +12,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import ru.mars.mobile.AudioSource
+import ru.mars.mobile.AudioSourceFactory
 
 /**
  * Тесты [WakeWordDetector] — чистый JVM: вместо микрофона [AudioSource] с очередью чанков,
@@ -159,9 +160,11 @@ class WakeWordDetectorTest {
         modelStore = store,
         policyFactory = { WakeWordPolicy(TOKENS) },
         portFactory = { port },
-        sourceFactory = {
-            onSourceCreated()
-            source
+        sourceFactory = object : AudioSourceFactory {
+            override fun create(): AudioSource {
+                onSourceCreated()
+                return source
+            }
         },
         nowMs = { clock.get().toLong() },
     )
@@ -234,7 +237,9 @@ class WakeWordDetectorTest {
             modelStore = modelStore(installed = true),
             policyFactory = { error("tokens.txt не читается") },
             portFactory = { port },
-            sourceFactory = { source },
+            sourceFactory = object : AudioSourceFactory {
+                override fun create(): AudioSource = source
+            },
             nowMs = { clock.get().toLong() },
         )
 
