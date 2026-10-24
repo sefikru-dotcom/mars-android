@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
+import ru.mars.mobile.asr.WakeWordDetector
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ChatAttachment
@@ -303,6 +304,23 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     /** Порт движка: то, что видит [StreamingStt]. Отдельно — чтобы освободить модель в onDestroy. */
     internal var asrPort: AsrEnginePort? = null
+
+    /**
+     * Детектор wake word «Марс, слушай». Один на экран: native-модель грузится в фоне при взводе,
+     * а не при каждом возврате из настроек. `null` — ещё не создавался или экран уничтожен.
+     */
+    internal var wakeWordDetector: WakeWordDetector? = null
+
+    /**
+     * Экран на переднем плане. Единственное условие, при котором wake word вообще слушает:
+     * в фоне микрофон без foreground-сервиса отнимут, а «слушающий» в фоне детектор — это
+     * расход батареи и вечный индикатор приватности.
+     */
+    internal var wakeWordScreenActive = false
+
+    /** Компактный индикатор состояния wake word: одна строка 11sp под статусной строкой. */
+    internal var wakeWordIndicator: TextView? = null
+
     /** Разрешение запросили из долгого нажатия на микрофон: после выдачи стартует hands-free. */
     internal var pendingHandsFree = false
     /** Распознавание уже записанного звука: повторный тап не запускает второе. */
@@ -417,6 +435,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onDestroy() {
+        // Детектор держит нативную модель и микрофон — освобождается до общего разбора стека.
+        releaseWakeWord()
         destroyChatStack()
         super.onDestroy()
     }
@@ -424,6 +444,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onResume() {
         super.onResume()
         resumeChat()
+        // Wake word слушает только при активном экране: возврат из настроек — единственная точка,
+        // где тумблер «Слушать „Марс“» доходит до детектора без перезапуска приложения.
+        wakeWordScreenActive = true
+        startWakeWordListening()
         // Карточки approval/clarify: живые каналы открытого диалога + один опрос
         // `GET /api/approval/pending` как страховка (запрос мог появиться, пока экран был
         // в фоне, а push не дошёл — очередь не должна ждать следующего события).
@@ -433,6 +457,8 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onPause() {
+        // Микрофон детектора закрывается первым: экран ушёл — слушать нечего.
+        stopWakeWordListening()
         // Соединения живых каналов закрываются сразу (отмена job'а отменяет in-flight
         // OkHttp call), а не по таймауту чтения: в фоне поток не нужен.
         attentionFeedWanted = false
