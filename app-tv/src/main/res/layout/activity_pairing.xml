@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Экран входа: шкала AppText.* и токены dimens.xml.
+     Форма не фиксируется в dp: колонка полей занимает 3/5 доступной ширины
+     (веса 1:3:1), поэтому на 720p/1080p/4K она масштабируется вместе с экраном,
+     а не остаётся островком 540dp. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -19,63 +23,78 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="18dp"
+        android:layout_marginTop="@dimen/tv_gap_l"
         android:text="МАРС ТВ"
-        android:textColor="@color/mars_text_strong"
-        android:textSize="44sp"
-        android:textStyle="bold" />
+        android:textAppearance="@style/AppText.Display" />
 
     <TextView
         android:id="@+id/pairingTitle"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="@dimen/tv_gap_s"
         android:text="Вход в персональный ассистент"
-        android:textColor="@color/mars_muted"
-        android:textSize="20sp" />
+        android:textAppearance="@style/AppText.Title"
+        android:textColor="@color/mars_muted" />
 
     <LinearLayout
-        android:layout_width="540dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/tv_pair_form_gap"
-        android:gravity="center"
-        android:orientation="vertical">
+        android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/passwordInput"
-            android:layout_width="match_parent"
-            android:layout_height="@dimen/tv_pair_field_h"
-            android:background="@drawable/bg_focus_input"
-            android:focusable="true"
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="3"
             android:gravity="center"
-            android:hint="Введите пароль Марса"
-            android:imeOptions="actionDone"
-            android:inputType="textPassword"
-            android:padding="16dp"
-            android:textColor="@color/mars_text_strong"
-            android:textColorHint="@color/mars_muted"
-            android:textSize="22sp" />
+            android:orientation="vertical">
 
-        <Button
-            android:id="@+id/loginButton"
-            android:layout_width="match_parent"
-            android:layout_height="@dimen/tv_pair_field_h"
-            android:layout_marginTop="18dp"
-            android:background="@drawable/bg_focus_accent"
-            android:focusable="true"
-            android:text="Войти"
-            android:textColor="@color/mars_on_accent"
-            android:textSize="22sp"
-            android:textStyle="bold" />
+            <EditText
+                android:id="@+id/passwordInput"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/tv_pair_field_h"
+                android:background="@drawable/bg_focus_input"
+                android:focusable="true"
+                android:gravity="center"
+                android:hint="Введите пароль Марса"
+                android:imeOptions="actionDone"
+                android:inputType="textPassword"
+                android:paddingStart="@dimen/tv_card_pad"
+                android:paddingEnd="@dimen/tv_card_pad"
+                android:textAppearance="@style/AppText.Body"
+                android:textColor="@color/mars_text_strong"
+                android:textColorHint="@color/mars_muted" />
+
+            <Button
+                android:id="@+id/loginButton"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/tv_pair_field_h"
+                android:layout_marginTop="@dimen/tv_gap_l"
+                android:background="@drawable/bg_focus_accent"
+                android:focusable="true"
+                android:text="Войти"
+                android:textAppearance="@style/AppText.Title"
+                android:textColor="@color/mars_on_accent" />
+        </LinearLayout>
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/pairingStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
+        android:layout_marginTop="@dimen/tv_gap_xl"
         android:gravity="center"
         android:text=""
-        android:textColor="@color/mars_text"
-        android:textSize="20sp" />
+        android:textAppearance="@style/AppText.Body"
+        android:textColor="@color/mars_text" />
 </LinearLayout>

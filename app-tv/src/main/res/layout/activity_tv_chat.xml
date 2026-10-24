@@ -16,24 +16,30 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
+        <!-- Шапка: бюджет 912dp = логотип 40 + gap 12 + заголовок (min 180, weight 1)
+             + «Режим» текстом + три иконки 40dp. Вторичные действия — ИКОНКИ:
+             четыре текстовые кнопки занимали 732dp, заголовку оставалось 38dp,
+             и он схлопывался в вертикальную колонку по одной букве. -->
         <LinearLayout
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="@dimen/tv_header_h">
 
             <ImageView
                 android:src="@drawable/ic_mars"
                 android:contentDescription="@null"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:layout_marginEnd="14dp" />
+                android:layout_width="@dimen/tv_btn_icon_h"
+                android:layout_height="@dimen/tv_btn_icon_h"
+                android:layout_marginEnd="@dimen/tv_gap_m" />
 
             <TextView
+                android:id="@+id/chatTitle"
                 android:text="Чат с Марсом"
-                android:textColor="@color/mars_text_strong"
-                android:textSize="32sp"
-                android:textStyle="bold"
+                android:textAppearance="@style/AppText.Headline"
+                android:minWidth="@dimen/tv_title_min_w"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content" />
@@ -43,82 +49,72 @@
             <Button
                 android:id="@+id/displayModeButton"
                 android:focusable="true"
-                android:layout_marginStart="20dp"
+                android:layout_marginStart="@dimen/tv_gap_m"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="22dp"
-                android:paddingEnd="22dp"
-                android:paddingTop="12dp"
-                android:paddingBottom="12dp"
+                android:paddingStart="@dimen/tv_btn_pad_h"
+                android:paddingEnd="@dimen/tv_btn_pad_h"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:background="@drawable/bg_focus_card"
                 android:drawableStart="@drawable/ic_settings"
                 android:drawableTint="@color/icon_focus_tint"
                 android:text="Режим: Окно"
-                android:textColor="@color/mars_text"
-                android:textSize="20sp"
-                android:drawablePadding="10dp"
+                android:textAppearance="@style/AppText.Button"
+                android:drawablePadding="@dimen/tv_btn_icon_gap"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="@dimen/tv_btn_h" />
 
             <Button
                 android:id="@+id/sessionsButton"
                 android:focusable="true"
-                android:layout_marginStart="20dp"
+                android:layout_marginStart="@dimen/tv_btn_gap"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="22dp"
-                android:paddingEnd="22dp"
-                android:paddingTop="12dp"
-                android:paddingBottom="12dp"
+                android:paddingStart="@dimen/tv_gap_s"
+                android:paddingEnd="@dimen/tv_gap_s"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:background="@drawable/bg_focus_card"
                 android:drawableStart="@drawable/ic_chat"
                 android:drawableTint="@color/icon_focus_tint"
-                android:text="Диалоги"
-                android:textColor="@color/mars_text"
-                android:textSize="20sp"
-                android:drawablePadding="10dp"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:contentDescription="Диалоги"
+                android:layout_width="@dimen/tv_btn_icon_h"
+                android:layout_height="@dimen/tv_btn_icon_h" />
 
             <Button
                 android:id="@+id/newChatButton"
                 android:focusable="true"
-                android:layout_marginStart="20dp"
+                android:layout_marginStart="@dimen/tv_btn_gap"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="22dp"
-                android:paddingEnd="22dp"
-                android:paddingTop="12dp"
-                android:paddingBottom="12dp"
+                android:paddingStart="@dimen/tv_gap_s"
+                android:paddingEnd="@dimen/tv_gap_s"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:background="@drawable/bg_focus_card"
                 android:drawableStart="@drawable/ic_new_chat"
                 android:drawableTint="@color/icon_focus_tint"
-                android:text="Новый чат"
-                android:textColor="@color/mars_text"
-                android:textSize="20sp"
-                android:drawablePadding="10dp"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:contentDescription="Новый чат"
+                android:layout_width="@dimen/tv_btn_icon_h"
+                android:layout_height="@dimen/tv_btn_icon_h" />
 
             <Button
                 android:id="@+id/backButton"
                 android:focusable="true"
-                android:layout_marginStart="20dp"
+                android:layout_marginStart="@dimen/tv_btn_gap"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="22dp"
-                android:paddingEnd="22dp"
-                android:paddingTop="12dp"
-                android:paddingBottom="12dp"
+                android:paddingStart="@dimen/tv_gap_s"
+                android:paddingEnd="@dimen/tv_gap_s"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:background="@drawable/bg_focus_card"
                 android:drawableStart="@drawable/ic_arrow_back"
                 android:drawableTint="@color/icon_focus_tint"
-                android:text="Назад"
-                android:textColor="@color/mars_text"
-                android:textSize="20sp"
-                android:drawablePadding="10dp"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:contentDescription="Назад"
+                android:layout_width="@dimen/tv_btn_icon_h"
+                android:layout_height="@dimen/tv_btn_icon_h" />
         </LinearLayout>
 
         <!-- Mini player: mirrors the global TvMusicPlayer transport while a track is bound;
@@ -129,10 +125,10 @@
             android:gravity="center_vertical"
             android:background="@drawable/bg_chip"
             android:layout_marginTop="@dimen/tv_chat_row_gap"
-            android:paddingStart="18dp"
-            android:paddingEnd="10dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp"
+            android:paddingStart="@dimen/tv_gap_l"
+            android:paddingEnd="@dimen/tv_gap_m"
+            android:paddingTop="@dimen/tv_gap_s"
+            android:paddingBottom="@dimen/tv_gap_s"
             android:visibility="gone"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content">
@@ -141,14 +137,14 @@
                 android:src="@drawable/ic_music"
                 android:contentDescription="@null"
                 app:tint="@color/mars_muted"
-                android:layout_marginEnd="12dp"
-                android:layout_width="26dp"
-                android:layout_height="26dp" />
+                android:layout_marginEnd="@dimen/tv_gap_m"
+                android:layout_width="@dimen/tv_icon_m"
+                android:layout_height="@dimen/tv_icon_m" />
 
             <TextView
                 android:id="@+id/miniPlayerText"
                 android:textColor="@color/mars_text"
-                android:textSize="18sp"
+                android:textAppearance="@style/AppText.Label"
                 android:singleLine="true"
                 android:ellipsize="end"
                 android:layout_width="wrap_content"
@@ -159,20 +155,20 @@
                 android:focusable="true"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:layout_marginStart="16dp"
-                android:paddingStart="18dp"
-                android:paddingEnd="18dp"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp"
+                android:layout_marginStart="@dimen/tv_gap_l"
+                android:paddingStart="@dimen/tv_gap_l"
+                android:paddingEnd="@dimen/tv_gap_l"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:background="@drawable/bg_focus_card"
                 android:drawableStart="@drawable/ic_pause"
                 android:drawableTint="@color/icon_focus_tint"
-                android:drawablePadding="8dp"
+                android:drawablePadding="@dimen/tv_gap_s"
                 android:text="Пауза"
                 android:textColor="@color/mars_text"
-                android:textSize="16sp"
+                android:textAppearance="@style/AppText.Button"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="@dimen/tv_btn_h" />
         </LinearLayout>
 
         <!-- Status strip: live reasoning/tool status + context-fill pill (both hidden when unknown) -->
@@ -186,7 +182,7 @@
             <TextView
                 android:id="@+id/statusText"
                 android:textColor="@color/mars_muted"
-                android:textSize="18sp"
+                android:textAppearance="@style/AppText.Label"
                 android:singleLine="true"
                 android:ellipsize="end"
                 android:visibility="gone"
@@ -201,28 +197,28 @@
                 android:id="@+id/contextStatusBadge"
                 android:textColor="@color/mars_status_online"
                 android:textStyle="bold"
-                android:textSize="20sp"
+                android:textAppearance="@style/AppText.Title"
                 android:singleLine="true"
                 android:ellipsize="end"
                 android:maxWidth="620dp"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp"
+                android:paddingStart="@dimen/tv_gap_l"
+                android:paddingEnd="@dimen/tv_gap_l"
+                android:paddingTop="@dimen/tv_gap_xs"
+                android:paddingBottom="@dimen/tv_gap_xs"
                 android:background="@drawable/bg_chip"
                 android:focusable="false"
                 android:visibility="gone"
-                android:layout_marginStart="12dp"
+                android:layout_marginStart="@dimen/tv_gap_m"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
 
             <TextView
                 android:id="@+id/contextText"
                 android:textColor="@color/mars_status_online"
-                android:textSize="16sp"
+                android:textAppearance="@style/AppText.Body"
                 android:singleLine="true"
                 android:visibility="gone"
-                android:layout_marginStart="12dp"
+                android:layout_marginStart="@dimen/tv_gap_m"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
 
@@ -232,17 +228,17 @@
             <TextView
                 android:id="@+id/quotaChip"
                 android:textColor="@color/mars_text_em"
-                android:textSize="16sp"
+                android:textAppearance="@style/AppText.Label"
                 android:singleLine="true"
                 android:ellipsize="end"
                 android:maxWidth="420dp"
                 android:visibility="gone"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp"
+                android:paddingStart="@dimen/tv_gap_m"
+                android:paddingEnd="@dimen/tv_gap_m"
+                android:paddingTop="@dimen/tv_gap_xs"
+                android:paddingBottom="@dimen/tv_gap_xs"
                 android:background="@drawable/bg_chip"
-                android:layout_marginStart="12dp"
+                android:layout_marginStart="@dimen/tv_gap_m"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
         </LinearLayout>
@@ -254,16 +250,16 @@
         <TextView
             android:id="@+id/subagentBoard"
             android:textColor="@color/mars_status_info"
-            android:textSize="17sp"
+            android:textAppearance="@style/AppText.Label"
             android:maxLines="4"
             android:ellipsize="end"
             android:lineSpacingExtra="2dp"
             android:focusable="false"
             android:visibility="gone"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:paddingTop="4dp"
-            android:paddingBottom="2dp"
+            android:paddingStart="@dimen/tv_gap_xl"
+            android:paddingEnd="@dimen/tv_gap_xl"
+            android:paddingTop="@dimen/tv_gap_xs"
+            android:paddingBottom="@dimen/tv_gap_xs"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
 
@@ -271,8 +267,18 @@
              (TvAutoScrollPolicy): the control appears only while the reader is away from
              the live edge and hides again on the jump/back-to-bottom (focus moves to the
              composer — a disappearing control must never drop the D-pad focus). -->
+        <!-- Лента: пол высоты tv_chat_transcript_min_h (180dp). Бюджет 540dp: поля 28 +
+             шапка 52 + зазор 8 + композер 48 = 136dp хрома, клавиатура 224dp ->
+             остаток 180dp (два сообщения вместо одного; без клавиатуры 356dp).
+             ВАЖНО: контейнер идёт с height=0dp + weight=1, а minHeight на таком
+             контейнере LinearLayout НЕ соблюдает — при 200dp он распирал экран и
+             выталкивал композер под клавиатуру. Пол держится арифметикой бюджета
+             (TvChatScaleContractTest), а не атрибутом.
+             Ряд чипсов на время IME скрывается целиком
+             (TvChatActivity.attachImeChipCollapse) — иначе лента получала 106dp. -->
         <FrameLayout
             android:layout_width="match_parent"
+            android:minHeight="@dimen/tv_chat_transcript_min_h"
             android:layout_height="0dp"
             android:layout_weight="1">
 
@@ -281,11 +287,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:scrollbars="none"
+                android:minHeight="@dimen/tv_chat_transcript_min_h"
                 android:fillViewport="true">
 
                 <LinearLayout
                     android:id="@+id/messages"
                     android:orientation="vertical"
+                    android:minHeight="@dimen/tv_chat_transcript_min_h"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content" />
             </ScrollView>
@@ -293,23 +301,23 @@
             <Button
                 android:id="@+id/jumpToBottomButton"
                 android:text="К последнему"
-                android:textSize="16sp"
+                android:textAppearance="@style/AppText.Button"
                 android:textColor="@color/mars_text"
                 android:background="@drawable/bg_focus_chip"
                 android:drawableStart="@drawable/ic_chevron_down"
                 android:drawableTint="@color/icon_focus_tint"
-                android:drawablePadding="8dp"
+                android:drawablePadding="@dimen/tv_gap_s"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="18dp"
-                android:paddingEnd="18dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
+                android:paddingStart="@dimen/tv_gap_l"
+                android:paddingEnd="@dimen/tv_gap_l"
+                android:paddingTop="@dimen/tv_gap_s"
+                android:paddingBottom="@dimen/tv_gap_s"
                 android:focusable="true"
                 android:visibility="gone"
                 android:layout_gravity="bottom|end"
-                android:layout_marginEnd="20dp"
-                android:layout_marginBottom="16dp"
+                android:layout_marginEnd="@dimen/tv_gap_l"
+                android:layout_marginBottom="@dimen/tv_gap_l"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
         </FrameLayout>
@@ -317,10 +325,11 @@
         <!-- Quick chips: canned one-tap turns above the composer (TvQuickChipsPolicy);
              buttons are built programmatically into quickChipsRow. -->
         <HorizontalScrollView
+            android:id="@+id/quickChipsScroll"
             android:layout_marginTop="@dimen/tv_chat_row_gap"
             android:scrollbars="none"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="@dimen/tv_chat_chips_h">
 
             <LinearLayout
                 android:layout_width="wrap_content"
@@ -332,21 +341,21 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:layout_marginEnd="28dp">
+                    android:layout_marginEnd="@dimen/tv_gap_xl">
                     <Button
                         android:id="@+id/modelButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
+                        android:layout_height="@dimen/tv_chat_chips_h"
                         android:minWidth="0dp"
                         android:minHeight="0dp"
                         android:maxWidth="340dp"
-                        android:paddingStart="20dp"
-                        android:paddingEnd="20dp"
-                        android:paddingTop="10dp"
-                        android:paddingBottom="10dp"
+                        android:paddingStart="@dimen/tv_gap_l"
+                        android:paddingEnd="@dimen/tv_gap_l"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp"
                         android:background="@drawable/bg_focus_card"
                         android:textColor="@color/mars_text"
-                        android:textSize="18sp"
+                        android:textAppearance="@style/AppText.Label"
                         android:textAllCaps="false"
                         android:singleLine="true"
                         android:ellipsize="middle"
@@ -357,18 +366,18 @@
                     <Button
                         android:id="@+id/reasoningButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
+                        android:layout_height="@dimen/tv_chat_chips_h"
+                        android:layout_marginStart="@dimen/tv_gap_m"
                         android:minWidth="0dp"
                         android:minHeight="0dp"
                         android:maxWidth="300dp"
-                        android:paddingStart="20dp"
-                        android:paddingEnd="20dp"
-                        android:paddingTop="10dp"
-                        android:paddingBottom="10dp"
+                        android:paddingStart="@dimen/tv_gap_l"
+                        android:paddingEnd="@dimen/tv_gap_l"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp"
                         android:background="@drawable/bg_focus_card"
                         android:textColor="@color/mars_text"
-                        android:textSize="18sp"
+                        android:textAppearance="@style/AppText.Label"
                         android:textAllCaps="false"
                         android:singleLine="true"
                         android:ellipsize="end"
@@ -380,7 +389,7 @@
                 <LinearLayout
                     android:id="@+id/quickChipsRow"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="@dimen/tv_chat_chips_h"
                     android:orientation="horizontal" />
             </LinearLayout>
         </HorizontalScrollView>
@@ -397,10 +406,14 @@
                 android:hint="Сообщение…"
                 android:textColor="@color/mars_text"
                 android:textColorHint="@color/mars_muted"
-                android:textSize="22sp"
+                android:textAppearance="@style/AppText.Body"
                 android:singleLine="true"
                 android:background="@drawable/bg_focus_input"
-                android:padding="16dp"
+                android:paddingStart="@dimen/tv_gap_l"
+                android:paddingEnd="@dimen/tv_gap_l"
+                android:paddingTop="@dimen/tv_gap_s"
+                android:paddingBottom="@dimen/tv_gap_s"
+                android:gravity="center_vertical"
                 android:focusable="true"
                 android:imeOptions="actionSend"
                 android:nextFocusRight="@id/sendButton"
@@ -411,18 +424,18 @@
             <Button
                 android:id="@+id/sendButton"
                 android:text="Отправить"
-                android:textSize="20sp"
+                android:textAppearance="@style/AppText.Button"
                 android:textColor="@color/mars_on_accent"
                 android:textStyle="bold"
                 android:background="@drawable/bg_focus_accent"
                 android:drawableStart="@drawable/ic_send"
                 android:drawableTint="@color/mars_on_accent"
-                android:drawablePadding="10dp"
-                android:paddingStart="24dp"
-                android:paddingEnd="24dp"
+                android:drawablePadding="@dimen/tv_gap_s"
+                android:paddingStart="@dimen/tv_gap_xl"
+                android:paddingEnd="@dimen/tv_gap_xl"
                 android:focusable="true"
                 android:nextFocusLeft="@id/messageInput"
-                android:layout_marginStart="16dp"
+                android:layout_marginStart="@dimen/tv_gap_l"
                 android:layout_width="wrap_content"
                 android:layout_height="@dimen/tv_chat_composer_h" />
         </LinearLayout>
@@ -443,30 +456,28 @@
         <LinearLayout
             android:orientation="vertical"
             android:background="@drawable/bg_session_panel"
-            android:padding="28dp"
+            android:padding="@dimen/tv_screen_pad_h"
             android:layout_gravity="center"
             android:layout_marginStart="110dp"
             android:layout_marginEnd="110dp"
-            android:layout_marginTop="28dp"
-            android:layout_marginBottom="28dp"
+            android:layout_marginTop="@dimen/tv_screen_pad_h"
+            android:layout_marginBottom="@dimen/tv_screen_pad_h"
             android:layout_width="match_parent"
             android:layout_height="match_parent">
 
             <TextView
                 android:text="Диалоги"
-                android:textColor="@color/mars_text_strong"
-                android:textSize="26sp"
-                android:textStyle="bold"
+                android:textAppearance="@style/AppText.Headline"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
 
             <TextView
                 android:id="@+id/sessionsStatus"
                 android:textColor="@color/mars_muted"
-                android:textSize="17sp"
+                android:textAppearance="@style/AppText.Label"
                 android:singleLine="true"
                 android:ellipsize="end"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="@dimen/tv_gap_s"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content" />
 
@@ -474,7 +485,7 @@
                 android:id="@+id/sessionScroll"
                 android:scrollbars="none"
                 android:fillViewport="true"
-                android:layout_marginTop="14dp"
+                android:layout_marginTop="@dimen/tv_gap_m"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1">
@@ -489,20 +500,20 @@
             <Button
                 android:id="@+id/closeSessionsButton"
                 android:text="Закрыть"
-                android:textSize="18sp"
+                android:textAppearance="@style/AppText.Button"
                 android:textColor="@color/mars_text"
                 android:background="@drawable/bg_focus_card"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="26dp"
-                android:paddingEnd="26dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
+                android:paddingStart="@dimen/tv_gap_xl"
+                android:paddingEnd="@dimen/tv_gap_xl"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:focusable="true"
                 android:layout_gravity="end"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="@dimen/tv_gap_l"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="@dimen/tv_btn_h" />
         </LinearLayout>
     </FrameLayout>
 
@@ -522,19 +533,19 @@
         <LinearLayout
             android:orientation="vertical"
             android:background="@drawable/bg_session_panel"
-            android:padding="28dp"
+            android:padding="@dimen/tv_screen_pad_h"
             android:layout_gravity="center"
             android:layout_marginStart="170dp"
             android:layout_marginEnd="170dp"
-            android:layout_marginTop="28dp"
-            android:layout_marginBottom="28dp"
+            android:layout_marginTop="@dimen/tv_screen_pad_h"
+            android:layout_marginBottom="@dimen/tv_screen_pad_h"
             android:layout_width="match_parent"
             android:layout_height="match_parent">
 
             <TextView
                 android:id="@+id/paramsTitle"
                 android:textColor="@color/mars_text_strong"
-                android:textSize="26sp"
+                android:textAppearance="@style/AppText.Headline"
                 android:textStyle="bold"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
@@ -543,7 +554,7 @@
                 android:id="@+id/paramsScroll"
                 android:scrollbars="none"
                 android:fillViewport="true"
-                android:layout_marginTop="14dp"
+                android:layout_marginTop="@dimen/tv_gap_m"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1">
@@ -558,20 +569,20 @@
             <Button
                 android:id="@+id/closeParamsButton"
                 android:text="@string/tv_picker_close"
-                android:textSize="18sp"
+                android:textAppearance="@style/AppText.Button"
                 android:textColor="@color/mars_text"
                 android:background="@drawable/bg_focus_card"
                 android:minWidth="0dp"
                 android:minHeight="0dp"
-                android:paddingStart="26dp"
-                android:paddingEnd="26dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
+                android:paddingStart="@dimen/tv_gap_xl"
+                android:paddingEnd="@dimen/tv_gap_xl"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"
                 android:focusable="true"
                 android:layout_gravity="end"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="@dimen/tv_gap_l"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
+                android:layout_height="@dimen/tv_btn_h" />
         </LinearLayout>
     </FrameLayout>
 </FrameLayout>

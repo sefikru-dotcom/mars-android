@@ -1,11 +1,82 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         ШКАЛА ТЕКСТА ТВ-клиента Марса.
+         База — Google TV Design type scale, урезанная снизу под плотный
+         рабочий интерфейс (у нас не медиа-каталог: нужна читаемость
+         СПИСКОВ, а не крупных постеров).
+
+         Иерархия сознательно контрастная (1.4x между ступенями): слабый
+         контраст 32/21sp давал «однородную кашу», из-за которой весь экран
+         читался как крупный текст.
+
+             display   40 / line 48    часы дашборда
+             headline  28 / line 36    заголовок экрана
+             title     20 / line 28    заголовок карточки, кнопки
+             body      16 / line 24    тело, сообщения чата, списки
+             label     14 / line 20    мета, подписи, чипсы
+             micro     12 / line 16    служебные строки
+
+         Правило: в layout кегль числом НЕ писать — только
+         android:textAppearance="@style/AppText.*". Программный рендер
+         берёт размеры из @dimen/tv_text_*.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <style name="AppText" parent="@android:style/TextAppearance">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textColor">@color/mars_text</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <style name="AppText.Display" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_display</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/mars_text_strong</item>
+        <item name="android:letterSpacing">-0.02</item>
+    </style>
+
+    <style name="AppText.Headline" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_headline</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/mars_text_strong</item>
+        <item name="android:letterSpacing">-0.01</item>
+    </style>
+
+    <style name="AppText.Title" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_title</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/mars_text</item>
+    </style>
+
+    <style name="AppText.Body" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_body</item>
+        <item name="android:textColor">@color/mars_text</item>
+    </style>
+
+    <style name="AppText.Label" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_label</item>
+        <item name="android:textColor">@color/mars_muted</item>
+    </style>
+
+    <style name="AppText.Micro" parent="AppText">
+        <item name="android:textSize">@dimen/tv_text_micro</item>
+        <item name="android:textColor">@color/mars_muted</item>
+    </style>
+
+    <!-- Подпись кнопки: базовый title, без капса (русский капс читается хуже) -->
+    <style name="AppText.Button" parent="AppText.Title">
+        <item name="android:textAllCaps">false</item>
+    </style>
+
     <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">@color/mars_accent</item>
         <item name="android:colorPrimary">@color/mars_surface</item>
         <item name="android:colorPrimaryDark">@color/mars_background</item>
-        <item name="android:windowBackground">@color/mars_background</item>
+        <!-- Фон окна: слой с планетой. Плотный scrim держит читаемость,
+             поэтому прозрачность карточек не ломает контраст. -->
+        <item name="android:windowBackground">@drawable/bg_tv_root</item>
         <item name="android:statusBarColor">@color/mars_background</item>
         <item name="android:navigationBarColor">@color/mars_background</item>
         <item name="android:textColorPrimary">@color/mars_text</item>
@@ -13,4 +84,5 @@
         <!-- Premium D-pad focus: custom ruby highlight, no default focus frames -->
         <item name="android:defaultFocusHighlightEnabled">false</item>
     </style>
+
 </resources>

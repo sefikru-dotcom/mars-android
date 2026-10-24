@@ -106,7 +106,7 @@ class TvChatInteractiveSurface(
     private fun appendNoticeLine(message: String, error: Boolean) {
         val line = TextView(container.context).apply {
             text = message
-            textSize = 16f
+            tvTextSize(R.dimen.tv_text_body)
             setTextColor(ContextCompat.getColor(context,
                 if (error) R.color.mars_status_error else R.color.mars_muted))
             setPadding(dp(24), dp(6), dp(24), dp(6))

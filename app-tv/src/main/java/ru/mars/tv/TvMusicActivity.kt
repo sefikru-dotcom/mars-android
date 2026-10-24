@@ -631,7 +631,7 @@ class TvMusicActivity : AppCompatActivity() {
     /** Заголовок полки: тема-цвета, жирный, НЕ фокусируемый ([MusicShelf.title] как есть). */
     private fun shelfHeading(title: String): TextView = TextView(this).apply {
         text = title
-        textSize = 24f
+        tvTextSize(R.dimen.tv_text_headline)
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
         isFocusable = false
@@ -718,7 +718,7 @@ class TvMusicActivity : AppCompatActivity() {
     /** Кнопка «Все плейлисты»: возврат из drill-down без повторного запроса списка. */
     private fun playlistBackChip(playlist: Playlist): TextView = TextView(this).apply {
         text = getString(R.string.tv_music_playlist_back)
-        textSize = 18f
+        tvTextSize(R.dimen.tv_text_body)
         gravity = Gravity.CENTER
         setPadding(dp(20), 0, dp(20), 0)
         setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -740,14 +740,14 @@ class TvMusicActivity : AppCompatActivity() {
     private fun addPlaylistRow(playlist: Playlist) {
         val title = TextView(this).apply {
             text = TvMusicLibraryPolicy.playlistTitle(playlist)
-            textSize = 20f
+            tvTextSize(R.dimen.tv_text_title)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
             setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
         }
         val meta = TextView(this).apply {
             text = TvMusicLibraryPolicy.playlistMeta(playlist)
-            textSize = 16f
+            tvTextSize(R.dimen.tv_text_body)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
             setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -899,7 +899,7 @@ class TvMusicActivity : AppCompatActivity() {
         }
         val labelView = TextView(this).apply {
             text = label
-            textSize = 20f
+            tvTextSize(R.dimen.tv_text_title)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
             setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -942,7 +942,7 @@ class TvMusicActivity : AppCompatActivity() {
         // кнопка — открывает альбом (mobile-parity: там тап по подписи альбома).
         val albumChip = TextView(this).apply {
             text = getString(R.string.tv_album_action)
-            textSize = 16f
+            tvTextSize(R.dimen.tv_text_body)
             isSingleLine = true
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(8), dp(18), dp(8))
@@ -1255,7 +1255,7 @@ class TvMusicActivity : AppCompatActivity() {
     private fun albumTrackRow(album: MusicAlbum, track: MusicTrack, index: Int): View {
         val label = TextView(this).apply {
             text = "${index + 1}. ${TvAlbumPolicy.trackLine(track)}"
-            textSize = 18f
+            tvTextSize(R.dimen.tv_text_body)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
             gravity = Gravity.CENTER_VERTICAL

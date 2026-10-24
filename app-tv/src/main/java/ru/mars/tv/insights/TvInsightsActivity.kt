@@ -4,7 +4,6 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.TypedValue
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
@@ -22,6 +21,7 @@ import ru.mars.network.repository.LogsRepository
 import ru.mars.tv.R
 import ru.mars.tv.TvFocusLift
 import ru.mars.tv.TvOfflineCacheStatus
+import ru.mars.tv.tvTextSize
 
 /**
  * TV-экран «Аналитика» (read-only паритет мобильного InsightsActivity): табы
@@ -295,7 +295,7 @@ class TvInsightsActivity : AppCompatActivity() {
     private fun chip(label: String): Button {
         val button = Button(this)
         button.text = label
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+        button.tvTextSize(R.dimen.tv_text_body)
         button.setTextColor(ContextCompat.getColor(this, R.color.mars_text))
         button.setBackgroundResource(R.drawable.bg_focus_chip)
         button.minWidth = 0
@@ -428,7 +428,7 @@ class TvInsightsActivity : AppCompatActivity() {
         val view = TextView(this)
         view.text = line.ifBlank { " " }
         view.typeface = Typeface.MONOSPACE
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        view.tvTextSize(R.dimen.tv_text_label)
         view.setTextColor(ContextCompat.getColor(this, R.color.mars_text))
         view.setBackgroundResource(R.drawable.bg_focus_chip)
         view.isFocusable = true

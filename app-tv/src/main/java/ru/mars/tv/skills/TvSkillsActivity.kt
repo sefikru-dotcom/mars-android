@@ -3,7 +3,6 @@ package ru.mars.tv.skills
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.TypedValue
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
@@ -15,6 +14,7 @@ import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.tv.R
 import ru.mars.tv.TvFocusLift
 import ru.mars.tv.TvOfflineCacheStatus
+import ru.mars.tv.tvTextSize
 
 /**
  * TV-экран «Скиллы» (read-only паритет мобильного SkillsActivity): каталог
@@ -236,7 +236,7 @@ class TvSkillsActivity : AppCompatActivity() {
     private fun chip(label: String): Button {
         val button = Button(this)
         button.text = label
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+        button.tvTextSize(R.dimen.tv_text_body)
         button.setTextColor(ContextCompat.getColor(this, R.color.mars_text))
         button.setBackgroundResource(R.drawable.bg_focus_chip)
         button.minWidth = 0

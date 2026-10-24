@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -143,6 +144,9 @@ class TvChatActivity : AppCompatActivity() {
 
     // Quick chips above the composer (content/activation/D-pad rules: TvQuickChipsPolicy).
     internal lateinit var quickChipsRow: LinearLayout
+
+    /** Обёртка ряда чипсов: при открытой клавиатуре прячется целиком ([attachImeChipCollapse]). */
+    internal lateinit var quickChipsScroll: View
     internal val chipButtons = mutableListOf<Button>()
     internal val sessionRowViews = mutableListOf<View>()
     internal var browserRows: List<TvSessionBrowserPolicy.SessionRow> = emptyList()
@@ -184,6 +188,9 @@ class TvChatActivity : AppCompatActivity() {
      * the current screen (mobile `sessionNavigation` parity).
      */
     internal var sessionLoadToken = 0
+
+    /** Listener видимости IME для схлопывания чипсов; снимается в [onDestroy]. */
+    private var imeLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
 
     internal var stream: Job? = null
     internal val store by lazy { AndroidKeyStoreCredentialStore(this) }
@@ -359,11 +366,31 @@ class TvChatActivity : AppCompatActivity() {
         // context (the header mini player resumes playback through TvMusicPlayer).
         TvMusicPlayer.attachContext(this)
         bindChatViews()
+        // Клавиатура забирает 224dp из 540 — ряд чипсов уходит на это время, иначе ленте
+        // достаётся ~106dp (ровно одно двухстрочное сообщение).
+        attachImeChipCollapse()
         // Переход с TV-экрана «Профили»: новая сессия этого чата создаётся в
         // выбранном профиле (SessionRepository.createSession принимает `profile`).
         // Уже привязанная сессия профиль не меняет — см. TvChatSessionFlow.bindProfile.
         sessionFlow.bindProfile(intent?.getStringExtra(ru.mars.tv.profiles.TvProfilesRouting.EXTRA_PROFILE))
         wireChatSurface(savedInstanceState)
+    }
+
+    /**
+     * Ряд чипсов над композером схлопывается, пока открыта экранная клавиатура.
+     *
+     * Вертикальный бюджет 540dp: шапка 52 + композер 48 + поля 28 + зазор 8 = 136dp,
+     * клавиатура 224dp — чипсам (40dp + 8dp зазор) места уже нет, а лента должна получить
+     * остаток, а не одно сообщение. Видимость считает [TvDpadTextInput.isImeVisible] —
+     * тот же расчёт, что у музыкального поиска, поэтому отдельного флага в хосте нет.
+     */
+    private fun attachImeChipCollapse() {
+        val listener = ViewTreeObserver.OnGlobalLayoutListener {
+            val target = if (TvDpadTextInput.isImeVisible(chatRoot)) View.GONE else View.VISIBLE
+            if (quickChipsScroll.visibility != target) quickChipsScroll.visibility = target
+        }
+        window.decorView.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        imeLayoutListener = listener
     }
 
     /**
@@ -413,6 +440,8 @@ class TvChatActivity : AppCompatActivity() {
             cancelServerTurnBestEffort()
         }
         cancelLocalStreamJobs()
+        imeLayoutListener?.let { window.decorView.viewTreeObserver.removeOnGlobalLayoutListener(it) }
+        imeLayoutListener = null
         // Отложенные flush живого пузыря снимаются — postDelayed не должен переживать
         // Activity (утечка окна через Runnable в main-looper).
         uiHandler.removeCallbacksAndMessages(null)
