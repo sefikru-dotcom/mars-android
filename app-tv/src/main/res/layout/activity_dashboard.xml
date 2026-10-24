@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- TV dashboard: Dark Obsidian + Ruby, D-pad focused, 540dp vertical budget (Mi TV 960x540dp).
-     Все размеры — токены res/values/dimens.xml. Шапка одной строкой (логотип слева, часы справа),
-     сетка 4x3 на layout_weight: ряды делят остаток высоты поровну, поэтому все кнопки видны
-     всегда, без скролла; при показанном мини-плеере ряды автоматически становятся компактнее.
+
+     ИЕРАРХИЯ (не «однородная каша»): часы 40 (AppText.Display) > заголовок «Марс» 28
+     (AppText.Headline) > подписи кнопок 20 (AppText.Title) > тело/мета 16/14
+     (AppText.Body / AppText.Label). Часы больше НЕ крупнейший элемент экрана:
+     раньше 48sp при заголовке 28sp задавали «гигантоманию» шапки.
+
+     ПЛОТНОСТЬ: шапка одной строкой, лента плеера на всю ширину, сетка 4x3 на
+     layout_weight (ряды делят остаток высоты поровну, кнопки видны всегда, без скролла;
+     при показанном мини-плеере ряды автоматически становятся компактнее).
+
+     КАРТОЧКИ: @drawable/bg_card_glass — 72% заливка + 1dp рамка, рубиновый селектор
+     фокуса D-pad (state_focused). Прозрачность не ломает контраст: фон-слой
+     bg_tv_root сам несёт плотный scrim, альфа заливки ниже токена не опускается.
+
+     Все размеры — токены res/values/dimens.xml, кегли — только AppText.*.
      Все id и цепочки nextFocus сохранены — их читает DashboardActivity.kt. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -17,7 +29,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- Шапка: логотип+имя слева, часы+дата справа (одна строка — экономия высоты) -->
+    <!-- Шапка: логотип+имя слева, статус-слот в центре, часы+дата справа (одна строка) -->
     <LinearLayout
         android:orientation="horizontal"
         android:gravity="center_vertical"
@@ -34,69 +46,108 @@
 
         <TextView
             android:text="Марс"
-            android:textColor="@color/mars_text_strong"
-            android:textSize="28sp"
-            android:textStyle="bold"
-            android:layout_marginStart="12dp"
+            android:textAppearance="@style/AppText.Headline"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:minWidth="0dp"
+            android:layout_marginStart="@dimen/tv_gap_m"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <!-- Статус-слот шапки: занимает середину строки, поэтому часы всегда прижаты
+             к правому краю, а заголовок — к левому, независимо от наличия текста.
+             Текст пишется только по факту (последнее событие/короткий статус), по
+             умолчанию пусто и gone — слот при этом сохраняет ширину за счёт weight. -->
+        <LinearLayout
+            android:id="@+id/headerStatusSlot"
+            android:orientation="horizontal"
+            android:gravity="center_vertical|start"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:minWidth="0dp"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:id="@+id/headerStatus"
+                android:textAppearance="@style/AppText.Label"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:minWidth="0dp"
+                android:visibility="gone"
+                android:layout_marginStart="@dimen/tv_gap_l"
+                android:layout_marginEnd="@dimen/tv_gap_l"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
 
         <LinearLayout
             android:orientation="vertical"
             android:gravity="end"
+            android:clipChildren="false"
+            android:clipToPadding="false"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content">
 
             <TextView
                 android:id="@+id/time"
-                android:textColor="@color/mars_text"
-                android:textSize="48sp"
+                android:textAppearance="@style/AppText.Display"
                 android:includeFontPadding="false"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
 
             <TextView
                 android:id="@+id/dateLine"
-                android:textColor="@color/mars_muted"
-                android:textSize="18sp"
-                android:layout_marginTop="2dp"
+                android:textAppearance="@style/AppText.Label"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:layout_marginTop="@dimen/tv_gap_xs"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content" />
         </LinearLayout>
     </LinearLayout>
 
     <!-- Now-playing strip: mirrors the global TvMusicPlayer transport while a track is bound;
-         rules (visibility/caption/toggle label) live in TvMiniPlayerSpec. Gone when idle. -->
+         rules (visibility/caption/toggle label) live in TvMiniPlayerSpec. Gone when idle.
+         Ширина match_parent: заголовок трека забирает весь остаток (weight), кнопка
+         транспорта прижата к правому краю — правая половина больше не пустует. -->
     <LinearLayout
         android:id="@+id/nowPlayingRow"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:background="@drawable/bg_chip"
+        android:background="@drawable/bg_card_glass"
+        android:clipChildren="false"
+        android:clipToPadding="false"
         android:layout_marginTop="@dimen/tv_dash_now_margin"
-        android:paddingStart="16dp"
-        android:paddingEnd="10dp"
+        android:paddingStart="@dimen/tv_gap_l"
+        android:paddingEnd="@dimen/tv_gap_m"
         android:paddingTop="@dimen/tv_dash_now_pad_v"
         android:paddingBottom="@dimen/tv_dash_now_pad_v"
         android:visibility="gone"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
         <ImageView
             android:src="@drawable/ic_music"
             android:contentDescription="@null"
             app:tint="@color/mars_muted"
-            android:layout_marginEnd="12dp"
-            android:layout_width="24dp"
-            android:layout_height="24dp" />
+            android:layout_marginEnd="@dimen/tv_gap_m"
+            android:layout_width="@dimen/tv_icon_m"
+            android:layout_height="@dimen/tv_icon_m" />
 
         <TextView
             android:id="@+id/nowPlayingText"
-            android:textColor="@color/mars_text"
-            android:textSize="16sp"
-            android:singleLine="true"
+            android:textAppearance="@style/AppText.Body"
+            android:maxLines="1"
             android:ellipsize="end"
-            android:layout_width="wrap_content"
+            android:singleLine="true"
+            android:minWidth="0dp"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content" />
 
         <Button
@@ -104,25 +155,29 @@
             android:focusable="true"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:layout_marginStart="16dp"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp"
-            android:background="@drawable/bg_focus_card"
+            android:layout_marginStart="@dimen/tv_gap_l"
+            android:paddingStart="@dimen/tv_dash_btn_pad_h"
+            android:paddingEnd="@dimen/tv_dash_btn_pad_h"
+            android:paddingTop="@dimen/tv_gap_xs"
+            android:paddingBottom="@dimen/tv_gap_xs"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_pause"
             android:drawableTint="@color/icon_focus_tint"
-            android:drawablePadding="8dp"
+            android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
             android:text="Пауза"
-            android:textColor="@color/mars_text"
-            android:textSize="16sp"
+            android:textAppearance="@style/AppText.Body"
+            android:textAllCaps="false"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:nextFocusDown="@id/chatButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
     </LinearLayout>
 
     <!-- Сетка разделов 4 ряда x 3: ряды height=0dp+weight=1 делят остаток высоты экрана,
-         кнопки match_parent внутри ряда. Все 11 кнопок видны на 540dp без скролла. -->
+         кнопки match_parent внутри ряда. Все 11 кнопок видны на 540dp без скролла.
+         Кнопка = стеклянная карточка: bg_card_glass, подпись AppText.Title,
+         паддинги и иконка из токенов tv_dash_btn_* / tv_icon_m. -->
     <LinearLayout
         android:orientation="horizontal"
         android:clipChildren="false"
@@ -135,9 +190,9 @@
         <Button
             android:id="@+id/chatButton"
             android:text="Чат"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_chat"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -158,9 +213,9 @@
         <Button
             android:id="@+id/projectsButton"
             android:text="Проекты"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_projects"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -181,9 +236,9 @@
         <Button
             android:id="@+id/todosButton"
             android:text="Задачи"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_todos"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -212,9 +267,9 @@
         <Button
             android:id="@+id/musicButton"
             android:text="Музыка"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_music"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -235,9 +290,9 @@
         <Button
             android:id="@+id/cronButton"
             android:text="Cron"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_cron"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -259,9 +314,9 @@
         <Button
             android:id="@+id/settingsButton"
             android:text="Выход"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_settings"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -291,9 +346,9 @@
         <Button
             android:id="@+id/kanbanButton"
             android:text="Канбан"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_kanban"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -314,9 +369,9 @@
         <Button
             android:id="@+id/insightsButton"
             android:text="Аналитика"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_insights"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -338,9 +393,9 @@
         <Button
             android:id="@+id/spacesButton"
             android:text="Пространства"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_spaces"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -370,9 +425,9 @@
         <Button
             android:id="@+id/memoryButton"
             android:text="Память"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_memory"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -392,9 +447,9 @@
         <Button
             android:id="@+id/skillsButton"
             android:text="Скиллы"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_skills"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
@@ -415,9 +470,9 @@
         <Button
             android:id="@+id/profilesButton"
             android:text="Профили"
-            android:textColor="@color/mars_text"
-            android:textSize="22sp"
-            android:background="@drawable/bg_focus_card"
+            android:textAppearance="@style/AppText.Title"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_card_glass"
             android:drawableStart="@drawable/ic_profiles"
             android:drawableTint="@color/icon_focus_tint"
             android:drawablePadding="@dimen/tv_dash_btn_drawable_gap"
