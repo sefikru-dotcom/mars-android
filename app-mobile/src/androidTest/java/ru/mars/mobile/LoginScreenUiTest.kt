@@ -23,6 +23,7 @@ class LoginScreenUiTest {
     @Before
     fun setUp() {
         UiTestHarness.resetState()
+        UiTestHarness.wakeAndUnlock()
         UiTestHarness.radioOff()
     }
 

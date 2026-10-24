@@ -142,6 +142,38 @@ object UiTestHarness {
         }
     }
 
+    /**
+     * Будит устройство и снимает keyguard.
+     *
+     * Headless-эмулятор блокируется повторно ВО ВРЕМЯ прогона: одного снятия в
+     * workflow мало, потому что экран гаснет между тестами, и дальше любое окно
+     * остаётся без window focus (`has-window-focus=false`) — падают все UI-тесты
+     * подряд, независимо от проверяемого поведения. Звать в `@Before` каждого
+     * теста, который поднимает активность.
+     */
+    fun wakeAndUnlock() {
+        DeviceSafetyGuard.requireEmulator("UiTestHarness.wakeAndUnlock")
+        val device = androidx.test.uiautomator.UiDevice.getInstance(
+            InstrumentationRegistry.getInstrumentation()
+        )
+        runCatching { device.wakeUp() }
+        runCatching { device.pressMenu() }
+        // `wm dismiss-keyguard` требует shell-прав — они есть у instrumentation.
+        shell("wm dismiss-keyguard")
+        // keyevent 82 (MENU) на API 34 сам keyguard не снимает, нужен свайп вверх.
+        if (runCatching { device.isNaturalOrientation }.getOrDefault(true)) {
+            runCatching {
+                device.swipe(
+                    device.displayWidth / 2,
+                    (device.displayHeight * 0.85f).toInt(),
+                    device.displayWidth / 2,
+                    (device.displayHeight * 0.25f).toInt(),
+                    20,
+                )
+            }
+        }
+    }
+
     /** Сохраняет фейковый native-credential настоящим прод-хранилищем (только эмулятор). */
     fun seedCredential() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.seedCredential")

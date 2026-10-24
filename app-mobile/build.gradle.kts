@@ -183,4 +183,8 @@ dependencies {
     androidTestImplementation("androidx.test:rules:1.5.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.test.espresso:espresso-intents:3.5.1")
+    // UiDevice нужен, чтобы будить устройство и снимать keyguard перед каждым тестом:
+    // headless-эмулятор снова блокируется во время прогона, и без этого UI-тесты
+    // падают на «has-window-focus=false».
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }

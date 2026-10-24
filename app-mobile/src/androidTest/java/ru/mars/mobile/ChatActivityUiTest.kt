@@ -33,6 +33,7 @@ class ChatActivityUiTest {
     @Before
     fun setUp() {
         UiTestHarness.resetState()
+        UiTestHarness.wakeAndUnlock()
         UiTestHarness.radioOff()
         UiTestHarness.grantRuntimePermissions()
         UiTestHarness.seedCredential()
