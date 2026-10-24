@@ -1,6 +1,7 @@
 package ru.mars.tv
 
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -135,7 +136,7 @@ internal fun TvChatActivity.renderSessionBrowser(sessions: List<SessionItem>) {
  */
 internal fun TvChatActivity.buildSessionListRetry(): Button = Button(this).apply {
     text = TvSessionBrowserPolicy.RETRY_LABEL
-    textSize = 18f
+    setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_label))
     isAllCaps = false
     setTextColor(ContextCompat.getColor(this@buildSessionListRetry, R.color.mars_text))
     setBackgroundResource(R.drawable.bg_focus_card)
@@ -193,7 +194,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.badge?.let { badge ->
         card.addView(TextView(this).apply {
             text = badge.text
-            textSize = 15f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
             setTextColor(ContextCompat.getColor(context, when (badge.tone) {
                 TvSessionBrowserPolicy.BadgeTone.ATTENTION -> R.color.mars_status_warning
                 TvSessionBrowserPolicy.BadgeTone.LIVE -> R.color.mars_status_online
@@ -209,7 +210,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.work?.let { work ->
         card.addView(TextView(this).apply {
             text = work
-            textSize = 15f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
             setTextColor(ContextCompat.getColor(context, R.color.mars_text))
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
@@ -219,7 +220,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.subtitle?.let { subtitle ->
         card.addView(TextView(this).apply {
             text = subtitle
-            textSize = 15f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
             setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END

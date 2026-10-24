@@ -1,6 +1,7 @@
 package ru.mars.tv
 
 import android.util.Log
+import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
 import android.widget.Button
@@ -45,7 +46,10 @@ internal fun TvChatActivity.buildQuickChips() {
     TvQuickChipsPolicy.chips.forEachIndexed { index, chip ->
         val button = Button(this).apply {
             text = chip.label
-            textSize = 18f
+            setTextSize(
+                TypedValue.COMPLEX_UNIT_PX,
+                resources.getDimension(R.dimen.tv_text_label),
+            )
             isAllCaps = false
             setTextColor(ContextCompat.getColor(this@buildQuickChips, R.color.mars_text))
             setBackgroundResource(R.drawable.bg_focus_card)
