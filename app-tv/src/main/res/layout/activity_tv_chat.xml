@@ -270,15 +270,15 @@
         <!-- Лента: пол высоты tv_chat_transcript_min_h (180dp). Бюджет 540dp: поля 28 +
              шапка 52 + зазор 8 + композер 48 = 136dp хрома, клавиатура 224dp ->
              остаток 180dp (два сообщения вместо одного; без клавиатуры 356dp).
-             ВАЖНО: контейнер идёт с height=0dp + weight=1, а minHeight на таком
-             контейнере LinearLayout НЕ соблюдает — при 200dp он распирал экран и
-             выталкивал композер под клавиатуру. Пол держится арифметикой бюджета
-             (TvChatScaleContractTest), а не атрибутом.
+             ВАЖНО: height=0dp + weight=1. minHeight на вертикальном LinearLayout тут
+             ставить НЕЛЬЗЯ: при открытой клавиатуре окно сжимается до ~318dp, и пол
+             вместе с весом выдавливал шапку с экрана (заголовок и «назад» исчезали).
+             Пол 180dp держится арифметикой бюджета (TvChatScaleContractTest), а шапка
+             должна остаться видимой всегда.
              Ряд чипсов на время IME скрывается целиком
              (TvChatActivity.attachImeChipCollapse) — иначе лента получала 106dp. -->
         <FrameLayout
             android:layout_width="match_parent"
-            android:minHeight="@dimen/tv_chat_transcript_min_h"
             android:layout_height="0dp"
             android:layout_weight="1">
 
@@ -287,13 +287,11 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:scrollbars="none"
-                android:minHeight="@dimen/tv_chat_transcript_min_h"
                 android:fillViewport="true">
 
                 <LinearLayout
                     android:id="@+id/messages"
                     android:orientation="vertical"
-                    android:minHeight="@dimen/tv_chat_transcript_min_h"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content" />
             </ScrollView>

@@ -117,6 +117,31 @@ class TvChatScaleContractTest {
     }
 
     @Test
+    fun `transcript never squeezes the header off screen`() {
+        // Живой регресс на Mi TV: при открытой клавиатуре окно сжимается до ~318dp,
+        // и minHeight ленты вместе с weight выдавливал шапку за верхний край —
+        // заголовок и кнопка «назад» исчезали полностью.
+        // Гарантия: на контейнере ленты НЕТ minHeight (пол держится бюджетом),
+        // а активность обязана ужиматься под клавиатуру (adjustResize), иначе окно
+        // ведёт себя непредсказуемо на разных прошивках.
+        val transcript = chat.substring(
+            chat.indexOf("android:id=\"@+id/messageScroll\"") - 400,
+            chat.indexOf("android:id=\"@+id/messageScroll\""),
+        )
+        assertFalse(
+            "на контейнере ленты не должно быть minHeight: он выдавливает шапку при IME",
+            transcript.contains("android:minHeight"),
+        )
+
+        val manifest = File(moduleDir, "src/main/AndroidManifest.xml").readText()
+        assertTrue(
+            "TvChatActivity должен ужиматься под клавиатуру (adjustResize)",
+            manifest.contains("TvChatActivity\"") &&
+                manifest.contains("android:windowSoftInputMode=\"adjustResize\""),
+        )
+    }
+
+    @Test
     fun `composer and chips rows are sized by tokens`() {
         assertEquals("@dimen/tv_chat_composer_h", attr("messageInput", "layout_height"))
         assertEquals("@dimen/tv_chat_composer_h", attr("sendButton", "layout_height"))
