@@ -35,6 +35,7 @@ class ChatSessionsUiTest {
     fun setUp() {
         UiTestHarness.resetState()
         UiTestHarness.radioOff()
+        UiTestHarness.grantRuntimePermissions()
         UiTestHarness.seedCredential()
         UiTestHarness.seedSessionCache()
     }

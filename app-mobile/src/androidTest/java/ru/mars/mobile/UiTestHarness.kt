@@ -118,6 +118,26 @@ object UiTestHarness {
         }
     }
 
+    /**
+     * Выдаёт runtime-разрешения, которые приложение запрашивает при старте, ДО запуска
+     * активности.
+     *
+     * Зачем: `ChatActivity` на входе вызывает `PushNotifications.ensurePostPermission`, и на
+     * API 33+ системный диалог POST_NOTIFICATIONS уводит активность из RESUMED. Espresso
+     * считает такую активность отсутствующей (`NoActivityResumedException`), и UI-тест падает
+     * не на своём предмете, а на модальном диалоге ОС. `pm grant` снимает диалог, оставляя
+     * поведение приложения неизменным.
+     */
+    fun grantRuntimePermissions() {
+        DeviceSafetyGuard.requireEmulator("UiTestHarness.grantRuntimePermissions")
+        listOf(
+            android.Manifest.permission.POST_NOTIFICATIONS,
+            android.Manifest.permission.RECORD_AUDIO,
+        ).forEach { permission ->
+            shell("pm grant ${targetContext.packageName} $permission")
+        }
+    }
+
     /** Сохраняет фейковый native-credential настоящим прод-хранилищем (только эмулятор). */
     fun seedCredential() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.seedCredential")
