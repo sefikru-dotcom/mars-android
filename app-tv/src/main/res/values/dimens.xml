@@ -5,44 +5,98 @@
      ориентация всегда landscape. Все layout обязаны брать размеры отсюда,
      хардкод dp в экранах не добавлять.
 
-     Вертикальный бюджет дашборда (худший случай, мини-плеер виден):
-       pad_top 20 + шапка(логотип/часы) 86 + nowPlaying 53 + gap 12
-       + сетка 4 ряда + pad_bottom 16 = 540dp
-       -> ряд кнопок = (540-187-3*row_gap 8)/4 ≈ 82dp  (>= tv_dash_btn_min_h 64dp)
-     Ряды сетки на layout_weight: на низком экране кнопки автоматически
-     компактнее, на высоком — растягиваются, скролл не нужен. -->
+     ВЕРТИКАЛЬНЫЙ БЮДЖЕТ. 540dp делятся так (худший случай — клавиатура открыта):
+       шапка 52 + лента >=200 + чипсы 44 + композер 48 + поля 36 = 380dp,
+       клавиатура 224dp -> вместе 604dp; поэтому ряд чипсов при открытом IME
+       схлопывается (tv_chat_chips_h = 0dp через code path), и лента получает
+       свои 200dp. Без IME бюджет: 52 + лента + 44 + 48 + 36.
+
+     Дашборд: pad_top 20 + шапка 76 + nowPlaying 50 + gap 12 + сетка 4x72
+       + 3*row_gap 8 + pad_bottom 16 = 486dp, остаток уходит в ленту/растяжение.
+
+     ШКАЛА ТЕКСТА (единая, шаг не 1sp): см. styles.xml TextAppearance.*;
+     минимальный кегль 11sp, максимальный 40sp. Новые кегли не вводить. -->
 <resources>
 
-    <!-- Каркас экрана (все Activity) -->
-    <dimen name="tv_screen_pad_h">28dp</dimen>
-    <dimen name="tv_screen_pad_top">20dp</dimen>
-    <dimen name="tv_screen_pad_bottom">16dp</dimen>
-    <dimen name="tv_header_gap">16dp</dimen>
+    <!-- ══ Отступы: единственная шкала, шаг 4dp ══ -->
+    <dimen name="tv_gap_xs">4dp</dimen>
+    <dimen name="tv_gap_s">8dp</dimen>
+    <dimen name="tv_gap_m">12dp</dimen>
+    <dimen name="tv_gap_l">16dp</dimen>
+    <dimen name="tv_gap_xl">24dp</dimen>
 
-    <!-- Дашборд: шапка -->
-    <dimen name="tv_dash_logo">40dp</dimen>
-    <dimen name="tv_dash_now_margin">10dp</dimen>
-    <dimen name="tv_dash_now_pad_v">6dp</dimen>
+    <!-- ══ Кегли текста (дублируют styles.xml для программного рендера) ══ -->
+    <dimen name="tv_text_display">40sp</dimen>
+    <dimen name="tv_text_headline">28sp</dimen>
+    <dimen name="tv_text_title">20sp</dimen>
+    <dimen name="tv_text_body">16sp</dimen>
+    <dimen name="tv_text_label">14sp</dimen>
+    <dimen name="tv_text_micro">12sp</dimen>
 
-    <!-- Дашборд: сетка кнопок -->
-    <dimen name="tv_dash_grid_gap_top">12dp</dimen>
-    <dimen name="tv_dash_row_gap">8dp</dimen>
-    <dimen name="tv_dash_btn_col_gap">12dp</dimen>
-    <dimen name="tv_dash_btn_pad_h">20dp</dimen>
-    <dimen name="tv_dash_btn_drawable_gap">12dp</dimen>
+    <!-- Межстрочные интервалы (множитель line-height/размер) -->
+    <integer name="tv_line_display">120</integer>
+    <integer name="tv_line_headline">129</integer>
+    <integer name="tv_line_title">140</integer>
+    <integer name="tv_line_body">150</integer>
+    <integer name="tv_line_label">143</integer>
+
+    <!-- ══ Каркас экрана (все Activity) ══ -->
+    <dimen name="tv_screen_pad_h">24dp</dimen>
+    <dimen name="tv_screen_pad_top">16dp</dimen>
+    <dimen name="tv_screen_pad_bottom">12dp</dimen>
+    <dimen name="tv_header_gap">12dp</dimen>
+    <dimen name="tv_header_h">52dp</dimen>
+
+    <!-- Заголовок экрана: минимальная ширина, ниже которой он не сжимается -->
+    <dimen name="tv_title_min_w">180dp</dimen>
+
+    <!-- ══ Кнопки ══ -->
+    <dimen name="tv_btn_h">40dp</dimen>
+    <dimen name="tv_btn_icon_h">40dp</dimen>
+    <dimen name="tv_btn_pad_h">12dp</dimen>
+    <dimen name="tv_btn_gap">8dp</dimen>
+    <dimen name="tv_btn_icon_gap">6dp</dimen>
+    <dimen name="tv_icon_s">20dp</dimen>
+    <dimen name="tv_icon_m">24dp</dimen>
+
+    <!-- ══ Карточки и списки ══ -->
+    <dimen name="tv_card_pad">16dp</dimen>
+    <dimen name="tv_card_pad_compact">12dp</dimen>
+    <dimen name="tv_card_gap">8dp</dimen>
+    <dimen name="tv_card_corner">12dp</dimen>
+    <dimen name="tv_row_min_h">48dp</dimen>
+
+    <!-- ══ Дашборд ══ -->
+    <dimen name="tv_dash_logo">32dp</dimen>
+    <dimen name="tv_dash_now_margin">8dp</dimen>
+    <dimen name="tv_dash_now_pad_v">4dp</dimen>
+    <dimen name="tv_dash_grid_gap_top">10dp</dimen>
+    <dimen name="tv_dash_row_gap">6dp</dimen>
+    <dimen name="tv_dash_btn_col_gap">10dp</dimen>
+    <dimen name="tv_dash_btn_pad_h">14dp</dimen>
+    <dimen name="tv_dash_btn_drawable_gap">10dp</dimen>
     <dimen name="tv_dash_btn_min_h">64dp</dimen>
 
-    <!-- Музыка -->
-    <dimen name="tv_music_control_h">56dp</dimen>
-    <dimen name="tv_music_row_gap">14dp</dimen>
+    <!-- ══ Музыка ══ -->
+    <dimen name="tv_music_control_h">44dp</dimen>
+    <dimen name="tv_music_row_gap">10dp</dimen>
 
-    <!-- Чат -->
-    <dimen name="tv_chat_composer_h">56dp</dimen>
-    <dimen name="tv_chat_row_gap">10dp</dimen>
+    <!-- ══ Чат ══ -->
+    <dimen name="tv_chat_composer_h">48dp</dimen>
+    <dimen name="tv_chat_row_gap">8dp</dimen>
+    <dimen name="tv_chat_chips_h">40dp</dimen>
+    <dimen name="tv_chat_transcript_min_h">200dp</dimen>
+    <dimen name="tv_chat_bubble_pad_h">14dp</dimen>
+    <dimen name="tv_chat_bubble_pad_v">10dp</dimen>
+    <dimen name="tv_chat_bubble_gap">8dp</dimen>
 
-    <!-- Вход (pairing) -->
-    <dimen name="tv_pair_logo">72dp</dimen>
-    <dimen name="tv_pair_field_h">64dp</dimen>
-    <dimen name="tv_pair_form_gap">24dp</dimen>
+    <!-- ══ Вход (pairing) ══ -->
+    <dimen name="tv_pair_logo">56dp</dimen>
+    <dimen name="tv_pair_field_h">48dp</dimen>
+    <dimen name="tv_pair_form_gap">16dp</dimen>
+
+    <!-- ══ Фон и стеклянные карточки ══ -->
+    <dimen name="tv_bg_card_alpha">72</dimen>
+    <dimen name="tv_card_stroke">1dp</dimen>
 
 </resources>
