@@ -2,6 +2,7 @@ package ru.mars.tv
 
 import android.view.View
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import ru.mars.network.repository.ProviderQuotaOutcome
