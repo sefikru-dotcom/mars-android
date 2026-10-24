@@ -47,8 +47,7 @@
             android:textAppearance="@style/AppText.Headline"
             android:textStyle="bold"
             android:layout_marginStart="@dimen/tv_gap_l"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content" />
 
         <TextView
@@ -61,7 +60,9 @@
             android:gravity="end"
             android:maxWidth="560dp"
             android:accessibilityLiveRegion="polite"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:minWidth="0dp"
             android:layout_height="wrap_content" />
 
         <Button
