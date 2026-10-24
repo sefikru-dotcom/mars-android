@@ -135,8 +135,8 @@ internal fun TvChatActivity.renderSessionBrowser(sessions: List<SessionItem>) {
  */
 internal fun TvChatActivity.buildSessionListRetry(): Button = Button(this).apply {
     text = TvSessionBrowserPolicy.RETRY_LABEL
-            tvTextSize(R.dimen.tv_text_body)
-            isAllCaps = false
+    tvTextSize(R.dimen.tv_text_body)
+    isAllCaps = false
     setTextColor(ContextCompat.getColor(this@buildSessionListRetry, R.color.mars_text))
     setBackgroundResource(R.drawable.bg_focus_card)
     minWidth = 0
