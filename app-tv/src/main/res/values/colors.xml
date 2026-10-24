@@ -45,4 +45,16 @@
 
     <!-- Session browser overlay scrim (85% of the base background) -->
     <color name="mars_scrim">#D907080B</color>
+
+    <!-- ═══ Стекло поверх фона с планетой ═══
+         Заливка 72% альфы от surface: планета просвечивает, но текст
+         остаётся читаемым. Focus — заметно светлее + рубиновая рамка. -->
+    <color name="mars_glass_fill">#B8131822</color>
+    <color name="mars_glass_fill_focused">#D91B2130</color>
+    <color name="mars_glass_stroke">#33FFFFFF</color>
+
+    <!-- Затемняющий слой над фотографией фона: держит контраст текста
+         независимо от яркости участка Марса под ним. -->
+    <color name="mars_bg_scrim">#E007080B</color>
+    <color name="mars_bg_scrim_soft">#9907080B</color>
 </resources>
