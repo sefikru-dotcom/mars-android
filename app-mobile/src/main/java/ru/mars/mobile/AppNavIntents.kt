@@ -56,6 +56,8 @@ object AppNavIntents {
         AppDestination.SKILLS -> Intent(context, SkillsActivity::class.java)
         AppDestination.KANBAN -> KanbanActivity.newIntent(context)
         AppDestination.ANALYTICS -> InsightsActivity.newIntent(context)
+        // Каталог пространств и выбор рабочего контекста для следующих сообщений.
+        AppDestination.SPACES -> Intent(context, SpacesActivity::class.java)
         AppDestination.SETTINGS -> Intent(context, SettingsActivity::class.java)
     }
 

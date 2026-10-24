@@ -7,6 +7,8 @@ import org.junit.Test
 /**
  * Контракт левого бара: только приложенческие разделы, «Чат» первым,
  * «Настройки» последними, дубли входов сокращены, logout — один хост.
+ * «Пространства» — полноценный раздел: экран вернулся в mobile, вход у него
+ * единственный (строка бара), поэтому раздел стоит перед «Настройками».
  */
 class AppSectionsPolicyTest {
 
@@ -15,7 +17,7 @@ class AppSectionsPolicyTest {
         assertEquals(AppDestination.entries, AppSectionsPolicy.sections)
         assertEquals(AppDestination.CHAT, AppSectionsPolicy.sections.first())
         assertEquals(AppDestination.SETTINGS, AppSectionsPolicy.sections.last())
-        assertEquals(10, AppSectionsPolicy.sections.size)
+        assertEquals(11, AppSectionsPolicy.sections.size)
     }
 
     @Test
@@ -26,10 +28,22 @@ class AppSectionsPolicyTest {
     }
 
     @Test
-    fun `duplicate entries are reduced - spaces and logs are not sections`() {
+    fun `duplicate entries are reduced - logs are not a section`() {
+        // Логи живут внутри «Аналитики», отдельного входа в баре нет. Пространства,
+        // наоборот, раздел: экран самостоятельный, дубля внутри других экранов нет.
         val keys = AppSectionsPolicy.sections.map { it.key }
-        assertTrue("spaces" !in keys)
         assertTrue("logs" !in keys)
+        assertTrue("spaces" in keys)
+        assertEquals(1, keys.count { it == "spaces" })
+    }
+
+    @Test
+    fun `spaces sits right before settings`() {
+        // «Настройки» всегда последние; «Пространства» — предпоследний раздел.
+        assertEquals(
+            listOf(AppDestination.SPACES, AppDestination.SETTINGS),
+            AppSectionsPolicy.sections.takeLast(2),
+        )
     }
 
     @Test

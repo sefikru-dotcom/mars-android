@@ -55,6 +55,9 @@
         <activity android:name=".TodosActivity" />
         <activity android:name=".CronActivity" />
         <activity android:name=".SettingsActivity" />
+        <!-- Каталог рабочих пространств (GET /api/workspaces) и выбор контекста
+             следующих сообщений: раздел левого бара AppDestination.SPACES. -->
+        <activity android:name=".SpacesActivity" />
         <!-- Read-only список профилей сервера (GET /api/profiles): вход из Настройки. -->
         <activity android:name=".ProfilesActivity" />
         <!-- Read-only доска канбана (GET /api/kanban/*) и мониторинг; запуск из левого бара (AppNavIntents.sectionIntent). -->
