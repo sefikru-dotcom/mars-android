@@ -4,6 +4,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.Espresso.pressBack
 import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.closeSoftKeyboard
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withClassName
@@ -90,6 +91,9 @@ class ChatActivityUiTest {
             waitUntilDisplayed(withHint("Искать в диалоге…"))
 
             // Back закрывает поиск первым (CLOSE_SEARCH), пользователь остаётся в диалоге.
+            // Клавиатуру закрываем ДО Back: пока поле в фокусе, первый Back съедает IME,
+            // панель остаётся открытой, и проверка ниже падает не на поведении экрана.
+            closeSoftKeyboard()
             pressBack()
             onView(withHint("Искать в диалоге…")).check(matches(not(isDisplayed())))
             onView(withText("МАРС")).check(matches(isDisplayed()))

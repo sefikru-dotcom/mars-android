@@ -99,8 +99,10 @@ class ChatSessionsUiTest {
     @Test
     fun search_filtersList_andShowsEmptyStateOnNoMatch() {
         launchAndWaitForList().use {
+            // replaceText, а не typeText: IME эмулятора не умеет транслировать кириллицу
+            // в key events, и typeText падает с «Failed to get key events for string».
             onView(withHint("Поиск диалогов…")).perform(
-                typeText(UiTestHarness.OTHER_TITLE), closeSoftKeyboard()
+                replaceText(UiTestHarness.OTHER_TITLE), closeSoftKeyboard()
             )
             waitUntilDisplayed(withText(UiTestHarness.OTHER_TITLE))
             onView(withText(UiTestHarness.PARENT_TITLE)).check(doesNotExist())
