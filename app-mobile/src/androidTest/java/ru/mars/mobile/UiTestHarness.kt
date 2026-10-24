@@ -227,17 +227,41 @@ object UiTestHarness {
                 onView(matcher).check(matches(not(isDisplayed())))
                 true
             } catch (missing: androidx.test.espresso.NoMatchingViewException) {
-                // View больше нет в иерархии — это ожидаемый исход «исчезло».
+                // View больше нет в иерархии — ожидаемый исход «исчезло».
                 true
             } catch (t: Throwable) {
-                // Прочие сбои (например, неоднозначный матчер) — НЕ «исчезло»:
-                // пробрасываем, иначе проверка станет вечно зелёной.
-                throw t
+                // Неоднозначный матчер ждать не имеет смысла — падаем сразу.
+                if (hasCause(t, androidx.test.espresso.AmbiguousViewMatcherException::class.java)) {
+                    throw AssertionError(
+                        "Матчер неоднозначен — совпало несколько view. Уточните матчер: $matcher",
+                        t,
+                    )
+                }
+                // Иначе view ЕЩЁ видима — нормальный промежуточный результат, опрашиваем дальше.
+                false
             }
             if (gone) return
             SystemClock.sleep(250)
         }
         throw AssertionError("View $matcher не исчезла за ${timeoutMs}ms")
+    }
+
+    /**
+     * Есть ли в цепочке причин исключение типа [type].
+     *
+     * Нужно потому, что Espresso заворачивает свои сбои в
+     * `AssertionFailedWithCauseError` (наследник [AssertionError]), так что судить по
+     * верхнему типу исключения нельзя: «ещё видима» и «матчер неоднозначен» приходят
+     * с одинаковой обёрткой и различаются только причиной.
+     */
+    private fun <T : Throwable> hasCause(error: Throwable, type: Class<T>): Boolean {
+        var cause: Throwable? = error
+        var guard = 0
+        while (cause != null && guard++ < 10) {
+            if (type.isInstance(cause)) return true
+            cause = cause.cause
+        }
+        return false
     }
 
     /**
@@ -252,16 +276,17 @@ object UiTestHarness {
             try {
                 onView(matcher).check(matches(isDisplayed()))
                 return
-            } catch (ambiguous: androidx.test.espresso.AmbiguousViewMatcherException) {
-                // Матчер совпал с несколькими view — это НЕ «ещё не появилось»: ждать
-                // бессмысленно, условие не выполнится никогда. Пробрасываем сразу, иначе
-                // реальная причина (нужен allOf/уточнение) тонет в «не появилась за 20s».
-                throw AssertionError(
-                    "Матчер неоднозначен — совпало несколько view. Уточните матчер " +
-                        "(allOf/withClassName): $matcher",
-                    ambiguous,
-                )
             } catch (t: Throwable) {
+                // Неоднозначный матчер — это НЕ «ещё не появилось»: ждать бессмысленно,
+                // условие не выполнится никогда. Проверяем по цепочке причин, потому что
+                // Espresso заворачивает свой сбой в AssertionFailedWithCauseError.
+                if (hasCause(t, androidx.test.espresso.AmbiguousViewMatcherException::class.java)) {
+                    throw AssertionError(
+                        "Матчер неоднозначен — совпало несколько view. Уточните матчер " +
+                            "(allOf/withClassName): $matcher",
+                        t,
+                    )
+                }
                 lastError = t
                 SystemClock.sleep(250)
             }
