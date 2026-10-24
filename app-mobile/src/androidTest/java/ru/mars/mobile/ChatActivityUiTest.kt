@@ -20,6 +20,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import ru.mars.mobile.UiTestHarness.waitUntilDisplayed
+import ru.mars.mobile.UiTestHarness.waitUntilGone
 
 /**
  * UI-тесты уровня «диалог» ([ChatActivity]): запуск без сервера, шторка
@@ -79,7 +80,7 @@ class ChatActivityUiTest {
 
     @Test
     fun transcriptSearch_opensViaHeaderButton_andBackClosesItStayingInChat() {
-        ActivityScenario.launch(ChatActivity::class.java).use {
+        ActivityScenario.launch(ChatActivity::class.java).use { scenario ->
             waitUntilDisplayed(withText("МАРС"))
             // Описание «Поиск по диалогу» носят ДВА элемента: кнопка в шапке и поле ввода
             // в раскрытой панели. Кликаем именно по кнопке (ImageButton), иначе Espresso
@@ -94,11 +95,13 @@ class ChatActivityUiTest {
             // Клавиатуру закрываем ДО Back: пока поле в фокусе, первый Back съедает IME,
             // панель остаётся открытой, и проверка ниже падает не на поведении экрана.
             closeSoftKeyboard()
-            pressBack()
-            // Проверяем по EditText: подсказка «Искать в диалоге…» уникальна, но поле
-            // остаётся в иерархии после закрытия панели (GONE) — так видно именно
-            // состояние панели, а не наличие view.
-            onView(withHint("Искать в диалоге…")).check(matches(not(isDisplayed())))
+            // Back отправляем в диспетчер самой активности, а не системным pressBack():
+            // на эмуляторе с IME системное нажатие может уйти клавиатуре, и тест тогда
+            // проверяет работу IME, а не NavBackPolicy приложения.
+            scenario.onActivity { activity ->
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+            waitUntilGone(withHint("Искать в диалоге…"))
             onView(withText("МАРС")).check(matches(isDisplayed()))
         }
     }

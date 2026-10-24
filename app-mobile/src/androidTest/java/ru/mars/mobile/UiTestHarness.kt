@@ -8,6 +8,7 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.platform.app.InstrumentationRegistry
 import org.hamcrest.Matcher
+import org.hamcrest.Matchers.not
 import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
@@ -210,6 +211,33 @@ object UiTestHarness {
             )
         )
         check(savedMessages) { "SessionOfflineCache отклонил запись транскрипта" }
+    }
+
+    /**
+     * Ждёт, пока [matcher] перестанет отображаться (или исчезнет из иерархии).
+     *
+     * Зачем отдельно от [waitUntilDisplayed]: экран перерисовывается отложенно
+     * (дебаунс ввода, асинхронная загрузка), поэтому `check(doesNotExist())` сразу
+     * после действия видит СТАРУЮ иерархию и падает не на поведении, а на гонке.
+     */
+    fun waitUntilGone(matcher: Matcher<View>, timeoutMs: Long = 20_000) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            val gone = try {
+                onView(matcher).check(matches(not(isDisplayed())))
+                true
+            } catch (missing: androidx.test.espresso.NoMatchingViewException) {
+                // View больше нет в иерархии — это ожидаемый исход «исчезло».
+                true
+            } catch (t: Throwable) {
+                // Прочие сбои (например, неоднозначный матчер) — НЕ «исчезло»:
+                // пробрасываем, иначе проверка станет вечно зелёной.
+                throw t
+            }
+            if (gone) return
+            SystemClock.sleep(250)
+        }
+        throw AssertionError("View $matcher не исчезла за ${timeoutMs}ms")
     }
 
     /**

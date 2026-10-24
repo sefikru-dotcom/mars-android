@@ -25,6 +25,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import ru.mars.mobile.UiTestHarness.waitUntilDisplayed
+import ru.mars.mobile.UiTestHarness.waitUntilGone
 
 /**
  * UI-тесты уровня «Диалоги» ([ChatSessionsActivity]) на seeded офлайн-кэше:
@@ -117,7 +118,10 @@ class ChatSessionsUiTest {
                 withClassName(equalTo(android.widget.Button::class.java.name)),
                 withText(UiTestHarness.OTHER_TITLE),
             ))
-            onView(withText(UiTestHarness.PARENT_TITLE)).check(doesNotExist())
+            // Рендер списка отложен дебаунсом (RENDER_DEBOUNCE_MS), поэтому проверка
+            // «родителя больше нет» должна ДОЖДАТЬСЯ перерисовки, а не читать иерархию
+            // мгновенно: иначе тест видит старый список и падает не на фильтре.
+            waitUntilGone(withText(UiTestHarness.PARENT_TITLE))
 
             onView(withHint("Поиск диалогов…")).perform(
                 replaceText("zzz-такого-диалога-нет"), closeSoftKeyboard()
