@@ -135,8 +135,8 @@ internal fun TvChatActivity.renderSessionBrowser(sessions: List<SessionItem>) {
  */
 internal fun TvChatActivity.buildSessionListRetry(): Button = Button(this).apply {
     text = TvSessionBrowserPolicy.RETRY_LABEL
-    tvTextSize(R.dimen.tv_text_body)
-    isAllCaps = false
+            tvTextSize(R.dimen.tv_text_body)
+            isAllCaps = false
     setTextColor(ContextCompat.getColor(this@buildSessionListRetry, R.color.mars_text))
     setBackgroundResource(R.drawable.bg_focus_card)
     minWidth = 0
@@ -195,7 +195,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.badge?.let { badge ->
         card.addView(TextView(this).apply {
             text = badge.text
-            tvTextSize(R.dimen.tv_text_label)
+            tvTextSize(R.dimen.tv_text_micro)
             setTextColor(ContextCompat.getColor(context, when (badge.tone) {
                 TvSessionBrowserPolicy.BadgeTone.ATTENTION -> R.color.mars_status_warning
                 TvSessionBrowserPolicy.BadgeTone.LIVE -> R.color.mars_status_online

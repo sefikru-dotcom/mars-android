@@ -1,6 +1,7 @@
 package ru.mars.tv
 
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -50,9 +51,14 @@ internal fun TvChatActivity.buildBubble(author: String, text: String, isUser: Bo
 /** Плоский текстовый пузырь (прежний рендер): пользователь, пустой placeholder, обычный ответ. */
 internal fun TvChatActivity.plainBubble(author: String, text: String, isUser: Boolean): TextView = TextView(this).apply {
     this.text = "$author: $text"
-    textSize = 22f
+    // Кегль — ТОЛЬКО из шкалы (tv_text_*). Единица указывается явно: свойство
+    // `textSize` трактует число как SP, а getDimension отдаёт PX — на xhdpi
+    // «16dp» превратилось бы в 32sp и лента разъехалась бы.
+    setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_body))
     setTextColor(ContextCompat.getColor(context, R.color.mars_text))
-    setPadding(dp(24), dp(16), dp(24), dp(16))
+    val padH = resources.getDimensionPixelSize(R.dimen.tv_chat_bubble_pad_h)
+    val padV = resources.getDimensionPixelSize(R.dimen.tv_chat_bubble_pad_v)
+    setPadding(padH, padV, padH, padV)
     setBackgroundResource(if (isUser) R.drawable.bg_bubble_user else R.drawable.bg_bubble_bot)
     isFocusable = true
     TvFocusLift.attach(this, reducedMotion)
@@ -60,7 +66,9 @@ internal fun TvChatActivity.plainBubble(author: String, text: String, isUser: Bo
 
 /** Общие параметры пузыря в ленте (отступ сверху). */
 internal fun TvChatActivity.bubbleParams(): LinearLayout.LayoutParams =
-    LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+    LinearLayout.LayoutParams(-1, -2).apply {
+        topMargin = resources.getDimensionPixelSize(R.dimen.tv_chat_bubble_gap)
+    }
 
 /**
  * Добавление в ленту с общим cap'ом ([TvTranscriptRetentionPolicy.trimPlan]):
@@ -84,9 +92,14 @@ internal fun TvChatActivity.addTranscriptView(view: View, params: LinearLayout.L
 internal fun TvChatActivity.appendActivityLine(line: String) {
     val view = TextView(this).apply {
         text = line
-        textSize = 18f
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_label))
         setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
-        setPadding(dp(18), dp(8), dp(18), dp(8))
+        setPadding(
+            resources.getDimensionPixelSize(R.dimen.tv_gap_l),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_s),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_l),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_s),
+        )
         setBackgroundResource(R.drawable.bg_thinking)
         maxLines = 2
         ellipsize = TextUtils.TruncateAt.END
@@ -95,7 +108,9 @@ internal fun TvChatActivity.appendActivityLine(line: String) {
         tag = TvChatActivity.TAG_ACTIVITY_LINE
     }
     activityLineViews.addLast(view)
-    addTranscriptView(view, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+    addTranscriptView(view, LinearLayout.LayoutParams(-1, -2).apply {
+        topMargin = resources.getDimensionPixelSize(R.dimen.tv_gap_s)
+    })
     enforceActivityLineCap()
 }
 
@@ -305,10 +320,15 @@ internal fun TvChatActivity.buildToolGroupRow(row: TvSessionBrowserPolicy.Transc
         orientation = LinearLayout.VERTICAL
         setBackgroundResource(R.drawable.bg_focus_card)
         isFocusable = false
-        setPadding(dp(22), dp(12), dp(22), dp(12))
+        setPadding(
+            resources.getDimensionPixelSize(R.dimen.tv_gap_xl),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_m),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_xl),
+            resources.getDimensionPixelSize(R.dimen.tv_gap_m),
+        )
         addView(TextView(this@buildToolGroupRow).apply {
             text = row.text
-            textSize = 17f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_label))
             setTextColor(ContextCompat.getColor(context, R.color.mars_status_online))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
@@ -316,11 +336,11 @@ internal fun TvChatActivity.buildToolGroupRow(row: TvSessionBrowserPolicy.Transc
         TvToolGroupPolicy.namesLine(row.toolNames).takeIf { it.isNotEmpty() }?.let { names ->
             addView(TextView(this@buildToolGroupRow).apply {
                 text = names
-                textSize = 15f
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
                 setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
-                setPadding(0, dp(4), 0, 0)
+                setPadding(0, resources.getDimensionPixelSize(R.dimen.tv_gap_xs), 0, 0)
             })
         }
     }
@@ -351,9 +371,14 @@ internal fun TvChatActivity.swapTranscript(prepared: LinearLayout) {
  */
 internal fun TvChatActivity.buildHiddenMarker(text: String?): TextView = TextView(this).apply {
     this.text = text.orEmpty()
-    textSize = 15f
+    setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
     setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
-    setPadding(dp(24), dp(10), dp(24), dp(4))
+    setPadding(
+        resources.getDimensionPixelSize(R.dimen.tv_gap_xl),
+        resources.getDimensionPixelSize(R.dimen.tv_chat_bubble_pad_v),
+        resources.getDimensionPixelSize(R.dimen.tv_gap_xl),
+        resources.getDimensionPixelSize(R.dimen.tv_gap_xs),
+    )
     isFocusable = false
     tag = TvChatActivity.TAG_HIDDEN_MARKER
 }
