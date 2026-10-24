@@ -58,26 +58,40 @@ class TvBackgroundLayerTest {
     }
 
     @Test
-    fun `root layer references the photo and the text scrim`() {
-        val xml = xmlWithoutComments(rootLayer)
-        assertTrue("bg_tv_root.xml не ссылается на @drawable/bg_mars_photo", xml.contains("@drawable/bg_mars_photo"))
-        assertTrue("bg_tv_root.xml не ссылается на @color/mars_bg_scrim", xml.contains("@color/mars_bg_scrim"))
-        assertTrue("фон должен остаться layer-list", xml.contains("<layer-list"))
-        assertEquals("слоёв ровно три: фото, scrim, виньетка", 3, Regex("<item\\b").findAll(xml).count())
-    }
-
-    @Test
     fun `bitmap layer comes before the darkening layers`() {
         val xml = xmlWithoutComments(rootLayer)
         val photoAt = xml.indexOf("@drawable/bg_mars_photo")
-        val scrimAt = xml.indexOf("@color/mars_bg_scrim")
         assertTrue("в bg_tv_root.xml нет bitmap-слоя", photoAt >= 0)
-        assertTrue("в bg_tv_root.xml нет затемняющего слоя", scrimAt >= 0)
+        assertTrue(
+            "в bg_tv_root.xml нет ни одного затемняющего слоя (shape с solid/gradient)",
+            xml.contains("<solid") || xml.contains("<gradient"),
+        )
+        // Первый shape должен идти строго после bitmap, иначе фото перекроет затемнение.
+        val firstShapeAt = listOf(xml.indexOf("<solid"), xml.indexOf("<gradient"))
+            .filter { it >= 0 }.minOrNull() ?: -1
         assertTrue(
             "bitmap должен идти ДО затемнения: иначе фотография перекроет интерфейс " +
-                "(photo@$photoAt, scrim@$scrimAt)",
-            photoAt < scrimAt,
+                "(photo@$photoAt, shape@$firstShapeAt)",
+            photoAt < firstShapeAt,
         )
+    }
+
+    @Test
+    fun `background layers do not double-darken an already graded photo`() {
+        // Основное затемнение впечено в JPEG при сборке кадра. Если слой в
+        // layer-list снова плотный, они складываются: фон темнеет вдвое и
+        // планета пропадает. Раньше тут стоял градиент с 88% слева — это было
+        // под прежний кадр с планетой справа; для симметричного кадра он
+        // делает левую треть чёрной без причины.
+        val xml = xmlWithoutComments(rootLayer)
+        val alphas = Regex("""#([0-9A-Fa-f]{2})[0-9A-Fa-f]{6}""")
+            .findAll(xml)
+            .map { it.groupValues[1].toInt(16) / 255.0 }
+            .toList()
+        assertTrue("в bg_tv_root.xml не нашлось цветов с альфой", alphas.isNotEmpty())
+        alphas.forEach { a ->
+            assertTrue("слой затемнения с альфой ${"%.2f".format(a)} — слишком плотный поверх уже затемнённого фото", a <= 0.40)
+        }
     }
 
     @Test

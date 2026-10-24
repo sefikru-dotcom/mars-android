@@ -23,11 +23,17 @@ class TvGlassContrastTest {
     private val moduleDir = File(System.getProperty("user.dir"))
     private val colorsXml = File(moduleDir, "src/main/res/values/colors.xml")
 
-    /** Самый светлый пиксель bg_mars_photo (замерен по факту, не гипотеза). */
-    private val brightest = Triple(200, 186, 120)
+    /**
+     * Самый светлый пиксель под сеткой карточек — замерен по факту на
+     * текущем bg_mars_photo (апскейл присланной владельцем картинки 600x337).
+     * Это правый край лимба планеты: он приходится на середину кадра, и
+     * именно там стекло обязано держать акцент. Если фон заменят, значение
+     * надо перезамерить — иначе гейт будет проверять чужую картинку.
+     */
+    private val brightest = Triple(153, 130, 114)
 
     private val text = Triple(0xF1, 0xF5, 0xF9)
-    private val muted = Triple(0x8B, 0x95, 0xA5)
+    private val muted = Triple(0x9A, 0xA5, 0xB4)
     private val accent = Triple(0xEF, 0x44, 0x44)
 
     private fun color(name: String): Int {
@@ -78,7 +84,10 @@ class TvGlassContrastTest {
     fun `muted meta over glass clears AA for large text`() {
         val on = compositeOverBrightest(color("mars_glass_fill"))
         val c = contrast(muted, on)
-        assertTrue("контраст меты ${"%.2f".format(c)} < 3.0 (композит $on)", c >= 3.0)
+        // 4.5, а не 3.0: мета — мелкий текст (14sp), а не крупный. На ТВ
+        // с дивана 3.99 читалось «на грани» именно в нижних карточках, где
+        // под стеклом лежит светлый лимб планеты.
+        assertTrue("контраст меты ${"%.2f".format(c)} < 4.5 (композит $on)", c >= 4.5)
     }
 
     @Test
