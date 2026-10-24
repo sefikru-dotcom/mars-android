@@ -224,6 +224,15 @@ object UiTestHarness {
             try {
                 onView(matcher).check(matches(isDisplayed()))
                 return
+            } catch (ambiguous: androidx.test.espresso.AmbiguousViewMatcherException) {
+                // Матчер совпал с несколькими view — это НЕ «ещё не появилось»: ждать
+                // бессмысленно, условие не выполнится никогда. Пробрасываем сразу, иначе
+                // реальная причина (нужен allOf/уточнение) тонет в «не появилась за 20s».
+                throw AssertionError(
+                    "Матчер неоднозначен — совпало несколько view. Уточните матчер " +
+                        "(allOf/withClassName): $matcher",
+                    ambiguous,
+                )
             } catch (t: Throwable) {
                 lastError = t
                 SystemClock.sleep(250)

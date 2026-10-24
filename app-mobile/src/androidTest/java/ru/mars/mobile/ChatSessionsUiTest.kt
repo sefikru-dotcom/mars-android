@@ -12,10 +12,13 @@ import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withClassName
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withHint
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Before
@@ -107,7 +110,13 @@ class ChatSessionsUiTest {
             onView(withHint("Поиск диалогов…")).perform(
                 replaceText(UiTestHarness.OTHER_TITLE), closeSoftKeyboard()
             )
-            waitUntilDisplayed(withText(UiTestHarness.OTHER_TITLE))
+            // Заголовок «Отдельный чат» совпадает ДВАЖДЫ: карточка списка (Button) и поле
+            // поиска (EditText) с введённым текстом. Ожидание привязано к карточке по
+            // классу, иначе Espresso падает на AmbiguousViewMatcher.
+            waitUntilDisplayed(allOf(
+                withClassName(equalTo(android.widget.Button::class.java.name)),
+                withText(UiTestHarness.OTHER_TITLE),
+            ))
             onView(withText(UiTestHarness.PARENT_TITLE)).check(doesNotExist())
 
             onView(withHint("Поиск диалогов…")).perform(

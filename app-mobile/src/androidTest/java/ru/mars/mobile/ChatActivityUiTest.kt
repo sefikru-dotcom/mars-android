@@ -95,6 +95,9 @@ class ChatActivityUiTest {
             // панель остаётся открытой, и проверка ниже падает не на поведении экрана.
             closeSoftKeyboard()
             pressBack()
+            // Проверяем по EditText: подсказка «Искать в диалоге…» уникальна, но поле
+            // остаётся в иерархии после закрытия панели (GONE) — так видно именно
+            // состояние панели, а не наличие view.
             onView(withHint("Искать в диалоге…")).check(matches(not(isDisplayed())))
             onView(withText("МАРС")).check(matches(isDisplayed()))
         }
