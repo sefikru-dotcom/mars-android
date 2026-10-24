@@ -85,7 +85,10 @@ class ChatSessionsUiTest {
             pressBack()
             waitUntilDisplayed(withContentDescription("Музыка"))
             // Back из показанных разделов на корневом уровне → SYSTEM_EXIT.
-            pressBack()
+            // pressBackUnconditionally: обычный pressBack() бросает
+            // NoActivityResumedException, когда нажатие КАК РАЗ завершает приложение —
+            // а тест этого и ожидает, так что падение было в тесте, не в поведении.
+            androidx.test.espresso.Espresso.pressBackUnconditionally()
             val deadline = System.currentTimeMillis() + 10_000
             var destroyed = false
             while (System.currentTimeMillis() < deadline && !destroyed) {
@@ -119,9 +122,12 @@ class ChatSessionsUiTest {
         launchAndWaitForList().use {
             onView(withContentDescription("Развернуть воркеры")).perform(click())
             waitUntilDisplayed(withText(UiTestHarness.CHILD_TITLE))
-            // Строка ребёнка помечена источником (sourceLabel + read-only подпись).
-            onView(withText(org.hamcrest.Matchers.containsString("Subagent")))
-                .check(matches(isDisplayed()))
+            // Строка ребёнка подписана темой его работы («Субагент» по умолчанию, если
+            // worker_status без goal) — паритет с WebUI. Английское «Subagent» в UI
+            // больше не рисуется, поэтому ожидание привязано к политике подписи.
+            onView(withText(org.hamcrest.Matchers.containsString(
+                ru.mars.mobile.SubagentWorkLabelPolicy.FALLBACK_GOAL
+            ))).check(matches(isDisplayed()))
             // Тумблер переключился на «Свернуть воркеры».
             onView(withContentDescription("Свернуть воркеры")).check(matches(isDisplayed()))
 
