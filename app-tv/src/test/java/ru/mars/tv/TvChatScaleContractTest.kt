@@ -17,7 +17,10 @@ import java.io.File
  *
  * Тест держит три вещи, которые легко откатить обратно:
  *  1. заголовок шапки не сжимается (minWidth + одна строка + ellipsize);
- *  2. лента имеет пол высоты tv_chat_transcript_min_h;
+ *  2. лента влезает в реальный вертикальный бюджет при клавиатуре — считается
+ *     арифметикой из тех же dimens, а не проверкой одного атрибута (minHeight на
+ *     контейнере с weight=1 не работает вовсе, поэтому «объявленный пол» ничего
+ *     не гарантировал);
  *  3. в лейауте НЕТ ни одного кегля числом и композер/чипсы стоят на токенах.
  *
  * Как и остальные тесты модуля — обычный JVM-тест, читающий исходники с диска
@@ -84,16 +87,32 @@ class TvChatScaleContractTest {
     // ── лента и композер ─────────────────────────────────────────────────────────────
 
     @Test
-    fun `transcript keeps a floor of tv_chat_transcript_min_h`() {
-        assertEquals(
-            "скролл ленты не должен сжиматься ниже пола",
-            "@dimen/tv_chat_transcript_min_h",
-            attr("messageScroll", "minHeight"),
+    fun `transcript fits the real vertical budget with the keyboard open`() {
+        // Считаем по тем же ресурсам, что видит устройство. Экран Mi TV — 960x540dp,
+        // клавиатура занимает 224dp. minHeight на контейнере с weight=1 не действует,
+        // поэтому единственная настоящая гарантия — арифметика хрома.
+        val dimens = File(moduleDir, "src/main/res/values/dimens.xml").readText()
+        fun dp(name: String): Int =
+            Regex("<dimen name=\"$name\">(\\d+)dp</dimen>").find(dimens)
+                ?.groupValues?.get(1)?.toInt()
+                ?: error("нет токена $name в dimens.xml")
+
+        val screen = 540
+        val ime = 224
+        val chrome = dp("tv_screen_pad_top") + dp("tv_screen_pad_bottom") +
+            dp("tv_header_h") + dp("tv_chat_row_gap") + dp("tv_chat_composer_h")
+        val floor = dp("tv_chat_transcript_min_h")
+        val window = screen - ime
+
+        assertTrue(
+            "хром $chrome dp + пол ленты $floor dp не влезают в окно $window dp: " +
+                "композер окажется под клавиатурой",
+            chrome + floor <= window,
         )
-        assertEquals(
-            "контейнер сообщений держит тот же пол",
-            "@dimen/tv_chat_transcript_min_h",
-            attr("messages", "minHeight"),
+        assertTrue(
+            "при клавиатуре лента должна давать хотя бы два сообщения (~90dp каждое), " +
+                "а не одно; сейчас ${window - chrome} dp",
+            window - chrome >= 170,
         )
     }
 

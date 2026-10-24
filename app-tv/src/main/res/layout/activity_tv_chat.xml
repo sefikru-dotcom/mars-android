@@ -267,10 +267,14 @@
              (TvAutoScrollPolicy): the control appears only while the reader is away from
              the live edge and hides again on the jump/back-to-bottom (focus moves to the
              composer — a disappearing control must never drop the D-pad focus). -->
-        <!-- Лента: пол высоты tv_chat_transcript_min_h (200dp) — ниже него лента не
-             объявляется. Бюджет 540dp: поля 28 + шапка 52 + зазор статуса 8 + композер
-             56 = 144dp, клавиатура 224dp -> остаток 172dp (два сообщения вместо одного;
-             без клавиатуры 348dp). Ряд чипсов на время IME скрывается целиком
+        <!-- Лента: пол высоты tv_chat_transcript_min_h (180dp). Бюджет 540dp: поля 28 +
+             шапка 52 + зазор 8 + композер 48 = 136dp хрома, клавиатура 224dp ->
+             остаток 180dp (два сообщения вместо одного; без клавиатуры 356dp).
+             ВАЖНО: контейнер идёт с height=0dp + weight=1, а minHeight на таком
+             контейнере LinearLayout НЕ соблюдает — при 200dp он распирал экран и
+             выталкивал композер под клавиатуру. Пол держится арифметикой бюджета
+             (TvChatScaleContractTest), а не атрибутом.
+             Ряд чипсов на время IME скрывается целиком
              (TvChatActivity.attachImeChipCollapse) — иначе лента получала 106dp. -->
         <FrameLayout
             android:layout_width="match_parent"

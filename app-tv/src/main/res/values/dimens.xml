@@ -85,7 +85,13 @@
     <dimen name="tv_chat_composer_h">48dp</dimen>
     <dimen name="tv_chat_row_gap">8dp</dimen>
     <dimen name="tv_chat_chips_h">40dp</dimen>
-    <dimen name="tv_chat_transcript_min_h">200dp</dimen>
+    <!--
+      Пол ленты — 180dp, а не 200: бюджет 540dp при клавиатуре 224dp даёт окно 316dp,
+      из него хром (поля 28 + шапка 52 + зазор 8 + композер 48) съедает 136dp.
+      Больше 180dp физически нет; при 200dp контейнер с weight=1 распирал экран и
+      выталкивал композер под клавиатуру. На 180dp помещаются два сообщения.
+    -->
+    <dimen name="tv_chat_transcript_min_h">180dp</dimen>
     <dimen name="tv_chat_bubble_pad_h">14dp</dimen>
     <dimen name="tv_chat_bubble_pad_v">10dp</dimen>
     <dimen name="tv_chat_bubble_gap">8dp</dimen>
