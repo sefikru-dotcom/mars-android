@@ -53,4 +53,12 @@
     <string name="settings_voice_section">ГОЛОС</string>
     <string name="settings_voice_barge_in">Перебивать ответ голосом</string>
     <string name="settings_voice_barge_in_hint">Скажите вслух — Марс замолчит</string>
+    <!--
+      Wake word: подсказка прямо говорит про расход батареи — это цена постоянного микрофона,
+      и человек должен видеть её до включения, а не в отчёте об энергопотреблении.
+    -->
+    <string name="settings_voice_wake_word">Слушать «Марс»</string>
+    <string name="settings_voice_wake_word_hint">Скажите «Марс, слушай» — диалог начнётся сам. Микрофон работает, пока экран открыт: расходует батарею</string>
+    <!-- Флаг включён, а модели на диске нет: честная причина вместо «включил и ничего не происходит». -->
+    <string name="settings_voice_wake_word_no_model">Модель распознавания ещё не скачана — «Марс» начнёт слушать после первого голосового диалога</string>
 </resources>

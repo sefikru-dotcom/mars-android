@@ -22,6 +22,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.asr.ModelStore
+import ru.mars.mobile.asr.WakeWordSetting
 import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.api.MarsApi
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
@@ -180,6 +182,17 @@ class SettingsActivity : ComponentActivity() {
         val bargeInSetting = VoiceBargeInSetting.of(
             getSharedPreferences(VOICE_OUTPUT_PREFS, Context.MODE_PRIVATE),
         )
+        // Wake word: ключ и дефолт — в [WakeWordSetting] (ВЫКЛЮЧЕНО по умолчанию, батарея).
+        // Подсказка меняется, если модели на диске нет: включённый тумблер без модели не работал
+        // бы, и человек должен видеть причину, а не ждать эффекта от тумблера впустую.
+        val wakeWordSetting = WakeWordSetting.of(
+            getSharedPreferences(VOICE_OUTPUT_PREFS, Context.MODE_PRIVATE),
+        )
+        val wakeWordHint = if (ModelStore(ModelStore.rootForAppFilesDir(filesDir)).isInstalled()) {
+            getString(R.string.settings_voice_wake_word_hint)
+        } else {
+            getString(R.string.settings_voice_wake_word_no_model)
+        }
         val voiceCard = buildCard().apply {
             addView(
                 buildToggleRow(
@@ -187,6 +200,13 @@ class SettingsActivity : ComponentActivity() {
                     hint = getString(R.string.settings_voice_barge_in_hint),
                     checked = bargeInSetting.isEnabled(),
                 ) { enabled -> bargeInSetting.setEnabled(enabled) },
+            )
+            addView(
+                buildToggleRow(
+                    label = getString(R.string.settings_voice_wake_word),
+                    hint = wakeWordHint,
+                    checked = wakeWordSetting.isEnabled(),
+                ) { enabled -> wakeWordSetting.setEnabled(enabled) },
             )
         }
         content.addView(voiceCard)
