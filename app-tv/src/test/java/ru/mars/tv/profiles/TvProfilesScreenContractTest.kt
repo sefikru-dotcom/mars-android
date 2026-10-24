@@ -44,7 +44,33 @@ class TvProfilesScreenContractTest {
     private val dashboardLayout by lazy { source("src/main/res/layout/activity_dashboard.xml") }
     private val screenLayout by lazy { source("src/main/res/layout/activity_tv_profiles.xml") }
     private val cardLayout by lazy { source("src/main/res/layout/item_tv_profile.xml") }
-    private val chatActivity by lazy { source("src/main/java/ru/mars/tv/TvChatActivity.kt") }
+    /** Каталог production-исходников экрана (cwd unit-теста — модуль app-tv). */
+    private val chatSourceDir: File by lazy {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            for (base in listOf(dir, File(dir, "app-tv"))) {
+                val candidate = File(base, "src/main/java/ru/mars/tv/TvChatActivity.kt")
+                if (candidate.isFile) return@lazy candidate.absoluteFile.parentFile!!
+            }
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден каталог исходников TvChatActivity.kt")
+    }
+
+    /**
+     * Чат целиком: хост плюс его секции (`TvChat*Section.kt`). После декомпозиции
+     * экрана чтение extra может жить в любой секции — контракт проверяет экран, а не
+     * конкретный файл (тот же приём, что в контрактах MusicActivity).
+     */
+    private val chatActivity by lazy {
+        val sections = chatSourceDir
+            .listFiles { f -> f.isFile && f.name.startsWith("TvChat") && f.name.endsWith("Section.kt") }
+            ?.sortedBy { it.name }
+            ?.joinToString("\n") { it.readText() }
+            .orEmpty()
+        source("src/main/java/ru/mars/tv/TvChatActivity.kt") + "\n" + sections
+    }
+
     private val chatFlow by lazy { source("src/main/java/ru/mars/tv/TvChatSessionFlow.kt") }
     private val repository by lazy {
         source("core-network/src/main/java/ru/mars/network/repository/ProfilesRepository.kt")
