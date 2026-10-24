@@ -11,16 +11,30 @@ import java.io.File
  * junit/mockwebserver/org.json), поэтому поведение проверяется в трёх слоях:
  *  1. чистая политика [TvMusicFocusPolicy] (цепочки, DOWN-цель, BACK-решение);
  *  2. парсинг activity_tv_music.xml — взаимные android:nextFocus* всей верхней панели;
- *  3. присутствие код-механизма в TvMusicActivity.kt (динамические id строк треков,
- *     rewire* после рендера, OnBackPressedCallback + скрытие IME).
+ *  3. присутствие код-механизма в исходниках экрана — хост [TvMusicActivity] плюс его
+ *     секции `TvMusic*Section.kt` (динамические id строк треков, rewire* после рендера,
+ *     OnBackPressedCallback + скрытие IME).
  * Фактический FocusSearch на устройстве здесь не выполняется (нет инструментации).
  */
 class TvMusicFocusNavigationTest {
 
     private val moduleDir = File(System.getProperty("user.dir"))
     private val layout = File(moduleDir, "src/main/res/layout/activity_tv_music.xml").readText()
-    private val activitySource =
-        File(moduleDir, "src/main/java/ru/mars/tv/TvMusicActivity.kt").readText()
+    /**
+     * Исходники экрана: хост [TvMusicActivity] ПЛЮС его секции `TvMusic*Section.kt`.
+     *
+     * Читать один файл по имени нельзя: после декомпозиции хоста код-механизм D-pad живёт
+     * в секциях, и тест краснел бы от самого факта выноса, а не от поломки фокуса. Список
+     * секций берётся с диска (glob) — новый секционный файл подхватывается сам.
+     */
+    private val activitySource: String by lazy {
+        val dir = File(moduleDir, "src/main/java/ru/mars/tv")
+        val sections = dir
+            .listFiles { f -> f.isFile && f.name.startsWith("TvMusic") && f.name.endsWith("Section.kt") }
+            ?.sortedBy { it.name }
+            .orEmpty()
+        (listOf(File(dir, "TvMusicActivity.kt")) + sections).joinToString("\n") { it.readText() }
+    }
 
     private fun block(id: String): String {
         val re = Regex(
@@ -127,7 +141,7 @@ class TvMusicFocusNavigationTest {
         )
     }
 
-    // --- 3. Код-механизм в TvMusicActivity.kt (не только XML) --------------------------
+    // --- 3. Код-механизм в хосте и секциях (не только XML) ----------------------------
 
     @Test
     fun `dynamic track rows get real ids and the first row is wired into the focus chain`() {
