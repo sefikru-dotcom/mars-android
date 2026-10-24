@@ -135,7 +135,7 @@ internal fun TvChatActivity.renderSessionBrowser(sessions: List<SessionItem>) {
  */
 internal fun TvChatActivity.buildSessionListRetry(): Button = Button(this).apply {
     text = TvSessionBrowserPolicy.RETRY_LABEL
-    textSize = 18f
+    tvTextSize(R.dimen.tv_text_body)
     isAllCaps = false
     setTextColor(ContextCompat.getColor(this@buildSessionListRetry, R.color.mars_text))
     setBackgroundResource(R.drawable.bg_focus_card)
@@ -161,7 +161,9 @@ internal fun TvChatActivity.buildSessionListRetry(): Button = Button(this).apply
 internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPolicy.SessionRow, current: Boolean): View {
     val card = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundResource(R.drawable.bg_focus_sidebar_item)
+        // Карточка диалога — стекло, а не прозрачная строка сайдбара: под ней
+        // фон с планетой, и без подложки заголовок терялся на светлых участках.
+        setBackgroundResource(R.drawable.bg_card_glass)
         isFocusable = true
         isClickable = true
         setPadding(dp(22), dp(14), dp(22), dp(14))
@@ -184,7 +186,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     }
     card.addView(TextView(this).apply {
         text = row.title
-        textSize = 20f
+        tvTextSize(R.dimen.tv_text_title)
         setTextColor(ContextCompat.getColor(
             context, if (current) R.color.mars_accent_text else R.color.mars_text_strong))
         isSingleLine = true
@@ -193,7 +195,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.badge?.let { badge ->
         card.addView(TextView(this).apply {
             text = badge.text
-            textSize = 15f
+            tvTextSize(R.dimen.tv_text_label)
             setTextColor(ContextCompat.getColor(context, when (badge.tone) {
                 TvSessionBrowserPolicy.BadgeTone.ATTENTION -> R.color.mars_status_warning
                 TvSessionBrowserPolicy.BadgeTone.LIVE -> R.color.mars_status_online
@@ -209,7 +211,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.work?.let { work ->
         card.addView(TextView(this).apply {
             text = work
-            textSize = 15f
+            tvTextSize(R.dimen.tv_text_label)
             setTextColor(ContextCompat.getColor(context, R.color.mars_text))
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
@@ -219,7 +221,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     row.subtitle?.let { subtitle ->
         card.addView(TextView(this).apply {
             text = subtitle
-            textSize = 15f
+            tvTextSize(R.dimen.tv_text_label)
             setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
@@ -229,7 +231,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
     TvSessionBrowserPolicy.metaWithCurrent(row.meta, current)?.let { meta ->
         card.addView(TextView(this).apply {
             text = meta
-            textSize = 14f
+            tvTextSize(R.dimen.tv_text_label)
             setTextColor(ContextCompat.getColor(context, R.color.mars_status_info))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END

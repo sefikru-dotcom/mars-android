@@ -52,13 +52,15 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
 
     init {
         orientation = VERTICAL
-        setBackgroundResource(R.drawable.bg_focus_card)
+        // Стеклянная подложка: полупрозрачная заливка + рамка, рубиновый фокус —
+        // карточка читается поверх фона с планетой, не превращаясь в плотную плашку.
+        setBackgroundResource(R.drawable.bg_card_glass)
         isFocusable = false
         descendantFocusability = FOCUS_AFTER_DESCENDANTS
         setPadding(dp(28), dp(20), dp(28), dp(20))
         errorStrip = TextView(context).apply {
             visibility = View.GONE
-            textSize = 16f
+            tvTextSize(R.dimen.tv_text_body)
             setTextColor(ContextCompat.getColor(context, R.color.mars_status_error))
         }
     }
@@ -75,7 +77,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
         TvInteractiveCardSpec.approvalDescription(payload).takeIf { it.isNotEmpty() }?.let { description ->
             addView(TextView(context).apply {
                 text = description
-                textSize = 18f
+                tvTextSize(R.dimen.tv_text_body)
                 setTextColor(ContextCompat.getColor(context, R.color.mars_text_em))
                 setPadding(0, dp(6), 0, dp(6))
             })
@@ -83,7 +85,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
         TvInteractiveCardSpec.approvalCodeLabel(payload)?.let { label ->
             addView(TextView(context).apply {
                 text = label
-                textSize = 15f
+                tvTextSize(R.dimen.tv_text_label)
                 setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
                 setPadding(0, dp(4), 0, 0)
             })
@@ -91,7 +93,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
         TvInteractiveCardSpec.approvalCodeBlock(payload).takeIf { it.isNotEmpty() }?.let { code ->
             addView(TextView(context).apply {
                 text = code
-                textSize = 17f
+                tvTextSize(R.dimen.tv_text_body)
                 typeface = Typeface.MONOSPACE
                 setTextColor(ContextCompat.getColor(context, R.color.mars_text))
                 setBackgroundResource(R.drawable.bg_chip)
@@ -130,7 +132,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
         TvInteractiveCardSpec.clarifyQuestion(payload).takeIf { it.isNotEmpty() }?.let { question ->
             addView(TextView(context).apply {
                 text = question
-                textSize = 20f
+                tvTextSize(R.dimen.tv_text_title)
                 setTextColor(ContextCompat.getColor(context, R.color.mars_text_strong))
                 setPadding(0, dp(6), 0, dp(10))
             })
@@ -150,7 +152,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
             is ClarifyMode.FreeText -> {
                 val editor = EditText(context).apply {
                     hint = TvInteractiveCardSpec.ANSWER_HINT
-                    textSize = 20f
+                    tvTextSize(R.dimen.tv_text_title)
                     isSingleLine = true
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                     setTextColor(ContextCompat.getColor(context, R.color.mars_text))
@@ -255,7 +257,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
 
     private fun title(text: String) = TextView(context).apply {
         this.text = text
-        textSize = 22f
+        tvTextSize(R.dimen.tv_text_title)
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(ContextCompat.getColor(context, R.color.mars_accent_text))
     }
@@ -263,7 +265,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
     private fun cardButton(label: String, primary: Boolean, destructive: Boolean, onClick: () -> Unit): Button =
         Button(context).apply {
             text = label
-            textSize = 18f
+            tvTextSize(R.dimen.tv_text_body)
             isAllCaps = false
             minWidth = 0
             minimumWidth = 0
@@ -324,7 +326,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
         labels.forEach { label ->
             row.addView(TextView(context).apply {
                 text = label
-                textSize = 14f
+                tvTextSize(R.dimen.tv_text_label)
                 setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
                 setBackgroundResource(R.drawable.bg_chip)
                 setPadding(dp(14), dp(6), dp(14), dp(6))

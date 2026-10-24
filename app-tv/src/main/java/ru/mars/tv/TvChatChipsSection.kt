@@ -45,7 +45,7 @@ internal fun TvChatActivity.buildQuickChips() {
     TvQuickChipsPolicy.chips.forEachIndexed { index, chip ->
         val button = Button(this).apply {
             text = chip.label
-            textSize = 18f
+            tvTextSize(R.dimen.tv_text_body)
             isAllCaps = false
             setTextColor(ContextCompat.getColor(this@buildQuickChips, R.color.mars_text))
             setBackgroundResource(R.drawable.bg_focus_card)
