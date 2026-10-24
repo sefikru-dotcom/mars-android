@@ -109,6 +109,21 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
+            # Снять блокировку экрана ДО сборки. Headless-эмулятор стартует с
+            # keyguard, и пока он висит, ни одно окно приложения не получает
+            # window focus: Espresso валится на RootViewWithoutFocusException,
+            # что выглядит как поломка UI, хотя приложение исправно. Симптом —
+            # падают ВСЕ UI-тесты разом, включая экран логина.
+            adb shell wm dismiss-keyguard || true
+            adb shell input keyevent 82 || true
+            adb shell svc power stayon true || true
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
+            # Диагностика: если фокус снова отвалится, в логе будет видно, что
+            # именно занимало foreground.
+            adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true
+
             # /usr/bin/sh раннера — это dash, где нет `set -o pipefail`. Поэтому
             # сборка запускается явным bash: иначе прогон падает не на тестах, а
             # на строке `set`, выдавая ложный «красный» о коде приложения.
