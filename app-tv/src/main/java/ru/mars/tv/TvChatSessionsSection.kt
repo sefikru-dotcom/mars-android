@@ -222,7 +222,7 @@ internal fun TvChatActivity.buildSessionCard(index: Int, row: TvSessionBrowserPo
         card.addView(TextView(this).apply {
             text = subtitle
             tvTextSize(R.dimen.tv_text_label)
-            setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+            setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
             setPadding(0, dp(4), 0, 0)

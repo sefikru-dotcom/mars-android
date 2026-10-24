@@ -49,7 +49,7 @@
         android:id="@+id/hostMetrics"
         android:maxLines="1"
         android:ellipsize="end"
-        android:textColor="@color/mars_muted"
+        android:textColor="@color/mars_muted_on_glass"
         android:textAppearance="@style/AppText.Body"
         android:lineSpacingExtra="@dimen/tv_gap_xs"
         android:layout_marginTop="@dimen/tv_gap_s"

@@ -86,7 +86,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
             addView(TextView(context).apply {
                 text = label
                 tvTextSize(R.dimen.tv_text_label)
-                setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
                 setPadding(0, dp(4), 0, 0)
             })
         }
@@ -156,7 +156,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
                     isSingleLine = true
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                     setTextColor(ContextCompat.getColor(context, R.color.mars_text))
-                    setHintTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                    setHintTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
                     setBackgroundResource(R.drawable.bg_focus_input)
                     setPadding(dp(18), dp(14), dp(18), dp(14))
                     isFocusable = true
@@ -309,7 +309,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
             layoutParams = lp
         }
         val cancel = cardButton(TvInteractiveCardSpec.CANCEL_LABEL, primary = false, destructive = false, onClick = onCancel).apply {
-            setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+            setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
         }
         row.addView(cancel)
         return row
@@ -327,7 +327,7 @@ class TvInteractiveCard(context: Context) : LinearLayout(context) {
             row.addView(TextView(context).apply {
                 text = label
                 tvTextSize(R.dimen.tv_text_label)
-                setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
                 setBackgroundResource(R.drawable.bg_chip)
                 setPadding(dp(14), dp(6), dp(14), dp(6))
                 val lp = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)

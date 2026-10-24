@@ -51,7 +51,7 @@
 
     <TextView
         android:id="@+id/skillDescription"
-        android:textColor="@color/mars_muted"
+        android:textColor="@color/mars_muted_on_glass"
         android:textAppearance="@style/AppText.Body"
         android:maxLines="3"
         android:ellipsize="end"

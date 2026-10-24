@@ -134,7 +134,7 @@
         <ImageView
             android:src="@drawable/ic_music"
             android:contentDescription="@null"
-            app:tint="@color/mars_muted"
+            app:tint="@color/mars_muted_on_glass"
             android:layout_marginEnd="@dimen/tv_gap_m"
             android:layout_width="@dimen/tv_icon_m"
             android:layout_height="@dimen/tv_icon_m" />

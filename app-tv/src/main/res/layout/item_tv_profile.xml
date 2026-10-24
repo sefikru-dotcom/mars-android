@@ -80,7 +80,7 @@
 
     <TextView
         android:id="@+id/profilePath"
-        android:textColor="@color/mars_muted"
+        android:textColor="@color/mars_muted_on_glass"
         android:textAppearance="@style/AppText.Label"
         android:maxLines="1"
         android:ellipsize="middle"

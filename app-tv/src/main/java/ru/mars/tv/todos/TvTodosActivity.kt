@@ -237,7 +237,7 @@ class TvTodosActivity : AppCompatActivity() {
         when (token) {
             StatusToken.DONE -> R.color.mars_status_online
             StatusToken.ACTIVE -> R.color.mars_status_info
-            StatusToken.WAITING, StatusToken.CANCELLED -> R.color.mars_muted
+            StatusToken.WAITING, StatusToken.CANCELLED -> R.color.mars_muted_on_glass
         },
     )
 

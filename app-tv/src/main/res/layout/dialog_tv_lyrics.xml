@@ -33,7 +33,7 @@
     <TextView
         android:id="@+id/lyricsMetaText"
         android:textAppearance="@style/AppText.Label"
-        android:textColor="@color/mars_muted"
+        android:textColor="@color/mars_muted_on_glass"
         android:visibility="gone"
         android:layout_marginTop="@dimen/tv_gap_xs"
         android:layout_width="match_parent"
@@ -52,7 +52,7 @@
         <TextView
             android:id="@+id/lyricsBodyText"
             android:textAppearance="@style/AppText.Body"
-            android:textColor="@color/mars_muted"
+            android:textColor="@color/mars_muted_on_glass"
             android:lineSpacingExtra="@dimen/tv_gap_xs"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />

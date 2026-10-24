@@ -217,7 +217,7 @@ class TvKanbanActivity : AppCompatActivity() {
     private fun columnEmptyHint(): View {
         val hint = TextView(this)
         hint.text = TvKanbanPolicy.COLUMN_EMPTY_HINT
-        hint.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+        hint.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
         hint.tvTextSize(R.dimen.tv_text_body)
         val params = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -257,7 +257,7 @@ class TvKanbanActivity : AppCompatActivity() {
             StatusToken.READY -> R.color.mars_status_info
             StatusToken.RUNNING, StatusToken.DONE -> R.color.mars_status_online
             StatusToken.BLOCKED -> R.color.mars_status_error
-            StatusToken.NEUTRAL -> R.color.mars_muted
+            StatusToken.NEUTRAL -> R.color.mars_muted_on_glass
         },
     )
 

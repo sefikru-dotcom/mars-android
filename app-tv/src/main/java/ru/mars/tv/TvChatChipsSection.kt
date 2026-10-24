@@ -174,7 +174,7 @@ internal fun TvChatActivity.renderSubagentBoard() {
         TvSubagentBoardPolicy.Tone.RUNNING -> R.color.mars_status_online
         TvSubagentBoardPolicy.Tone.WARNING -> R.color.mars_status_warning
         TvSubagentBoardPolicy.Tone.ERROR -> R.color.mars_status_error
-        TvSubagentBoardPolicy.Tone.DONE -> R.color.mars_muted
+        TvSubagentBoardPolicy.Tone.DONE -> R.color.mars_muted_on_glass
     }))
     subagentBoard.visibility = View.VISIBLE
 }

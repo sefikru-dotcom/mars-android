@@ -385,7 +385,7 @@ class TvInsightsActivity : AppCompatActivity() {
             is TvInsightRow.Note -> {
                 meta.visibility = View.VISIBLE
                 meta.text = row.text
-                meta.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+                meta.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
             }
         }
         TvFocusLift.attach(view)

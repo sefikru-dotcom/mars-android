@@ -108,7 +108,7 @@ class TvChatInteractiveSurface(
             text = message
             tvTextSize(R.dimen.tv_text_body)
             setTextColor(ContextCompat.getColor(context,
-                if (error) R.color.mars_status_error else R.color.mars_muted))
+                if (error) R.color.mars_status_error else R.color.mars_muted_on_glass))
             setPadding(dp(24), dp(6), dp(24), dp(6))
         }
         container.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })

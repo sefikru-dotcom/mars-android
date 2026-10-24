@@ -34,7 +34,7 @@
         android:layout_marginTop="@dimen/tv_gap_s"
         android:text="Вход в персональный ассистент"
         android:textAppearance="@style/AppText.Title"
-        android:textColor="@color/mars_muted" />
+        android:textColor="@color/mars_muted_on_glass" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -68,7 +68,7 @@
                 android:paddingEnd="@dimen/tv_card_pad"
                 android:textAppearance="@style/AppText.Body"
                 android:textColor="@color/mars_text_strong"
-                android:textColorHint="@color/mars_muted" />
+                android:textColorHint="@color/mars_muted_on_glass" />
 
             <Button
                 android:id="@+id/loginButton"

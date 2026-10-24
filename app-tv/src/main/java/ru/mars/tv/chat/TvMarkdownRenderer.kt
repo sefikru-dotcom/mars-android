@@ -139,7 +139,7 @@ object TvMarkdownRenderer {
                             if (task.checked) R.drawable.ic_task_done else R.drawable.ic_task_open,
                         )
                         imageTintList = ContextCompat.getColorStateList(
-                            context, if (task.checked) R.color.mars_status_online else R.color.mars_muted,
+                            context, if (task.checked) R.color.mars_status_online else R.color.mars_muted_on_glass,
                         )
                         contentDescription = if (task.checked) "Выполнено" else "Не выполнено"
                     }, LinearLayout.LayoutParams(
@@ -154,7 +154,7 @@ object TvMarkdownRenderer {
                             context.resources.getDimension(R.dimen.tv_text_body),
                         )
                         setTextColor(ContextCompat.getColor(
-                            context, if (task.checked) R.color.mars_muted else R.color.mars_text,
+                            context, if (task.checked) R.color.mars_muted_on_glass else R.color.mars_text,
                         ))
                     }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                 }, LinearLayout.LayoutParams(

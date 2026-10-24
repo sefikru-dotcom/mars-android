@@ -1327,7 +1327,7 @@ class TvMusicActivity : AppCompatActivity() {
             TvLyricsPanelState.Idle -> Unit
 
             is TvLyricsPanelState.Loading -> {
-                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
                 body.text = TvLyricsViewPolicy.LOADING_TEXT
                 meta.visibility = View.GONE
                 renderTranslateButton(dialog, visible = false)
@@ -1352,14 +1352,14 @@ class TvMusicActivity : AppCompatActivity() {
             }
 
             is TvLyricsPanelState.Missing -> {
-                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
                 body.text = TvLyricsViewPolicy.MISSING_TEXT
                 meta.visibility = View.GONE
                 renderTranslateButton(dialog, visible = false)
             }
 
             is TvLyricsPanelState.Error -> {
-                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+                body.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
                 body.text = state.message
                 meta.visibility = View.GONE
                 renderTranslateButton(dialog, visible = false)

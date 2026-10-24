@@ -33,7 +33,7 @@ class TvGlassContrastTest {
     private val brightest = Triple(153, 130, 114)
 
     private val text = Triple(0xF1, 0xF5, 0xF9)
-    private val muted = Triple(0x9A, 0xA5, 0xB4)
+    private val muted = Triple(0x9A, 0xA5, 0xB4)  // mars_muted_on_glass
     private val accent = Triple(0xEF, 0x44, 0x44)
 
     private fun color(name: String): Int {

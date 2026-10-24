@@ -24,8 +24,13 @@
     <!-- Text -->
     <color name="mars_text">#F1F5F9</color>
     <color name="mars_text_strong">#FFFFFF</color>
-    <color name="mars_muted">#9AA5B4</color>
+    <color name="mars_muted">#8B95A5</color>
     <color name="mars_text_em">#CBD5E1</color>
+    <!-- Мета на стеклянной подложке. Отдельный токен, а не правка mars_muted:
+         он общий с app-mobile, и гейт паритета палитры требует один hex на
+         бренд. На ярком лимбе под нижними карточками #8B95A5 даёт 3.99 при
+         нужных 4.5 для 14sp — этот тон даёт 4.83. -->
+    <color name="mars_muted_on_glass">#9AA5B4</color>
     <!-- Алиас имени, которым этот же тон зовёт app-mobile (mars_em): без пары
          один и тот же оттенок назывался по-разному в двух модулях, и сверка
          палитр не могла их сопоставить. -->

@@ -93,7 +93,7 @@ internal fun TvChatActivity.appendActivityLine(line: String) {
     val view = TextView(this).apply {
         text = line
         setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_label))
-        setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+        setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
         setPadding(
             resources.getDimensionPixelSize(R.dimen.tv_gap_l),
             resources.getDimensionPixelSize(R.dimen.tv_gap_s),
@@ -337,7 +337,7 @@ internal fun TvChatActivity.buildToolGroupRow(row: TvSessionBrowserPolicy.Transc
             addView(TextView(this@buildToolGroupRow).apply {
                 text = names
                 setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
-                setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+                setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, resources.getDimensionPixelSize(R.dimen.tv_gap_xs), 0, 0)
@@ -372,7 +372,7 @@ internal fun TvChatActivity.swapTranscript(prepared: LinearLayout) {
 internal fun TvChatActivity.buildHiddenMarker(text: String?): TextView = TextView(this).apply {
     this.text = text.orEmpty()
     setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.tv_text_micro))
-    setTextColor(ContextCompat.getColor(context, R.color.mars_muted))
+    setTextColor(ContextCompat.getColor(context, R.color.mars_muted_on_glass))
     setPadding(
         resources.getDimensionPixelSize(R.dimen.tv_gap_xl),
         resources.getDimensionPixelSize(R.dimen.tv_chat_bubble_pad_v),

@@ -71,7 +71,7 @@ class PairingActivity : AppCompatActivity() {
         loginButton.isEnabled = false
         passwordInput.isEnabled = false
         statusText.text = "Подключение к Марсу…"
-        statusText.setTextColor(ContextCompat.getColor(this, R.color.mars_muted))
+        statusText.setTextColor(ContextCompat.getColor(this, R.color.mars_muted_on_glass))
 
         loginJob = lifecycleScope.launch {
             val result = repository.loginWithPassword(password, "mi_tv")

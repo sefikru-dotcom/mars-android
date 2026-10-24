@@ -41,7 +41,7 @@
     <TextView
         android:id="@+id/albumStateText"
         android:textAppearance="@style/AppText.Body"
-        android:textColor="@color/mars_muted"
+        android:textColor="@color/mars_muted_on_glass"
         android:visibility="gone"
         android:layout_marginTop="@dimen/tv_gap_l"
         android:layout_width="match_parent"
