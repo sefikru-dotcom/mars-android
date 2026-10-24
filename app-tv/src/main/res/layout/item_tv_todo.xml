@@ -5,9 +5,9 @@
     android:orientation="horizontal"
     android:gravity="center_vertical"
     android:background="@drawable/bg_focus_card"
-    android:padding="20dp"
+    android:padding="@dimen/tv_card_pad"
     android:focusable="true"
-    android:layout_marginTop="12dp"
+    android:layout_marginTop="@dimen/tv_card_gap"
     android:layout_width="match_parent"
     android:layout_height="wrap_content">
 
@@ -15,31 +15,33 @@
         android:id="@+id/todoDot"
         android:src="@drawable/ic_status_dot"
         android:contentDescription="@null"
-        android:layout_marginStart="4dp"
+        android:layout_marginStart="@dimen/tv_gap_xs"
         android:layout_width="12dp"
         android:layout_height="12dp" />
 
     <TextView
         android:id="@+id/todoContent"
         android:textColor="@color/mars_text"
-        android:textSize="20sp"
-        android:lineSpacingExtra="3dp"
+        android:textAppearance="@style/AppText.Body"
+        android:lineSpacingExtra="@dimen/tv_gap_xs"
         android:maxLines="3"
         android:ellipsize="end"
-        android:layout_marginStart="16dp"
+        android:layout_marginStart="@dimen/tv_gap_l"
         android:layout_width="0dp"
         android:layout_weight="1"
         android:layout_height="wrap_content" />
 
     <TextView
         android:id="@+id/todoBadge"
-        android:textSize="15sp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textAppearance="@style/AppText.Label"
         android:background="@drawable/bg_chip"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:layout_marginStart="14dp"
+        android:paddingStart="@dimen/tv_gap_m"
+        android:paddingEnd="@dimen/tv_gap_m"
+        android:paddingTop="@dimen/tv_gap_xs"
+        android:paddingBottom="@dimen/tv_gap_xs"
+        android:layout_marginStart="@dimen/tv_gap_m"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 </LinearLayout>
