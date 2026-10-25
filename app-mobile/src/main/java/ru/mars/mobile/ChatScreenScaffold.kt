@@ -250,7 +250,7 @@ object ChatScreenScaffold {
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
             setPadding(dp(12), dp(8), dp(12), dp(10))
         }
 

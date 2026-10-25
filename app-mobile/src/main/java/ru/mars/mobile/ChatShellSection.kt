@@ -91,7 +91,11 @@ import ru.mars.network.repository.readBoundedUploadPayload
  */
 
 internal fun ChatActivity.buildView(): View {
-    drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.BG) }
+    // Прозрачный DrawerLayout: под ним оконный кадр (@drawable/mars_window_bg).
+    // Контент чата тоже прозрачный (ChatScreenScaffold), поэтому кадр виден на
+    // всём экране; шторка разделов остаётся плотной (SIDEBAR) — ей нужна своя
+    // подложка, иначе подписи поедут по картинке.
+    drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.SCREEN_VEIL) }
     drawer.addView(buildChatContent(), DrawerLayout.LayoutParams(-1, -1))
     drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
     return drawer

@@ -25,7 +25,7 @@ import androidx.core.view.WindowInsetsCompat
 internal fun MusicActivity.buildView(): View {
     val root = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundColor(MarsTheme.BG)
+        setBackgroundColor(MarsTheme.SCREEN_VEIL)
         setPadding(dp(16), dp(16), dp(16), dp(12))
     }
 

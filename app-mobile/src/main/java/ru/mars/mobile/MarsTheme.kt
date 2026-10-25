@@ -49,6 +49,48 @@ object MarsTheme {
 
     /** Standard 20% white ripple for every interactive surface (buttons, icon buttons). */
     const val RIPPLE = 0x33ffffff.toInt()
+
+    // ---- Стекло (паритет с app-tv) ----
+    /**
+     * Подложка «стеклянной» карточки: 69% непрозрачности #10131B поверх кадра.
+     * Те же значения, что у TV (mars_glass_fill), — один бренд, один токен.
+     *
+     * Почему не плотнее и не прозрачнее: 69% — замер по худшему пикселю фона
+     * (яркий лимб планеты). На нём [TEXT_MUTED] держит 4.83:1, то есть проходит
+     * WCAG AA для мелкого текста; при 55% тот же текст падает до 3.94:1 и
+     * подписи в карточках, лежащих на освещённой части планеты, перестают
+     * читаться. Плотнее — стекло превращается в глухую заливку и теряет смысл.
+     */
+    const val GLASS_FILL = 0xb010131b.toInt()
+    /** Стекло под нажатием/фокусом: чуть светлее, геометрия та же. */
+    const val GLASS_FILL_FOCUSED = 0xcc161c28.toInt()
+    /** Hairline-рамка стекла: 20% белого. */
+    const val GLASS_STROKE = 0x33ffffff.toInt()
+    /**
+     * Приглушённый текст НА стекле. Обычный [TEXT_MUTED] (#8B95A5) на
+     * полупрозрачной подложке даёт 4.83:1 на ярком лимбе, этот тон — 5.85:1.
+     * Тот же приём и то же значение, что `mars_muted_on_glass` на TV.
+     */
+    const val TEXT_MUTED_ON_GLASS = 0xff9aa5b4.toInt()
+
+    /**
+     * Вуаль экрана поверх кадра: полупрозрачный обсидиан ПОД всем контентом.
+     *
+     * Прозрачного корня недостаточно. Оконный слой уже гасит кадр до 62%, но
+     * часть текста лежит не в карточках, а прямо на фоне: подписи шапки,
+     * статус-строки, чипы подсказок. На самом ярком участке лимба [TEXT_MUTED]
+     * на голом кадре даёт 2.25:1 — вдвое ниже порога. С этой вуалью (55%)
+     * тот же текст держит 4.55:1, [TEXT] — 12.6:1, а планета остаётся
+     * различимой: просвечивание есть, «мёртвой заливки» нет.
+     *
+     * Почему не решено одним цветом окна: окно рисует и заставку, где кадр
+     * обязан быть на полной яркости. Вуаль — свойство экрана, не окна.
+     *
+     * 42%, а не 55%: 55% гасит кадр вдвое и вместе с окном превращает планету
+     * в тёмное пятно. На 42% стеклянная карточка на лимбе держит [TEXT_MUTED]
+     * 4.64:1 (порог AA), [TEXT] — 12.8:1, и при этом кадр остаётся живым.
+     */
+    const val SCREEN_VEIL = 0x6b07080b.toInt()
     
     // Text colors
     const val TEXT = 0xfff1f5f9.toInt()
@@ -305,6 +347,24 @@ object MarsTheme {
 
     /** User bubble: deep noble sapphire gradient with a thin rim light. */
     fun userBubble(context: Context): GradientDrawable = gradientCard(context, MarsGradients.USER_BUBBLE)
+
+    /**
+     * Стеклянная подложка: полупрозрачная заливка + hairline-рамка.
+     *
+     * ЭТО НЕ [card] с полупрозрачным цветом: там solid из одного тона, и на
+     * ярком участке кадра такой прямоугольник читается как «вырезанная дыра» —
+     * текст просвечивает вместе с планетой. Здесь верхний слой плотнее нижнего
+     * (лёгкий градиент), поэтому стекло даёт и «просвечивание», и стабильный
+     * контраст: замер по худшему пикселю кадра — [TEXT_MUTED] 4.83:1,
+     * [TEXT_MUTED_ON_GLASS] 5.85:1, [TEXT] 13.3:1.
+     */
+    fun glassSurface(
+        context: Context,
+        radiusDp: Int = 14,
+        fill: Int = GLASS_FILL,
+        strokeColor: Int = GLASS_STROKE,
+        strokeWidthDp: Int = 1,
+    ): GradientDrawable = card(context, fill, radiusDp, strokeColor, strokeWidthDp)
 
     /** Bot message card: deep graphite gradient with a micro border. */
     fun botMessageCard(context: Context): GradientDrawable = gradientCard(context, MarsGradients.BOT_CARD)

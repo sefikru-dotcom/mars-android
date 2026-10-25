@@ -14,7 +14,6 @@ import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -112,9 +111,19 @@ class SplashActivity : ComponentActivity() {
     // --- Разметка ---------------------------------------------------------------------
 
     /**
-     * Экран собирается кодом, как и остальной UI модуля: планета и слово стоят
-     * по центру, ореол — отдельный View ПОД планетой, чтобы пульсировала только
-     * его альфа, а сама планета и текст оставались непрозрачными и неподвижными.
+     * Экран собирается кодом, как и остальной UI модуля.
+     *
+     * Планета НЕ рисуется отдельным ImageView: она уже пришла из темы окна
+     * (@drawable/splash_window_bg) как часть брендового кадра — присланного
+     * владельцем снимка Марса. Раньше здесь стоял второй, нарисованный диск
+     * (mars_splash_planet) поверх фона с планетой, то есть два Марса в одном
+     * кадре. Теперь поверх кадра живёт только слово «МАРС» и мягкое свечение
+     * за ним; диск планеты из кадра — единственный.
+     *
+     * Слово ставится НИЖЕ центра, а не по центру: в кадре планета занимает
+     * среднюю треть (низ диска ~67% высоты), верх и низ — чистый обсидиан.
+     * Центрированный текст лёг бы прямо на освещённый лимб, где контраст
+     * белого падает до 3.5:1; в нижней трети тот же текст даёт >12:1.
      */
     private fun buildContent(): View {
         // Фон НЕ дублируется на корне: он уже пришёл из темы (SplashTheme ->
@@ -128,18 +137,16 @@ class SplashActivity : ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
         }
 
-        val haloSize = dp(HALO_SIZE_DP)
-        val planetBox = FrameLayout(this)
-        haloDrawable = haloDrawable().also { halo ->
-            planetBox.addView(View(this).apply { background = halo },
-                FrameLayout.LayoutParams(haloSize, haloSize, Gravity.CENTER))
+        // Ореол остаётся: он даёт «дыхание» бренда и пульсирует по существующей
+        // политике. Размер — от ширины экрана, а не константой: на 20:9 и на
+        // 18:9 свечение должно занимать одинаковую долю кадра.
+        val haloSize = (resources.displayMetrics.widthPixels * HALO_WIDTH_FRAC).toInt()
+        haloDrawable = haloDrawable(haloSize).also { halo ->
+            column.addView(
+                View(this).apply { background = halo },
+                LinearLayout.LayoutParams(haloSize, haloSize)
+            )
         }
-        val planetSize = dp(PLANET_SIZE_DP)
-        planetBox.addView(ImageView(this).apply {
-            setImageResource(R.drawable.mars_splash_planet)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }, FrameLayout.LayoutParams(planetSize, planetSize, Gravity.CENTER))
-        column.addView(planetBox, LinearLayout.LayoutParams(haloSize, haloSize))
 
         // @string/app_name в нижнем регистре («Марс») — на заставке нужен
         // капс-логотип, поэтому регистр поднимаем здесь, а не заводим вторую
@@ -156,11 +163,12 @@ class SplashActivity : ComponentActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(WORD_TOP_MARGIN_DP) })
 
+        // Нижняя треть: подпись живёт под планетой, на чистом обсидиане.
         root.addView(column, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER
-        ))
+            Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+        ).apply { bottomMargin = dp(WORD_BOTTOM_MARGIN_DP) })
         contentColumn = column
         return root
     }
@@ -173,8 +181,8 @@ class SplashActivity : ComponentActivity() {
      * управляет пульсация. Если зашить полупрозрачность в цвета, аниматор
      * умножал бы её на свою — ореол стал бы тусклым и перестал читаться.
      */
-    private fun haloDrawable(): GradientDrawable {
-        val radius = dp(HALO_SIZE_DP) / 2
+    private fun haloDrawable(sizePx: Int): GradientDrawable {
+        val radius = sizePx / 2
         return GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             gradientType = GradientDrawable.RADIAL_GRADIENT
@@ -336,14 +344,23 @@ class SplashActivity : ComponentActivity() {
     private fun dp(value: Int) = MarsTheme.dp(this, value)
 
     private companion object {
-        /** Диаметр ореола: планета занимает примерно треть — «мягкое свечение». */
-        const val HALO_SIZE_DP = 320
+        /**
+         * Диаметр ореола как доля ширины экрана: 0.62 на 1080px даёт ~670px —
+         * мягкое свечение, которое читается за словом «МАРС», но не спорит с
+         * диском планеты из кадра.
+         */
+        const val HALO_WIDTH_FRAC = 0.62f
 
-        /** Диаметр планеты внутри ореола. */
-        const val PLANET_SIZE_DP = 200
-
-        /** Отступ слова «МАРС» от планеты. */
+        /** Отступ слова «МАРС» от ореола. */
         const val WORD_TOP_MARGIN_DP = 18
+
+        /**
+         * Отступ слова от низа экрана: подпись живёт в чистой обсидиановой
+         * трети ПОД планетой (низ диска в кадре ~67% высоты). Это и
+         * композиция, и читаемость: на лимбе белый текст даёт 3.5:1, здесь —
+         * больше 12:1.
+         */
+        const val WORD_BOTTOM_MARGIN_DP = 96
 
         /** Один кадр при 60 Гц — запас для переспроса политики. */
         const val FRAME_SLACK_MS = 16L

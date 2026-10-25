@@ -29,14 +29,22 @@ object MarsGradients {
     val DEPTH_LAYERS: IntArray = intArrayOf(BG, SURFACE_0, SURFACE_1, SURFACE_2, SURFACE_3)
 
     // ---- Gradient card colors (Obsidian Deep Glass) ----
-    /** User bubble: deep noble sapphire. */
-    const val USER_BUBBLE_TOP = 0xff1e2638.toInt()
-    const val USER_BUBBLE_BOTTOM = 0xff141a28.toInt()
+    // Полупрозрачность поверх кадра: плотность подобрана замером по ХУДШЕМУ
+    // пикселю фона (яркий лимб планеты под слоем окна и вуалью, #6C5833), а не
+    // на глаз. Ниже — значение TEXT_MUTED на этом фоне:
+    //   пузырь пользователя: 0.86 -> 4.55:1 (порог AA), берём 0.88 с запасом;
+    //   карточка Mars:       0.62 -> 4.51:1, берём 0.66.
+    // Плотнее — стекло становится глухой заливкой и фон под ним не читается;
+    // прозрачнее — мелкие подписи в карточках на освещённой части планеты
+    // уходят ниже порога.
+    /** User bubble: deep noble sapphire, translucent over the background frame. */
+    const val USER_BUBBLE_TOP = 0xe01e2638.toInt()
+    const val USER_BUBBLE_BOTTOM = 0xe0141a28.toInt()
     const val USER_BUBBLE_STROKE = 0xff2d3b55.toInt()
 
-    /** Bot message card: deep graphite. */
-    const val BOT_CARD_TOP = 0xff0f131c.toInt()
-    const val BOT_CARD_BOTTOM = 0xff090c13.toInt()
+    /** Bot message card: deep graphite glass. */
+    const val BOT_CARD_TOP = 0xa80f131c.toInt()
+    const val BOT_CARD_BOTTOM = 0xa8090c13.toInt()
     const val BOT_CARD_STROKE = 0xff1c2333.toInt()
 
     /** Thinking ("Мысли") card: translucent sapphire haze. */

@@ -79,7 +79,7 @@ class SettingsActivity : ComponentActivity() {
     private fun buildView(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
             setPadding(dp(16), dp(10), dp(16), dp(16))
         }
 

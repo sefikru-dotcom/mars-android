@@ -60,24 +60,43 @@ class MarsThemeDepthTest {
     @Test
     fun `user bubble is deep sapphire gradient with thin rim`() {
         val spec = MarsGradients.USER_BUBBLE
-        assertEquals(0xff1e2638.toInt(), spec.startColor)
-        assertEquals(0xff141a28.toInt(), spec.endColor)
+        // RGB-каналы прежние; изменилась только альфа — пузырь стал стеклом
+        // поверх кадра. Контракт держит не hex, а читаемость: подложка обязана
+        // остаться достаточно плотной для TEXT_MUTED на худшем пикселе фона.
+        assertEquals(0xff1e2638.toInt(), spec.startColor or 0xff000000.toInt())
+        assertEquals(0xff141a28.toInt(), spec.endColor or 0xff000000.toInt())
         assertEquals(0xff2d3b55.toInt(), spec.strokeColor)
         assertEquals(MarsGradients.Angle.TL_BR, spec.angle)
         assertTrue("bubble must have real gradient depth", spec.hasDepth)
         assertTrue("bubble must have a stroke", spec.hasStroke)
         assertTrue("bubble text padding expected", spec.paddingDp > 0)
+        assertTrue(
+            "пузырь — стекло: полупрозрачность обязательна, иначе фон под ним не виден",
+            !MarsGradients.isOpaque(spec.startColor)
+        )
+        assertTrue(
+            "но не прозрачнее 0.80: ниже этого мелкий текст на ярком лимбе проваливается под 4.5:1",
+            MarsGradients.alphaOf(spec.startColor) >= 0xCC
+        )
     }
 
     @Test
-    fun `bot card is graphite gradient with micro border and inner padding`() {
+    fun `bot card is graphite glass with micro border and inner padding`() {
         val spec = MarsGradients.BOT_CARD
-        assertEquals(0xff0f131c.toInt(), spec.startColor)
-        assertEquals(0xff090c13.toInt(), spec.endColor)
+        assertEquals(0xff0f131c.toInt(), spec.startColor or 0xff000000.toInt())
+        assertEquals(0xff090c13.toInt(), spec.endColor or 0xff000000.toInt())
         assertEquals(0xff1c2333.toInt(), spec.strokeColor)
         assertEquals(MarsGradients.Angle.TOP_BOTTOM, spec.angle)
         assertTrue(spec.hasDepth)
         assertTrue("bot card needs a light inner padding", spec.paddingDp > 0)
+        assertTrue(
+            "карточка Mars — стекло, фон обязан просвечивать",
+            !MarsGradients.isOpaque(spec.startColor)
+        )
+        assertTrue(
+            "порог читаемости: не прозрачнее 0.60 (muted на лимбе держит 4.5:1)",
+            MarsGradients.alphaOf(spec.startColor) >= 0x99
+        )
     }
 
     @Test

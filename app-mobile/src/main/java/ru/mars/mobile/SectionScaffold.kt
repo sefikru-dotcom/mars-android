@@ -41,7 +41,7 @@ object SectionScaffold {
         val compact = headerStyle == HeaderStyle.COMPACT
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
         }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())

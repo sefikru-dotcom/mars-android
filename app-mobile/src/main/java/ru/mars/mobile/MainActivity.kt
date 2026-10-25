@@ -67,7 +67,7 @@ class MainActivity : ComponentActivity() {
         val root = LinearLayout(this).apply {
             id = ROOT_ID
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

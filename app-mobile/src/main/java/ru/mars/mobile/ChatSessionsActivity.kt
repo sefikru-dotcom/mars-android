@@ -1223,7 +1223,7 @@ class ChatSessionsActivity : ComponentActivity() {
     // --- View -------------------------------------------------------------------------------------
 
     private fun buildView(): View {
-        drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.BG) }
+        drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.SCREEN_VEIL) }
         drawer.addView(buildListContent(), DrawerLayout.LayoutParams(-1, -1))
         drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
         return drawer
@@ -1233,7 +1233,7 @@ class ChatSessionsActivity : ComponentActivity() {
     private fun buildListContent(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
             setPadding(dp(12), dp(8), dp(12), dp(10))
         }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
