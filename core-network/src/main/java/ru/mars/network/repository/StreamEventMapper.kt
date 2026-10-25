@@ -372,7 +372,10 @@ object StreamEventMapper {
         if (usedTokens <= 0) return null
         // WebUI parity: Math.round(used/window*100), clamped like the ring (pct=min(100,rawPct)).
         val percent = Math.round(usedTokens.toLong() * 100.0 / maxTokens).toInt().coerceIn(0, 100)
-        return ChatEvent.ContextUsage(usedTokens, maxTokens, percent)
+        // ui.js `_syncCtxIndicator`: `const threshold = usage.threshold_tokens || 0` — a missing,
+        // null or non-positive threshold means «сервер порог не сообщил» (0), not a guess.
+        val thresholdTokens = intField(usage, "threshold_tokens")?.takeIf { it > 0 } ?: 0
+        return ChatEvent.ContextUsage(usedTokens, maxTokens, percent, thresholdTokens)
     }
 
     private fun intField(obj: Map<String, Any?>, vararg keys: String): Int? =

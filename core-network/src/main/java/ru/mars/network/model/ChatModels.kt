@@ -114,8 +114,20 @@ sealed interface ChatEvent {
      * `input_tokens`, which would overflow the window on long sessions, #1436).
      * [maxTokens] — the model's context window (>0).
      * [percent] — 0..100, clamped like the WebUI ring.
+     * [thresholdTokens] — server-side auto-compression threshold in tokens
+     * (`threshold_tokens` of the same `_live_usage_snapshot` payload), i.e. the fill
+     * level at which the SERVER compresses the context. `0` = «сервер не сообщил»
+     * (old payloads/backends without the field) — callers must not invent a
+     * percentage then. This is NOT the local `AutoCompressionConfig.thresholdPercent`
+     * preference of the app; the two are shown separately. Default `0` keeps every
+     * existing construction site (app-mobile/app-tv/tests) source-compatible.
      */
-    data class ContextUsage(val usedTokens: Int, val maxTokens: Int, val percent: Int) : ChatEvent
+    data class ContextUsage(
+        val usedTokens: Int,
+        val maxTokens: Int,
+        val percent: Int,
+        val thresholdTokens: Int = 0,
+    ) : ChatEvent
 
     /**
      * Steer text the agent never consumed (SSE `pending_steer_leftover`: `{session_id, text}`).

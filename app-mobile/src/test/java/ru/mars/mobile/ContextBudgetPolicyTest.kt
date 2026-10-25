@@ -9,8 +9,13 @@ import ru.mars.network.model.ChatEvent
 
 class ContextBudgetPolicyTest {
 
-    private fun usage(used: Int, max: Int, percent: Int) =
-        ChatEvent.ContextUsage(usedTokens = used, maxTokens = max, percent = percent)
+    private fun usage(used: Int, max: Int, percent: Int, threshold: Int = 0) =
+        ChatEvent.ContextUsage(
+            usedTokens = used,
+            maxTokens = max,
+            percent = percent,
+            thresholdTokens = threshold,
+        )
 
     @Test
     fun `unknown usage hides the pill`() {
@@ -85,14 +90,64 @@ class ContextBudgetPolicyTest {
     fun `details text lists fill percent and token counts`() {
         val details = ContextBudgetPolicy.detailsText(usage(1_500, 32_000, 5))
         assertEquals(
-            "Заполнено: 5%\nИспользовано токенов: 1.5k\nРазмер окна: 32.0k",
+            "Заполнено: 5%\nИспользовано токенов: 1.5k\nРазмер окна: 32.0k\n" +
+                "Сервер сожмёт при: порог не сообщён",
             details,
         )
+    }
+
+    @Test
+    fun `details text shows the server auto compression threshold in tokens and percent`() {
+        // Живой payload: window 200k, threshold_tokens 160k -> «Сервер сожмёт при: 160.0k · 80%».
+        val details = ContextBudgetPolicy.detailsText(usage(50_000, 200_000, 25, threshold = 160_000))
+        assertEquals(
+            "Заполнено: 25%\nИспользовано токенов: 50.0k\nРазмер окна: 200.0k\n" +
+                "Сервер сожмёт при: 160.0k · 80%",
+            details,
+        )
+    }
+
+    @Test
+    fun `details text keeps a threshold larger than the window honest`() {
+        // Порог больше окна: автосжатие сервера уже не наступит — показываем >100%, не врём «100%».
+        val details = ContextBudgetPolicy.detailsText(usage(10_000, 200_000, 5, threshold = 250_000))
+        assertTrue(details.endsWith("Сервер сожмёт при: 250.0k · 125%"))
     }
 
     @Test
     fun `details text for unknown measurement says it is not measured yet`() {
         assertEquals(ContextBudgetPolicy.UNKNOWN_DETAILS, ContextBudgetPolicy.detailsText(null))
         assertEquals(ContextBudgetPolicy.UNKNOWN_DETAILS, ContextBudgetPolicy.detailsText(usage(0, 0, 0)))
+    }
+
+    @Test
+    fun `unknown window hides the pill even when a threshold is present`() {
+        // context_length<=0: окна нет — ни процента, ни порога, ни подписи кольца (#1436).
+        val pill = ContextBudgetPolicy.pill(usage(50_000, 0, 0, threshold = 160_000), false)
+        assertFalse(pill.visible)
+        assertNull(pill.autoCompression)
+        assertNull(ContextBudgetPolicy.autoCompressionLabel(usage(50_000, 0, 0, threshold = 160_000)))
+        assertNull(ContextBudgetPolicy.thresholdPercent(usage(50_000, 0, 0, threshold = 160_000)))
+    }
+
+    @Test
+    fun `ring caption carries the webui auto compression wording`() {
+        // Эталон WebUI `context_auto_compress_at`: «Автосжатие при <порог> · <процент>%».
+        val pill = ContextBudgetPolicy.pill(usage(50_000, 200_000, 25, threshold = 160_000), false)
+        assertEquals("Автосжатие при 160.0k · 80%", pill.autoCompression)
+        assertEquals(
+            "Заполнение контекста: 25%. Автосжатие при 160.0k · 80%",
+            pill.contentDescription,
+        )
+        assertEquals(80, ContextBudgetPolicy.thresholdPercent(usage(50_000, 200_000, 25, threshold = 160_000)))
+    }
+
+    @Test
+    fun `ring caption stays short when the server sent no threshold`() {
+        val pill = ContextBudgetPolicy.pill(usage(50_000, 200_000, 25), false)
+        assertNull(pill.autoCompression)
+        assertEquals("Заполнение контекста: 25%", pill.contentDescription)
+        assertNull(ContextBudgetPolicy.autoCompressionLabel(null))
+        assertNull(ContextBudgetPolicy.autoCompressionLabel(usage(50_000, 200_000, 25, threshold = 0)))
     }
 }
