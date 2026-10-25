@@ -31,7 +31,14 @@ class SessionDetailContextSeedTest {
             "last_prompt_tokens" to 50_000,
         )
         assertEquals(
-            ChatEvent.ContextUsage(usedTokens = 50_000, maxTokens = 200_000, percent = 25),
+            ChatEvent.ContextUsage(
+                usedTokens = 50_000,
+                maxTokens = 200_000,
+                percent = 25,
+                // Порог автосжатия читается из того же холодного payload — кольцо
+                // сразу знает, когда сервер сожмёт, не дожидаясь первого хода.
+                thresholdTokens = 160_000,
+            ),
             StreamEventMapper.contextUsageOf(session),
         )
     }
