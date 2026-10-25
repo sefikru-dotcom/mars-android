@@ -129,6 +129,14 @@ jobs:
             # снимается — она отключается, а экран удерживается включённым.
             adb shell locksettings set-disabled true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
+            # `svc power stayon true` держит экран ТОЛЬКО при питании. Эмулятор
+            # считает себя на батарее, поэтому эта команда сама по себе ничего
+            # не удерживала: экран гас, и keyguard возвращался посреди прогона,
+            # давая 13 ложных падений на ровном месте. Поэтому сначала
+            # «подключаем питание», затем разрешаем stay-on для всех состояний.
+            adb shell dumpsys battery set ac 1 || true
+            adb shell dumpsys battery set usb 1 || true
+            adb shell settings put global stay_on_while_plugged_in 7 || true
             adb shell svc power stayon true || true
             adb shell input keyevent KEYCODE_WAKEUP || true
             adb shell wm dismiss-keyguard || true
