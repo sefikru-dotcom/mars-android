@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -129,6 +130,16 @@ object ChatMessageCardRenderer {
         }
         labelRow.addView(label)
 
+        // Шапка: час сообщения ОБЯЗАН получить свою ширину раньше пилюли модели.
+        // LinearLayout (HORIZONTAL) меряет детей слева направо и последнему ребёнку
+        // отдаёт остаток строки. Пилюля с wrap_content и ДЛИННЫМ именем модели
+        // (история берёт каталожную подпись вида «Gemini 3.8 Flash · vision и быстрые
+        // задачи» — 41 символ, до 186dp при 9.5sp, и это ещё без fontScale 1.15–1.3)
+        // съедала всю строку, и часу доставался MeasureSpec AT_MOST 0 → нулевая
+        // ширина → на экране НИЧЕГО. Поэтому пилюля живёт в контейнере с
+        // width=0+weight: в первом проходе LinearLayout такое дитя не меряет, часы
+        // получают полную ширину, а пилюля забирает остаток и обрезается ellipsis'ом.
+        var headerHasFlex = false
         if (!isUser) {
             // Фактическая модель хода (волна C, фича A): приоритет — серверный штамп
             // пузыря (открывающий кадр context_status, фоллбэк — effective_model из
@@ -145,20 +156,41 @@ object ChatMessageCardRenderer {
                     setTextColor(MarsTheme.ACCENT_TEXT)
                     background = MarsTheme.pill(context, MarsTheme.SURFACE_0, strokeColor = MarsTheme.BORDER_SUBTLE)
                     setPadding(dp(6), dp(1), dp(6), dp(1))
+                    // Одна строка: длинная подпись модели не переносится на вторую
+                    // строку шапки и не отбирает место у часов.
+                    isSingleLine = true
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
                 }
-                labelRow.addView(modelPill, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                val pillHost = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(modelPill, LinearLayout.LayoutParams(-2, -2))
+                }
+                labelRow.addView(
+                    pillHost,
+                    LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) },
+                )
+                headerHasFlex = true
             }
         }
 
         // Час сообщения справа в шапке карточки; при неизвестной метке не показываем.
+        // Подпись — 11sp и TEXT_EM вместо прежних 10.5sp TEXT_MUTED: мелкий серый час
+        // на тёмной карточке владелец не замечал, хотя технически он рисовался.
         MessageTimePolicy.clockLabel(message.timestamp)?.let { clock ->
-            labelRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-            labelRow.addView(TextView(context).apply {
-                text = clock
-                textSize = 10.5f
-                setTextColor(MarsTheme.TEXT_MUTED)
-                isSingleLine = true
-            })
+            // Карточка пользователя («Вы» + час) не имеет пилюли с весом — распорка.
+            if (!headerHasFlex) labelRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            labelRow.addView(
+                TextView(context).apply {
+                    text = clock
+                    textSize = 11f
+                    setTextColor(MarsTheme.TEXT_EM)
+                    isSingleLine = true
+                    maxLines = 1
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) },
+            )
         }
         card.addView(labelRow)
 
