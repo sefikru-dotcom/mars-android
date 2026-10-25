@@ -30,9 +30,17 @@ object MessageTimePolicy {
      * Epoch-метка сохранённой истории: state.db/sidecar несут `timestamp`
      * epoch-СЕКУНДАМИ (целыми или дробными). Граница [EPOCH_MILLIS_FLOOR]:
      * значения ниже неё — секунды (эпоха до 2286 года), выше — миллисекунды.
+     * Экспоненциальная форма («1.7929214065E9») допускается намеренно: JSON-число
+     * Moshi декодирует в Double, и любой путь, забывший нормализовать его в
+     * plain-string (BigDecimal, см. SessionRepository.createdAt), иначе молча
+     * терял бы час сообщения. Диапазон правдоподобия ниже отсекает мусор
+     * («0», «42», «20261011»), поэтому цифровая ветка не требует ≥9 цифр.
      */
-    private val EPOCH_NUMBER = Regex("^\\d{9,15}(\\.\\d+)?$")
+    private val EPOCH_NUMBER = Regex("^\\+?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$")
     private const val EPOCH_MILLIS_FLOOR = 1e12
+
+    /** Верхняя граница правдоподобия (2096-10): абсурдные значения не рисуем вовсе. */
+    private const val EPOCH_MILLIS_CEILING = 4e12
 
     /**
      * Разбор серверной метки: ISO со смещением, ISO-instant («…Z»), «YYYY-MM-DD HH:MM:SS»
@@ -43,9 +51,10 @@ object MessageTimePolicy {
         val value = raw?.trim().orEmpty()
         if (value.isEmpty()) return fallback
         if (EPOCH_NUMBER.matches(value)) {
-            value.toDoubleOrNull()?.takeIf { it > 0 }?.let { epoch ->
-                return (if (epoch >= EPOCH_MILLIS_FLOOR) epoch else epoch * 1000.0).toLong()
+            val millis = value.toDoubleOrNull()?.let { epoch ->
+                if (epoch >= EPOCH_MILLIS_FLOOR) epoch else epoch * 1000.0
             }
+            if (millis != null && millis in EPOCH_MILLIS_FLOOR..EPOCH_MILLIS_CEILING) return millis.toLong()
         }
         return runCatching { DateTimeFormatter.ISO_OFFSET_DATE_TIME.parse(value, Instant::from).toEpochMilli() }
             .recoverCatching { DateTimeFormatter.ISO_INSTANT.parse(value, Instant::from).toEpochMilli() }
