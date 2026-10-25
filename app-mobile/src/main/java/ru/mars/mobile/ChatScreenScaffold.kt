@@ -878,7 +878,6 @@ object ChatScreenScaffold {
             visibility = View.GONE
             setOnClickListener { host.showContextUsageDetails() }
         }
-        chipsRow.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(2) })
 
         // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
         // первый показывает кумулятивные токены и деньги (`GET api/session/usage`),
@@ -891,7 +890,6 @@ object ChatScreenScaffold {
             visibility = View.GONE
             setOnClickListener { host.showSessionUsageDetails() }
         }
-        chipsRow.addView(usageIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
         // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
         // tap открывает множественный выбор из справочника тулсетов.
@@ -924,6 +922,22 @@ object ChatScreenScaffold {
         chipsRow.addView(quotaChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
         chipsScroll.addView(chipsRow)
+
+        // Кольцо контекста и расход сессии — ВНЕ горизонтального скролла чипов.
+        // Внутри него они уезжали за правый край на узком экране (POCO F5), а это
+        // единственный индикатор «скоро ужмёт». Держим их закреплёнными слева от
+        // скролла: всегда на виду, а длинные подписи чипов прокручиваются сами.
+        val pinnedIndicators = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        pinnedIndicators.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
+        pinnedIndicators.addView(
+            usageIndicator,
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(2) },
+        )
+        composerBottomBar.addView(pinnedIndicators, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
 
         // Справа: кнопки действий (поиск, вложение, голос, озвучка, отправка/стоп)
