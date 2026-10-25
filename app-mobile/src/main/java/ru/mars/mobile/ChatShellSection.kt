@@ -249,6 +249,8 @@ internal fun ChatActivity.buildChatContent(): View {
     activityModeBtn = v.composer.activityModeBtn
     workspaceBtn = v.composer.workspaceBtn
     contextRing = v.composer.contextRing
+    contextRow = v.composer.contextRow
+    contextCaption = v.composer.contextCaption
     usageIndicator = v.composer.usageIndicator
     toolsetsChip = v.composer.toolsetsChip
     quotaChip = v.composer.quotaChip

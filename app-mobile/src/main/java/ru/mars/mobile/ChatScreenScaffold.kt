@@ -209,6 +209,10 @@ object ChatScreenScaffold {
         val activityModeBtn: Button,
         val workspaceBtn: Button,
         val contextRing: ContextRingView,
+        /** Строка контекста (кольцо + подпись с токенами и порогом); скрыта без замера. */
+        val contextRow: LinearLayout,
+        /** Подпись «25% · 50.0k/200.0k · сжатие при 160.0k · 80%» (текст — из политики). */
+        val contextCaption: TextView,
         val usageIndicator: TextView,
         val toolsetsChip: Button,
         val quotaChip: TextView,
@@ -891,6 +895,38 @@ object ChatScreenScaffold {
             setOnClickListener { host.showSessionUsageDetails() }
         }
 
+        // Строка контекста над чипами: кольцо + подпись «25% · 50.0k/200.0k · сжатие при 160.0k · 80%».
+        // Порог автосжатия и объём токенов видны БЕЗ тапа по кольцу (тап по-прежнему открывает
+        // детали, но «когда сожмёт» угадывать нельзя). Текст целиком решает чистая
+        // [ContextBudgetPolicy.composerLabel]; здесь только применение.
+        // Отдельная строка, а не место в нижней панели: на 360dp справа от кольца остаётся
+        // ~130dp (чипы + 5 кнопок действий), подпись там обрезалась бы. Здесь ширина — вся
+        // капсула (weight 1 при фиксированных 24dp кольца, горизонтального раздувания нет),
+        // а maxLines=2 даёт перенос вместо обрезки на fontScale 1.3.
+        val contextCaption = TextView(context).apply {
+            textSize = 9.5f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            includeFontPadding = false
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setOnClickListener { host.showContextUsageDetails() }
+        }
+        val contextRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(2), 0, 0)
+        }
+        contextRow.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
+        contextRow.addView(
+            contextCaption,
+            LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(6) },
+        )
+        // Порядок в капсуле: поле ввода → строка контекста → нижняя панель с кнопками.
+        composer.addView(contextRow, LinearLayout.LayoutParams(-1, -2))
+
         // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
         // tap открывает множественный выбор из справочника тулсетов.
         val toolsetsChip = Button(context).apply {
@@ -923,20 +959,14 @@ object ChatScreenScaffold {
 
         chipsScroll.addView(chipsRow)
 
-        // Кольцо контекста и расход сессии — ВНЕ горизонтального скролла чипов.
-        // Внутри него они уезжали за правый край на узком экране (POCO F5), а это
-        // единственный индикатор «скоро ужмёт». Держим их закреплёнными слева от
-        // скролла: всегда на виду, а длинные подписи чипов прокручиваются сами.
-        val pinnedIndicators = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        pinnedIndicators.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
-        pinnedIndicators.addView(
+        // Расход сессии — ВНЕ горизонтального скролла чипов: внутри него пилюля уезжала за
+        // правый край на узком экране (POCO F5). Кольцо контекста живёт в своей строке выше
+        // (contextRow), где у него есть место под подпись с объёмом токенов и порогом
+        // автосжатия; чипы от переезда только выиграли 24dp ширины.
+        composerBottomBar.addView(
             usageIndicator,
-            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(2) },
+            LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) },
         )
-        composerBottomBar.addView(pinnedIndicators, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
 
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
 
@@ -1071,6 +1101,8 @@ object ChatScreenScaffold {
                 activityModeBtn = activityModeBtn,
                 workspaceBtn = workspaceBtn,
                 contextRing = contextRing,
+                contextRow = contextRow,
+                contextCaption = contextCaption,
                 usageIndicator = usageIndicator,
                 toolsetsChip = toolsetsChip,
                 quotaChip = quotaChip,

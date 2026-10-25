@@ -311,12 +311,22 @@ internal fun ChatActivity.loadWorkspaces() {
 /**
  * Кольцо контекста в композере (паритет с `.ctx-ring-svg` WebUI): дуга + процент,
  * цвет по порогам. Скрыто, пока замер неизвестен — нерешённое окно не превращается
- * в фейковый процент (#1436 parity). Решение (видимость, процент, порог, описание)
- * принимает [ContextBudgetPolicy] (JVM-тесты); этот слой только отдаёт его кольцу.
+ * в фейковый процент (#1436 parity). Рядом с кольцом — подпись с объёмом токенов и
+ * порогом автосжатия, чтобы «сколько занято» и «когда сожмёт» были видны без тапа.
+ * Решение (видимость, процент, порог, тексты) принимает [ContextBudgetPolicy]
+ * (JVM-тесты); этот слой только отдаёт его кольцу и подписи.
  */
 internal fun ChatActivity.updateContextIndicator() {
-    val view = contextRing ?: return
-    view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))
+    val pill = ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning)
+    contextRing?.render(pill)
+    val label = ContextBudgetPolicy.composerLabel(uiState.contextUsage, compressionRunning)
+    val caption = contextCaption ?: return
+    caption.text = label
+    caption.contentDescription = pill.contentDescription
+    caption.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
+    // Строка целиком скрыта, когда измерять нечего: пустой подписи и «нулевого» порога
+    // пользователь видеть не должен (ContextBudgetPolicy возвращает null, а не нули).
+    contextRow?.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
 }
 
 /**
