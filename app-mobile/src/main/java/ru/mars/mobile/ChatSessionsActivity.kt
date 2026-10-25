@@ -370,6 +370,20 @@ class ChatSessionsActivity : ComponentActivity() {
             return
         }
         lifecycleScope.launch {
+            // Кэш показывается ДО сети. Раньше список рисовался только после
+            // `getSessions`, а при мёртвой сети connect-таймаут — 10 с: экран
+            // оставался пустым («Диалогов пока нет»), хотя копия лежит в кэше.
+            // Это и флак UI-тестов (20 с ожидания против 10 с таймаута), и
+            // реальный промах UX. Сетевой результат ниже перерисовывает поверх.
+            if (sessions.isEmpty()) {
+                val cached = withContext(Dispatchers.IO) { offlineCache.loadSessions() }
+                if (cached != null && cached.sessions.isNotEmpty()) {
+                    sessions = cached.sessions
+                    offlineSnapshotAt = cached.savedAtEpochMillis
+                    renderSessionList()
+                    updateOfflineBanner()
+                }
+            }
             try {
                 val fresh = SessionRepository().getSessions(ChatActivity.BASE_URL, c)
                 // Пустой ответ (сбой сети или диалогов действительно нет) сверяется с
