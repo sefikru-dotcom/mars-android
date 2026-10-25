@@ -38,6 +38,17 @@ DEFAULT_PALETTE_FILES = {"MarsTheme.kt", "MarsGradients.kt", "colors.xml"}
 
 COLOR_RE = re.compile(r"0x[0-9a-fA-F]{6,8}\b|parseColor\(\s*\"#[0-9a-fA-F]{6,8}\"")
 
+# Битовые маски платформы Android — НЕ цвета, хотя пишутся тем же литералом `0x…`.
+# `InputType.TYPE_TEXT_FLAG_CAP_SENTENCES = 0x00004000` — флаг ввода; гейт палитры
+# обязан их пропускать, иначе любая честная политика ввода не проходит CI. Узнаём
+# маску по ИМЕНИ константы: значение маски всегда объявлено как `..._FLAG_...`,
+# `TYPE_CLASS_...`, `TYPE_MASK_...`, `IME_ACTION_...` или `IME_FLAG_...`.
+# Цветовыми считаются только литералы 6/8 знаков (0xRRGGBB / 0xAARRGGBB) с иным именем.
+MASK_NAME_RE = re.compile(
+    r"\b(?:TYPE_(?:MASK|CLASS)_[A-Z_]+|TYPE_TEXT_FLAG_[A-Z_]+|TYPE_[A-Z_]*FLAG_[A-Z_]+"
+    r"|IME_ACTION_[A-Z_]+|IME_FLAG_[A-Z_]+)\b"
+)
+
 # Именованные цвета Android, у которых есть токен палитры. `Color.TRANSPARENT` не банится:
 # это «отсутствие цвета» (прозрачный фон кнопки), а не оттенок дизайн-системы.
 COLOR_NAME_RE = re.compile(r"\bColor\.(WHITE|BLACK)\b")
@@ -244,7 +255,12 @@ def main(argv: list[str]) -> int:
         for idx, line in enumerate(clean):
             original = raw[idx] if idx < len(raw) else ""
             if not is_palette:
+                # Маска платформы (InputType/IME) — не цвет палитры: пропускаем строку
+                # объявления константы, иначе гейт валит любую политику ввода.
+                mask_line = MASK_NAME_RE.search(line) is not None
                 for m in COLOR_RE.finditer(line):
+                    if mask_line:
+                        continue
                     print(f"{path}:{idx + 1}: [цвет] {m.group(0)}   | {original.strip()[:90]}")
                     colors += 1
                 for m in COLOR_NAME_RE.finditer(line):
