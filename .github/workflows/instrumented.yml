@@ -23,7 +23,15 @@ name: Instrumented UI tests
   # непроверенный CI-файл в main — это лотерея.
   workflow_dispatch:
   push:
-    branches: ['w3/**', 'wave/**', 'run/**']
+    # main — обязателен: без него набор androidTest не проверялся на боевой
+    # ветке вообще, и зелёный CI на main ничего не говорил о UI-поведении.
+    # paths ограничивает запуск: эмулятор не поднимается на правки документации.
+    branches: ['main', 'w3/**', 'wave/**', 'run/**']
+    paths:
+      - 'app-mobile/src/**'
+      - 'app-mobile/build.gradle.kts'
+      - 'core-network/src/**'
+      - '.github/workflows/instrumented.yml'
   pull_request:
     paths:
       - 'app-mobile/src/**'
