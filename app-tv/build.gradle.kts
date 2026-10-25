@@ -26,7 +26,7 @@ if (!hasReleaseSigning) {
 }
 
 android { namespace = "ru.mars.tv"; compileSdk = 34
-    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 33; versionName = "1.5.9"
+    defaultConfig { applicationId = "ru.mars.tv"; minSdk = 28; targetSdk = 34; versionCode = 34; versionName = "1.5.10"
         // Локали: свои строки только в values/ (ru), каталогов других локалей в
         // модуле нет. Библиотечные локали срезаются так же, как в app-mobile:
         // 196 КБ локализованных строк + 262 КБ уникальных строковых данных,
