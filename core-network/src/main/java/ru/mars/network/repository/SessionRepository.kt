@@ -520,6 +520,14 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
         // "no override" — the composer pill then shows the server default rather
         // than a phantom empty selection.
         enabledToolsets = toolsetNames(s["enabled_toolsets"]),
+        // Cold context-window snapshot (#ring-seed): `GET /api/session` puts
+        // `context_length` / `threshold_tokens` / `last_prompt_tokens` on the
+        // session object itself (api/routes.py). Parsed through the SAME mapper
+        // the `metering` frames use, so the ring cannot disagree with the stream:
+        // unknown window stays null, never a fake percentage.
+        contextUsage = StreamEventMapper.contextUsageOf(
+            s.entries.associate { (key, value) -> key.toString() to value },
+        ),
     )
 
     suspend fun renameSession(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String, newTitle: String): Boolean =
