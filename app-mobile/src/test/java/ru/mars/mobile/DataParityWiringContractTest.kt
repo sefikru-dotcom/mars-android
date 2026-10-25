@@ -41,6 +41,7 @@ class DataParityWiringContractTest {
                 "ChatCardHostSection.kt",
                 "ChatStatusSection.kt",
                 "ChatTurnSection.kt",
+            "ChatSlashCommandsSection.kt",
                 "ChatSessionSection.kt",
                 "ChatSessionLifecycleSection.kt",
                 "ChatTranscriptSection.kt",
@@ -139,8 +140,8 @@ class DataParityWiringContractTest {
             "Промпт продолжения уходит в обычную очередь, а не вторым путём отправки",
             chat.contains("offlineQueue.enqueue(text, currentSessionId)")
         )
-        assertTrue("`/goal` перехватывается до отправки в модель", chat.contains("GoalLoopPolicy.isCommand(text)"))
-        assertTrue("Команда обслуживается локально", chat.contains("handleGoalCommand(text)"))
+        assertTrue("`/goal` перехватывается до отправки в модель", chat.contains("GoalLoopPolicy.isCommand(rawInput)"))
+        assertTrue("Команда обслуживается локально", chat.contains("handleGoalCommand(rawInput)"))
     }
 
     // --- O8: карточка офлайн-очереди ------------------------------------------------------

@@ -46,8 +46,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
-import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
 import ru.mars.network.model.ChatAttachment
@@ -120,13 +120,18 @@ internal fun ChatActivity.initializeChatStores() {
         workspaceSelection = WorkspaceSelection(PrefsWorkspaceChoiceStorage(getSharedPreferences("mars-workspace-choice", Context.MODE_PRIVATE)))
         autoCompressionStorage = PrefsAutoCompressionStorage(getSharedPreferences("mars-auto-compression", Context.MODE_PRIVATE))
         drafts = SessionDraftController(PrefsSessionDraftStore(getSharedPreferences(ChatActivity.DRAFTS_PREFS, Context.MODE_PRIVATE)))
-        // Офлайн-устойчивость: кэш сессий/транскриптов (core-network) и персистентная очередь
-        // неотправленных сообщений. Оба хранилища — приватные plaintext-данные, поэтому входят
-        // в cleanup при logout/реавторизации вместе с черновиками.
-        val offlineCachePrefs = getSharedPreferences(ChatActivity.OFFLINE_CACHE_PREFS, Context.MODE_PRIVATE)
-        val pendingQueuePrefs = getSharedPreferences(ChatActivity.PENDING_QUEUE_PREFS, Context.MODE_PRIVATE)
-        offlineCache = SessionOfflineCache(SharedPreferencesKeyValueStore(offlineCachePrefs))
-        val pendingMessageStore = PrefsPendingMessageStore(pendingQueuePrefs)
+        // Офлайн-устойчивость: кэш сессий/транскриптов и персистентная очередь
+        // неотправленных сообщений. Оба хранилища — приватные plaintext-данные, поэтому
+        // входят в cleanup при logout/реавторизации вместе с черновиками.
+        //
+        // Источник — OfflineStores (SQLite), а НЕ SharedPreferences: офлайн-слой уже
+        // переехал в SQLite (OfflineStores.migrateLegacy при первом открытии базы стирает
+        // prefs), а этот экран продолжал писать в старый prefs-файл. Следствие было
+        // реальным дефектом: транскрипт, сохранённый здесь, экраном диалога больше не
+        // читался (он читает SQLite), а миграция при следующем старте его вычищала —
+        // офлайн-копия молча терялась при каждом запуске.
+        offlineCache = OfflineStores.sessionCache(this)
+        val pendingMessageStore = OfflineStores.pendingMessageStore(this)
         offlineQueue = OfflineMessageQueuePolicy(pendingMessageStore)
         // Выход из авторизации (logout/реавторизация) обязан стереть локальные plaintext-данные
         // до finish(), и после этого черновики больше не сохраняются (onPause не пишет назад).
@@ -135,6 +140,9 @@ internal fun ChatActivity.initializeChatStores() {
         authExitCleanup = AuthExitStores.cleanup(
             context = this,
             overrides = mapOf(AuthExitStores.PENDING_QUEUE_PREFS to pendingMessageStore),
+            // SQLite-база офлайн-слоя входит в cleanup как отдельное хранилище: она
+            // стирается одной транзакцией (очередь + кэш), имя prefs-файла тут ни при чём.
+            extras = listOf(OfflineStores.database(this)),
         )
         compressionController = ContextCompressionController(
             host = CompressionHostBridge(),

@@ -25,20 +25,31 @@ import ru.mars.network.repository.ChatRepository
  */
 
 internal fun ChatActivity.sendMessage() {
+    val rawInput = input.text.toString().trim()
+    // Команды разбираются ДО веток read-only/steer: `/stop` и `/steer` осмысленны именно
+    // во время хода, а раньше текст ушёл бы на сервер перехватом. `/help` работает и в
+    // сессии «только для чтения»: он ничего не меняет. Обычный текст идёт прежним путём.
+    // `/goal` (O14) обслуживается локально: в модель как промпт не уходит, иначе сервер
+    // просто ответил бы текстом, а цель не изменилась бы.
+    if (GoalLoopPolicy.isCommand(rawInput)) {
+        handleGoalCommand(rawInput)
+        return
+    }
+    // Остальные слэш-команды (паритет с WebUI) обслуживаются клиентом: разбор —
+    // чистая [SlashCommandPolicy], исполнение — [handleSlashCommand]. В модель как
+    // промпт они не уходят, иначе сервер ответил бы текстом, а команда не сработала бы.
+    // Неизвестное имя тоже не отправляется — диспетчер отвечает «неизвестная команда».
+    if (SlashCommandPolicy.isCommand(rawInput)) {
+        handleSlashCommand(rawInput)
+        return
+    }
     if (currentSessionReadOnly) {
         statusView.text = "Сессия доступна только для чтения"
         return
     }
     if (uiState.status == ChatStatus.TYPING) { steerMessage(); return }
-    val rawInput = input.text.toString().trim()
     val text = composerLayoutPresenter.outgoingText(rawInput)
     val outgoingAttachments = attachments.toList()
-    // Команда `/goal` (O14) обслуживается локально: в модель как промпт не уходит,
-    // иначе сервер просто ответил бы текстом, а цель не изменилась бы.
-    if (GoalLoopPolicy.isCommand(text)) {
-        handleGoalCommand(text)
-        return
-    }
     // Офлайн-буферизация (OfflineMessageQueuePolicy): без сети обычный текст уходит в
     // персистентную очередь с локальным эхом и будет отправлен автоматически после
     // восстановления связи. Вложения не буферизуются — multipart-загрузку офлайн не

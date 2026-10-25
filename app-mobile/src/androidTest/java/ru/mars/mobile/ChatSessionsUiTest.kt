@@ -12,16 +12,20 @@ import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.intent.Intents
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withClassName
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withHint
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import ru.mars.mobile.UiTestHarness.waitUntilDisplayed
+import ru.mars.mobile.UiTestHarness.waitUntilGone
 
 /**
  * UI-тесты уровня «Диалоги» ([ChatSessionsActivity]) на seeded офлайн-кэше:
@@ -34,7 +38,9 @@ class ChatSessionsUiTest {
     @Before
     fun setUp() {
         UiTestHarness.resetState()
+        UiTestHarness.wakeAndUnlock()
         UiTestHarness.radioOff()
+        UiTestHarness.grantRuntimePermissions()
         UiTestHarness.seedCredential()
         UiTestHarness.seedSessionCache()
     }
@@ -84,7 +90,10 @@ class ChatSessionsUiTest {
             pressBack()
             waitUntilDisplayed(withContentDescription("Музыка"))
             // Back из показанных разделов на корневом уровне → SYSTEM_EXIT.
-            pressBack()
+            // pressBackUnconditionally: обычный pressBack() бросает
+            // NoActivityResumedException, когда нажатие КАК РАЗ завершает приложение —
+            // а тест этого и ожидает, так что падение было в тесте, не в поведении.
+            androidx.test.espresso.Espresso.pressBackUnconditionally()
             val deadline = System.currentTimeMillis() + 10_000
             var destroyed = false
             while (System.currentTimeMillis() < deadline && !destroyed) {
@@ -98,11 +107,22 @@ class ChatSessionsUiTest {
     @Test
     fun search_filtersList_andShowsEmptyStateOnNoMatch() {
         launchAndWaitForList().use {
+            // replaceText, а не typeText: IME эмулятора не умеет транслировать кириллицу
+            // в key events, и typeText падает с «Failed to get key events for string».
             onView(withHint("Поиск диалогов…")).perform(
-                typeText(UiTestHarness.OTHER_TITLE), closeSoftKeyboard()
+                replaceText(UiTestHarness.OTHER_TITLE), closeSoftKeyboard()
             )
-            waitUntilDisplayed(withText(UiTestHarness.OTHER_TITLE))
-            onView(withText(UiTestHarness.PARENT_TITLE)).check(doesNotExist())
+            // Заголовок «Отдельный чат» совпадает ДВАЖДЫ: карточка списка (Button) и поле
+            // поиска (EditText) с введённым текстом. Ожидание привязано к карточке по
+            // классу, иначе Espresso падает на AmbiguousViewMatcher.
+            waitUntilDisplayed(allOf(
+                withClassName(equalTo(android.widget.Button::class.java.name)),
+                withText(UiTestHarness.OTHER_TITLE),
+            ))
+            // Рендер списка отложен дебаунсом (RENDER_DEBOUNCE_MS), поэтому проверка
+            // «родителя больше нет» должна ДОЖДАТЬСЯ перерисовки, а не читать иерархию
+            // мгновенно: иначе тест видит старый список и падает не на фильтре.
+            waitUntilGone(withText(UiTestHarness.PARENT_TITLE))
 
             onView(withHint("Поиск диалогов…")).perform(
                 replaceText("zzz-такого-диалога-нет"), closeSoftKeyboard()
@@ -116,9 +136,12 @@ class ChatSessionsUiTest {
         launchAndWaitForList().use {
             onView(withContentDescription("Развернуть воркеры")).perform(click())
             waitUntilDisplayed(withText(UiTestHarness.CHILD_TITLE))
-            // Строка ребёнка помечена источником (sourceLabel + read-only подпись).
-            onView(withText(org.hamcrest.Matchers.containsString("Subagent")))
-                .check(matches(isDisplayed()))
+            // Строка ребёнка подписана темой его работы («Субагент» по умолчанию, если
+            // worker_status без goal) — паритет с WebUI. Английское «Subagent» в UI
+            // больше не рисуется, поэтому ожидание привязано к политике подписи.
+            onView(withText(org.hamcrest.Matchers.containsString(
+                ru.mars.mobile.SubagentWorkLabelPolicy.FALLBACK_GOAL
+            ))).check(matches(isDisplayed()))
             // Тумблер переключился на «Свернуть воркеры».
             onView(withContentDescription("Свернуть воркеры")).check(matches(isDisplayed()))
 

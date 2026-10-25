@@ -8,8 +8,9 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.platform.app.InstrumentationRegistry
 import org.hamcrest.Matcher
+import org.hamcrest.Matchers.not
+import ru.mars.mobile.offline.OfflineStores
 import ru.mars.network.cache.SessionOfflineCache
-import ru.mars.network.cache.SharedPreferencesKeyValueStore
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.model.SessionItem
@@ -102,6 +103,9 @@ object UiTestHarness {
     fun resetState() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.resetState")
         AndroidKeyStoreCredentialStore(targetContext).clear()
+        // Прод-хранилище офлайн-слоя — SQLite: чистим его целиком, иначе фикстуры
+        // предыдущего теста (кэш диалогов, очередь отправки) протекают в следующий.
+        OfflineStores.clearAll(targetContext)
         listOf(
             "mars-offline-cache",
             "mars-session-drafts",
@@ -115,6 +119,58 @@ object UiTestHarness {
         ).forEach { name ->
             targetContext.getSharedPreferences(name, Context.MODE_PRIVATE)
                 .edit().clear().commit()
+        }
+    }
+
+    /**
+     * Выдаёт runtime-разрешения, которые приложение запрашивает при старте, ДО запуска
+     * активности.
+     *
+     * Зачем: `ChatActivity` на входе вызывает `PushNotifications.ensurePostPermission`, и на
+     * API 33+ системный диалог POST_NOTIFICATIONS уводит активность из RESUMED. Espresso
+     * считает такую активность отсутствующей (`NoActivityResumedException`), и UI-тест падает
+     * не на своём предмете, а на модальном диалоге ОС. `pm grant` снимает диалог, оставляя
+     * поведение приложения неизменным.
+     */
+    fun grantRuntimePermissions() {
+        DeviceSafetyGuard.requireEmulator("UiTestHarness.grantRuntimePermissions")
+        listOf(
+            android.Manifest.permission.POST_NOTIFICATIONS,
+            android.Manifest.permission.RECORD_AUDIO,
+        ).forEach { permission ->
+            shell("pm grant ${targetContext.packageName} $permission")
+        }
+    }
+
+    /**
+     * Будит устройство и снимает keyguard.
+     *
+     * Headless-эмулятор блокируется повторно ВО ВРЕМЯ прогона: одного снятия в
+     * workflow мало, потому что экран гаснет между тестами, и дальше любое окно
+     * остаётся без window focus (`has-window-focus=false`) — падают все UI-тесты
+     * подряд, независимо от проверяемого поведения. Звать в `@Before` каждого
+     * теста, который поднимает активность.
+     */
+    fun wakeAndUnlock() {
+        DeviceSafetyGuard.requireEmulator("UiTestHarness.wakeAndUnlock")
+        val device = androidx.test.uiautomator.UiDevice.getInstance(
+            InstrumentationRegistry.getInstrumentation()
+        )
+        runCatching { device.wakeUp() }
+        runCatching { device.pressMenu() }
+        // `wm dismiss-keyguard` требует shell-прав — они есть у instrumentation.
+        shell("wm dismiss-keyguard")
+        // keyevent 82 (MENU) на API 34 сам keyguard не снимает, нужен свайп вверх.
+        if (runCatching { device.isNaturalOrientation }.getOrDefault(true)) {
+            runCatching {
+                device.swipe(
+                    device.displayWidth / 2,
+                    (device.displayHeight * 0.85f).toInt(),
+                    device.displayWidth / 2,
+                    (device.displayHeight * 0.25f).toInt(),
+                    20,
+                )
+            }
         }
     }
 
@@ -133,17 +189,18 @@ object UiTestHarness {
     }
 
     /**
-     * Кладёт в прод-кэш ([SessionOfflineCache] поверх файла `mars-offline-cache`)
-     * снимок списка диалогов и транскрипт родительской сессии. При выключенном
-     * радио список диалогов и открытый диалог показывают ровно эти данные.
+     * Кладёт в прод-кэш ([SessionOfflineCache]) снимок списка диалогов и
+     * транскрипт родительской сессии. При выключенном радио список диалогов и
+     * открытый диалог показывают ровно эти данные.
+     *
+     * Хранилище берётся из [OfflineStores] — того же слоя, что читает приложение
+     * (SQLite с TTL по умолчанию), а не из SharedPreferences: прод переехал на
+     * SQLite, и фикстура, записанная в prefs, экраном не видна — список пуст,
+     * тесты падают на «Диалогов пока нет», хотя wiring исправен.
      */
     fun seedSessionCache() {
         DeviceSafetyGuard.requireEmulator("UiTestHarness.seedSessionCache")
-        val cache = SessionOfflineCache(
-            SharedPreferencesKeyValueStore(
-                targetContext.getSharedPreferences("mars-offline-cache", Context.MODE_PRIVATE)
-            )
-        )
+        val cache = OfflineStores.sessionCache(targetContext)
         val saved = cache.saveSessions(
             listOf(
                 SessionItem(
@@ -189,6 +246,57 @@ object UiTestHarness {
     }
 
     /**
+     * Ждёт, пока [matcher] перестанет отображаться (или исчезнет из иерархии).
+     *
+     * Зачем отдельно от [waitUntilDisplayed]: экран перерисовывается отложенно
+     * (дебаунс ввода, асинхронная загрузка), поэтому `check(doesNotExist())` сразу
+     * после действия видит СТАРУЮ иерархию и падает не на поведении, а на гонке.
+     */
+    fun waitUntilGone(matcher: Matcher<View>, timeoutMs: Long = 20_000) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            val gone = try {
+                onView(matcher).check(matches(not(isDisplayed())))
+                true
+            } catch (missing: androidx.test.espresso.NoMatchingViewException) {
+                // View больше нет в иерархии — ожидаемый исход «исчезло».
+                true
+            } catch (t: Throwable) {
+                // Неоднозначный матчер ждать не имеет смысла — падаем сразу.
+                if (hasCause(t, androidx.test.espresso.AmbiguousViewMatcherException::class.java)) {
+                    throw AssertionError(
+                        "Матчер неоднозначен — совпало несколько view. Уточните матчер: $matcher",
+                        t,
+                    )
+                }
+                // Иначе view ЕЩЁ видима — нормальный промежуточный результат, опрашиваем дальше.
+                false
+            }
+            if (gone) return
+            SystemClock.sleep(250)
+        }
+        throw AssertionError("View $matcher не исчезла за ${timeoutMs}ms")
+    }
+
+    /**
+     * Есть ли в цепочке причин исключение типа [type].
+     *
+     * Нужно потому, что Espresso заворачивает свои сбои в
+     * `AssertionFailedWithCauseError` (наследник [AssertionError]), так что судить по
+     * верхнему типу исключения нельзя: «ещё видима» и «матчер неоднозначен» приходят
+     * с одинаковой обёрткой и различаются только причиной.
+     */
+    private fun <T : Throwable> hasCause(error: Throwable, type: Class<T>): Boolean {
+        var cause: Throwable? = error
+        var guard = 0
+        while (cause != null && guard++ < 10) {
+            if (type.isInstance(cause)) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    /**
      * Ждёт (поллинг на main-idle между попытками), пока [matcher] не станет
      * отображаемым: асинхронная загрузка из кэша/сети не отслеживается
      * IdlingResource приложения.
@@ -201,6 +309,16 @@ object UiTestHarness {
                 onView(matcher).check(matches(isDisplayed()))
                 return
             } catch (t: Throwable) {
+                // Неоднозначный матчер — это НЕ «ещё не появилось»: ждать бессмысленно,
+                // условие не выполнится никогда. Проверяем по цепочке причин, потому что
+                // Espresso заворачивает свой сбой в AssertionFailedWithCauseError.
+                if (hasCause(t, androidx.test.espresso.AmbiguousViewMatcherException::class.java)) {
+                    throw AssertionError(
+                        "Матчер неоднозначен — совпало несколько view. Уточните матчер " +
+                            "(allOf/withClassName): $matcher",
+                        t,
+                    )
+                }
                 lastError = t
                 SystemClock.sleep(250)
             }

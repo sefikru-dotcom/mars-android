@@ -1,0 +1,196 @@
+name: Instrumented UI tests
+
+# Инструментальные (Espresso) тесты на эмуляторе — отдельный workflow, а не шаг в ci.yml.
+#
+# Почему отдельно:
+#  1. Эмулятор в CI — самый дорогой и самый хрупкий шаг (KVM, GPU, загрузка AVD).
+#     В общем прогоне он превратил бы каждую правку в ожидание загрузки эмулятора
+#     и красил бы main из-за инфраструктуры раннера, а не из-за кода.
+#  2. Пока не доказано, что набор зелёный на эмуляторе, ставить его в один job
+#     с юнит-тестами значит заменить проверку кода проверкой инфраструктуры.
+#
+# Тесты безопасны по конструкции: EmulatorOnlyTestRunner завершает instrumentation
+# ДО загрузки тестов на физическом устройстве (fail-closed), а сами тесты работают
+# против варианта `uiTest` (applicationIdSuffix .uitest) — с собственным пакетом,
+# своим data-каталогом и своим UID-пространством AndroidKeyStore. Боевой
+# ru.mars.mobile не затрагивается. Живой сервер не нужен: сеть в harness
+# выключается, данные сидятся в офлайн-кэш.
+
+"on":
+  # Ручной запуск — основной путь. Ветки проекта (w3/**, wave/**, run/**) и PR
+  # добавлены, чтобы workflow можно было ПРОВЕРИТЬ по факту до вливания в main:
+  # workflow_dispatch на неосновной ветке GitHub не обслуживает (404), а
+  # непроверенный CI-файл в main — это лотерея.
+  workflow_dispatch:
+  push:
+    branches: ['w3/**', 'wave/**', 'run/**']
+  pull_request:
+    paths:
+      - 'app-mobile/src/**'
+      - 'app-mobile/build.gradle.kts'
+      - 'core-network/src/**'
+      - '.github/workflows/instrumented.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instrumented-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instrumented:
+    name: Espresso on emulator (uiTest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Materialize Firebase google-services.json from CI secrets
+        env:
+          MARS_GOOGLE_SERVICES_MOBILE_B64: ${{ secrets.MARS_GOOGLE_SERVICES_MOBILE_B64 }}
+        run: |
+          set -eu
+          if [ -z "${MARS_GOOGLE_SERVICES_MOBILE_B64:-}" ]; then
+            echo "FAIL: секрет MARS_GOOGLE_SERVICES_MOBILE_B64 не задан"
+            exit 1
+          fi
+          printf '%s' "$MARS_GOOGLE_SERVICES_MOBILE_B64" | base64 -d > app-mobile/google-services.json
+          python3 -c "import json,sys; json.load(open('app-mobile/google-services.json')); print('google-services.json: валидный JSON')"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Make wrapper executable
+        run: chmod +x ./gradlew
+
+      # KVM обязателен: без аппаратной виртуализации эмулятор на x86_64 либо не
+      # стартует, либо деградирует до софтверного рендера и таймаутит. Шаг
+      # падает явно и понятно, вместо загадочного таймаута загрузки AVD.
+      - name: Enable KVM
+        run: |
+          set -eu
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -e /dev/kvm || { echo "FAIL: /dev/kvm отсутствует — эмулятор не запустится"; exit 1; }
+          echo "KVM доступен"
+
+      # AVD-образ кэшируется: скачивание system image — самая долгая часть
+      # холодного прогона, а он не меняется между коммитами.
+      # Снапшот НЕ кэшируется (только образ): сохранённый снапшот возвращает
+      # эмулятор в состояние «экран заблокирован», из-за чего окно приложения
+      # остаётся без фокуса и весь прогон ложно краснеет.
+      - name: Cache AVD snapshot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-${{ runner.os }}-${{ hashFiles('app-mobile/build.gradle.kts') }}
+          restore-keys: |
+            avd-api34-${{ runner.os }}-
+
+      # Одна Gradle-инвокация: собрать uiTest-вариант и его androidTest APK,
+      # затем прогнать на эмуляторе. Тесты против физического устройства не
+      # пойдут по конструкции (EmulatorOnlyTestRunner), поэтому здесь только
+      # эмулятор — это не риск, а единственный поддерживаемый путь.
+      - name: Run instrumented tests on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            # Блокировка экрана — главная причина ложных «красных» UI-прогонов.
+            # Headless-эмулятор стартует с keyguard, а затем экран гаснет по
+            # таймауту и keyguard возвращается ПРЯМО ВО ВРЕМЯ прогона (10 минут).
+            # Пока он висит, ни одно окно приложения не получает window focus:
+            # Espresso падает на RootViewWithoutFocusException, и это выглядит как
+            # поломка UI, хотя приложение исправно. Поэтому блокировка не просто
+            # снимается — она отключается, а экран удерживается включённым.
+            adb shell locksettings set-disabled true || true
+            adb shell settings put system screen_off_timeout 2147483647 || true
+            adb shell svc power stayon true || true
+            adb shell input keyevent KEYCODE_WAKEUP || true
+            adb shell wm dismiss-keyguard || true
+            adb shell input keyevent 82 || true
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
+            # Системные оверлеи отбирают window focus, и Espresso падает на
+            # RootViewWithoutFocusException: экран логина с полем пароля
+            # провоцирует диалог автозаполнения, а уведомления — heads-up окно.
+            adb shell settings put secure autofill_service null || true
+            adb shell settings put global heads_up_notifications_enabled 0 || true
+            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+            adb shell input keyevent KEYCODE_HOME || true
+            # Диагностика: если фокус снова отвалится, в логе будет видно, что
+            # именно занимало foreground.
+            adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true
+
+            # /usr/bin/sh раннера — это dash, где нет `set -o pipefail`. Поэтому
+            # сборка запускается явным bash: иначе прогон падает не на тестах, а
+            # на строке `set`, выдавая ложный «красный» о коде приложения.
+            bash -c 'set -o pipefail; ./gradlew --no-daemon --stacktrace --max-workers=2 :app-mobile:connectedUiTestAndroidTest 2>&1 | tee instrumented.log'
+
+      - name: Summarize instrumented results
+        if: always()
+        run: |
+          set -eu
+          # Считать по XML, а не по слову «успех» в логе: пустой прогон без
+          # тестов выглядел бы зелёным. Guard завершает instrumentation с
+          # RESULT_CANCELED, и это тоже должно быть видно как провал.
+          shopt -s nullglob
+          files=(app-mobile/build/outputs/androidTest-results/connected/**/*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "FAIL: XML-результатов нет — тесты не выполнились"
+            echo "instrumented: no XML results" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          python3 - "$@" <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          files = glob.glob('app-mobile/build/outputs/androidTest-results/connected/**/*.xml', recursive=True)
+          tests = failures = errors = skipped = 0
+          for path in files:
+              try:
+                  root = ET.parse(path).getroot()
+              except ET.ParseError:
+                  continue
+              for suite in ([root] if root.tag == 'testsuite' else root.iter('testsuite')):
+                  tests += int(suite.get('tests') or 0)
+                  failures += int(suite.get('failures') or 0)
+                  errors += int(suite.get('errors') or 0)
+                  skipped += int(suite.get('skipped') or 0)
+          print(f"instrumented: tests={tests} failures={failures} errors={errors} skipped={skipped}")
+          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'], 'a') as fh:
+              fh.write(f"instrumented: tests={tests} failures={failures} errors={errors} skipped={skipped}\n")
+          if tests == 0:
+              print("FAIL: прогон без тестов")
+              sys.exit(1)
+          if failures or errors:
+              print("FAIL: есть провалы")
+              sys.exit(1)
+          PY
+
+      - name: Upload instrumented reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrumented-reports-${{ github.sha }}
+          path: |
+            app-mobile/build/reports/androidTests/**
+            app-mobile/build/outputs/androidTest-results/**
+            instrumented.log
+          if-no-files-found: warn
+          retention-days: 5

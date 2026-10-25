@@ -4,18 +4,23 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.Espresso.pressBack
 import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.closeSoftKeyboard
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withClassName
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withHint
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import ru.mars.mobile.UiTestHarness.waitUntilDisplayed
+import ru.mars.mobile.UiTestHarness.waitUntilGone
 
 /**
  * UI-тесты уровня «диалог» ([ChatActivity]): запуск без сервера, шторка
@@ -28,7 +33,9 @@ class ChatActivityUiTest {
     @Before
     fun setUp() {
         UiTestHarness.resetState()
+        UiTestHarness.wakeAndUnlock()
         UiTestHarness.radioOff()
+        UiTestHarness.grantRuntimePermissions()
         UiTestHarness.seedCredential()
         UiTestHarness.seedSessionCache()
     }
@@ -74,14 +81,28 @@ class ChatActivityUiTest {
 
     @Test
     fun transcriptSearch_opensViaHeaderButton_andBackClosesItStayingInChat() {
-        ActivityScenario.launch(ChatActivity::class.java).use {
+        ActivityScenario.launch(ChatActivity::class.java).use { scenario ->
             waitUntilDisplayed(withText("МАРС"))
-            onView(withContentDescription("Поиск по диалогу")).perform(click())
+            // Описание «Поиск по диалогу» носят ДВА элемента: кнопка в шапке и поле ввода
+            // в раскрытой панели. Кликаем именно по кнопке (ImageButton), иначе Espresso
+            // валится на AmbiguousViewMatcher. Поле проверяется ниже по подсказке.
+            onView(allOf(
+                withClassName(equalTo(android.widget.ImageButton::class.java.name)),
+                withContentDescription("Поиск по диалогу"),
+            )).perform(click())
             waitUntilDisplayed(withHint("Искать в диалоге…"))
 
             // Back закрывает поиск первым (CLOSE_SEARCH), пользователь остаётся в диалоге.
-            pressBack()
-            onView(withHint("Искать в диалоге…")).check(matches(not(isDisplayed())))
+            // Клавиатуру закрываем ДО Back: пока поле в фокусе, первый Back съедает IME,
+            // панель остаётся открытой, и проверка ниже падает не на поведении экрана.
+            closeSoftKeyboard()
+            // Back отправляем в диспетчер самой активности, а не системным pressBack():
+            // на эмуляторе с IME системное нажатие может уйти клавиатуре, и тест тогда
+            // проверяет работу IME, а не NavBackPolicy приложения.
+            scenario.onActivity { activity ->
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+            waitUntilGone(withHint("Искать в диалоге…"))
             onView(withText("МАРС")).check(matches(isDisplayed()))
         }
     }

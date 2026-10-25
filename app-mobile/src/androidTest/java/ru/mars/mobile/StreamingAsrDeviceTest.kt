@@ -26,10 +26,24 @@ class StreamingAsrDeviceTest {
 
     private companion object {
         const val TAG = "MarsAsrDeviceTest"
+
+        /**
+         * Приёмочный тест написан под arm64-железо POCO F5. На x86_64-эмуляторе sherpa-onnx
+         * либо не грузит модель, либо падает в native, и красный прогон ничего не говорит о
+         * боевом устройстве. Поэтому на эмуляторе тест помечается пропущенным, а не падает —
+         * иначе CI-гейт приходится либо игнорировать, либо отключать целиком.
+         */
+        fun skipOnEmulator() {
+            org.junit.Assume.assumeFalse(
+                "приёмочный ASR-тест: нужен arm64 POCO, не эмулятор",
+                DeviceSafetyGuard.evaluateCurrentDevice().isEmulator,
+            )
+        }
     }
 
     @Test
     fun modelDownloadsAndRecognizerInitializes() {
+        skipOnEmulator()
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val engine = StreamingAsrEngine(context = ctx, config = AsrConfig())
 
@@ -39,6 +53,7 @@ class StreamingAsrDeviceTest {
 
     @Test
     fun acceptsPcmAndProducesResultOrEmptyWithoutCrash() {
+        skipOnEmulator()
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val events = mutableListOf<AsrEvent>()
         val engine = StreamingAsrEngine(
