@@ -361,4 +361,20 @@ data class SessionDetail(
      * names the session is restricted to.
      */
     val enabledToolsets: List<String>? = null,
+    /**
+     * Cold context-window snapshot of a loaded session (`GET /api/session` emits
+     * `context_length`, `threshold_tokens`, `last_prompt_tokens` right beside the
+     * session fields — api/routes.py, the same trio `_live_usage_snapshot()`
+     * carries on `metering` frames). `null` when the payload omits them, which
+     * means "not measured yet", never a fake zero window.
+     *
+     * Why it exists: the composer ring used to stay empty until the FIRST turn
+     * of the session, because [ru.mars.mobile.ChatUiState.bindSession] resets
+     * `contextUsage` and only live stream frames could refill it. Opening an old
+     * long session therefore showed no fill level at all — exactly the "не видно
+     * сколько токенов уже занято" complaint. Seeding from the detail payload
+     * gives the ring a real value immediately, and the first `metering` frame of
+     * the next turn overwrites it as before.
+     */
+    val contextUsage: ChatEvent.ContextUsage? = null,
 )

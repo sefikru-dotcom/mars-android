@@ -71,7 +71,12 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
             drafts.onSessionSwitch(currentSessionId, detail.id, input.text.toString())
             // O7: новый диалог — свой черновик; текст прежнего поля не «принадлежит» ему.
             composerGuard.onSessionSwitch()
-            uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+            uiState.bindSession(
+                detail.id,
+                detail.title,
+                historyMessages(detail),
+                contextUsage = detail.contextUsage,
+            )
             applySessionTitle(uiState.sessionTitle)
             modelSelection.setSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
@@ -341,7 +346,12 @@ internal fun ChatActivity.reloadCurrentSession() {
     lifecycleScope.launch {
         val detail = SessionRepository().getSessionDetail(ChatActivity.BASE_URL, c, id)
         if (detail != null && currentSessionId == id) {
-            uiState.bindSession(detail.id, detail.title, historyMessages(detail))
+            uiState.bindSession(
+                detail.id,
+                detail.title,
+                historyMessages(detail),
+                contextUsage = detail.contextUsage,
+            )
             applySessionTitle(uiState.sessionTitle)
             modelSelection.setSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
