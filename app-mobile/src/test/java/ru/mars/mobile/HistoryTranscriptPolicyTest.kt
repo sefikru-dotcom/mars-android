@@ -262,6 +262,40 @@ class HistoryTranscriptPolicyTest {
     }
 
     @Test
+    fun `multi-day history renders a Moscow clock on every bubble and day separators`() {
+        val msk = java.time.ZoneId.of("Europe/Moscow")
+        val bubbles = HistoryTranscriptPolicy.of(
+            listOf(
+                // 2026-10-13 19:54:37 UTC = 22:54 MSK
+                row("user", "вчерашний вопрос", timestamp = "1791921277.8392885"),
+                row("assistant", "вчерашний ответ", timestamp = "1791921300"),
+                // 2026-10-14 06:40:00 UTC = 09:40 MSK — другие сутки
+                row("user", "сегодняшний вопрос", timestamp = "1791960000"),
+                row("assistant", "сегодняшний ответ", timestamp = "1791960030"),
+            )
+        )
+        assertEquals(4, bubbles.size)
+        // Час есть у КАЖДОГО пузыря истории (ни один не остался UNKNOWN).
+        val clocks = bubbles.map { MessageTimePolicy.clockLabel(it.timestamp, msk) }
+        assertEquals(listOf("22:54", "22:55", "09:40", "09:40"), clocks)
+        // Разделитель суток: первый пузырь и смена дня, между сообщениями одного дня — нет.
+        val snapshots = bubbles.mapIndexed { index, bubble ->
+            CardSnapshotPolicy.of(
+                bubble,
+                previousTimestamp = bubbles.getOrNull(index - 1)?.timestamp ?: MessageTimePolicy.UNKNOWN_TIMESTAMP,
+                chromeEpoch = 0L,
+                streamingFlag = false,
+            )
+        }
+        assertEquals(listOf(true, false, true, false), snapshots.map { it.showDaySeparator })
+        // Подписи разделителей считаются от тех же меток (в зоне владельца).
+        assertEquals("13 октября", MessageTimePolicy.dayLabel(snapshots[0].separatorTimestamp, millisNow(), msk))
+        assertEquals("14 октября", MessageTimePolicy.dayLabel(snapshots[2].separatorTimestamp, millisNow(), msk))
+    }
+
+    private fun millisNow(): Long = java.time.Instant.parse("2026-10-20T09:00:00Z").toEpochMilli()
+
+    @Test
     fun `grouped card keeps the first assistant timestamp of the turn`() {
         val bubbles = HistoryTranscriptPolicy.of(
             listOf(

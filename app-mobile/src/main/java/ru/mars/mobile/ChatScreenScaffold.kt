@@ -755,13 +755,31 @@ object ChatScreenScaffold {
             setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
             textSize = 15f
-            maxLines = ComposerLayoutPresenter.MAX_INPUT_LINES
-            isSingleLine = false
             background = null
             setPadding(dp(6), dp(4), dp(6), dp(4))
-            imeOptions = 4
+            // Флаги и геометрия — из [ComposerInputTypePolicy] (чистая JVM-политика с тестами).
+            // Порядок критичен (ловушка TextView): setSingleLine(false) внутри себя вызывает
+            // setMaxLines(Integer.MAX_VALUE), поэтому предел строк ставится ПОСЛЕДНИМ — иначе
+            // он сбрасывается, поле растёт без границы и вылезает за капсулу на чипы.
+            inputType = ComposerInputTypePolicy.INPUT_TYPE
+            isSingleLine = false
+            maxLines = ComposerInputTypePolicy.maxLines()
+            // Перенос по словам (а не горизонтальный скролл) + скролл ВНУТРИ поля:
+            // длинный текст листается в поле, не растягивая композер.
+            setHorizontallyScrolling(false)
+            isVerticalScrollBarEnabled = false
+            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля. Держит капсулу
+            // в рамках даже если платформа проигнорирует maxLines (не наезжает на нижнюю панель).
+            includeFontPadding = false
+            maxHeight = ComposerInputTypePolicy.maxHeightPx(
+                lineHeightPx = paint.fontMetricsInt.let { it.descent - it.ascent },
+                verticalPaddingPx = dp(4) + dp(4),
+            )
+            imeOptions = ComposerInputTypePolicy.IME_OPTIONS
             setOnEditorActionListener { _, action, _ ->
-                if (action == 4) { host.sendMessage(); true } else false
+                // Отправляет только явный IME_ACTION_SEND; Enter и прочие действия отдаём полю,
+                // чтобы многострочный ввод продолжал вставлять перевод строки.
+                if (ComposerInputTypePolicy.isSendAction(action)) { host.sendMessage(); true } else false
             }
             // A15: серверный черновик composer. Запись дебаунсится политикой
             // [ServerDraftSyncPolicy] (~2 с покоя между запросами); программная вставка
@@ -860,7 +878,6 @@ object ChatScreenScaffold {
             visibility = View.GONE
             setOnClickListener { host.showContextUsageDetails() }
         }
-        chipsRow.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(2) })
 
         // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
         // первый показывает кумулятивные токены и деньги (`GET api/session/usage`),
@@ -873,7 +890,6 @@ object ChatScreenScaffold {
             visibility = View.GONE
             setOnClickListener { host.showSessionUsageDetails() }
         }
-        chipsRow.addView(usageIndicator, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
         // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
         // tap открывает множественный выбор из справочника тулсетов.
@@ -906,6 +922,22 @@ object ChatScreenScaffold {
         chipsRow.addView(quotaChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4) })
 
         chipsScroll.addView(chipsRow)
+
+        // Кольцо контекста и расход сессии — ВНЕ горизонтального скролла чипов.
+        // Внутри него они уезжали за правый край на узком экране (POCO F5), а это
+        // единственный индикатор «скоро ужмёт». Держим их закреплёнными слева от
+        // скролла: всегда на виду, а длинные подписи чипов прокручиваются сами.
+        val pinnedIndicators = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        pinnedIndicators.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
+        pinnedIndicators.addView(
+            usageIndicator,
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(2) },
+        )
+        composerBottomBar.addView(pinnedIndicators, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+
         composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
 
         // Справа: кнопки действий (поиск, вложение, голос, озвучка, отправка/стоп)

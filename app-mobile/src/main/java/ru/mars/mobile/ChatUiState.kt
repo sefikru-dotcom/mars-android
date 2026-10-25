@@ -497,7 +497,19 @@ class ChatUiState(
         return true
     }
 
-    fun bindSession(id: String?, title: String?, history: List<ChatMessage>) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; contextUsage = null; expandedCodeBlocks.clear(); expandedToolGroups.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
+    fun bindSession(
+        id: String?,
+        title: String?,
+        history: List<ChatMessage>,
+        /**
+         * Cold context snapshot из `GET /api/session` ([ru.mars.network.model.SessionDetail.contextUsage]).
+         * Раньше кольцо заполнения оставалось пустым до ПЕРВОГО хода в диалоге: bindSession
+         * его сбрасывал, а refill давали только живые `metering`-кадры. null = сервер не
+         * прислал метрик (это не «0%», кольцо просто скрыто).
+         */
+        contextUsage: ChatEvent.ContextUsage? = null,
+    ) { todoState = null; activeSessionId = id; sessionTitle = title; messages.clear(); messages.addAll(TranscriptCapPolicy.capMessages(history)); status = ChatStatus.IDLE; phase = null; this.contextUsage = contextUsage; expandedCodeBlocks.clear(); expandedToolGroups.clear(); autonomyEnabled = false; reattachedTurn = false; streamDroppedChars = 0; clearSubagentBoard(); clearActiveTurnFlags(); clearPendingInteractive() }
+
     fun toggleThoughts(index: Int) { messages.getOrNull(index)?.let { messages[index] = it.copy(thoughtsExpanded = !it.thoughtsExpanded) } }
     fun toggleTool(messageIndex: Int, toolIndex: Int) { messages.getOrNull(messageIndex)?.let { m -> if (toolIndex in m.tools.indices) messages[messageIndex] = m.copy(tools = m.tools.mapIndexed { i, t -> if (i == toolIndex) t.copy(expanded = !t.expanded) else t }) } }
 

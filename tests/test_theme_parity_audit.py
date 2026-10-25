@@ -70,6 +70,30 @@ class GateTest(unittest.TestCase):
         code, _ = self.run_gate()
         self.assertEqual(0, code)
 
+    def test_platform_input_masks_are_not_colors(self):
+        # InputType/IME — битовые маски, а не оттенки палитры. Гейт узнаёт их по имени
+        # константы: иначе любая политика ввода (autocapitalize/multi-line) валит CI.
+        self.write(
+            "ComposerInputTypePolicy.kt",
+            "const val TYPE_CLASS_TEXT = 0x00000001\n"
+            "const val TYPE_TEXT_FLAG_CAP_SENTENCES = 0x00004000\n"
+            "const val IME_ACTION_SEND = 0x00000004\n",
+        )
+        code, out = self.run_gate()
+        self.assertEqual(0, code, out)
+
+    def test_named_value_colour_next_to_a_mask_is_still_banned(self):
+        # Соседняя строка с настоящим цветом не должна спасаться именем маски выше:
+        # пропуск действует ПОСТРОЧНО, а не на весь файл.
+        self.write(
+            "Mixed.kt",
+            "const val TYPE_MASK_CLASS = 0x0000000F\n"
+            "val accent = 0xff5ad2a0\n",
+        )
+        code, out = self.run_gate()
+        self.assertEqual(1, code)
+        self.assertIn("0xff5ad2a0", out)
+
     # --- глифы -------------------------------------------------------------
 
     def test_bullet_glyph_is_banned(self):

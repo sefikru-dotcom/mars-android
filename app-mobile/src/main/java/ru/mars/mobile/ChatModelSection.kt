@@ -339,7 +339,10 @@ internal fun ChatActivity.showContextUsageDetails() {
         setHintTextColor(MarsTheme.TEXT_MUTED)
     }
     val autoBox = CheckBox(this).apply {
-        text = "Автосжатие при ${config.thresholdPercent}% заполнения"
+        // Локальное предпочтение приложения (AutoCompressionConfig), НЕ серверный
+        // threshold_tokens: серверный порог показан строкой в деталях выше
+        // («Сервер сожмёт при: 160.0k · 80%»), поэтому подписи не путаются.
+        text = "Локальный авто-режим при ${config.thresholdPercent}% заполнения"
         isChecked = config.enabled
         setTextColor(MarsTheme.TEXT_STRONG)
         setOnCheckedChangeListener { _, checked ->

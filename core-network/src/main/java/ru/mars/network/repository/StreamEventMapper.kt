@@ -372,11 +372,28 @@ object StreamEventMapper {
         if (usedTokens <= 0) return null
         // WebUI parity: Math.round(used/window*100), clamped like the ring (pct=min(100,rawPct)).
         val percent = Math.round(usedTokens.toLong() * 100.0 / maxTokens).toInt().coerceIn(0, 100)
-        return ChatEvent.ContextUsage(usedTokens, maxTokens, percent)
+        // ui.js `_syncCtxIndicator`: `const threshold = usage.threshold_tokens || 0` — a missing,
+        // null or non-positive threshold means «сервер порог не сообщил» (0), not a guess.
+        val thresholdTokens = intField(usage, "threshold_tokens")?.takeIf { it > 0 } ?: 0
+        return ChatEvent.ContextUsage(usedTokens, maxTokens, percent, thresholdTokens)
     }
 
     private fun intField(obj: Map<String, Any?>, vararg keys: String): Int? =
         keys.firstNotNullOfOrNull { key -> (obj[key] as? Number)?.toInt() }
+
+    /**
+     * Context-window snapshot of a NON-stream payload (session detail, history
+     * header) — the same `context_length` / `threshold_tokens` /
+     * `last_prompt_tokens` trio a `metering` frame carries, but sitting flat on
+     * the session object instead of under `usage`. Public entry point so
+     * `SessionRepository` can seed the composer ring on session load without
+     * duplicating the percent maths or the #1436 invariants.
+     *
+     * Deliberately reuses [contextUsage]: one implementation of "post-compression
+     * estimate wins, cumulative input_tokens never counts, unknown window is not
+     * a percentage" — a second copy would drift from the stream path.
+     */
+    fun contextUsageOf(payload: Map<String, Any?>?): ChatEvent.ContextUsage? = contextUsage(payload)
 
     private fun interimAssistant(obj: Map<String, Any?>?, eventId: String?): ChatEvent? {
         if (obj == null) return null
