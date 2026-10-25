@@ -755,13 +755,31 @@ object ChatScreenScaffold {
             setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
             textSize = 15f
-            maxLines = ComposerLayoutPresenter.MAX_INPUT_LINES
-            isSingleLine = false
             background = null
             setPadding(dp(6), dp(4), dp(6), dp(4))
-            imeOptions = 4
+            // Флаги и геометрия — из [ComposerInputTypePolicy] (чистая JVM-политика с тестами).
+            // Порядок критичен (ловушка TextView): setSingleLine(false) внутри себя вызывает
+            // setMaxLines(Integer.MAX_VALUE), поэтому предел строк ставится ПОСЛЕДНИМ — иначе
+            // он сбрасывается, поле растёт без границы и вылезает за капсулу на чипы.
+            inputType = ComposerInputTypePolicy.INPUT_TYPE
+            isSingleLine = false
+            maxLines = ComposerInputTypePolicy.maxLines()
+            // Перенос по словам (а не горизонтальный скролл) + скролл ВНУТРИ поля:
+            // длинный текст листается в поле, не растягивая композер.
+            setHorizontallyScrolling(false)
+            isVerticalScrollBarEnabled = false
+            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля. Держит капсулу
+            // в рамках даже если платформа проигнорирует maxLines (не наезжает на нижнюю панель).
+            includeFontPadding = false
+            maxHeight = ComposerInputTypePolicy.maxHeightPx(
+                lineHeightPx = paint.fontMetricsInt.let { it.descent - it.ascent },
+                verticalPaddingPx = dp(4) + dp(4),
+            )
+            imeOptions = ComposerInputTypePolicy.IME_OPTIONS
             setOnEditorActionListener { _, action, _ ->
-                if (action == 4) { host.sendMessage(); true } else false
+                // Отправляет только явный IME_ACTION_SEND; Enter и прочие действия отдаём полю,
+                // чтобы многострочный ввод продолжал вставлять перевод строки.
+                if (ComposerInputTypePolicy.isSendAction(action)) { host.sendMessage(); true } else false
             }
             // A15: серверный черновик composer. Запись дебаунсится политикой
             // [ServerDraftSyncPolicy] (~2 с покоя между запросами); программная вставка
