@@ -76,6 +76,37 @@ object ContextBudgetPolicy {
         return "Автосжатие при ${formatTokenCount(usage.thresholdTokens)} · $percent%"
     }
 
+    /**
+     * Компактная подпись заполнения: «25% · 50.0k/200.0k». null, когда окно неизвестно
+     * (`maxTokens <= 0`) — тогда любые числа были бы выдумкой (#1436).
+     */
+    fun usageLabel(usage: ChatEvent.ContextUsage?): String? {
+        if (usage == null || usage.maxTokens <= 0) return null
+        return "${usage.percent}% · ${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.maxTokens)}"
+    }
+
+    /**
+     * Подпись контекста рядом с кольцом композера — то, что видно БЕЗ тапа по кольцу:
+     * «25% · 50.0k/200.0k · сжатие при 160.0k · 80%».
+     *
+     * Паритет с WebUI: процент заполнения — серверный `round(used/window*100)`
+     * (`ContextUsage.percent`, клампится к 100 как дуга кольца), процент порога —
+     * [thresholdPercent] (`round(threshold/window*100)`, НЕ клампится: порог больше окна
+     * честно даёт >100%). Второго форматтера токенов нет — только [formatTokenCount].
+     *
+     * null — измерять нечего (замера нет или окно неизвестно): подпись скрывается, а не
+     * показывает фейковые нули. Порог `<= 0` (сервер не сообщил `threshold_tokens`) подпись
+     * не удлиняет: остаётся «25% · 50.0k/200.0k» без части про сжатие.
+     * Во время сжатия подпись — [COMPRESSION_LABEL] (замера ещё нет).
+     */
+    fun composerLabel(usage: ChatEvent.ContextUsage?, compressionRunning: Boolean = false): String? {
+        if (compressionRunning) return COMPRESSION_LABEL
+        val measured = usage ?: return null
+        val base = usageLabel(measured) ?: return null
+        val threshold = thresholdPercent(measured) ?: return base
+        return "$base · сжатие при ${formatTokenCount(measured.thresholdTokens)} · $threshold%"
+    }
+
     /** Состояние пилюли композера: компрессия важнее замера, неизвестный замер скрыт. */
     fun pill(usage: ChatEvent.ContextUsage?, compressionRunning: Boolean): ContextPillView {
         if (compressionRunning) {
@@ -99,7 +130,7 @@ object ContextBudgetPolicy {
         }
         return ContextPillView(
             visible = true,
-            text = "${usage.percent}% · ${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.maxTokens)}",
+            text = usageLabel(usage),
             level = level(usage.percent),
             contentDescription = description,
             percent = usage.percent,

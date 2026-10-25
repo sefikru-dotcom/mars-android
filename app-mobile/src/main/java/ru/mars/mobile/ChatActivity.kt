@@ -178,6 +178,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var workspaceSelection: WorkspaceSelection
     internal var workspaceBtn: Button? = null
     internal var contextRing: ContextRingView? = null
+    /** Строка контекста композера (кольцо + подпись); скрыта, пока замер неизвестен. */
+    internal var contextRow: LinearLayout? = null
+    /** Видимая подпись контекста: «25% · 50.0k/200.0k · сжатие при 160.0k · 80%». */
+    internal var contextCaption: TextView? = null
     /** Живой заголовок диалога в шапке (SSE-кадр `title`, авто-титлинг на ходу). */
     internal var sessionTitleView: TextView? = null
     /** Пилюля расхода/стоимости сессии (A14, `GET /api/session/usage`); скрыта при 0/недоступности. */

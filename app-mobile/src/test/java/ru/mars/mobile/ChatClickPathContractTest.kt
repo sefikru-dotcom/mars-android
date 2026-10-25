@@ -322,7 +322,8 @@ class ChatClickPathContractTest {
         )
         assertTrue(
             "Кольцо рисует только решение ContextBudgetPolicy.pill (никаких своих порогов)",
-            chatUi.contains("view.render(ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning))")
+            chatUi.contains("val pill = ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning)") &&
+                chatUi.contains("contextRing?.render(pill)")
         )
         assertTrue(
             "View кольца обязана нести contentDescription из политики (TalkBack)",

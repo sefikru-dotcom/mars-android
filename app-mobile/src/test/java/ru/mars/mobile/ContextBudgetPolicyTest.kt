@@ -150,4 +150,89 @@ class ContextBudgetPolicyTest {
         assertNull(ContextBudgetPolicy.autoCompressionLabel(null))
         assertNull(ContextBudgetPolicy.autoCompressionLabel(usage(50_000, 200_000, 25, threshold = 0)))
     }
+
+    // --- Подпись композера: объём токенов и порог автосжатия видны БЕЗ тапа ---------------
+
+    @Test
+    fun `composer label shows percent tokens and the server threshold`() {
+        // Живой payload: окно 200k, порог 160k -> «18% · 36.0k/200.0k · сжатие при 160.0k · 80%».
+        assertEquals(
+            "18% · 36.0k/200.0k · сжатие при 160.0k · 80%",
+            ContextBudgetPolicy.composerLabel(usage(36_000, 200_000, 18, threshold = 160_000)),
+        )
+    }
+
+    @Test
+    fun `composer label omits the compression part when the server sent no threshold`() {
+        // threshold_tokens отсутствует: подпись не выдумывает порог, но токены показывает.
+        assertEquals("18% · 36.0k/200.0k", ContextBudgetPolicy.composerLabel(usage(36_000, 200_000, 18)))
+        assertEquals(
+            "18% · 36.0k/200.0k",
+            ContextBudgetPolicy.composerLabel(usage(36_000, 200_000, 18, threshold = 0)),
+        )
+        assertEquals(
+            "18% · 36.0k/200.0k",
+            ContextBudgetPolicy.composerLabel(usage(36_000, 200_000, 18, threshold = -1)),
+        )
+    }
+
+    @Test
+    fun `composer label is hidden when the window is unknown`() {
+        // Окна нет — нет ни процента, ни токенов: пустая подпись, а не «0.0k/0.0k».
+        assertNull(ContextBudgetPolicy.composerLabel(null))
+        assertNull(ContextBudgetPolicy.composerLabel(usage(36_000, 0, 0, threshold = 160_000)))
+        assertNull(ContextBudgetPolicy.composerLabel(usage(0, 0, 0)))
+    }
+
+    @Test
+    fun `composer label keeps a threshold above the window honest`() {
+        // Порог 250k при окне 200k = 125% (не клампится): автосжатие уже не наступит,
+        // и подпись честно говорит «125%», а не тихое «100%».
+        assertEquals(
+            "5% · 10.0k/200.0k · сжатие при 250.0k · 125%",
+            ContextBudgetPolicy.composerLabel(usage(10_000, 200_000, 5, threshold = 250_000)),
+        )
+    }
+
+    @Test
+    fun `composer label does not turn tiny values into 0_0k`() {
+        // Мелкие числа печатаются как есть (тот же formatTokenCount, что в деталях).
+        assertEquals("1% · 5/900", ContextBudgetPolicy.composerLabel(usage(5, 900, 1)))
+        assertEquals(
+            "0% · 1/900 · сжатие при 500 · 56%",
+            ContextBudgetPolicy.composerLabel(usage(1, 900, 0, threshold = 500)),
+        )
+    }
+
+    @Test
+    fun `composer label keeps a measured zero usage instead of hiding`() {
+        // Измеренный ноль при известном окне — реальные данные, а не отсутствие замера.
+        assertEquals("0% · 0/200.0k", ContextBudgetPolicy.composerLabel(usage(0, 200_000, 0)))
+        assertEquals(
+            "0% · 0/200.0k · сжатие при 160.0k · 80%",
+            ContextBudgetPolicy.composerLabel(usage(0, 200_000, 0, threshold = 160_000)),
+        )
+    }
+
+    @Test
+    fun `composer label shows the compression progress label`() {
+        // Во время сжатия замера ещё нет: подпись говорит «Сжатие…», а не старый процент.
+        assertEquals(
+            ContextBudgetPolicy.COMPRESSION_LABEL,
+            ContextBudgetPolicy.composerLabel(null, compressionRunning = true),
+        )
+        assertEquals(
+            ContextBudgetPolicy.COMPRESSION_LABEL,
+            ContextBudgetPolicy.composerLabel(usage(10, 100, 10), compressionRunning = true),
+        )
+    }
+
+    @Test
+    fun `composer label reuses the pill measurement text`() {
+        // Один форматтер на пилюлю и подпись: подпись = текст пилюли + часть про сжатие.
+        val measured = usage(12_345, 200_000, 6)
+        val pillText = ContextBudgetPolicy.pill(measured, false).text
+        assertEquals(pillText, ContextBudgetPolicy.usageLabel(measured))
+        assertTrue(ContextBudgetPolicy.composerLabel(measured)!!.startsWith(pillText!!))
+    }
 }
