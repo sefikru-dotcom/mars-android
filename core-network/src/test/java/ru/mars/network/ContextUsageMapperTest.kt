@@ -29,9 +29,79 @@ class ContextUsageMapperTest {
                       "post_compression_context_tokens_estimate":null}}
         """.trimIndent()
         assertEquals(
-            ChatEvent.ContextUsage(usedTokens = 50000, maxTokens = 200000, percent = 25),
+            ChatEvent.ContextUsage(
+                usedTokens = 50000,
+                maxTokens = 200000,
+                percent = 25,
+                thresholdTokens = 160000,
+            ),
             StreamEventMapper.map("metering", "e1", payload)
         )
+    }
+
+    @Test
+    fun thresholdTokensIsMappedFromTheLiveMeteringPayload() {
+        // ui.js `_syncCtxIndicator`: `const threshold = usage.threshold_tokens || 0` — поле
+        // приходит рядом с context_length/last_prompt_tokens и раньше выбрасывалось клиентом.
+        val payload = """
+            {"usage":{"context_length":200000,"threshold_tokens":160000,"last_prompt_tokens":50000}}
+        """.trimIndent()
+        val event = StreamEventMapper.map("metering", null, payload) as ChatEvent.ContextUsage
+        assertEquals(160000, event.thresholdTokens)
+        assertEquals(25, event.percent)
+    }
+
+    @Test
+    fun missingThresholdTokensMapsToZeroUnknownNotAGuess() {
+        val event = StreamEventMapper.map(
+            "metering", null, """{"usage":{"context_length":200000,"last_prompt_tokens":50000}}"""
+        ) as ChatEvent.ContextUsage
+        assertEquals(0, event.thresholdTokens)
+        // Source compatibility: the 3-arg shape equals a payload without the field.
+        assertEquals(ChatEvent.ContextUsage(50000, 200000, 25), event)
+    }
+
+    @Test
+    fun nullThresholdTokensMapsToZeroUnknown() {
+        val event = StreamEventMapper.map(
+            "metering", null,
+            """{"usage":{"context_length":200000,"threshold_tokens":null,"last_prompt_tokens":50000}}"""
+        ) as ChatEvent.ContextUsage
+        assertEquals(0, event.thresholdTokens)
+    }
+
+    @Test
+    fun zeroThresholdMeansServerSentNoThreshold() {
+        // `threshold_tokens || 0`: 0 — это «порог неизвестен», а не «сжать сразу».
+        val event = StreamEventMapper.map(
+            "metering", null,
+            """{"usage":{"context_length":200000,"threshold_tokens":0,"last_prompt_tokens":50000}}"""
+        ) as ChatEvent.ContextUsage
+        assertEquals(0, event.thresholdTokens)
+        assertEquals(25, event.percent)
+    }
+
+    @Test
+    fun thresholdLargerThanTheWindowIsPreservedVerbatim() {
+        // Порог > окна: сервер прислал именно это — не клампим и не подменяем процентом.
+        // Заполнение по-прежнему считается ТОЛЬКО от used/window (не от порога).
+        val event = StreamEventMapper.map(
+            "metering", null,
+            """{"usage":{"context_length":200000,"threshold_tokens":250000,"last_prompt_tokens":50000}}"""
+        ) as ChatEvent.ContextUsage
+        assertEquals(250000, event.thresholdTokens)
+        assertEquals(200000, event.maxTokens)
+        assertEquals(25, event.percent)
+    }
+
+    @Test
+    fun thresholdOnFlatContextFrameIsMappedToo() {
+        val event = StreamEventMapper.map(
+            "context", null,
+            """{"context_length":128000,"threshold_tokens":102400,"last_prompt_tokens":64000}"""
+        ) as ChatEvent.ContextUsage
+        assertEquals(102400, event.thresholdTokens)
+        assertEquals(50, event.percent)
     }
 
     @Test
