@@ -91,10 +91,15 @@ import ru.mars.network.repository.readBoundedUploadPayload
  */
 
 internal fun ChatActivity.buildView(): View {
-    // Прозрачный DrawerLayout: под ним оконный кадр (@drawable/mars_window_bg).
-    // Контент чата тоже прозрачный (ChatScreenScaffold), поэтому кадр виден на
-    // всём экране; шторка разделов остаётся плотной (SIDEBAR) — ей нужна своя
-    // подложка, иначе подписи поедут по картинке.
+    // Вуаль экрана живёт ЗДЕСЬ и только здесь: под ней оконный кадр
+    // (@drawable/mars_window_bg). Контент чата прозрачный (ChatScreenScaffold),
+    // поэтому кадр виден на всём экране; шторка разделов остаётся плотной
+    // (SIDEBAR) — ей нужна своя подложка, иначе подписи поедут по картинке.
+    //
+    // Почему это важно: раньше ту же вуаль ставил ещё и корень каркаса чата
+    // (ChatScreenScaffold), то есть она накладывалась дважды. 0x6B два раза —
+    // это альфа 0.66 вместо 0.42: кадр давал 13/255 на диске планеты, и экран
+    // читался как чёрный, а «стеклянные» карточки просвечивали пустотой.
     drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.SCREEN_VEIL) }
     drawer.addView(buildChatContent(), DrawerLayout.LayoutParams(-1, -1))
     drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))

@@ -45,6 +45,16 @@ object ContextBudgetPolicy {
     /** Детали, когда сервер ещё не присылал metering-кадр. */
     const val UNKNOWN_DETAILS = "Заполнение ещё не измерено — данные появятся после первого хода."
 
+    /**
+     * Подпись постоянной строки контекста, когда замера ещё нет.
+     *
+     * Строка живёт под шапкой всегда (владелец видит, где смотреть заполнение),
+     * но процент не выдумывается: кольцо скрыто, а текст честно говорит, что
+     * замера нет. Пустая строка вместо подписи выглядела бы как сломанный
+     * индикатор — именно поэтому раньше вся строка пряталась.
+     */
+    const val UNMEASURED_LABEL = "Контекст ещё не измерен"
+
     /** Порог автосжатия неизвестен (сервер не прислал `threshold_tokens`). */
     const val THRESHOLD_UNKNOWN = "порог не сообщён"
 
@@ -86,23 +96,24 @@ object ContextBudgetPolicy {
     }
 
     /**
-     * Подпись контекста рядом с кольцом композера — то, что видно БЕЗ тапа по кольцу:
-     * «25% · 50.0k/200.0k · сжатие при 160.0k · 80%».
+     * Подпись контекста в постоянной строке под шапкой — то, что видно БЕЗ тапа
+     * по кольцу: «25% · 50.0k/200.0k · сжатие при 160.0k · 80%».
      *
      * Паритет с WebUI: процент заполнения — серверный `round(used/window*100)`
      * (`ContextUsage.percent`, клампится к 100 как дуга кольца), процент порога —
      * [thresholdPercent] (`round(threshold/window*100)`, НЕ клампится: порог больше окна
      * честно даёт >100%). Второго форматтера токенов нет — только [formatTokenCount].
      *
-     * null — измерять нечего (замера нет или окно неизвестно): подпись скрывается, а не
-     * показывает фейковые нули. Порог `<= 0` (сервер не сообщил `threshold_tokens`) подпись
-     * не удлиняет: остаётся «25% · 50.0k/200.0k» без части про сжатие.
+     * Строка постоянная: замера нет — подпись [UNMEASURED_LABEL], а не null.
+     * Процент при этом не выдумывается (кольцо продолжает жить по [pill]: без
+     * замера оно скрыто). Порог `<= 0` (сервер не сообщил `threshold_tokens`)
+     * подпись не удлиняет: остаётся «25% · 50.0k/200.0k» без части про сжатие.
      * Во время сжатия подпись — [COMPRESSION_LABEL] (замера ещё нет).
      */
-    fun composerLabel(usage: ChatEvent.ContextUsage?, compressionRunning: Boolean = false): String? {
+    fun composerLabel(usage: ChatEvent.ContextUsage?, compressionRunning: Boolean = false): String {
         if (compressionRunning) return COMPRESSION_LABEL
-        val measured = usage ?: return null
-        val base = usageLabel(measured) ?: return null
+        val measured = usage ?: return UNMEASURED_LABEL
+        val base = usageLabel(measured) ?: return UNMEASURED_LABEL
         val threshold = thresholdPercent(measured) ?: return base
         return "$base · сжатие при ${formatTokenCount(measured.thresholdTokens)} · $threshold%"
     }

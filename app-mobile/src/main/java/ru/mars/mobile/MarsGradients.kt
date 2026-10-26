@@ -42,10 +42,24 @@ object MarsGradients {
     const val USER_BUBBLE_BOTTOM = 0xe0141a28.toInt()
     const val USER_BUBBLE_STROKE = 0xff2d3b55.toInt()
 
-    /** Bot message card: deep graphite glass. */
-    const val BOT_CARD_TOP = 0xa80f131c.toInt()
-    const val BOT_CARD_BOTTOM = 0xa8090c13.toInt()
-    const val BOT_CARD_STROKE = 0xff1c2333.toInt()
+    /**
+     * Bot message card: deep graphite glass.
+     *
+     * Тон поднят с #0f131c/#090c13 до #1b2231/#141a26 и альфа снижена до 60%.
+     * Прежняя пара была ТЕМНЕЕ фона, на котором лежала: при кадре 13/255 и
+     * тоне карточки 17/255 просвет читался как «плотная плита», а не стекло
+     * (разница с фоном — 2.6 единицы из 255). Новый тон светлее кадра на
+     * 8–16 единиц по всем точкам экрана, то есть карточка видна КАК слой
+     * поверх планеты, и при этом планета сквозь неё просвечивает.
+     *
+     * Границы: на 50% альфы контраст mars_muted_on_glass ещё 5.86:1 при
+     * пороге AA 4.5; тоньше нельзя — подписи в карточке на светлом лимбе
+     * уходят ниже порога.
+     */
+    const val BOT_CARD_TOP = 0x991b2231.toInt()
+    const val BOT_CARD_BOTTOM = 0x99141a26.toInt()
+    /** Hairline — брендовый токен стекла (`mars_glass_stroke`), а не свой оттенок. */
+    const val BOT_CARD_STROKE = 0x33ffffff.toInt()
 
     /** Thinking ("Мысли") card: translucent sapphire haze. */
     const val THINKING_TOP = 0x142563eb

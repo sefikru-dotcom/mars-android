@@ -83,9 +83,11 @@ class MarsThemeDepthTest {
     @Test
     fun `bot card is graphite glass with micro border and inner padding`() {
         val spec = MarsGradients.BOT_CARD
-        assertEquals(0xff0f131c.toInt(), spec.startColor or 0xff000000.toInt())
-        assertEquals(0xff090c13.toInt(), spec.endColor or 0xff000000.toInt())
-        assertEquals(0xff1c2333.toInt(), spec.strokeColor)
+        // Тон стекла светлее фонового кадра: прежние #0f131c/#090c13 были темнее
+        // подложки, и просвет читался как плотная плита, а не стекло.
+        assertEquals(0xff1b2231.toInt(), spec.startColor or 0xff000000.toInt())
+        assertEquals(0xff141a26.toInt(), spec.endColor or 0xff000000.toInt())
+        assertEquals("hairline — брендовый токен стекла", 0x33ffffff.toInt(), spec.strokeColor)
         assertEquals(MarsGradients.Angle.TOP_BOTTOM, spec.angle)
         assertTrue(spec.hasDepth)
         assertTrue("bot card needs a light inner padding", spec.paddingDp > 0)
