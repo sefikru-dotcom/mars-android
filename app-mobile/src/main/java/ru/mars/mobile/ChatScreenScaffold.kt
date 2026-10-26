@@ -250,7 +250,10 @@ object ChatScreenScaffold {
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.SCREEN_VEIL)
+            // Прозрачный корень: вуаль экрана уже держит DrawerLayout (ChatShellSection).
+            // Вторая копия здесь удваивала альфу (0.42 → 0.66) и гасила кадр планеты
+            // до состояния «чёрный экран»; стеклянные карточки просвечивали пустотой.
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
             setPadding(dp(12), dp(8), dp(12), dp(10))
         }
 
@@ -326,6 +329,38 @@ object ChatScreenScaffold {
 
         root.addView(header)
 
+        // Строка контекста — ПОД шапкой и постоянно, а не в композере и не только на
+        // время хода. Собрана здесь, добавлена в root после баннера сети (порядок
+        // addView ниже), чтобы стоять вторым элементом экрана: сразу под шапкой.
+        // Кольцо скрывается без замера, подпись — нет (см. ContextBudgetPolicy).
+        val contextRing = ContextRingView(context).apply {
+            visibility = View.GONE
+            setOnClickListener { host.showContextUsageDetails() }
+        }
+        val contextCaption = TextView(context).apply {
+            textSize = 10f
+            setTextColor(MarsTheme.TEXT_MUTED_ON_GLASS)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            includeFontPadding = false
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener { host.showContextUsageDetails() }
+        }
+        // Панель под шапкой: вуаль-плашка, чтобы подпись лежала на кадре читаемо
+        // (на лимбе голый текст даёт 2.25:1 — вдвое ниже порога AA).
+        val contextRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(3), dp(10), dp(3))
+            background = MarsTheme.glassSurface(context, radiusDp = 10)
+            setOnClickListener { host.showContextUsageDetails() }
+        }
+        contextRow.addView(contextRing, LinearLayout.LayoutParams(dp(20), dp(20)))
+        contextRow.addView(
+            contextCaption,
+            LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) },
+        )
+
         // Баннер сетевого статуса: видимость/текст/тон решает чистая NetworkBannerPolicy,
         // хост лишь мапит тон на токены MarsTheme (полоса под хедером, над мини-плеером).
         val networkBanner = TextView(context).apply {
@@ -337,6 +372,9 @@ object ChatScreenScaffold {
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         root.addView(networkBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+
+        // Строка контекста: второй элемент экрана, сразу под шапкой (постоянно видима).
+        root.addView(contextRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
 
         // Полоса мини-плеера
         val miniPlayerBox = LinearLayout(context).apply {
@@ -878,11 +916,6 @@ object ChatScreenScaffold {
         }
         chipsRow.addView(workspaceBtn, LinearLayout.LayoutParams(-2, dp(24)).apply { marginEnd = dp(4) })
 
-        val contextRing = ContextRingView(context).apply {
-            visibility = View.GONE
-            setOnClickListener { host.showContextUsageDetails() }
-        }
-
         // A14: расход/стоимость сессии. Отдельная пилюля от контекстного заполнения:
         // первый показывает кумулятивные токены и деньги (`GET api/session/usage`),
         // второй — процент окна из metering-кадров. NaN-подобный «$0.00» не показываем.
@@ -895,37 +928,8 @@ object ChatScreenScaffold {
             setOnClickListener { host.showSessionUsageDetails() }
         }
 
-        // Строка контекста над чипами: кольцо + подпись «25% · 50.0k/200.0k · сжатие при 160.0k · 80%».
-        // Порог автосжатия и объём токенов видны БЕЗ тапа по кольцу (тап по-прежнему открывает
-        // детали, но «когда сожмёт» угадывать нельзя). Текст целиком решает чистая
-        // [ContextBudgetPolicy.composerLabel]; здесь только применение.
-        // Отдельная строка, а не место в нижней панели: на 360dp справа от кольца остаётся
-        // ~130dp (чипы + 5 кнопок действий), подпись там обрезалась бы. Здесь ширина — вся
-        // капсула (weight 1 при фиксированных 24dp кольца, горизонтального раздувания нет),
-        // а maxLines=2 даёт перенос вместо обрезки на fontScale 1.3.
-        val contextCaption = TextView(context).apply {
-            textSize = 9.5f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            includeFontPadding = false
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setOnClickListener { host.showContextUsageDetails() }
-        }
-        val contextRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(0, dp(2), 0, 0)
-        }
-        contextRow.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
-        contextRow.addView(
-            contextCaption,
-            LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(6) },
-        )
-        // Порядок в капсуле: поле ввода → строка контекста → нижняя панель с кнопками.
-        composer.addView(contextRow, LinearLayout.LayoutParams(-1, -2))
+        // Строка контекста живёт ПОД ШАПКОЙ (собрана выше), а не в капсуле композера:
+        // это постоянный индикатор экрана, а не часть панели ввода. Здесь её больше нет.
 
         // A9: чип набора инструментов сессии. Подпись и видимость решает [SessionToolsetsPresenter],
         // tap открывает множественный выбор из справочника тулсетов.

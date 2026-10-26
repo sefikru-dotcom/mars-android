@@ -50,16 +50,18 @@ class ContextCaptionContractTest {
                 scaffold.contains("contextCaption,"),
         )
         assertTrue(
-            "Строка контекста обязана попадать в капсулу композера",
-            scaffold.contains("composer.addView(contextRow"),
+            "Строка контекста обязана стоять ПОД ШАПКОЙ (root), а не в капсуле композера",
+            scaffold.contains("root.addView(contextRow") &&
+                !scaffold.contains("composer.addView(contextRow"),
         )
         assertTrue(
             "Подпись и её строка отдаются наружу в ComposerViews",
             scaffold.contains("val contextCaption: TextView") && scaffold.contains("val contextRow: LinearLayout"),
         )
         assertTrue(
-            "Подпись не обрезается в одну строку: перенос на вторую (maxLines 2)",
-            scaffold.contains("maxLines = 2"),
+            "Подпись постоянная: одна строка с ellipsis, без скрытия по пустому замеру",
+            scaffold.contains("maxLines = 1") &&
+                !scaffold.contains("visibility = View.GONE\n            setPadding(0, dp(2), 0, 0)"),
         )
     }
 
@@ -86,15 +88,13 @@ class ContextCaptionContractTest {
             ),
         )
         assertTrue(
-            "Подпись обязана реально отрисовываться (текст + видимость)",
+            "Подпись обязана реально отрисовываться (текст + постоянная видимость)",
             modelSection.contains("caption.text = label") &&
-                modelSection.contains("caption.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE"),
+                modelSection.contains("caption.visibility = View.VISIBLE"),
         )
         assertTrue(
-            "Без замера скрывается вся строка, а не остаётся пустой подписью",
-            modelSection.contains(
-                "contextRow?.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE"
-            ),
+            "Строка контекста видима всегда, а не только на время хода",
+            modelSection.contains("contextRow?.visibility = View.VISIBLE"),
         )
         assertTrue(
             "TalkBack получает описание из политики (порог озвучивается)",

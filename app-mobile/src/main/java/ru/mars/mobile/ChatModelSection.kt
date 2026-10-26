@@ -309,24 +309,28 @@ internal fun ChatActivity.loadWorkspaces() {
 }
 
 /**
- * Кольцо контекста в композере (паритет с `.ctx-ring-svg` WebUI): дуга + процент,
- * цвет по порогам. Скрыто, пока замер неизвестен — нерешённое окно не превращается
- * в фейковый процент (#1436 parity). Рядом с кольцом — подпись с объёмом токенов и
- * порогом автосжатия, чтобы «сколько занято» и «когда сожмёт» были видны без тапа.
- * Решение (видимость, процент, порог, тексты) принимает [ContextBudgetPolicy]
- * (JVM-тесты); этот слой только отдаёт его кольцу и подписи.
+ * Строка контекста под шапкой (постоянная, паритет с `.ctx-ring-svg` WebUI): дуга +
+ * процент, цвет по порогам. Кольцо скрыто, пока замер неизвестен — нерешённое окно
+ * не превращается в фейковый процент (#1436 parity). Сама СТРОКА при этом видима
+ * всегда: владелец должен видеть, где смотреть заполнение, а не искать его.
+ * Рядом с кольцом — подпись с объёмом токенов и порогом автосжатия, чтобы «сколько
+ * занято» и «когда сожмёт» были видны без тапа.
+ * Решение (текст, процент, порог) принимает [ContextBudgetPolicy] (JVM-тесты);
+ * этот слой только отдаёт его кольцу и подписи.
  */
 internal fun ChatActivity.updateContextIndicator() {
     val pill = ContextBudgetPolicy.pill(uiState.contextUsage, compressionRunning)
     contextRing?.render(pill)
+    // Подпись постоянная: без замера это честное «Контекст ещё не измерен»,
+    // а не пустая строка и не выдуманный процент.
     val label = ContextBudgetPolicy.composerLabel(uiState.contextUsage, compressionRunning)
     val caption = contextCaption ?: return
     caption.text = label
-    caption.contentDescription = pill.contentDescription
-    caption.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
-    // Строка целиком скрыта, когда измерять нечего: пустой подписи и «нулевого» порога
-    // пользователь видеть не должен (ContextBudgetPolicy возвращает null, а не нули).
-    contextRow?.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
+    caption.contentDescription = pill.contentDescription ?: label
+    caption.visibility = View.VISIBLE
+    // Кольцо живёт по [pill]: без замера оно скрыто, но строка остаётся на месте —
+    // поэтому visibility строки здесь не трогаем вообще.
+    contextRow?.visibility = View.VISIBLE
 }
 
 /**

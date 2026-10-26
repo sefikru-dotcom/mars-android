@@ -177,11 +177,21 @@ class ContextBudgetPolicyTest {
     }
 
     @Test
-    fun `composer label is hidden when the window is unknown`() {
-        // Окна нет — нет ни процента, ни токенов: пустая подпись, а не «0.0k/0.0k».
-        assertNull(ContextBudgetPolicy.composerLabel(null))
-        assertNull(ContextBudgetPolicy.composerLabel(usage(36_000, 0, 0, threshold = 160_000)))
-        assertNull(ContextBudgetPolicy.composerLabel(usage(0, 0, 0)))
+    fun `composer label states the context is unmeasured instead of hiding`() {
+        // Строка контекста постоянная: без замера она не исчезает и не показывает
+        // фейковые нули — подпись честно говорит, что измерения ещё нет.
+        assertEquals(
+            ContextBudgetPolicy.UNMEASURED_LABEL,
+            ContextBudgetPolicy.composerLabel(null),
+        )
+        assertEquals(
+            ContextBudgetPolicy.UNMEASURED_LABEL,
+            ContextBudgetPolicy.composerLabel(usage(36_000, 0, 0, threshold = 160_000)),
+        )
+        assertEquals(
+            ContextBudgetPolicy.UNMEASURED_LABEL,
+            ContextBudgetPolicy.composerLabel(usage(0, 0, 0)),
+        )
     }
 
     @Test
@@ -233,6 +243,6 @@ class ContextBudgetPolicyTest {
         val measured = usage(12_345, 200_000, 6)
         val pillText = ContextBudgetPolicy.pill(measured, false).text
         assertEquals(pillText, ContextBudgetPolicy.usageLabel(measured))
-        assertTrue(ContextBudgetPolicy.composerLabel(measured)!!.startsWith(pillText!!))
+        assertTrue(ContextBudgetPolicy.composerLabel(measured).startsWith(pillText!!))
     }
 }

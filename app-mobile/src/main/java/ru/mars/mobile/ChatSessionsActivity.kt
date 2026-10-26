@@ -1233,7 +1233,9 @@ class ChatSessionsActivity : ComponentActivity() {
     private fun buildListContent(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.SCREEN_VEIL)
+            // Прозрачный корень: вуаль экрана держит DrawerLayout (buildView).
+            // Вторая копия здесь удваивала альфу и гасила кадр планеты.
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
             setPadding(dp(12), dp(8), dp(12), dp(10))
         }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
