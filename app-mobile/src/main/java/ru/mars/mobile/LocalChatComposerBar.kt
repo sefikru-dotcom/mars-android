@@ -108,6 +108,8 @@ internal class LocalChatComposerBar(
 
     /** Последнее состояние кнопки: null — иконка ещё не выставлена. */
     private var lastStreaming: Boolean? = null
+    /** Последнее известное состояние «Останавливаю…»: render зовётся на каждой дельте. */
+    private var lastStopping: Boolean? = null
 
     init {
         // Порядок в строке: токены → полоса → процент. Подпись слева отвечает «сколько
@@ -256,6 +258,15 @@ internal class LocalChatComposerBar(
         usage = state.usage
         renderContext(state)
         val streaming = state.streaming
+        // Фаза «Останавливаю…»: стрим уже не принимает дельты, но цикл ещё не вышел.
+        // Кнопка обязана быть мёртвой — иначе второй тап уйдёт в пустоту и человек
+        // решит, что стоп не сработал.
+        val stopping = state.stopping
+        if (lastStopping != stopping) {
+            lastStopping = stopping
+            sendButton.isEnabled = !stopping
+            sendButton.alpha = if (stopping) 0.4f else 1f
+        }
         // Иконка меняется только на переходах «стрим/покой», а render зовётся на каждой
         // дельте: без этого гварда каждый кадр заново тянул бы drawable и tint.
         if (lastStreaming != streaming) {

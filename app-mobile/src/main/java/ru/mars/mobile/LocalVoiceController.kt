@@ -368,6 +368,27 @@ class LocalVoiceController(
         }
     }
 
+    /**
+     * Конец потока ответа при раннем старте озвучки.
+     *
+     * Зачем отдельно от [onAnswerCompleted]: экран, который уже отдавал дельты, обязан
+     * закрыть поток, но НЕ повторять ответ целиком. [onAnswerCompleted] здесь не годится —
+     * он же решает, озвучивать ли ответ вообще, и сбрасывает `voiceTurn`; при потоковом
+     * чтении этот флаг уже отработал на первом куске.
+     *
+     * Идемпотентен: повторный вызов после закрытия ничего не делает.
+     */
+    fun onAnswerEnded() {
+        if (released) return
+        cancelThinkingHint()
+        if (!streamedTurn) return
+        streamedTurn = false
+        val tail = tts?.let { runCatching { it.endStream() }.getOrDefault(false) } ?: false
+        if (tail && state.phase != LocalVoicePhase.SPEAKING) {
+            emit(state.copy(phase = LocalVoicePhase.SPEAKING, partial = "", ttsAvailable = true))
+        }
+    }
+
     /** Озвучить произвольный текст (пункт «Озвучить» у сообщения). */
     fun speakNow(text: String?) {
         if (released) return
