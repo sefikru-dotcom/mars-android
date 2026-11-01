@@ -74,22 +74,47 @@ internal class LocalChatTranscript(
     private val expandedCode = HashSet<Long>()
 
     /**
-     * Показать состояние. Скролл — только если человек уже был внизу: иначе чтение
+     * Держимся ли низа (гистерезис). Стартуем «прилипшими»: новый диалог обязан
+     * показывать хвост, а не начало.
+     */
+    private var sticking: Boolean = true
+
+    /**
+     * Показать состояние. Скролл — только пока лента «прилипла» к низу: иначе чтение
      * середины диалога обрывалось бы на каждой дельте стрима.
+     *
+     * Решение о «прилип» вынесено в чистую [LocalScrollPolicy] (два порога, гистерезис):
+     * одного порога не хватает — на нём лента либо дёргается на каждом пикселе, либо
+     * отпускает низ при первом же дребезге и больше не возвращается.
      */
     fun render(state: LocalChatUiState) {
-        val atBottom = isAtBottom()
+        sticking = LocalScrollPolicy.shouldStick(
+            scrollY = view.scrollY,
+            distanceToBottom = distanceToBottom(),
+            wasSticking = sticking,
+            stickPx = dp(LocalScrollPolicy.STICK_DP),
+            leavePx = dp(LocalScrollPolicy.LEAVE_DP),
+        )
         lastAssistantId = state.items
             .lastOrNull { it.role == LocalRole.ASSISTANT && it.tool == null }
             ?.id
         val ids = state.items.map { it.id }
         if (ids != renderedIds) rebuild(state) else update(state)
-        if (atBottom) scrollToBottom()
+        if (sticking) scrollToBottom()
     }
 
-    /** Принудительно вниз — после отправки нового сообщения. */
+    /** Принудительно вниз — после отправки нового сообщения (это и есть «приколоть»). */
     fun scrollToBottom() {
+        // Явный уход вниз по кнопке/отправке — снова держим низ: иначе человек, который
+        // только что отправил вопрос, читал бы ответ, уехавший за кадр.
+        sticking = true
         view.post { runCatching { view.fullScroll(View.FOCUS_DOWN) } }
+    }
+
+    /** Расстояние до низа в пикселях; ≤ 0 — контент короче вьюпорта (underflow). */
+    private fun distanceToBottom(): Int {
+        val child = view.getChildAt(0) ?: return 0
+        return child.height - view.height - view.scrollY
     }
 
     private fun rebuild(state: LocalChatUiState) {
@@ -124,7 +149,9 @@ internal class LocalChatTranscript(
             } else {
                 val card = AssistantCard(item)
                 assistantCards[item.id] = card
-                card.bind(item, index)
+                // Окно контекста нужно футеру для пары «запрос/окно»: из предмета ленты
+                // его не взять — размер окна знает каталог модели, а не ответ.
+                card.bind(item, index, state.context?.windowTokens)
                 column.addView(
                     card.root,
                     LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
@@ -144,7 +171,7 @@ internal class LocalChatTranscript(
                 userBubbles[item.id]?.text = item.text
                 return@forEachIndexed
             }
-            assistantCards[item.id]?.bind(item, index)
+            assistantCards[item.id]?.bind(item, index, state.context?.windowTokens)
         }
     }
 
@@ -196,12 +223,6 @@ internal class LocalChatTranscript(
         }
     }
 
-    private fun isAtBottom(): Boolean {
-        val child = view.getChildAt(0) ?: return true
-        if (child.height == 0) return true
-        return child.height - view.height - view.scrollY <= dp(24)
-    }
-
     private fun dp(value: Int): Int = MarsTheme.dp(context, value)
 
     private fun codeKey(messageIndex: Int, blockIndex: Int): Long =
@@ -232,6 +253,19 @@ internal class LocalChatTranscript(
             visibility = View.GONE
         }
 
+        /**
+         * Футер хода: расход и пометка обрыва — одной строкой мелкого текста.
+         *
+         * Скрыт целиком, когда показывать нечего: пустая строка под ответом читалась бы
+         * как «здесь что-то не загрузилось». Правило «ноль не показываем» живёт в чистой
+         * [LocalTurnFooter] — карточка только рисует то, что вернула функция.
+         */
+        private val footer: TextView = TextView(context).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+        }
+
         private val markdownState = ChatMarkdownRenderer.MarkdownRenderState()
 
         private var current: LocalChatItem = item
@@ -246,12 +280,20 @@ internal class LocalChatTranscript(
             })
             root.addView(placeholder, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             root.addView(body, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            // Футер — последним: он читается как подпись под ответом, а не как его часть.
+            root.addView(footer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             attachLongPress(root, item)
         }
 
-        fun bind(item: LocalChatItem, index: Int) {
+        fun bind(item: LocalChatItem, index: Int, windowTokens: Int? = null) {
             current = item
             this.index = index
+            // Футер обновляется ДО раннего выхода: голая строка «оборван» бывает и без
+            // текста, и терять её на стриме нельзя.
+            val footerLine = LocalTurnFooter.line(item, windowTokens)
+            footer.text = footerLine
+            footer.visibility = if (footerLine == null) View.GONE else View.VISIBLE
+            footer.contentDescription = footerLine
             attachLongPress(root, item)
             if (item.streaming && item.text.isBlank()) {
                 placeholder.visibility = View.VISIBLE
@@ -547,5 +589,54 @@ internal class LocalChatTranscript(
 
         /** Каталог развёрнутых копий картинок из истории (внутри cacheDir). */
         const val STORED_DIR = "generated-history"
+    }
+}
+
+/**
+ * Политика «держать низ» для ленты: гистерезис из двух порогов.
+ *
+ * Одного порога не хватает: при нём лента либо цепляется за низ на каждом пикселе (человек
+ * не может дочитать ответ), либо отпускает низ от первого же дребезга раскладки и больше
+ * не возвращается. Два порога дают мёртвую зону: ушли выше [LEAVE_DP] — отпустили,
+ * вернулись ближе [STICK_DP] — снова держим (как в PocketPal `ChatView`, STICK=24, LEAVE=40).
+ *
+ * Чистая функция без `android.*`: единственный способ проверить это без эмулятора —
+ * JVM-тест [LocalScrollHysteresisTest].
+ */
+object LocalScrollPolicy {
+
+    /** Вернуться к удержанию низа, когда до него меньше 24dp. */
+    const val STICK_DP = 24
+
+    /** Отпустить низ, когда до него больше 40dp. */
+    const val LEAVE_DP = 40
+
+    /**
+     * Держать ли низ после очередного рендера.
+     *
+     * [distanceToBottom] — сколько пикселей ниже среза (≤ 0 — контент короче вьюпорта),
+     * [wasSticking] — состояние до рендера, [stickPx]/[leavePx] — пороги в пикселях.
+     */
+    fun shouldStick(
+        scrollY: Int,
+        distanceToBottom: Int,
+        wasSticking: Boolean,
+        stickPx: Int,
+        leavePx: Int,
+    ): Boolean {
+        // Нет прокрутки вовсе — контент короче вьюпорта либо вьюха ещё не разложена
+        // (scrollY == 0 и низ ближе нуля): держим низ всегда, иначе первые дельты
+        // стрима уехали бы за кадр.
+        if (scrollY <= 0 && distanceToBottom <= 0) return true
+        // Дальше решают пороги. Отрицательное расстояние при непустой прокрутке
+        // (rubber-band на краю) проходит любой из них как «внизу» — отдельная ветка
+        // для него не нужна.
+        return if (wasSticking) {
+            // Держим, пока не ушли выше мёртвой зоны: мелкий дребезг раскладки её не пробивает.
+            distanceToBottom <= leavePx
+        } else {
+            // Уже отпустили: возвращаемся, только когда человек сам подошёл к низу.
+            distanceToBottom < stickPx
+        }
     }
 }

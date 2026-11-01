@@ -1,7 +1,10 @@
 package ru.mars.mobile
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,12 +71,104 @@ data class LocalChatItem(
      * этой строки человек видел пустой пузырь и решал, что ответ потерялся.
      */
     val thinking: String = "",
+    /**
+     * Расход хода по последнему кадру `usage` провайдера: сумма по шагам ЭТОГО хода.
+     *
+     * Нули — не «ноль токенов», а «провайдер не сообщил»: `usage` отдают не все
+     * (см. [LocalUsage]), и выдумывать цифры ради красивого футера нельзя. Именно поэтому
+     * все три поля по умолчанию нулевые, а футер рисуется только по непустым.
+     */
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val totalTokens: Int = 0,
+    /**
+     * Ответ оборван: поток кончился ошибкой или кнопкой «Стоп», но текст уже был.
+     *
+     * Флаг ставится только когда человек реально что-то увидел: текст сохраняется целиком,
+     * ошибка его НЕ затирает (иначе «Стоп» выглядел бы как потеря ответа). Пустой ответ
+     * при обрыве не помечается, а удаляется — помечать нечего.
+     */
+    val interrupted: Boolean = false,
+    /**
+     * Ответ упёрся в лимит токенов модели (`finish_reason = length`).
+     *
+     * Поле готово, но не выставляется: транспорт ядра не пробрасывает `finish_reason`,
+     * а угадывать обрезку по длине текста — значит врать. Появится признак в
+     * [ru.mars.network.local.LocalChatEvent] — достаточно будет выставить флаг здесь.
+     */
+    val truncated: Boolean = false,
 )
+
+/**
+ * Строка футера хода — единственное место, где решается, что показать под ответом.
+ *
+ * Правила (те же, что у PocketPal `AssistantTurnFooter`): часть рисуется только при
+ * непустом значении, ноль — не значение, нет ни одной части — футера нет вовсе.
+ * Никакого ttft/токов-в-секунду: этого провайдер не сообщает, а считать самим —
+ * значит показывать выдуманные числа.
+ *
+ * Чистая функция без `android.*`: покрывается JVM-тестом [LocalTurnFooterTest].
+ */
+object LocalTurnFooter {
+
+    /** Приписка к оборванному ответу. */
+    const val INTERRUPTED = "оборван"
+
+    /** Слово после числа токенов: «1.2k ток». */
+    const val TOKENS = "ток"
+
+    /**
+     * Строка футера или null, если показывать нечего.
+     *
+     * [windowTokens] — размер окна контекста модели; null — окно неизвестно, и тогда
+     * пара «запрос/окно» не рисуется (одно число без знаменателя читалось бы как «сколько
+     * осталось»).
+     */
+    fun line(
+        promptTokens: Int = 0,
+        completionTokens: Int = 0,
+        totalTokens: Int = 0,
+        windowTokens: Int? = null,
+        interrupted: Boolean = false,
+    ): String? {
+        val parts = ArrayList<String>(3)
+        // «Всего» — сумма шагов хода. Если провайдер прислал только ответ (бывает у
+        // потоковых API без total), показываем хотя бы её: это тоже факт, а не догадка.
+        val total = if (totalTokens > 0) totalTokens else completionTokens
+        if (total > 0) parts += "${LocalContextPolicy.formatTokens(total)} $TOKENS"
+        if (promptTokens > 0 && windowTokens != null && windowTokens > 0) {
+            parts += "${LocalContextPolicy.formatTokens(promptTokens)}/" +
+                LocalContextPolicy.formatTokens(windowTokens)
+        }
+        if (interrupted) parts += INTERRUPTED
+        return if (parts.isEmpty()) null else parts.joinToString(SEPARATOR)
+    }
+
+    /** Строка футера для элемента ленты. */
+    fun line(item: LocalChatItem, windowTokens: Int? = null): String? = line(
+        promptTokens = item.promptTokens,
+        completionTokens = item.completionTokens,
+        totalTokens = item.totalTokens,
+        windowTokens = windowTokens,
+        interrupted = item.interrupted,
+    )
+
+    /** Разделитель частей: точка-в-середине, как в подписях остального экрана. */
+    const val SEPARATOR = " · "
+}
 
 /** Состояние экрана диалога. Один источник правды для рендера. */
 data class LocalChatUiState(
     val items: List<LocalChatItem> = emptyList(),
     val streaming: Boolean = false,
+    /**
+     * Фаза остановки: «Стоп» нажат, цикл ещё выходит и финализирует строку.
+     *
+     * Отдельное поле, потому что [streaming] не различает «отвечает» и «доезжает до
+     * финиша»: в этой фазе экран обязан показать «Останавливаю…» и заблокировать отправку,
+     * хотя дельты уже не принимаются.
+     */
+    val stopping: Boolean = false,
     /** Нейтральная подсказка (не настроен провайдер, нет инструментов). */
     val notice: String? = null,
     /** Ошибка хода; показывается плашкой, не заменяет ленту. */
@@ -149,6 +244,19 @@ class LocalChatPresenter(
      * null — модель в каталоге не найдена (или каталог ещё не загружен).
      */
     private val modelInfo: (String) -> LocalModelInfo? = { null },
+    /**
+     * Вернуть ввод в поле: ход упал ДО первого токена, и удалять текст человека молча
+     * нельзя — он бы набирал вопрос заново.
+     *
+     * Экран подставляет и текст, и вложения (чипы файлов): провайдер мог не принять
+     * картинку, а файл у человека уже выбран. Пара «сообщение + пустой ответ» к этому
+     * моменту удалена из ленты и из истории — возврат ввода единственный след хода.
+     *
+     * Значение по умолчанию — [NO_UNDO], а не пустая лямбда нарочно: если экран возврат
+     * ввода не подключил, пару НЕ удаляем. Иначе текст вопроса исчез бы из ленты молча —
+     * это хуже, чем оставить сообщение без ответа.
+     */
+    private val onUndoInput: (text: String, attachments: List<LocalAttachment>) -> Unit = NO_UNDO,
 ) {
 
     private val _state = MutableStateFlow(LocalChatUiState())
@@ -171,6 +279,34 @@ class LocalChatPresenter(
      * Хранится отдельно от [usageTotal]: сумма promptTokens по шагам удвоила бы процент.
      */
     private var lastStepPromptTokens: Int = 0
+
+    /**
+     * Фаза 1 отмены: «Стоп» нажат, новые дельты уже не принимаются.
+     *
+     * Флаг, а не сравнение со [LocalChatUiState.stopping]: его читает горячий путь
+     * `handle`, и лишняя аллокация состояния там ни к чему.
+     */
+    @Volatile
+    private var cancelRequested: Boolean = false
+
+    /**
+     * Job текущего хода: по нему «Стоп» просит цикл выйти.
+     *
+     * null — цикла нет. Именно он отличает «стоп во время ответа» от «стоп нечего
+     * останавливать»: во втором случае финализировать надо сразу.
+     */
+    @Volatile
+    private var turnJob: Job? = null
+
+    /** Id строки ассистента текущего хода — её и помечаем оборванной. */
+    @Volatile
+    private var turnAssistantId: String = ""
+
+    /**
+     * Расход ТЕКУЩЕГО хода — сумма шагов, а не диалога: из неё рисуется футер строки.
+     * Нули означают «провайдер не сообщил», и футер тогда не рисуется вовсе.
+     */
+    private var turnUsage: LocalUsage = LocalUsage()
 
     /**
      * Обёртка исполнения: запоминает полный результат для истории и пропускает вызов
@@ -266,8 +402,11 @@ class LocalChatPresenter(
     /**
      * Отправить сообщение и довести ход до конца (включая шаги с инструментами).
      *
-     * Отмена корутины — это и есть кнопка «Стоп»: поток ядра закрывается, частичный
-     * ответ остаётся в ленте и сохраняется. Исключений наружу не бывает.
+     * Отмена корутины — это и есть кнопка «Стоп»: [cancelLocally] глушит приём дельт,
+     * цикл выходит, и ТОЛЬКО в `finally` строка финализируется (см. [finishTurn]). Так
+     * частичный текст не может исчезнуть: его не затирает ни ошибка, ни отмена.
+     *
+     * Исключений наружу не бывает: сбой транспорта ложится в [LocalChatUiState.error].
      */
     suspend fun send(
         profile: LocalProviderProfile,
@@ -315,12 +454,22 @@ class LocalChatPresenter(
                 LocalChatItem(user.id, LocalRole.USER, user.text) +
                 LocalChatItem(assistantId, LocalRole.ASSISTANT, text = "", streaming = true),
             streaming = true,
+            // Новый ход снимает фазу остановки прошлого: иначе экран остался бы
+            // заблокированным «Останавливаю…» после удачного следующего вопроса.
+            stopping = false,
             notice = null,
             error = null,
         )
 
         var partial = ""
         var committed = false
+        /** Был ли хоть один байт ответа (текст или reasoning) — от этого зависит undo. */
+        var produced = false
+        var failed = false
+        turnUsage = LocalUsage()
+        cancelRequested = false
+        turnAssistantId = assistantId
+        turnJob = currentCoroutineContext()[Job]
         try {
             LocalAgentLoop(client, executor, maxIterations)
                 .run(profile, apiKey, history, tools)
@@ -331,19 +480,36 @@ class LocalChatPresenter(
                     val handled = handle(event, assistantId, partial)
                     partial = handled.text
                     committed = committed || handled.committed
+                    produced = produced || handled.produced
+                    failed = failed || handled.failed
                 }
-        } finally {
-            if (!committed && partial.isNotBlank()) {
-                // Отмена/обрыв после первого токена: то, что человек уже видел,
-                // обязано остаться в истории, иначе после перезапуска ответ исчезнет.
-                history = history + LocalMessage(
-                    id = newId(),
-                    role = LocalRole.ASSISTANT,
-                    text = partial,
-                    createdAt = now(),
-                )
+        } catch (cancel: CancellationException) {
+            // «Стоп» — решение человека, а не сбой: ввод не возвращаем (он никуда не
+            // пропал), а строку финализирует finally — уже после выхода из цикла.
+            cancelRequested = true
+            throw cancel
+        } catch (failure: Exception) {
+            failed = true
+            // Раньше исключение транспорта вылетало из send в scope экрана: человек
+            // оставался с вечным «Печатает…» и без причины. Теперь это та же плашка,
+            // что и у LocalChatEvent.Error.
+            if (_state.value.error == null) {
+                _state.value = _state.value.copy(error = errorText(failure))
             }
-            finalizeStreaming(assistantId)
+        } finally {
+            // Фаза 3: цикл вышел — только теперь трогаем строку. Ниже — лента/история,
+            // затем диск: сохранение обязано случиться и при отмене.
+            finishTurn(
+                assistantId = assistantId,
+                userId = user.id,
+                body = body,
+                attachments = attachments,
+                partial = partial,
+                committed = committed,
+                produced = produced,
+                aborted = cancelRequested || failed,
+                failed = failed,
+            )
             val snapshot = history
             val spend = usageTotal
             // NonCancellable: при «Стоп» контекст уже отменён, а запись на диск
@@ -354,12 +520,111 @@ class LocalChatPresenter(
                 // утверждать «ход ничего не стоил».
                 if (spend.isMeasured) runCatching { onUsagePersist(spend) }
             }
+            cancelRequested = false
+            turnJob = null
+            turnAssistantId = ""
         }
     }
 
-    /** Пометить ход завершённым без сохранения (например, экран ушёл в фон до старта). */
+    /**
+     * Кнопка «Стоп», фаза 1 из 3.
+     *
+     * (1) Здесь ход помечается останавливаемым ([LocalChatUiState.stopping]) и глохнет
+     * приём дельт. (2) Цикл просим выйти. (3) Финализацию делает `finally` в [send] —
+     * то есть строго после выхода из цикла и только он. Ждать в этом методе нельзя:
+     * он зовётся с UI-потока, а ход идёт в scope экрана; «дождаться» выражено тем, что
+     * строку закрывает сам цикл, а не тот, кто нажал кнопку.
+     */
     fun cancelLocally() {
-        finalizeStreaming("")
+        val job = turnJob
+        if (job == null || !_state.value.streaming) {
+            // Хода нет — останавливать нечего. Убираем возможный пустой хвост и снимаем
+            // «Останавливаю…», если оно осталось от прошлого хода.
+            cancelRequested = false
+            finalizeStreaming("")
+            if (_state.value.stopping) _state.value = _state.value.copy(stopping = false)
+            return
+        }
+        cancelRequested = true
+        _state.value = _state.value.copy(stopping = true)
+        job.cancel()
+        // Гонка: ход мог финализироваться между чтением job и записью stopping, и тогда
+        // снимать «Останавливаю…» уже некому. Проверяем, что ход всё ещё тот же.
+        if (turnJob !== job) {
+            cancelRequested = false
+            _state.value = _state.value.copy(stopping = false)
+        }
+    }
+
+    /**
+     * Фаза 3: привести ленту и историю к честному виду после выхода из цикла.
+     *
+     * Единственное место, где решается судьба строки ответа:
+     *  - текст был, поток оборвался → строка остаётся, помечается `interrupted`
+     *    (текст НЕ затирается ошибкой: «Стоп» не должен выглядеть как потеря ответа);
+     *  - ни текста, ни reasoning → строки нет вовсе, помечать нечего;
+     *  - сбой до первого токена → уходит и пара «сообщение человека + пустой ответ»,
+     *    в историю она не пишется, а ввод возвращается экрану через [onUndoInput].
+     *
+     * Осознанный стоп до первого токена ввод НЕ возвращает: человек сам остановился,
+     * а его сообщение остаётся в ленте — прятать его значило бы делать вид, что
+     * вопроса не было.
+     */
+    private fun finishTurn(
+        assistantId: String,
+        userId: String,
+        body: String,
+        attachments: List<LocalAttachment>,
+        partial: String,
+        committed: Boolean,
+        produced: Boolean,
+        aborted: Boolean,
+        failed: Boolean,
+    ) {
+        val row = _state.value.items.firstOrNull { it.id == assistantId }
+        val hasText = partial.isNotBlank() || !row?.text.isNullOrBlank()
+        val hasOutput = produced || hasText || !row?.thinking.isNullOrBlank()
+
+        if (!committed && !hasText) {
+            // Ответа нет вовсе: пустой пузырь — не ответ, его место в ленте не нужно.
+            _state.value = _state.value.copy(
+                items = _state.value.items.filterNot { it.id == assistantId },
+            )
+            if (!hasOutput && failed) {
+                // Сбой до первого байта: ход не состоялся. Если экран подключил возврат
+                // ввода — убираем и сообщение человека, и его след в истории (иначе
+                // следующий запрос отправил бы провайдеру вопрос, которого человек
+                // уже не видит), а текст возвращаем в поле. Без колбэка — оставляем
+                // сообщение: молча стереть набранное человеком нельзя.
+                if (onUndoInput !== NO_UNDO) {
+                    _state.value = _state.value.copy(
+                        items = _state.value.items.filterNot { it.id == userId },
+                    )
+                    history = history.filterNot { it.id == userId }
+                    runCatching { onUndoInput(body, attachments) }
+                }
+            }
+        } else if (!committed && hasText) {
+            // Отмена/обрыв после первого токена: то, что человек уже видел, обязано
+            // остаться и в истории, иначе после перезапуска ответ исчезнет.
+            history = history + LocalMessage(
+                id = newId(),
+                role = LocalRole.ASSISTANT,
+                text = partial,
+                createdAt = now(),
+            )
+            if (aborted) updateItem(assistantId) { it.copy(interrupted = true) }
+        }
+        // Завершённый шаг (committed) не помечаем даже при обрыве следующего: этот ответ
+        // полный, и приписка «оборван» на нём была бы ложью.
+        finalizeStreaming(assistantId)
+        if (_state.value.stopping) _state.value = _state.value.copy(stopping = false)
+    }
+
+    /** Человеческий текст сбоя транспорта: без стектрейса и без «null» на экране. */
+    private fun errorText(failure: Throwable): String {
+        val reason = failure.message?.trim()?.takeIf { it.isNotEmpty() }
+        return if (reason != null) "Соединение прервано: $reason" else "Соединение прервано"
     }
 
     /** Очистить ошибку (после показа плашки). */
@@ -372,14 +637,34 @@ class LocalChatPresenter(
         if (_state.value.notice != notice) _state.value = _state.value.copy(notice = notice)
     }
 
-    private data class Handled(val text: String, val committed: Boolean)
+    /**
+     * Результат обработки кадра.
+     *
+     * [produced] — кадр принёс хоть байт ответа (текст или reasoning): по этому признаку
+     * решается, возвращать ли ввод при сбое до первого токена.
+     * [failed] — кадр сообщил об ошибке потока.
+     */
+    private data class Handled(
+        val text: String,
+        val committed: Boolean,
+        val produced: Boolean = false,
+        val failed: Boolean = false,
+    )
 
     private fun handle(event: LocalChatEvent, assistantId: String, partial: String): Handled {
+        // Фаза 1 отмены: новые дельты уже не принимаем. Проверка ДО обработки, а не
+        // после: то, что прилетело в гонке с «Стоп», человек видеть не должен — иначе
+        // текст продолжал бы расти после остановки.
+        if (cancelRequested &&
+            (event is LocalChatEvent.Delta || event is LocalChatEvent.ReasoningDelta)
+        ) {
+            return Handled(partial, false)
+        }
         when (event) {
             is LocalChatEvent.Delta -> {
                 val next = partial + event.text
                 updateItem(assistantId) { it.copy(text = next, streaming = true) }
-                return Handled(next, false)
+                return Handled(next, false, produced = event.text.isNotEmpty())
             }
 
             // Размышления провайдера: у reasoning-моделей (deepseek-v4.1-flash-1017,
@@ -394,7 +679,7 @@ class LocalChatPresenter(
                         it.copy(thinking = (it.thinking + event.text).take(THINKING_LIMIT))
                     }
                 }
-                return Handled(partial, false)
+                return Handled(partial, false, produced = thought.isNotEmpty())
             }
 
             is LocalChatEvent.ToolRequested -> {
@@ -451,12 +736,14 @@ class LocalChatPresenter(
                         }
                     }
                 }
-                return Handled(full, true)
+                return Handled(full, true, produced = full.isNotBlank())
             }
 
             is LocalChatEvent.Error -> {
+                // Текст ошибки НЕ заменяет уже показанный ответ: плашка живёт отдельно,
+                // а накопленный текст остаётся в строке (обрыв помечается в finally).
                 _state.value = _state.value.copy(error = event.message)
-                return Handled(partial, false)
+                return Handled(partial, false, failed = true)
             }
         }
     }
@@ -474,6 +761,25 @@ class LocalChatPresenter(
             totalTokens = usageTotal.totalTokens + step.totalTokens,
         )
         lastStepPromptTokens = step.promptTokens
+        // Расход хода — сумма по его шагам: он относится к строке ответа, а не к диалогу.
+        // Ноль сюда не попадает вовсе (isMeasured выше), поэтому футер не покажет «0 ток».
+        // `promptTokens` берём из ПОСЛЕДНЕГО шага, а не суммой: каждый шаг включает всю
+        // предыдущую историю, и сумма дала бы «запрос вдвое больше окна».
+        turnUsage = LocalUsage(
+            promptTokens = step.promptTokens,
+            completionTokens = turnUsage.completionTokens + step.completionTokens,
+            totalTokens = turnUsage.totalTokens + step.totalTokens,
+        )
+        val rowId = turnAssistantId
+        if (rowId.isNotEmpty()) {
+            updateItem(rowId) {
+                it.copy(
+                    promptTokens = turnUsage.promptTokens,
+                    completionTokens = turnUsage.completionTokens,
+                    totalTokens = turnUsage.totalTokens,
+                )
+            }
+        }
         publishUsage()
     }
 
@@ -671,6 +977,16 @@ class LocalChatPresenter(
     companion object {
         /** Идентификатор системного сообщения: постоянный, чтобы память не плодила копии. */
         private const val SYSTEM_MESSAGE_ID = "memory-system"
+
+        /**
+         * Признак «экран не подключил [onUndoInput]».
+         *
+         * Сравнивается по ссылке: значение по умолчанию получает ровно этот объект.
+         * Нужен, чтобы при неподключённом возврате ввода не удалять сообщение человека
+         * (см. `finishTurn`): пустая лямбда неотличима от намеренной заглушки, а
+         * потерянный текст вопроса — это потеря работы человека.
+         */
+        private val NO_UNDO: (text: String, attachments: List<LocalAttachment>) -> Unit = { _, _ -> }
 
         /** Сколько символов размышлений держим в элементе: они не ответ, длину не копим. */
         private const val THINKING_LIMIT = 600
