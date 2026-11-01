@@ -114,4 +114,19 @@ class LocalTurnFooterTest {
         // Восстановленный из истории ответ метрик не несёт — футера нет.
         assertNull(LocalTurnFooter.line(LocalChatItem(id = "a-2", role = LocalRole.ASSISTANT)))
     }
+
+    @Test
+    fun `ttft is shown honestly and only when measured`() {
+        // Не измеряли — строки нет: ноль означает «не знаем», а не «ноль миллисекунд».
+        assertEquals(null, LocalTurnFooter.line(ttftMs = 0))
+
+        assertEquals("первый символ 640мс", LocalTurnFooter.line(ttftMs = 640))
+        // Больше секунды — в секундах с одним знаком: «1.8с» читается быстрее «1800мс».
+        assertEquals("первый символ 1.8с", LocalTurnFooter.line(ttftMs = 1800))
+        // ttft идёт отдельной частью вместе с расходом, а не вместо него.
+        assertEquals(
+            "1.2k ток · первый символ 900мс",
+            LocalTurnFooter.line(totalTokens = 1200, ttftMs = 900),
+        )
+    }
 }

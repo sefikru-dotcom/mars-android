@@ -99,6 +99,15 @@ data class LocalChatItem(
      * [ru.mars.network.local.LocalChatEvent] — достаточно будет выставить флаг здесь.
      */
     val truncated: Boolean = false,
+    /**
+     * Время до первого символа ответа, мс; 0 — не измеряли (ход ещё идёт или ответа нет).
+     *
+     * `ttft` измеряется честно: от старта хода до первой дельты текста или размышления.
+     * В отличие от «токенов в секунду» это не оценка: момент старта и момент первого
+     * байта известны точно, а вот число токенов в секунду из `usage` посчитать нельзя —
+     * провайдер отдаёт их одним кадром в конце, без отметок времени.
+     */
+    val ttftMs: Long = 0,
 )
 
 /**
@@ -132,8 +141,9 @@ object LocalTurnFooter {
         totalTokens: Int = 0,
         windowTokens: Int? = null,
         interrupted: Boolean = false,
+        ttftMs: Long = 0,
     ): String? {
-        val parts = ArrayList<String>(3)
+        val parts = ArrayList<String>(4)
         // «Всего» — сумма шагов хода. Если провайдер прислал только ответ (бывает у
         // потоковых API без total), показываем хотя бы её: это тоже факт, а не догадка.
         val total = if (totalTokens > 0) totalTokens else completionTokens
@@ -142,6 +152,8 @@ object LocalTurnFooter {
             parts += "${LocalContextPolicy.formatTokens(promptTokens)}/" +
                 LocalContextPolicy.formatTokens(windowTokens)
         }
+        // Задержка первого символа: «0.8с» короче и читается лучше, чем «800 мс».
+        if (ttftMs > 0) parts += formatTtft(ttftMs)
         if (interrupted) parts += INTERRUPTED
         return if (parts.isEmpty()) null else parts.joinToString(SEPARATOR)
     }
@@ -153,7 +165,15 @@ object LocalTurnFooter {
         totalTokens = item.totalTokens,
         windowTokens = windowTokens,
         interrupted = item.interrupted,
+        ttftMs = item.ttftMs,
     )
+
+    /** Подпись задержки первого символа: до секунды — миллисекунды, дальше — секунды. */
+    fun formatTtft(ms: Long): String = if (ms < 1000) {
+        "первый символ ${ms}мс"
+    } else {
+        String.format(java.util.Locale.US, "первый символ %.1fс", ms / 1000.0)
+    }
 
     /** Разделитель частей: точка-в-середине, как в подписях остального экрана. */
     const val SEPARATOR = " · "
@@ -519,6 +539,11 @@ class LocalChatPresenter(
         /** Был ли хоть один байт ответа (текст или reasoning) — от этого зависит undo. */
         var produced = false
         var failed = false
+        // Задержка первого символа: старт хода фиксируется здесь, первый кадр — в handle().
+        // Момент старта берётся до первого сетевого вызова, иначе в ttft попадёт
+        // подготовка инструментов, а не ожидание ответа модели.
+        var ttft = 0L
+        val turnStartedAt = now()
         turnUsage = LocalUsage()
         cancelRequested = false
         turnAssistantId = assistantId
@@ -531,6 +556,11 @@ class LocalChatPresenter(
                 .flowOn(Dispatchers.IO)
                 .collect { event ->
                     val handled = handle(event, assistantId, partial)
+                    // Первый реальный символ ответа: фиксируем один раз за ход.
+                    if (ttft == 0L && handled.produced) {
+                        ttft = (now() - turnStartedAt).coerceAtLeast(0L)
+                        updateItem(assistantId) { it.copy(ttftMs = ttft) }
+                    }
                     partial = handled.text
                     committed = committed || handled.committed
                     produced = produced || handled.produced
