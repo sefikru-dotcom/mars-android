@@ -37,6 +37,8 @@ import java.util.concurrent.TimeUnit
  * Гарантии контракта §3.3: поток не бросает исключений (всё приходит
  * [LocalChatEvent.Error]), после [LocalChatEvent.AssistantFinished] завершается, отмена
  * корутины закрывает соединение (блокирующий сокет снимается через `Call.cancel()`).
+ * Единственное исключение из «всё приходит событием» — смена конфигурации посреди шага:
+ * такой поток закрывается БЕЗ событий (см. [providerSeq] и [stream]).
  *
  * Таймауты задаются здесь, а не у вызывающего: [SILENCE_TIMEOUT_MS] — это watchdog
  * молчания (180 с, в миллисекундах), общий `callTimeout` намеренно выключен, потому что
@@ -59,6 +61,21 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
         .lenient()
 
     /**
+     * Метка конфигурации провайдера, общая для этого транспорта и того, кто меняет настройки.
+     *
+     * Живёт в клиенте, а не в отдельном синглтоне: клиент и так один на приложение, а
+     * глобальная переменная в модуле означала бы, что метку поднимает кто угодно и
+     * проверить это нечем. Экран настроек, сменив профиль/адрес/модель, зовёт
+     * [LocalProviderSeq.bump] на ЭТОМ объекте — и все шаги, начатые до смены, замолкают
+     * (см. [stream]).
+     *
+     * Параметр конструктора не добавлен намеренно: конструктор с двумя параметрами
+     * перестал бы подходить тестовой фабрике `LocalClientFixture`, которая заполняет только
+     * известные ей типы, и десяток чужих тестов молча ушёл бы в «пропущено».
+     */
+    val providerSeq: LocalProviderSeq = LocalProviderSeq()
+
+    /**
      * Шаг без настроек хода — прежнее поведение: `temperature`/`maxTokens` из профиля.
      *
      * Сводится к перегрузке с `settings = null`, чтобы путь сборки тела был ровно один:
@@ -78,6 +95,14 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
      * `settings == null` — байт в байт прежнее тело: старые вызывающие и сохранённые
      * профили не должны заметить появления настроек. Если настройки заданы, поля берутся
      * из них, а значения, оставленные провайдеру, в тело НЕ попадают ([SamplerParams]).
+     *
+     * Устойчивость к смене конфигурации (B1). В начале шага снимается метка
+     * ([LocalProviderSeq.snapshot]), и каждый эмит идёт через [emitIfCurrent]. Если за время
+     * шага человек сменил профиль/адрес/модель, поток прекращается молча: ни текста, ни
+     * `AssistantFinished`, ни `Error`. Молчание здесь — не потеря, а правильный ответ:
+     * ответ по старому адресу больше не принадлежит текущему диалогу, а `Error` заставил бы
+     * человека искать сбой там, где он сам всё и поменял. Вызывающий обязан пережить поток,
+     * закрывшийся без `AssistantFinished` (экран закрывает шаг по завершении сбора).
      */
     override fun stream(
         profile: LocalProviderProfile,
@@ -85,91 +110,113 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
         messages: List<LocalMessage>,
         tools: List<LocalToolSchema>,
         settings: LocalTurnSettings?,
-    ): Flow<LocalChatEvent> = flow {
-        val url = LocalProviderUrls.chatCompletionsUrl(profile.baseUrl).toHttpUrlOrNull()
-        if (url == null) {
-            emit(LocalChatEvent.Error("неверный адрес провайдера: «${profile.baseUrl}»"))
-            return@flow
-        }
-        // Отказ по вложениям — до сборки тела и до сети: сообщение с неотправляемым
-        // вложением не должно уходить «без файла» молча (контракт §3). Текст причины
-        // приходит событием, а не исключением: поток по контракту их не бросает.
-        val refusal = messages.firstNotNullOfOrNull { it.attachmentRefusal() }
-        if (refusal != null) {
-            emit(LocalChatEvent.Error(refusal))
-            return@flow
-        }
-        val payload = buildRequestBody(profile, messages, tools, settings)
+    ): Flow<LocalChatEvent> {
+        // Метка снимается ЗДЕСЬ, при СОЗДАНИИ потока, а не в теле `flow`: между созданием
+        // и подпиской человек мог успеть сменить адрес/модель, и метка, снятая в теле,
+        // оказалась бы новой — шаг по старому профилю выглядел бы актуальным. Fail-closed:
+        // сомнительный шаг молчит, а не пишет ответ чужой модели в текущий диалог.
+        val stamp = providerSeq.snapshot()
+        return flow<LocalChatEvent> {
+            val url = LocalProviderUrls.chatCompletionsUrl(profile.baseUrl).toHttpUrlOrNull()
+            if (url == null) {
+                emitIfCurrent(stamp, LocalChatEvent.Error("неверный адрес провайдера: «${profile.baseUrl}»"))
+                return@flow
+            }
+            // Отказ по вложениям — до сборки тела и до сети: сообщение с неотправляемым
+            // вложением не должно уходить «без файла» молча (контракт §3). Текст причины
+            // приходит событием, а не исключением: поток по контракту их не бросает.
+            val refusal = messages.firstNotNullOfOrNull { it.attachmentRefusal() }
+            if (refusal != null) {
+                emitIfCurrent(stamp, LocalChatEvent.Error(refusal))
+                return@flow
+            }
+            val payload = buildRequestBody(profile, messages, tools, settings)
 
-        var attempts = 0
-        var receivedToken = false
+            var attempts = 0
+            var receivedToken = false
 
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            attempts += 1
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                // Сверка и здесь: повтор после смены адреса ушёл бы на СТАРЫЙ адрес, то есть
+                // заведомо в чужой сервер — и «новый» ответ снова оказался бы старым.
+                if (stamp.isOvertaken) return@flow
+                attempts += 1
 
-            val request = Request.Builder()
-                .url(url)
-                .header("Authorization", "Bearer $apiKey")
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .header("Cache-Control", "no-cache")
-                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $apiKey")
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .header("Cache-Control", "no-cache")
+                    .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
 
-            val call = http.newCall(request)
-            // Отмена корутины не прерывает блокирующее чтение сама по себе — снимаем вызов.
-            val cancelHook = currentCoroutineContext()[Job]?.invokeOnCompletion { call.cancel() }
-            var retry = false
-            var stop = false
+                val call = http.newCall(request)
+                // Отмена корутины не прерывает блокирующее чтение сама по себе — снимаем вызов.
+                val cancelHook = currentCoroutineContext()[Job]?.invokeOnCompletion { call.cancel() }
+                var retry = false
+                var stop = false
 
-            try {
-                call.execute().use { response ->
-                    if (!response.isSuccessful) {
-                        val errorBody = response.body?.string().orEmpty()
-                        val retryable = LocalRetryPolicy.isRetryableStatus(response.code)
-                        if (LocalRetryPolicy.shouldRetry(attempts, receivedToken, retryable)) {
-                            retry = true
-                        } else {
-                            stop = true
-                            emit(LocalChatEvent.Error(describeFailure(response.code, errorBody), retryable))
-                        }
-                    } else {
-                        val source = response.body?.source()
-                        if (source == null) {
-                            stop = true
-                            emit(LocalChatEvent.Error("провайдер вернул пустой ответ"))
-                        } else {
-                            val outcome = this@flow.consumeStream(source)
-                            if (outcome.sawToken) receivedToken = true
-                            stop = true
-                            if (!outcome.produced) {
-                                // Пустой 200 без единого кадра — не «пустой ответ модели», а сбой.
-                                emit(LocalChatEvent.Error("провайдер закрыл поток без данных", retryable = true))
+                try {
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) {
+                            val errorBody = response.body?.string().orEmpty()
+                            val retryable = LocalRetryPolicy.isRetryableStatus(response.code)
+                            if (LocalRetryPolicy.shouldRetry(attempts, receivedToken, retryable)) {
+                                retry = true
+                            } else {
+                                stop = true
+                                // Устаревший шаг молчит: отказ пришёл по адресу, который человек
+                                // уже сменил, и показать его как сбой текущего — соврать.
+                                emitIfCurrent(stamp, LocalChatEvent.Error(describeFailure(response.code, errorBody), retryable))
                             }
-                            // Обрыв без `finish_reason` и без `[DONE]` — не ошибка: парсер закрыл
-                            // шаг на EOF и отдал `AssistantFinished` тем, что успел собрать.
+                        } else {
+                            val source = response.body?.source()
+                            if (source == null) {
+                                stop = true
+                                emitIfCurrent(stamp, LocalChatEvent.Error("провайдер вернул пустой ответ"))
+                            } else {
+                                val outcome = this@flow.consumeStream(source, stamp)
+                                if (outcome.sawToken) receivedToken = true
+                                stop = true
+                                // Замолчавший из-за смены адреса шаг не «закрылся без данных»:
+                                // приписывать ему сбой пустого потока — значит пугать человека
+                                // ошибкой за то, что он сам и сделал.
+                                if (!outcome.produced && !stamp.isOvertaken) {
+                                    // Пустой 200 без единого кадра — не «пустой ответ модели», а сбой.
+                                    emitIfCurrent(stamp, LocalChatEvent.Error("провайдер закрыл поток без данных", retryable = true))
+                                }
+                                // Обрыв без `finish_reason` и без `[DONE]` — не ошибка: парсер закрыл
+                                // шаг на EOF и отдал `AssistantFinished` тем, что успел собрать.
+                                Unit
+                            }
                         }
                     }
+                } catch (io: IOException) {
+                    // Отмена приходит сюда как IOException("Canceled") — не путать с обрывом сети.
+                    if (!currentCoroutineContext().isActive) throw CancellationException("запрос отменён")
+                    if (stamp.isOvertaken) {
+                        // Сокет на старый адрес обрывается при смене конфигурации: обрыв здесь —
+                        // следствие действия человека, а не сбой сети, и ошибкой не считается.
+                        stop = true
+                    } else if (LocalRetryPolicy.shouldRetry(attempts, receivedToken, LocalRetryPolicy.isRetryableFailure(io))) {
+                        retry = true
+                    } else {
+                        stop = true
+                        emitIfCurrent(stamp, LocalChatEvent.Error("сеть: ${io.message ?: io.javaClass.simpleName}", retryable = true))
+                    }
+                } finally {
+                    cancelHook?.dispose()
                 }
-            } catch (io: IOException) {
-                // Отмена приходит сюда как IOException("Canceled") — не путать с обрывом сети.
-                if (!currentCoroutineContext().isActive) throw CancellationException("запрос отменён")
-                if (LocalRetryPolicy.shouldRetry(attempts, receivedToken, LocalRetryPolicy.isRetryableFailure(io))) {
-                    retry = true
-                } else {
-                    stop = true
-                    emit(LocalChatEvent.Error("сеть: ${io.message ?: io.javaClass.simpleName}", retryable = true))
-                }
-            } finally {
-                cancelHook?.dispose()
-            }
 
-            if (stop) return@flow
-            if (!retry) return@flow
-            delay(LocalRetryPolicy.pauseBeforeRetry(attempts))
-        }
-    }.flowOn(Dispatchers.IO)
+                // Устаревший шаг выходит молча и без повтора: повтор ушёл бы на адрес,
+                // который человек уже сменил.
+                if (stop || stamp.isOvertaken) return@flow
+                if (!retry) return@flow
+                delay(LocalRetryPolicy.pauseBeforeRetry(attempts))
+            }
+        }.flowOn(Dispatchers.IO)
+    }
 
     override suspend fun models(
         profile: LocalProviderProfile,
@@ -254,8 +301,17 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
     /**
      * Читает поток построчно и отдаёт события; выходит, как только шаг закрылся
      * `AssistantFinished` (дальше читать нечего).
+     *
+     * [stamp] — метка конфигурации, снятая при создании шага. Каждый эмит идёт через
+     * [emitIfCurrent]: смена адреса/модели посреди потока прекращает и эмиссию, и чтение
+     * сокета, но НЕ выглядит ошибкой — шаг просто перестаёт существовать. Возврат при
+     * устаревшей метке идёт с `produced`, накопленным ДО смены: вызывающий по нему решает,
+     * был ли это пустой поток, и устаревший шаг этот вопрос уже не задаёт.
      */
-    private suspend fun FlowCollector<LocalChatEvent>.consumeStream(source: BufferedSource): StreamOutcome {
+    private suspend fun FlowCollector<LocalChatEvent>.consumeStream(
+        source: BufferedSource,
+        stamp: LocalProviderStamp,
+    ): StreamOutcome {
         val parser = LocalSseParser()
         var produced = false
         var sawToken = false
@@ -264,18 +320,18 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
             val line = source.readUtf8Line() ?: break
             for (event in parser.onLine(line)) {
                 for (mapped in mapSse(event)) {
+                    if (!emitIfCurrent(stamp, mapped)) return StreamOutcome(produced, sawToken)
                     produced = true
                     if (mapped is LocalChatEvent.Delta || mapped is LocalChatEvent.ReasoningDelta) sawToken = true
-                    emit(mapped)
                     if (mapped is LocalChatEvent.AssistantFinished) return StreamOutcome(produced, sawToken)
                 }
             }
         }
         for (event in parser.onEndOfStream()) {
             for (mapped in mapSse(event)) {
+                if (!emitIfCurrent(stamp, mapped)) return StreamOutcome(produced, sawToken)
                 produced = true
                 if (mapped is LocalChatEvent.Delta || mapped is LocalChatEvent.ReasoningDelta) sawToken = true
-                emit(mapped)
                 if (mapped is LocalChatEvent.AssistantFinished) return StreamOutcome(produced, sawToken)
             }
         }

@@ -21,12 +21,22 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Почему ключ отдельно от профиля: профиль читается экраном настроек и уходит в
  * диагностику/экспорт, ключ не должен попадать туда ни при каких обстоятельствах.
- * Схема ровно та же, что у серверного device-credential Марса
- * ([ru.mars.network.credential.AndroidKeyStoreCredentialStore]): AES/GCM в AndroidKeyStore,
- * без права чтения из бэкапа (allowBackup=false уже стоит в манифесте).
+ * Схема та же, что у серверного device-credential Марса
+ * ([ru.mars.network.credential.AndroidKeyStoreCredentialStore]): AES/GCM, ключ шифрования
+ * в AndroidKeyStore, без права чтения из бэкапа (allowBackup=false уже стоит в манифесте).
+ * Тот класс здесь не переиспользуется намеренно: у него ОДИН слот и фиксированный алиас
+ * под device-token, и запись ключа провайдера туда затёрла бы токен устройства. Схема
+ * повторена, алиас — свой (`mars.local.provider.key`), слоты — по профилю.
  *
  * Хранилище намеренно синхронное и дешёвое: профилей единицы, вызов идёт с экрана,
  * а не из горячего цикла ответа.
+ *
+ * Про миграцию. Слот `api_key.<id>` существовал и как открытый ключ (без IV). Такие
+ * слоты при первом обращении шифруются и стираются ([LocalProviderKeyMigration]);
+ * решение принимает чистая функция, исполняет [migrateLegacyKeys]. Порядок важен:
+ * сначала шифрование, потом стирание — при недоступном Keystore ключ остаётся на месте,
+ * и человек не вводит его заново. Ни ключ, ни его шифротекст в логи не попадают:
+ * в этом классе нет ни одного `Log`-вызова, а исключения наружу не пробрасываются.
  */
 class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore {
 
@@ -35,6 +45,12 @@ class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore
     private val keyStore: KeyStore? by lazy {
         runCatching { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }.getOrNull()
     }
+
+    /** Миграция старых ключей выполнена (или выполнять нечего). */
+    @Volatile
+    private var keysMigrated = false
+
+    private val migrationLock = Any()
 
     override fun state(): LocalProviderState {
         val raw = prefs.getString(KEY_PROFILES, null) ?: return LocalProviderState()
@@ -88,8 +104,15 @@ class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore
     }
 
     override fun apiKey(profileId: String): String? {
+        ensureKeysMigrated()
         val encoded = prefs.getString(KEY_KEY_PREFIX + profileId, null) ?: return null
-        val encodedIv = prefs.getString(KEY_IV_PREFIX + profileId, null) ?: return null
+        val encodedIv = prefs.getString(KEY_IV_PREFIX + profileId, null)
+        if (encodedIv == null) {
+            // Шифрование при миграции не удалось (Keystore недоступен): отдаём старый
+            // открытый ключ, чтобы человек не вводил его заново. Стирание повторится
+            // при следующем успешном обращении, а не «когда-нибудь потом».
+            return encoded.takeIf { it.isNotBlank() }
+        }
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(
@@ -103,8 +126,16 @@ class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore
     }
 
     override fun saveApiKey(profileId: String, key: String) {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty()) {
+            // Пустая строка — это «забыть ключ», а не сохранить пустоту: иначе чат
+            // отправил бы запрос с пустым заголовком авторизации и получил 401.
+            clearApiKey(profileId)
+            return
+        }
+        ensureKeysMigrated()
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
-        val ciphertext = cipher.doFinal(key.trim().toByteArray(StandardCharsets.UTF_8))
+        val ciphertext = cipher.doFinal(trimmed.toByteArray(StandardCharsets.UTF_8))
         prefs.edit()
             .putString(KEY_KEY_PREFIX + profileId, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
             .putString(KEY_IV_PREFIX + profileId, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
@@ -112,7 +143,49 @@ class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore
     }
 
     override fun clearApiKey(profileId: String) {
+        // IV стирается вместе с ключом: осиротевший IV — мусор, который миграция
+        // иначе вычищала бы отдельным проходом.
         prefs.edit().remove(KEY_KEY_PREFIX + profileId).remove(KEY_IV_PREFIX + profileId).apply()
+    }
+
+    /**
+     * Один проход миграции старых ключей; повторные вызовы ничего не делают.
+     *
+     * План строит чистая [LocalProviderKeyMigration.plan]; здесь только исполнение.
+     * Если зашифровать не удалось, НИЧЕГО не стираем: потерять ключ хуже, чем оставить
+     * его открытым ещё на один запуск — человек не должен вводить его заново.
+     */
+    private fun ensureKeysMigrated() {
+        if (keysMigrated) return
+        synchronized(migrationLock) {
+            if (keysMigrated) return
+            keysMigrated = runCatching { migrateLegacyKeys() }.getOrDefault(false)
+        }
+    }
+
+    /** @return true — prefs приведены к целевому виду (или уже были). */
+    private fun migrateLegacyKeys(): Boolean {
+        val plan = LocalProviderKeyMigration.plan(prefs.all)
+        if (plan.isEmpty) return true
+
+        // Шифруем ВСЁ до единого коммита: частично перенесённый набор ключей хуже,
+        // чем неперенесённый.
+        val sealedSlots = ArrayList<Pair<String, String>>(plan.toSeal.size * 2)
+        for (secret in plan.toSeal) {
+            val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
+            val ciphertext = cipher.doFinal(secret.plaintext.toByteArray(StandardCharsets.UTF_8))
+            sealedSlots += (KEY_KEY_PREFIX + secret.profileId) to
+                Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+            sealedSlots += (KEY_IV_PREFIX + secret.profileId) to
+                Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
+        }
+
+        // commit(), а не apply(): миграция должна быть на диске до первого чтения ключа,
+        // иначе следующий запуск снова увидит открытый слот.
+        val editor = prefs.edit()
+        plan.toErase.forEach { slot -> editor.remove(slot) }
+        sealedSlots.forEach { (slot, value) -> editor.putString(slot, value) }
+        return editor.commit()
     }
 
     private fun persistProfiles(profiles: List<LocalProviderProfile>) {
@@ -163,8 +236,10 @@ class LocalProviderPrefsStore(private val context: Context) : LocalProviderStore
         const val PREFS = "mars-local-provider"
         const val KEY_PROFILES = "profiles"
         const val KEY_ACTIVE = "active_id"
-        const val KEY_KEY_PREFIX = "api_key."
-        const val KEY_IV_PREFIX = "api_key_iv."
+
+        /** Слоты ключей берутся из плана миграции: разойтись с ним они не могут. */
+        const val KEY_KEY_PREFIX = LocalProviderKeyMigration.SLOT_PREFIX
+        const val KEY_IV_PREFIX = LocalProviderKeyMigration.IV_PREFIX
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val TAG_BITS = 128
     }

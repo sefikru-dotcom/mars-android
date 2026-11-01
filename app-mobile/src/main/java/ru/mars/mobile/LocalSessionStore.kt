@@ -7,6 +7,7 @@ import ru.mars.network.local.LocalMessage
 import ru.mars.network.local.LocalRole
 import ru.mars.network.local.LocalSession
 import ru.mars.network.local.LocalToolCall
+import ru.mars.network.local.LocalTurnMetrics
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -500,6 +501,14 @@ object LocalSessionJson {
                 }
             })
         }
+        // Метрики хода — ТОЛЬКО у ответа модели и только когда шаг реально измерялся.
+        // Два условия, а не одно: `metrics` у USER/TOOL запрещены контрактом (§1), а
+        // нули писать нельзя — «0 токенов» это утверждение, которого провайдер не делал.
+        // Свежий диалог без метрик остаётся байт в байт таким, каким его писала волна 1.
+        val metrics = message.metrics
+        if (metrics != null && metrics.isMeasured && message.role == LocalRole.ASSISTANT) {
+            put("metrics", encodeMetrics(metrics))
+        }
     }
 
     fun decodeMessage(item: JSONObject, index: Int = 0): LocalMessage? {
@@ -525,7 +534,47 @@ object LocalSessionJson {
             toolCalls = calls,
             toolCallId = item.optString("toolCallId").takeIf { it.isNotBlank() },
             createdAt = item.optLong("createdAt", 0L),
+            metrics = decodeMetrics(item, role),
         )
+    }
+
+    /**
+     * Метрики хода из вложенного объекта.
+     *
+     * `null` — объекта нет (файл волны 1), он не у ответа модели или поле битое
+     * (строка/массив вместо объекта). Ни один из этих случаев не исключение: битое
+     * поле метрик не должно стоить диалога — ровно как битая мета сессии.
+     *
+     * Терпимость к значениям та же, что у остальной меты: токены — через [optTokens]
+     * (строка с числом принимается), булевы — через [optFlag] (нет поля — `false`).
+     */
+    private fun decodeMetrics(item: JSONObject, role: LocalRole): LocalTurnMetrics? {
+        // У USER/TOOL метрик не бывает: файл с ними — не повод показать футер под
+        // вопросом человека.
+        if (role != LocalRole.ASSISTANT) return null
+        val raw = item.optJSONObject("metrics") ?: return null
+        return LocalTurnMetrics(
+            promptTokens = raw.optTokens("promptTokens").toIntToken(),
+            completionTokens = raw.optTokens("completionTokens").toIntToken(),
+            totalTokens = raw.optTokens("totalTokens").toIntToken(),
+            ttftMs = raw.optTokens("ttftMs"),
+            interrupted = raw.optFlag("interrupted"),
+            truncated = raw.optFlag("truncated"),
+            finishReason = raw.optText("finishReason"),
+        )
+    }
+
+    /** Вложенный объект метрик: ровно те ключи, которые читает [decodeMetrics]. */
+    private fun encodeMetrics(metrics: LocalTurnMetrics): JSONObject = JSONObject().apply {
+        put("promptTokens", metrics.promptTokens)
+        put("completionTokens", metrics.completionTokens)
+        put("totalTokens", metrics.totalTokens)
+        put("ttftMs", metrics.ttftMs)
+        put("interrupted", metrics.interrupted)
+        put("truncated", metrics.truncated)
+        // `finishReason` — только когда провайдер его прислал: `null` в файле
+        // утверждал бы «причина — null», хотя причина просто неизвестна.
+        metrics.finishReason?.takeIf { it.isNotBlank() }?.let { put("finishReason", it) }
     }
 
     /**
@@ -555,6 +604,30 @@ object LocalSessionJson {
         }
         return value.coerceAtLeast(0L)
     }
+
+    /**
+     * Флаг метрик. Отсутствие поля — `false` (старый файл), строка `"true"`/`"1"` и
+     * число ≠ 0 принимаются: файл мог быть записан другой версией кодека, и падать на
+     * этом незачем. Мусор (объект, массив) — тоже `false`.
+     */
+    private fun JSONObject.optFlag(key: String): Boolean {
+        if (!has(key) || isNull(key)) return false
+        return when (val raw = opt(key)) {
+            is Boolean -> raw
+            is Number -> raw.toInt() != 0
+            is String -> {
+                val text = raw.trim()
+                text.equals("true", ignoreCase = true) || text == "1"
+            }
+            else -> false
+        }
+    }
+
+    /**
+     * Токены метрик — `Int`, а в файле они читаются как `Long`. Огромное число в
+     * подпорченном файле не должно переполниться в отрицательное: клампим к `Int.MAX_VALUE`.
+     */
+    private fun Long.toIntToken(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
     private fun roleOf(raw: String): LocalRole? =
         LocalRole.values().firstOrNull { it.name.equals(raw, ignoreCase = true) }

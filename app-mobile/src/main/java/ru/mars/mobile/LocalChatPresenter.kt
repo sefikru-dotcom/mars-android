@@ -24,6 +24,7 @@ import ru.mars.network.local.LocalToolCall
 import ru.mars.network.local.LocalToolExecutor
 import ru.mars.network.local.LocalToolResult
 import ru.mars.network.local.LocalToolSchema
+import ru.mars.network.local.LocalTurnMetrics
 import ru.mars.network.local.LocalUsage
 import java.util.Locale
 import java.util.UUID
@@ -92,11 +93,14 @@ data class LocalChatItem(
      */
     val interrupted: Boolean = false,
     /**
-     * Ответ упёрся в лимит токенов модели (`finish_reason = length`).
+     * Ответ упёрся в лимит выходных токенов модели: `finish_reason = length`.
      *
-     * Поле готово, но не выставляется: транспорт ядра не пробрасывает `finish_reason`,
-     * а угадывать обрезку по длине текста — значит врать. Появится признак в
-     * [ru.mars.network.local.LocalChatEvent] — достаточно будет выставить флаг здесь.
+     * Единственный честный признак обрезки. Угадывать её по длине текста нельзя: у
+     * короткого ответа и у обрезанного текста разницы в длине нет, а `stop`/`tool_calls`
+     * означают, что модель закончила сама. Выставляется из
+     * [ru.mars.network.local.LocalChatEvent.AssistantFinished.finishReason]; `null`
+     * (провайдер причину не прислал) оставляет `false` — «неизвестно» здесь честнее
+     * ложного «обрезан».
      */
     val truncated: Boolean = false,
     /**
@@ -125,6 +129,15 @@ object LocalTurnFooter {
     /** Приписка к оборванному ответу. */
     const val INTERRUPTED = "оборван"
 
+    /**
+     * Приписка к ответу, упёршемуся в лимит выходных токенов.
+     *
+     * Отдельное слово, а не общее «оборван»: обрыв — это сбой или «Стоп», а обрезка —
+     * штатный предел модели, и человеку важно различать «связь упала» и «модель
+     * договорила не всё».
+     */
+    const val TRUNCATED = "обрезан"
+
     /** Слово после числа токенов: «1.2k ток». */
     const val TOKENS = "ток"
 
@@ -134,6 +147,8 @@ object LocalTurnFooter {
      * [windowTokens] — размер окна контекста модели; null — окно неизвестно, и тогда
      * пара «запрос/окно» не рисуется (одно число без знаменателя читалось бы как «сколько
      * осталось»).
+     *
+     * Порядок частей: токены → запрос/окно → ttft → [INTERRUPTED] → [TRUNCATED].
      */
     fun line(
         promptTokens: Int = 0,
@@ -141,9 +156,10 @@ object LocalTurnFooter {
         totalTokens: Int = 0,
         windowTokens: Int? = null,
         interrupted: Boolean = false,
+        truncated: Boolean = false,
         ttftMs: Long = 0,
     ): String? {
-        val parts = ArrayList<String>(4)
+        val parts = ArrayList<String>(5)
         // «Всего» — сумма шагов хода. Если провайдер прислал только ответ (бывает у
         // потоковых API без total), показываем хотя бы её: это тоже факт, а не догадка.
         val total = if (totalTokens > 0) totalTokens else completionTokens
@@ -155,6 +171,9 @@ object LocalTurnFooter {
         // Задержка первого символа: «0.8с» короче и читается лучше, чем «800 мс».
         if (ttftMs > 0) parts += formatTtft(ttftMs)
         if (interrupted) parts += INTERRUPTED
+        // Обрезка — после обрыва: если случилось и то и другое, порядок фиксирован
+        // (сбой мог прийти уже после `length`), и человек видит обе причины.
+        if (truncated) parts += TRUNCATED
         return if (parts.isEmpty()) null else parts.joinToString(SEPARATOR)
     }
 
@@ -165,6 +184,7 @@ object LocalTurnFooter {
         totalTokens = item.totalTokens,
         windowTokens = windowTokens,
         interrupted = item.interrupted,
+        truncated = item.truncated,
         ttftMs = item.ttftMs,
     )
 
@@ -341,6 +361,24 @@ class LocalChatPresenter(
     private var turnUsage: LocalUsage = LocalUsage()
 
     /**
+     * `finish_reason` последнего завершённого шага текущего хода; `null` — провайдер
+     * причину не сообщил (или шаг ещё не закрыт).
+     *
+     * Хранится за ходом, а не за кадром: [LocalTurnMetrics] собирается один раз, когда
+     * шаг уже закрыт, и причина ПОСЛЕДНЕГО шага — единственная, которая относится к
+     * ответу (у промежуточных шагов с инструментами это `tool_calls`).
+     */
+    private var turnFinishReason: String? = null
+
+    /**
+     * Время до первого символа текущего хода, мс; 0 — не измерено.
+     *
+     * Дублирует [LocalChatItem.ttftMs] намеренно: метрики собираются в момент закрытия
+     * шага, а читать их из ленты значило бы зависеть от того, отрисован ли элемент.
+     */
+    private var turnTtftMs: Long = 0L
+
+    /**
      * Обёртка исполнения: запоминает полный результат для истории и пропускает вызов
      * дальше. Ошибку не глотает — решение об ошибке принимает нижестоящий исполнитель.
      */
@@ -457,6 +495,11 @@ class LocalChatPresenter(
      * [usage] — сохранённый расход диалога из меты сессии (W3). Из него НЕ выводится
      * процент заполнения: в мете лежит сумма prompt по шагам, а не замер последнего шага,
      * поэтому пилюля остаётся скрытой до первого хода — честно, а не «примерно».
+     *
+     * Футер ответов при этом восстанавливается целиком: `ttft`, токены, «оборван» и
+     * «обрезан» берутся из [LocalMessage.metrics] каждого сообщения ([buildItems]), поэтому
+     * строка под ответом после перезапуска та же, что была до него. Сообщения без метрик
+     * (файл волны 1) дают пустой футер — как и раньше.
      */
     fun restore(messages: List<LocalMessage>, usage: LocalUsage? = null) {
         history = messages
@@ -545,6 +588,8 @@ class LocalChatPresenter(
         var ttft = 0L
         val turnStartedAt = now()
         turnUsage = LocalUsage()
+        turnFinishReason = null
+        turnTtftMs = 0L
         cancelRequested = false
         turnAssistantId = assistantId
         turnJob = currentCoroutineContext()[Job]
@@ -559,6 +604,7 @@ class LocalChatPresenter(
                     // Первый реальный символ ответа: фиксируем один раз за ход.
                     if (ttft == 0L && handled.produced) {
                         ttft = (now() - turnStartedAt).coerceAtLeast(0L)
+                        turnTtftMs = ttft
                         updateItem(assistantId) { it.copy(ttftMs = ttft) }
                     }
                     partial = handled.text
@@ -695,6 +741,9 @@ class LocalChatPresenter(
                 role = LocalRole.ASSISTANT,
                 text = partial,
                 createdAt = now(),
+                // Оборванный ответ тоже несёт метрики: «оборван», ttft и токены
+                // обязаны пережить перезапуск, иначе футер после него менялся бы.
+                metrics = turnMetrics(interrupted = aborted),
             )
             if (aborted) updateItem(assistantId) { it.copy(interrupted = true) }
         }
@@ -702,6 +751,31 @@ class LocalChatPresenter(
         // полный, и приписка «оборван» на нём была бы ложью.
         finalizeStreaming(assistantId)
         if (_state.value.stopping) _state.value = _state.value.copy(stopping = false)
+    }
+
+    /**
+     * Метрики хода для истории — ровно то, что экран показал в футере.
+     *
+     * Собираются из уже посчитанного ([turnUsage], [turnTtftMs], [turnFinishReason]),
+     * а не пересчитываются: второй счётчик токенов разошёлся бы с первым, и футер
+     * после перезапуска показывал бы другое число, чем до него.
+     *
+     * `null`, когда шаг не измерялся ([LocalTurnMetrics.isMeasured] == false): писать
+     * нули значило бы утверждать «шаг ничего не стоил», а рисовать пустой футер —
+     * обещать цифры, которых нет. По той же причине `truncated` без токенов и ttft в
+     * историю не попадает (политика §1 контракта волны 12).
+     */
+    private fun turnMetrics(interrupted: Boolean): LocalTurnMetrics? {
+        val metrics = LocalTurnMetrics(
+            promptTokens = turnUsage.promptTokens,
+            completionTokens = turnUsage.completionTokens,
+            totalTokens = turnUsage.totalTokens,
+            ttftMs = turnTtftMs,
+            interrupted = interrupted,
+            truncated = turnFinishReason == LocalTurnMetrics.REASON_LENGTH,
+            finishReason = turnFinishReason,
+        )
+        return metrics.takeIf { it.isMeasured }
     }
 
     /** Человеческий текст сбоя транспорта: без стектрейса и без «null» на экране. */
@@ -789,13 +863,30 @@ class LocalChatPresenter(
 
             is LocalChatEvent.AssistantFinished -> {
                 val full = event.fullText.ifBlank { partial }
-                if (full.isNotBlank()) updateItem(assistantId) { it.copy(text = full, streaming = false) }
+                // `length` — единственный достоверный признак упора в лимит выходных
+                // токенов. `stop`/`tool_calls`/`content_filter` — модель закончила сама
+                // (или её остановили), и «обрезан» на них был бы ложью. `null` —
+                // провайдер причину не прислал: тоже не обрезка, а «неизвестно».
+                val truncated = event.finishReason == LocalTurnMetrics.REASON_LENGTH
+                turnFinishReason = event.finishReason
+                if (full.isNotBlank()) {
+                    updateItem(assistantId) {
+                        it.copy(text = full, streaming = false, truncated = truncated)
+                    }
+                } else if (truncated) {
+                    // Текста нет, а шаг закрыт по лимиту: флаг остаётся на строке —
+                    // судьбу пустого пузыря решает finalizeStreaming, не мы.
+                    updateItem(assistantId) { it.copy(truncated = true) }
+                }
                 history = history + LocalMessage(
                     id = newId(),
                     role = LocalRole.ASSISTANT,
                     text = event.fullText,
                     toolCalls = event.toolCalls,
                     createdAt = now(),
+                    // Метрики едут в историю вместе с текстом: без них после
+                    // перезапуска футер пуст, хотя цифры были получены (A3).
+                    metrics = turnMetrics(interrupted = false),
                 )
                 // TOOL-сообщения обязаны следовать за вызовом и нести контент:
                 // провайдеры отвергают историю с висящим tool_call.
@@ -920,7 +1011,24 @@ class LocalChatPresenter(
                 LocalRole.USER -> items.add(LocalChatItem(message.id, LocalRole.USER, message.text))
                 LocalRole.ASSISTANT -> {
                     if (message.text.isNotBlank() || message.toolCalls.isEmpty()) {
-                        items.add(LocalChatItem(message.id, LocalRole.ASSISTANT, message.text))
+                        // Метрики хода поднимаются из истории в элемент ленты: без этого
+                        // после перезапуска футер был бы пуст, хотя цифры сохранены (A3).
+                        // У сообщений без метрик (старый файл) поля остаются нулевыми —
+                        // ровно как раньше.
+                        val metrics = message.metrics
+                        items.add(
+                            LocalChatItem(
+                                id = message.id,
+                                role = LocalRole.ASSISTANT,
+                                text = message.text,
+                                promptTokens = metrics?.promptTokens ?: 0,
+                                completionTokens = metrics?.completionTokens ?: 0,
+                                totalTokens = metrics?.totalTokens ?: 0,
+                                ttftMs = metrics?.ttftMs ?: 0L,
+                                interrupted = metrics?.interrupted ?: false,
+                                truncated = metrics?.truncated ?: false,
+                            )
+                        )
                     }
                     message.toolCalls.forEach { call ->
                         items.add(

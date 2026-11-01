@@ -20,12 +20,32 @@ class LocalContextBarWiringTest {
         var dir: File? = File(".").absoluteFile
         while (dir != null) {
             val candidate = File(dir, relative)
-            if (candidate.isFile) return candidate.readText()
+            if (candidate.isFile) return candidate.readText().normalizeNewlines()
             val nested = File(dir, "app-mobile/$relative")
-            if (nested.isFile) return nested.readText()
+            if (nested.isFile) return nested.readText().normalizeNewlines()
             dir = dir.parentFile
         }
         throw AssertionError("Не найден исходник: $relative")
+    }
+
+    /**
+     * Привести переводы строк к `\n`.
+     *
+     * На Windows при `core.autocrlf=true` рабочее дерево лежит с CRLF, а в git — с LF.
+     * Многострочные проверки ниже сравнивают куски разметки с `\n` внутри, и без
+     * нормализации контракт «полоса добавляется ровно одним addView» падал бы только
+     * на этой машине, оставаясь зелёным в CI. Код от перевода строк не зависит —
+     * значит, и тест не должен.
+     */
+    private fun String.normalizeNewlines(): String =
+        lineSequence().joinToString(LF)
+
+    private companion object {
+        /**
+         * Разделитель строк собран из кода символа, а не литералом с escape:
+         * редакторы и инструменты патча превращают такой литерал в настоящий перевод строки.
+         */
+        val LF: String = 10.toChar().toString()
     }
 
     private val bar by lazy { source("src/main/java/ru/mars/mobile/ContextFillBarView.kt") }

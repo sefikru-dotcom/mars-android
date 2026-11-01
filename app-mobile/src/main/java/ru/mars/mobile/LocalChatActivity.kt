@@ -1252,6 +1252,9 @@ class LocalChatActivity : ComponentActivity() {
             contextWindow = catalog[updated.model]?.contextWindow ?: updated.contextWindow,
         )
         providerStore.saveProfile(withWindow)
+        // Смена модели/адреса посреди хода обязана замолчать старый поток: иначе ответ
+        // прежней модели ляжет в диалог, который человек уже ведёт с новой.
+        LocalChatTransport.noteConfigurationChanged()
         return withWindow
     }
 
