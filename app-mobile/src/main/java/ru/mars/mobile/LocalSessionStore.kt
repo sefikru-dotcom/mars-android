@@ -96,8 +96,23 @@ class LocalSessionStore(private val dir: File) {
                 totalPromptTokens = previous?.totalPromptTokens ?: 0L,
                 totalTokens = previous?.totalTokens ?: 0L,
                 reasoningEffort = previous?.reasoningEffort,
+                turnSettings = previous?.turnSettings,
             )
         )
+        return updated
+    }
+
+    /**
+     * Сохранить снимок параметров хода, не трогая сообщения и расход.
+     *
+     * Отдельный метод, потому что пишется в другой момент: сообщения — после каждого
+     * хода, параметры — когда человек их изменил в шторке. `null` — диалога нет или
+     * файл битый (писать некуда).
+     */
+    fun updateTurnSettings(sessionId: String, settingsJson: String?): StoredSession? {
+        val current = LocalSessionRetention.readSession(dir, sessionId) ?: return null
+        val updated = current.copy(turnSettings = settingsJson)
+        persist(updated)
         return updated
     }
 
@@ -252,6 +267,17 @@ data class StoredSession(
     val totalTokens: Long = 0L,
     /** Уровень reasoning (`low`/`medium`/`high`); `null` — «Авто». */
     val reasoningEffort: String? = null,
+    /**
+     * Снимок параметров хода (сэмпсинг) в JSON — как он был у диалога в момент
+     * последнего сохранения.
+     *
+     * Строкой, а не типом ядра, намеренно: хранилище не обязано знать про
+     * [ru.mars.network.local.LocalTurnSettings], иначе любое расширение параметров
+     * ломало бы чтение старых файлов. Кто сохраняет — сериализует сам, кто читает —
+     * разбирает сам и при ошибке получает `null` («настройки не сохранены»), а не
+     * диалог без сообщений.
+     */
+    val turnSettings: String? = null,
 )
 
 /**
@@ -407,6 +433,7 @@ object LocalSessionJson {
             // ровно таким же, каким его писала волна 1.
             meta?.model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
             meta?.reasoningEffort?.takeIf { it.isNotBlank() }?.let { put("reasoningEffort", it) }
+            meta?.turnSettings?.takeIf { it.isNotBlank() }?.let { put("turnSettings", it) }
             val promptTokens = meta?.totalPromptTokens ?: 0L
             if (promptTokens > 0L) put("totalPromptTokens", promptTokens)
             val totalTokens = meta?.totalTokens ?: 0L
@@ -442,6 +469,7 @@ object LocalSessionJson {
             totalPromptTokens = root.optTokens("totalPromptTokens"),
             totalTokens = root.optTokens("totalTokens"),
             reasoningEffort = root.optText("reasoningEffort"),
+            turnSettings = root.optText("turnSettings"),
         )
     }
 
