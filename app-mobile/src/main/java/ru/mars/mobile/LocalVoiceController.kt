@@ -5,13 +5,17 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import ru.mars.mobile.service.MarsVoiceService
+import ru.mars.mobile.voice.MicCaptureWatchdog
 
 /**
  * Голосовой ввод локального чата: микрофон → существующий ASR → текст в композер, и
@@ -100,6 +104,25 @@ class LocalVoiceController(
     private var voiceTurn = false
 
     private var released = false
+
+    /**
+     * Сторож «захват открыт, а звука нет». Чистая машина состояний в
+     * [MicCaptureWatchdog]: секунды, счётчик перезапусков и решение сдаться проверяются
+     * юнит-тестом, а здесь только таймер и вызовы.
+     */
+    private val micWatchdog = MicCaptureWatchdog(MIC_WATCHDOG_MS)
+
+    /** Ход с озвучкой дельтами: текст уже ушёл в синтез, повторять его целиком нельзя. */
+    private var streamedTurn = false
+
+    /** Подсказка на размышлениях уже прозвучала в этом ходу (второй раз не говорим). */
+    private var hintSpoken = false
+
+    /** Подсказка поставлена в очередь на [THINKING_HINT_DELAY_MS] — второй раз не ставим. */
+    private var hintScheduled = false
+
+    /** Идёт пауза между [closeCapture] и повторным захватом после срабатывания сторожа. */
+    private var micRestartPending = false
 
     // ---------------------------------------------------------------------------------------
     // Публичный API
@@ -200,6 +223,7 @@ class LocalVoiceController(
     /** Выбросить реплику без текста (уход с экрана, отмена). */
     fun cancelListening() {
         if (released) return
+        cancelThinkingHint()
         closeCapture()
         runCatching { stt?.cancelUtterance() }
         handledUtterance = true
@@ -218,12 +242,90 @@ class LocalVoiceController(
     fun onTurnStarted() {
         if (released) return
         stopSpeaking()
+        // Новый ход — новые подсказки: «Секунду, думаю» звучит не чаще раза за ход.
+        cancelThinkingHint()
+        hintSpoken = false
         if (state.phase == LocalVoicePhase.THINKING) emit(state.copy(phase = LocalVoicePhase.IDLE))
+    }
+
+    /**
+     * Модель начала отвечать: текст ответа пойдёт дельтами.
+     *
+     * Зачем это отдельный вызов, а не «начнём при первой дельте»: пока первый кусок текста
+     * синтезируется, старый звук (например подсказка «Секунду, думаю») должен быть уже погашен
+     * и подтверждён тишиной ([LocalVoiceTts.beginStream]) — иначе первый же кусок нового ответа
+     * глушится остатком чужого стопа, и ответ начинается со второго предложения.
+     *
+     * @return `true` — поток открыт и ответ будет озвучен; `false` — озвучки нет (ход не
+     *   голосовой, автоозвучка выключена, объект освобождён).
+     */
+    fun onAnswerStarted(): Boolean {
+        if (released) return false
+        if (!speakAnswers || !voiceTurn) return false
+        if (state.phase == LocalVoicePhase.LISTENING || capture?.isCapturing == true) return false
+        val voice = ensureTts() ?: return false
+        if (!voice.available) return false
+        cancelThinkingHint()
+        streamedTurn = false
+        return runCatching { voice.beginStream() }.getOrDefault(false)
+    }
+
+    /**
+     * Очередная дельта текста ответа: ранний старт речи.
+     *
+     * Первый кусок уходит в синтез по клаузу (запятая/точка/двоеточие/тире/перевод строки),
+     * следующие — пачками ~300 символов по границе слова ([ru.mars.mobile.voice.SpeechChunker]).
+     * Ждать готового ответа не нужно: озвучка догоняет текст сама, куски не теряются.
+     *
+     * @return `true` — кусок принят или встал в очередь; `false` — копим текст (говорить пока
+     *   нечего) либо ответ не озвучивается.
+     */
+    fun onAnswerDelta(delta: String?): Boolean {
+        if (released) return false
+        if (!speakAnswers || !voiceTurn) return false
+        if (delta.isNullOrEmpty()) return false
+        val voice = tts ?: return false
+        cancelThinkingHint()
+        // Первый же принятый кусок отменяет подсказку: текст появился — заглушка не нужна.
+        val accepted = runCatching { voice.appendStream(delta) }.getOrDefault(false)
+        // Отданный кусок означает, что первые символы уже говорятся — вторую дозу текста
+        // (весь ответ в onAnswerCompleted) произносить нельзя, иначе ответ прозвучит дважды.
+        // Фазу SPEAKING здесь НЕ ставим: её включает [onTtsSpeakingChanged] по принятому
+        // синтезу, иначе индикатор опережал бы звук на самой первой дельте (см. KDoc
+        // [LocalVoiceTts] про точность движка).
+        if (accepted) streamedTurn = true
+        return accepted
+    }
+
+    /**
+     * Модель начала с рассуждений, а озвучиваемого текста ещё нет.
+     *
+     * Молчание в этот момент человек читает как «Марс сломался»: локальная модель думает
+     * секунды. Поэтому вместо тишины звучит короткая заглушка — РОВНО ОДИН раз за ход и только
+     * если текст не появился сам ([THINKING_HINT_DELAY_MS] — тот же промежуток, за который
+     * первый кусок успевает прийти у быстрой модели).
+     *
+     * @return `true` — подсказка поставлена в очередь.
+     */
+    fun onReasoningStarted(): Boolean {
+        if (released) return false
+        if (!speakAnswers || !voiceTurn) return false
+        if (hintSpoken || hintScheduled) return false
+        if (streamedTurn) return false
+        // Человек говорит — поверх его речи Марс не вставляет заглушку.
+        if (state.phase == LocalVoicePhase.LISTENING || capture?.isCapturing == true) return false
+        if (state.phase == LocalVoicePhase.SPEAKING) return false
+        hintScheduled = true
+        main.postDelayed(thinkingHint, THINKING_HINT_DELAY_MS)
+        return true
     }
 
     /**
      * Ход завершён: озвучить ответ, если он пришёл на голосовую реплику и озвучка доступна.
      * Без звука фаза возвращается в IDLE — кнопка не остаётся в «Говорю» навсегда.
+     *
+     * Если ответ уже звучал потоком ([onAnswerDelta]), здесь отдаётся только его хвост:
+     * повторно весь текст не произносится.
      */
     fun onAnswerCompleted(text: String?) {
         if (released) return
@@ -232,6 +334,16 @@ class LocalVoiceController(
         // «голосом спросили» не тянется в следующий ход.
         val fromVoice = voiceTurn
         voiceTurn = false
+        cancelThinkingHint()
+        // Поток уже говорил этот ответ: дозвучиваем хвост и НЕ читаем текст заново.
+        if (streamedTurn) {
+            streamedTurn = false
+            val tail = tts?.let { runCatching { it.endStream() }.getOrDefault(false) } ?: false
+            if (tail && state.phase != LocalVoicePhase.SPEAKING) {
+                emit(state.copy(phase = LocalVoicePhase.SPEAKING, partial = "", ttsAvailable = true))
+            }
+            return
+        }
         if (!speakAnswers || !fromVoice || body.isEmpty()) {
             // Открытый микрофон не трогаем: иначе фаза стала бы IDLE при живом захвате, и
             // следующий тап «закончить» не нашёл бы, что закрывать.
@@ -349,6 +461,9 @@ class LocalVoiceController(
     fun release() {
         if (released) return
         released = true
+        main.removeCallbacks(watchdogTick)
+        main.removeCallbacks(thinkingHint)
+        hintScheduled = false
         closeCapture()
         runCatching { stt?.release() }
         stt = null
@@ -428,7 +543,7 @@ class LocalVoiceController(
     }
 
     /** Микрофон + сырой PCM в движок. Маршрут захвата — дефолт [AndroidAudioSourceFactory]. */
-    private fun startCapture(wrapper: StreamingStt) {
+    private fun startCapture(wrapper: StreamingStt, restarted: Boolean = false) {
         if (released) return
         // Живой захват не переоткрываем (второй `AudioRecord` отобрал бы звук у первого), но и
         // не выходим молча: перед новым захватом прошлый ОБЯЗАН быть освобождён — иначе тап
@@ -449,7 +564,11 @@ class LocalVoiceController(
         val started = runCatching {
             fresh.start(
                 captureListener,
-                HandsFreeCapture.RawPcmListener { pcm, length -> wrapper.acceptPcm(pcm, length) },
+                HandsFreeCapture.RawPcmListener { pcm, length ->
+                    // Первый же буфер — доказательство, что сторожу микрофона нечего спасать.
+                    micWatchdog.onAudioChunk()
+                    wrapper.acceptPcm(pcm, length)
+                },
             )
         }.getOrDefault(false)
         if (!started) {
@@ -459,12 +578,103 @@ class LocalVoiceController(
         }
         capture = fresh
         emit(state.copy(phase = LocalVoicePhase.LISTENING, partial = "", notice = null))
+        // Захват открылся — но это ещё не значит, что из него идёт звук (см. [MicCaptureWatchdog]).
+        armMicWatchdog(restarted)
     }
 
     private fun closeCapture() {
+        // Сторож живёт только рядом с живым захватом: без этого он «сдавался» бы уже после
+        // закрытия микрофона и показывал человеку ложное «микрофон не отвечает».
+        main.removeCallbacks(watchdogTick)
         val current = capture ?: return
         capture = null
         runCatching { current.cancel() }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Сторож микрофона
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Захват открыт: ждём первый буфер не дольше [MIC_WATCHDOG_MS] и смотрим за часами.
+     *
+     * @param restarted `true` — это переоткрытие после [MicCaptureWatchdog.Decision.RESTART];
+     *   тогда счётчик перезапусков НЕ сбрасывается, и второй провал заканчивается сдачей.
+     */
+    private fun armMicWatchdog(restarted: Boolean) {
+        val now = watchdogClock()
+        if (restarted) micWatchdog.onRestartStarted(now) else micWatchdog.onCaptureStarted(now)
+        main.removeCallbacks(watchdogTick)
+        main.postDelayed(watchdogTick, MicCaptureWatchdog.TICK_INTERVAL_MS)
+    }
+
+    /**
+     * Тик сторожа. Решения принимает [MicCaptureWatchdog] (чистая машина, проверена тестом),
+     * здесь только «что сделать руками»: перезапустить захват или честно сдаться.
+     */
+    private val watchdogTick = object : Runnable {
+        override fun run() {
+            if (released || capture?.isCapturing != true) return
+            when (micWatchdog.tick(watchdogClock())) {
+                MicCaptureWatchdog.Decision.WAIT -> {
+                    // Звук уже пошёл — таймер больше не нужен, микрофон здоров.
+                    if (!micWatchdog.healthy) main.postDelayed(this, MicCaptureWatchdog.TICK_INTERVAL_MS)
+                }
+
+                MicCaptureWatchdog.Decision.RESTART -> restartCapture()
+                MicCaptureWatchdog.Decision.GIVE_UP -> failMicWatchdog()
+            }
+        }
+    }
+
+    /**
+     * Один автоматический перезапуск захвата: закрыть и переоткрыть микрофон.
+     *
+     * Пауза [MIC_RESTART_PAUSE_MS] — не перестраховка: на Android поток чтения освобождает
+     * ОБЩИЙ `AudioRecord` не мгновенно, и `init()`, сделанный сразу после `stop()`, теряет
+     * новый захват (микрофон «открыт», буферов нет — ровно то, от чего сторож и поставлен).
+     * Задержка сделана корутиной ([delay]), а не блокирующим сном: сон на главном потоке
+     * подвесил бы интерфейс и не дал бы потоку чтения шанса закончить.
+     */
+    private fun restartCapture() {
+        if (released || micRestartPending) return
+        val wrapper = stt
+        if (wrapper == null) {
+            failMicWatchdog()
+            return
+        }
+        micRestartPending = true
+        closeCapture()
+        scope.launch {
+            delay(MIC_RESTART_PAUSE_MS)
+            micRestartPending = false
+            if (released || capture?.isCapturing == true) return@launch
+            // Пока ждали, человек мог закончить реплику или экран уйти в фон — тогда не
+            // переоткрываем: иначе микрофон ожил бы после явного «стоп».
+            if (state.phase != LocalVoicePhase.LISTENING) return@launch
+            if (blockedByBackgroundConversation()) return@launch
+            startCapture(wrapper, restarted = true)
+        }
+    }
+
+    /**
+     * Второй провал: молчать нельзя. Захват закрывается, фаза возвращается в IDLE, а человек
+     * видит причину — «Микрофон не отвечает — голосовой режим остановлен», а не пустой
+     * индикатор «Слушаю».
+     */
+    private fun failMicWatchdog() {
+        micWatchdog.reset()
+        main.removeCallbacks(watchdogTick)
+        closeCapture()
+        runCatching { stt?.cancelUtterance() }
+        handledUtterance = true
+        emit(
+            state.copy(
+                phase = LocalVoicePhase.IDLE,
+                partial = "",
+                notice = MIC_NOT_RESPONDING,
+            ),
+        )
     }
 
     /** Реплика закрыта: микрофон освобождён, текст отдан один раз. */
@@ -480,6 +690,11 @@ class LocalVoiceController(
         }
         // Ход начат голосом: его ответ — единственный кандидат на озвучку ([onAnswerCompleted]).
         voiceTurn = true
+        // Новая голосовая реплика — новый ход: заглушка снова разрешена, старое состояние
+        // потоковой озвучки не наследуется.
+        hintSpoken = false
+        hintScheduled = false
+        streamedTurn = false
         // Фаза — IDLE, а НЕ THINKING. THINKING закрыт для нажатий (`LocalVoiceButton.render`
         // гасит кнопку), а своего сигнала «ход завершён» у контроллера нет: снимал его только
         // хост. Один пропущенный колбэк — и микрофон не открывался больше никогда (на POCO
@@ -591,8 +806,41 @@ class LocalVoiceController(
     private fun ttsPossible(): Boolean = tts?.available ?: true
 
     // ---------------------------------------------------------------------------------------
+    // Подсказка вместо тишины на размышлениях
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Одноразовая заглушка «Секунду, думаю.».
+     *
+     * Почему не отдельный канал сигналов: заглушка — обычная речь, и она обязана уважать то же,
+     * что ответ (маршрут вывода, AEC, отказ движка). Иначе она звучала бы из «правильного»
+     * динамика с выключенным эхоподавлением и попадала бы в захват как голос человека.
+     */
+    private val thinkingHint = Runnable {
+        hintScheduled = false
+        if (released || !voiceTurn || hintSpoken) return@Runnable
+        // Текст уже пошёл (или человек говорит) — заглушка не нужна и мешала бы.
+        if (state.phase == LocalVoicePhase.SPEAKING || state.phase == LocalVoicePhase.LISTENING) {
+            return@Runnable
+        }
+        val voice = ensureTts() ?: return@Runnable
+        if (!voice.available) return@Runnable
+        if (runCatching { voice.speak(THINKING_HINT_TEXT) }.getOrDefault(false)) hintSpoken = true
+    }
+
+    /** Снять поставленную, но ещё не прозвучавшую заглушку: текст появился первым. */
+    private fun cancelThinkingHint() {
+        if (!hintScheduled) return
+        hintScheduled = false
+        main.removeCallbacks(thinkingHint)
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Мелочи
     // ---------------------------------------------------------------------------------------
+
+    /** Часы сторожа: монотонные, не зависят от перевода системного времени. */
+    private fun watchdogClock(): Long = SystemClock.elapsedRealtime()
 
     private fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
@@ -624,6 +872,31 @@ class LocalVoiceController(
         /** Микрофон держит фоновый сервис: второй захват отобрал бы у него звук. */
         const val BACKGROUND_LISTENING: String = "Слушаю в фоне — говорите после „Марс, слушай“"
 
+        /**
+         * Захват открылся, но за [MIC_WATCHDOG_MS] из него не пришло ни одного буфера —
+         * одна попытка перезапуска, потом [MIC_NOT_RESPONDING]. Порог именно три секунды:
+         * человек уже сказал бы первое слово, а ждать дольше значит держать его в «Слушаю».
+         */
+        const val MIC_WATCHDOG_MS: Long = 3_000L
+
+        /** Сообщение человеку, когда микрофон молчит и после перезапуска. */
+        const val MIC_NOT_RESPONDING: String = "Микрофон не отвечает — голосовой режим остановлен"
+
+        /**
+         * Пауза между освобождением и переоткрытием общего `AudioRecord`. Короче — новый
+         * захват теряется, длиннее — слышимая дыра в реплике.
+         */
+        const val MIC_RESTART_PAUSE_MS: Long = 150L
+
+        /** Заглушка на размышлениях модели: одна короткая фраза вместо тишины. */
+        const val THINKING_HINT_TEXT: String = "Секунду, думаю."
+
         private const val THREAD_ASR_LOAD = "mars-local-voice-asr-load"
+
+        /**
+         * Задержка перед заглушкой: быстрая модель успевает выдать первый кусок, и подсказка
+         * не звучит вовсе — «не произносить, если текст появился сразу».
+         */
+        private const val THINKING_HINT_DELAY_MS = 700L
     }
 }
