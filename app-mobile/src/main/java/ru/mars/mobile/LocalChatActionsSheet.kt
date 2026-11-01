@@ -44,6 +44,9 @@ internal object LocalChatActionsSheet {
     const val SELECT_LABEL = "Выбрать текст"
     const val SPEAK_LABEL = "Озвучить"
 
+    /** Дописать обрезанный ответ с того места, где модель упёрлась в лимит токенов. */
+    const val CONTINUE_LABEL = "Продолжить"
+
     /** Пересобрать ответ в файл DOCX/XLSX/TXT и отдать в «Поделиться». */
     const val SAVE_FILE_LABEL = "Сохранить как файл"
     const val SHARE_LABEL = "Поделиться"
@@ -72,10 +75,18 @@ internal object LocalChatActionsSheet {
         models: List<String> = emptyList(),
         currentModel: String? = null,
         onRetryWith: (String) -> Unit = {},
+        /**
+         * Предложить «Продолжить»: только когда модель упёрлась в лимит выходных токенов.
+         *
+         * Считает экран через [LocalContinuePolicy] — лист не решает, была ли обрезка,
+         * чтобы правило не разъехалось с [LocalChatActions] и с футером.
+         */
+        canContinue: Boolean = false,
+        onContinue: () -> Unit = {},
     ) {
         val hasText = text.isNotBlank()
         val retryModels = alternatives(models, currentModel)
-        val actions = ArrayList<Pair<String, () -> Unit>>(6)
+        val actions = ArrayList<Pair<String, () -> Unit>>(7)
         if (hasText) actions += COPY_LABEL to onCopy
         if (canRetry) actions += RETRY_LABEL to onRetry
         if (canRetry && retryModels.isNotEmpty()) {
@@ -85,6 +96,7 @@ internal object LocalChatActionsSheet {
         if (hasText && canSpeak) actions += SPEAK_LABEL to onSpeak
         if (hasText) actions += SHARE_LABEL to onShare
         if (hasText && onSaveFile != null) actions += SAVE_FILE_LABEL to onSaveFile
+        if (canContinue && hasText) actions += CONTINUE_LABEL to onContinue
         // Нечего предложить — не показываем пустой лист.
         if (actions.isEmpty()) return
 

@@ -41,6 +41,7 @@ import ru.mars.network.local.AttachmentKind
 import ru.mars.network.local.LocalAttachment
 import ru.mars.network.local.MemoryStore
 import ru.mars.network.local.OwnerProfileStore
+import ru.mars.network.local.LocalCapabilityCache
 import ru.mars.network.local.LocalChatClient
 import ru.mars.network.local.LocalMessage
 import ru.mars.network.local.LocalModelInfo
@@ -208,6 +209,26 @@ class LocalChatActivity : ComponentActivity() {
      * контекста не знает окно, а переключатель reasoning не знает о поддержке.
      */
     private val catalog = HashMap<String, LocalModelInfo>()
+
+    /**
+     * Кэш возможностей модели по адресу провайдера.
+     *
+     * Отличие от [catalog]: тот живёт до пересоздания экрана и ничего не знает о смене
+     * сервера, поэтому после переключения адреса ещё показывал бы окно и поддержку
+     * reasoning ЧУЖОГО провайдера. Здесь ключ включает нормализованный адрес, а смена
+     * профиля сбрасывает кэш целиком ([LocalCapabilityCache.invalidate]).
+     */
+    private val capabilityCache = LocalCapabilityCache()
+
+    /**
+     * Метки запросов каталога: применяется только последний.
+     *
+     * `prefetchCatalog` запускается на каждый `onResume` и после смены профиля. Два
+     * наложившихся запроса завершаются в любом порядке: медленный ответ по ПРЕЖНЕМУ
+     * адресу мог прийти после быстрого по новому и переписать каталог обратно, то есть
+     * вернуть окно и поддержку reasoning чужого сервера. Гейт отбрасывает такие ответы.
+     */
+    private val catalogGate = LocalModelPickGate()
 
     /** Текущий диалог; `null` — ещё не создан (создаётся первым сообщением). */
     @Volatile
@@ -829,8 +850,10 @@ class LocalChatActivity : ComponentActivity() {
         if (presenter.state.value.streaming) stopTurn() else send()
     }
 
-    private fun send(): Job? {
-        val text = composer.input.text.toString().trim()
+    private fun send(internal: String? = null): Job? {
+        // [internal] — служебная реплика (сейчас это «Продолжить»): она уходит модели,
+        // но не рисуется в ленте и не подменяет содержимое поля ввода.
+        val text = internal?.trim() ?: composer.input.text.toString().trim()
         // Вложение без текста — нормальный запрос («что на фото?» человек не писал).
         val pending = attachments
         if (text.isEmpty() && pending.isEmpty()) return null
@@ -862,8 +885,8 @@ class LocalChatActivity : ComponentActivity() {
             subtitle.text = created.title
         }
 
-        val body = bodyWithAttachmentMarks(text, pending)
-        composer.input.setText("")
+        val body = if (internal != null) internal.trim() else bodyWithAttachmentMarks(text, pending)
+        if (internal == null) composer.input.setText("")
         // Вложения ушли с этим ходом — чипы снимаем сразу: иначе они висят всю длину
         // ответа и читаются как «не отправлено».
         clearAttachments()
@@ -879,6 +902,9 @@ class LocalChatActivity : ComponentActivity() {
                 // Вложения едут в исходящем LocalMessage: презентер кладёт их в поле
                 // attachments, а тело запроса собирает транспорт ядра.
                 attachments = pending,
+                // Служебная реплика не попадает в ленту: человек нажал действие,
+                // а не написал сообщение.
+                showInFeed = internal == null,
             )
         }
         turn = started
@@ -1255,6 +1281,10 @@ class LocalChatActivity : ComponentActivity() {
         // Смена модели/адреса посреди хода обязана замолчать старый поток: иначе ответ
         // прежней модели ляжет в диалог, который человек уже ведёт с новой.
         LocalChatTransport.noteConfigurationChanged()
+        // Возможности прежнего адреса больше не факт: окно и поддержка reasoning
+        // относятся к серверу, а он сменился. Fail-closed: неизвестно — значит неизвестно,
+        // а не «как у прошлой модели».
+        capabilityCache.invalidate()
         return withWindow
     }
 
@@ -1272,7 +1302,15 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     /** Метаданные модели из кэша каталога: окно контекста и поддержка reasoning. */
-    private fun catalogInfo(id: String): LocalModelInfo? = catalog[id]
+    private fun catalogInfo(id: String): LocalModelInfo? {
+        // Сначала — кэш по адресу: он переживает перезагрузку каталога и сбрасывается
+        // при смене провайдера. Затем — каталог этого экрана, собранный prefetchCatalog.
+        val profile = providerStore.state().active
+        if (profile != null) {
+            capabilityCache.get(LocalCapabilityCache.keyFor(profile), id)?.let { return it }
+        }
+        return catalog[id]
+    }
 
     /**
      * Каталог моделей в фоне: без него пилюля контекста не знает окно, а переключатель
@@ -1282,11 +1320,19 @@ class LocalChatActivity : ComponentActivity() {
     private fun prefetchCatalog() {
         val profile = providerStore.state().active ?: return
         val apiKey = providerStore.apiKey(profile.id) ?: return
+        val requestSeq = catalogGate.begin()
         lifecycleScope.launch {
             val models = withContext(Dispatchers.IO) {
                 client.catalog(profile, apiKey).getOrNull()
             } ?: return@launch
+            // Ответ по устаревшему запросу отбрасывается: за время ожидания человек мог
+            // сменить адрес, и возможности прежнего сервера больше не факт.
+            if (!catalogGate.shouldApply(requestSeq)) return@launch
             models.forEach { info -> catalog[info.id] = info }
+            // Каталог разобран — возможности этих моделей дальше берутся по адресу
+            // провайдера. Пустой ответ сюда не доходит (`?: return@launch` выше), поэтому
+            // «неизвестно» не превращается в «модель ничего не умеет».
+            capabilityCache.put(LocalCapabilityCache.keyFor(profile), models)
             if (isFinishing || isDestroyed) return@launch
             // Каталог уточнил окно и поддержку reasoning — сообщаем презентеру.
             presenter.bindProfile(providerStore.state().active)
@@ -1426,6 +1472,11 @@ class LocalChatActivity : ComponentActivity() {
             // Пересборка в файл: провайдер умеет только текст, поэтому DOCX/XLSX/TXT
             // собираются здесь, на телефоне, и отдаются в системное «Поделиться».
             onSaveFile = { chooseFileFormat(item.text) },
+            // «Продолжить» — только честная обрезка по лимиту токенов у последнего ответа.
+            // Правило живёт в LocalContinuePolicy, здесь только вопрос «предлагать ли».
+            canContinue = LocalChatActions.canContinue(item, isLastAssistant) &&
+                !presenter.state.value.streaming,
+            onContinue = { continueTruncated(item) },
             // Альтернативы для «повторить другой моделью»: кэш каталога, который уже
             // прогрелся на экране, плюс текущая — иначе на холодном старте список пуст.
             models = catalog.keys.sorted(),
@@ -1567,6 +1618,21 @@ class LocalChatActivity : ComponentActivity() {
         composer.input.setText(lastUser)
         composer.input.setSelection(lastUser.length)
         send()
+    }
+
+    /**
+     * «Продолжить» обрезанный ответ.
+     *
+     * Почему служебной репликой, а не повторной отправкой последнего вопроса: при
+     * `finish_reason = length` модель уже сказала всё, что успела, и повтор вопроса дал
+     * бы другой ответ с начала, а не продолжение. В историю уходит [LocalContinuePolicy.CONTINUE_PROMPT],
+     * экран при этом не показывает лишнюю строку — человек видит только, как дописывается
+     * прежний ответ.
+     */
+    private fun continueTruncated(item: LocalChatItem) {
+        if (presenter.state.value.streaming) return
+        if (!LocalContinuePolicy.shouldOffer(item.truncated, item.interrupted, item.text)) return
+        send(internal = LocalContinuePolicy.CONTINUE_PROMPT)
     }
 
     private fun share(text: String) {

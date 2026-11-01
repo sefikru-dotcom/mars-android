@@ -530,6 +530,15 @@ class LocalChatPresenter(
         tools: List<LocalToolSchema>,
         text: String,
         attachments: List<LocalAttachment> = emptyList(),
+        /**
+         * Показывать ли реплику в ленте.
+         *
+         * `false` — служебная реплика: она уходит модели ([LocalMessage] с ролью USER
+         * всё равно попадает в историю, иначе провайдер не поймёт, что от него хотят),
+         * но в ленте не рисуется. Так выглядит «Продолжить»: человек нажал действие,
+         * а не написал сообщение, и собственная реплика в ленте была бы шумом.
+         */
+        showInFeed: Boolean = true,
     ) {
         val body = text.trim()
         if (body.isEmpty() || _state.value.streaming) return
@@ -567,8 +576,10 @@ class LocalChatPresenter(
         val assistantId = newId()
         _state.value = _state.value.copy(
             items = _state.value.items +
-                LocalChatItem(user.id, LocalRole.USER, user.text) +
-                LocalChatItem(assistantId, LocalRole.ASSISTANT, text = "", streaming = true),
+                (listOfNotNull(
+                    LocalChatItem(user.id, LocalRole.USER, user.text).takeIf { showInFeed },
+                ) +
+                    LocalChatItem(assistantId, LocalRole.ASSISTANT, text = "", streaming = true)),
             streaming = true,
             // Новый ход снимает фазу остановки прошлого: иначе экран остался бы
             // заблокированным «Останавливаю…» после удачного следующего вопроса.

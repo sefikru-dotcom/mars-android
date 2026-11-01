@@ -8,7 +8,7 @@ import ru.mars.network.local.LocalRole
  * Набор намеренно узкий: это то, что умеет делать сама лента без сервера. «Поделиться»
  * сюда не входит — оно требует `Intent` и живёт на экране (W4).
  */
-enum class LocalChatAction { COPY, RETRY, EDIT, SPEAK }
+enum class LocalChatAction { COPY, RETRY, EDIT, SPEAK, CONTINUE }
 
 /**
  * Чистые правила «какое действие доступно для строки ленты» и русские подписи.
@@ -29,6 +29,7 @@ object LocalChatActions {
         LocalChatAction.RETRY -> "Повторить"
         LocalChatAction.EDIT -> "Изменить"
         LocalChatAction.SPEAK -> "Озвучить"
+        LocalChatAction.CONTINUE -> "Продолжить"
     }
 
     /**
@@ -74,6 +75,25 @@ object LocalChatActions {
             !item.streaming &&
             item.text.isNotBlank()
 
+    /**
+     * Можно ли продолжить этот ответ.
+     *
+     * Продолжение осмысленно ровно в одном случае: провайдер упёрся в лимит выходных
+     * токенов (`finish_reason = length`), то есть модель не закончила мысль, а её
+     * оборвали. Решение принимает [LocalContinuePolicy] — здесь только проброс, чтобы
+     * набор действий оставался единственным местом, где решается «что можно со строкой».
+     */
+    fun canContinue(item: LocalChatItem, isLastAssistant: Boolean): Boolean =
+        isLastAssistant &&
+            item.role == LocalRole.ASSISTANT &&
+            item.tool == null &&
+            !item.streaming &&
+            LocalContinuePolicy.shouldOffer(
+                truncated = item.truncated,
+                interrupted = item.interrupted,
+                text = item.text,
+            )
+
     /** Текст, который копирует действие [LocalChatAction.COPY]. */
     fun copyText(item: LocalChatItem): String =
         item.text.ifBlank { item.tool?.argumentsJson.orEmpty() }
@@ -98,6 +118,7 @@ object LocalChatActions {
         if (canRetry(item, isLastAssistant)) add(LocalChatAction.RETRY)
         if (canEdit(item)) add(LocalChatAction.EDIT)
         if (canSpeak(item, speechAvailable)) add(LocalChatAction.SPEAK)
+        if (canContinue(item, isLastAssistant)) add(LocalChatAction.CONTINUE)
     }
 
     /**
@@ -116,6 +137,7 @@ object LocalChatActions {
             LocalChatAction.RETRY -> "Повторить последний ответ ассистента"
             LocalChatAction.EDIT -> "Изменить своё сообщение и отправить заново"
             LocalChatAction.SPEAK -> "Озвучить ответ ассистента"
+            LocalChatAction.CONTINUE -> "Продолжить обрезанный ответ"
         }
     }
 }
