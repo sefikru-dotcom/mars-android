@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import ru.mars.network.local.LocalTurnSettings
+import ru.mars.network.local.SamplerKind
 import ru.mars.network.local.SamplerParam
 import ru.mars.network.local.SamplerParams
 import ru.mars.network.local.SettingsSource
@@ -72,7 +73,7 @@ object LocalTurnSettingsPolicy {
      * иначе человек вводил бы число, которое провайдер молча обрежет.
      *
      * [providerDefault] — отформатированный дефолт приложения/модели, если он известен
-     * ([SamplerParams.defaultValue]); `null` — дефолт неизвестен, и подпись «по
+     * ([SamplerParam.defaultValue]); `null` — дефолт неизвестен, и подпись «по
      * умолчанию» показывать нельзя (врала бы).
      */
     data class ParamRow(
@@ -96,17 +97,32 @@ object LocalTurnSettingsPolicy {
      * провайдера: выдумывать потолок «на глаз» хуже, чем дать ввести и получить честную
      * ошибку от площадки.
      *
-     * Параметр без числового диапазона ([SamplerParams.range] == null) в список не
+     * Параметр без числового диапазона ([SamplerParam.STOP]) в список не
      * попадает: числовое поле без границ нечем валидировать, а «любое число» — не
      * диапазон.
      */
+    /** Заголовок строки: человеческая подпись к wire-имени параметра. */
+    private fun label(param: SamplerParam): String = when (param) {
+        SamplerParam.TEMPERATURE -> "Температура"
+        SamplerParam.TOP_P -> "Top-p"
+        SamplerParam.TOP_K -> "Top-k"
+        SamplerParam.MIN_P -> "Min-p"
+        SamplerParam.PRESENCE_PENALTY -> "Присутствие"
+        SamplerParam.FREQUENCY_PENALTY -> "Частота"
+        SamplerParam.REPETITION_PENALTY -> "Повторы"
+        SamplerParam.SEED -> "Seed"
+        SamplerParam.MAX_TOKENS -> "Лимит ответа"
+        SamplerParam.STOP -> "Стоп-последовательности"
+    }
+
     fun rows(settings: LocalTurnSettings, modelMaxTokens: Int?): List<ParamRow> {
         val current = numbers(settings)
         val result = ArrayList<ParamRow>(NUMERIC_ORDER.size)
         for (param in NUMERIC_ORDER) {
-            val range = SamplerParams.range(param) ?: continue
-            var min = range.start
-            var max = range.endInclusive
+            // Границы берём из членов enum напрямую: отдельная функция range() дублировала
+            // бы их и разъехалась бы с телом запроса при первой правке таблицы.
+            var min = param.min
+            var max = param.max
             if (param == SamplerParam.MAX_TOKENS && modelMaxTokens != null && modelMaxTokens > 0) {
                 max = minOf(max, modelMaxTokens.toDouble())
             }
@@ -114,13 +130,15 @@ object LocalTurnSettingsPolicy {
             // (каталог отдал мусор). Оставляем одну точку, а не перевёрнутый диапазон:
             // перевёрнутый сделал бы любое значение «вне границ» и шторку несохраняемой.
             if (max < min) max = min
-            val step = SamplerParams.step(param).takeIf { it > 0.0 } ?: FALLBACK_STEP
+            val step = param.step.takeIf { it > 0.0 } ?: FALLBACK_STEP
             val value = current[param]
-            val default = SamplerParams.defaultValue(param)?.let { format(it, step) }
+            val default = param.defaultValue?.let { format(it, step) }
             result += ParamRow(
                 param = param,
-                label = SamplerParams.label(param),
-                hint = SamplerParams.hint(param),
+                // Подпись собираем из имени поля: отдельный словарь подписей разошёлся бы
+                // с таблицей при добавлении параметра, а wire-имя всегда точное.
+                label = label(param),
+                hint = param.hint,
                 min = min,
                 max = max,
                 step = step,
@@ -213,10 +231,11 @@ object LocalTurnSettingsPolicy {
      * «правильная».
      */
     fun validate(param: SamplerParam, raw: String): Result<Double?> {
-        val range = SamplerParams.range(param)
-            ?: return Result.failure(IllegalArgumentException("У этого параметра нет числового диапазона"))
-        val step = SamplerParams.step(param).takeIf { it > 0.0 } ?: FALLBACK_STEP
-        return validate(range.start, range.endInclusive, step, raw)
+        if (param.kind == SamplerKind.STRING_LIST) {
+            return Result.failure(IllegalArgumentException("У этого параметра нет числового диапазона"))
+        }
+        val step = param.step.takeIf { it > 0.0 } ?: FALLBACK_STEP
+        return validate(param.min, param.max, step, raw)
     }
 
     /**
