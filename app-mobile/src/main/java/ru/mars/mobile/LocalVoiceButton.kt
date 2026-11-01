@@ -130,6 +130,24 @@ class LocalVoiceButton(
     /** Ход завершён: озвучить ответ, если он на голосовую реплику. */
     fun onAnswerCompleted(text: String?) = controller.onAnswerCompleted(text)
 
+    /**
+     * Начало ответа: ранний старт озвучки.
+     *
+     * Возвращает `true`, если ответ будет озвучен потоком, — тогда экран обязан звать
+     * [onAnswerDelta] на каждой дельте и НЕ звать [onAnswerCompleted] в конце (иначе
+     * ответ прозвучит дважды).
+     */
+    fun onAnswerStarted(): Boolean = controller.onAnswerStarted()
+
+    /** Очередная дельта ответа: контроллер сам режет текст на удобные для синтеза куски. */
+    fun onAnswerDelta(delta: String?): Boolean = controller.onAnswerDelta(delta)
+
+    /** Модель начала с размышлений: короткая подсказка вместо тишины. */
+    fun onReasoningStarted(): Boolean = controller.onReasoningStarted()
+
+    /** Поток ответа закончился: закрыть озвучку, не повторяя сказанное. */
+    fun onAnswerEnded() = controller.onAnswerEnded()
+
     /** Начался ход: прошлая озвучка не должна звучать поверх нового ответа. */
     fun onTurnStarted() = controller.onTurnStarted()
 

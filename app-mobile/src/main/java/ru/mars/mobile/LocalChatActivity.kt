@@ -151,6 +151,15 @@ class LocalChatActivity : ComponentActivity() {
 
     /** Прошлое состояние стрима: нужен переход «шёл → закончился», а не сам флаг. */
     private var wasStreaming = false
+    /**
+     * Ответ озвучивается потоком (ранний старт речи).
+     *
+     * Когда `true`, куски уходят в синтез по мере поступления, и в конце ответа НЕЛЬЗЯ
+     * звать `onAnswerCompleted` — иначе ответ прозвучит второй раз целиком.
+     */
+    private var voiceStreaming = false
+    /** Сколько символов ответа уже отдано синтезу: дельта = хвост сверх этого. */
+    private var voiceSpokenChars = 0
 
     /**
      * Область хода, которая НЕ отменяется при уходе экрана.
@@ -259,6 +268,14 @@ class LocalChatActivity : ComponentActivity() {
             // Память читается на каждый ход: человек мог только что дописать факт
             // на экране «Память», и следующий же вопрос обязан его учитывать.
             systemPrompt = ::memoryPrompt,
+            // Сбой до первого токена возвращает вопрос в поле ввода вместе с вложениями:
+            // набирать заново сообщение, которое уже было, — худший вид потери работы.
+            onUndoInput = { text, files ->
+                composer.input.setText(text)
+                composer.input.setSelection(text.length)
+                attachments = files
+                composer.setAttachments(attachments, ::removeAttachment)
+            },
         )
         // Прогрев офлайн-голоса — в фоне, пока человек читает экран.
         prepareOfflineVoiceInBackground()
@@ -761,14 +778,42 @@ class LocalChatActivity : ComponentActivity() {
 
         scaffold.progress.visibility = if (state.streaming) View.VISIBLE else View.GONE
 
+        // Голос: ранний старт и подача по дельтам.
+        //
+        // Раньше ответ отдавался синтезу целиком в конце — человек ждал тишины, пока
+        // модель домолчит. Теперь первый кусок уходит синтезу сразу, а остальное — по
+        // мере поступления. `voiceSpokenChars` считает отданное, чтобы дельта не
+        // повторяла уже сказанное: текст в ленте дописывается, а не заменяется.
+        if (::voice.isInitialized) {
+            val assistant = state.items.lastOrNull { it.role == LocalRole.ASSISTANT }
+            val assistantText = assistant?.text.orEmpty()
+            if (state.streaming && !voiceStreaming) {
+                voiceStreaming = voice.onAnswerStarted()
+                voiceSpokenChars = 0
+            }
+            if (state.streaming && voiceStreaming) {
+                if (assistantText.length > voiceSpokenChars) {
+                    voice.onAnswerDelta(assistantText.substring(voiceSpokenChars))
+                    voiceSpokenChars = assistantText.length
+                }
+                // Размышления без текста: вместо тишины короткая подсказка один раз за ход.
+                if (assistantText.isEmpty() && assistant?.thinking?.isNotEmpty() == true) {
+                    voice.onReasoningStarted()
+                }
+            }
+        }
+
         // Ход закончился: отдать ответ голосу. Без этого кнопка навсегда остаётся в
         // «Думаю» — проверено на POCO 29.10: ответ пришёл, кнопка висела.
         if (wasStreaming && !state.streaming) {
             val answer = state.items.lastOrNull { it.role == LocalRole.ASSISTANT }?.text
             if (::voice.isInitialized) {
-                voice.onAnswerCompleted(answer)
+                // Если ответ уже звучал потоком — только закрыть поток, не повторяя его.
+                if (voiceStreaming) voice.onAnswerEnded() else voice.onAnswerCompleted(answer)
                 voice.render(voice.controller.state())
             }
+            voiceStreaming = false
+            voiceSpokenChars = 0
         }
         wasStreaming = state.streaming
 
@@ -1378,6 +1423,20 @@ class LocalChatActivity : ComponentActivity() {
             // Пересборка в файл: провайдер умеет только текст, поэтому DOCX/XLSX/TXT
             // собираются здесь, на телефоне, и отдаются в системное «Поделиться».
             onSaveFile = { chooseFileFormat(item.text) },
+            // Альтернативы для «повторить другой моделью»: кэш каталога, который уже
+            // прогрелся на экране, плюс текущая — иначе на холодном старте список пуст.
+            models = catalog.keys.sorted(),
+            currentModel = presenter.state.value.model ?: providerStore.state().active?.model,
+            onRetryWith = { model ->
+                val profile = providerStore.state().active
+                if (profile == null) {
+                    Toast.makeText(this, NOT_CONFIGURED, Toast.LENGTH_SHORT).show()
+                } else {
+                    val info = catalog[model] ?: LocalModelInfo(id = model)
+                    applyModel(profile, info)
+                    retryLastTurn()
+                }
+            },
         )
     }
 
