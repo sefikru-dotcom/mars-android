@@ -45,6 +45,7 @@ import ru.mars.network.local.LocalChatClient
 import ru.mars.network.local.LocalMessage
 import ru.mars.network.local.LocalModelInfo
 import ru.mars.network.local.LocalProviderProfile
+import ru.mars.network.local.LocalTurnSettings
 import ru.mars.network.local.LocalProviderStore
 import ru.mars.network.local.LocalRole
 import ru.mars.network.local.LocalSession
@@ -132,6 +133,9 @@ class LocalChatActivity : ComponentActivity() {
     private lateinit var subtitle: TextView
     private lateinit var modelButton: TextView
     private lateinit var reasoningButton: TextView
+
+    /** Чип «Параметры»: сэмпсинг текущего диалога. */
+    private lateinit var paramsButton: TextView
 
     /** Голосовой ввод (микрофон → ASR → композер). Инициализируется в [buildView]. */
     private lateinit var voice: LocalVoiceButton
@@ -647,14 +651,74 @@ class LocalChatActivity : ComponentActivity() {
             visibility = View.GONE
         }
 
+        // «Параметры» — сэмпсинг этого диалога. Отдельный чип, а не пункт меню модели:
+        // там выбирают ЧЕМ отвечать, а здесь — КАК, и смешивать эти два вопроса в одном
+        // списке значит каждый раз вспоминать, в каком из них температура.
+        paramsButton = chip(::openTurnSettings).apply {
+            contentDescription = "Параметры хода: температура, top_p, лимиты"
+        }
+
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(subtitle, LinearLayout.LayoutParams(0, -2, 1f))
             addView(modelButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(reasoningButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+            addView(paramsButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(wakeChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(memoryChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+        }
+    }
+
+    /**
+     * Открыть шторку параметров хода.
+     *
+     * Дефолты для «Сбросить» считаются от текущей модели: у неё может быть известный из
+     * каталога потолок ответа, и после сброса он обязан вернуться — иначе человек получил
+     * бы «провайдер сам» там, где модель честно сообщила предел.
+     */
+    private fun openTurnSettings() {
+        val state = presenter.state.value
+        // Модель может быть не выбрана (первый запуск): тогда потолок неизвестен и его
+        // подставит профиль, а не «пустая строка вместо имени модели».
+        val model = state.model?.takeIf { it.isNotBlank() }?.let { catalogInfo(it) }
+        LocalTurnSettingsSheet.show(
+            this,
+            state.turnSettings,
+            model?.maxOutputTokens,
+            onSave = { next ->
+                presenter.setTurnSettings(next)
+                persistTurnSettings(next)
+            },
+            onReset = {
+                val defaults = LocalTurnSettings.defaultsFor(
+                    model,
+                    activeProfileForDefaults(state),
+                )
+                presenter.setTurnSettings(defaults)
+                persistTurnSettings(defaults)
+            },
+        )
+    }
+
+    /**
+     * Профиль для расчёта дефолтов параметров хода.
+     *
+     * Берём активный профиль хранилища, а не состояние кнопки: после смены модели
+     * презентер уже несёт новую модель, а `maxTokens` профиля задаёт верхнюю границу
+     * «лимита ответа». Нет профиля — пустая заготовка: [LocalTurnSettings.defaultsFor]
+     * переживает `null`-поля и вернёт «провайдер сам».
+     */
+    private fun activeProfileForDefaults(state: LocalChatUiState): LocalProviderProfile? =
+        providerStore.state().active?.let { profile ->
+            if (state.model.isNullOrBlank()) profile else profile.copy(model = state.model)
+        }
+
+    /** Снимок параметров в мету сессии: перезапуск приложения вернёт те же значения. */
+    private fun persistTurnSettings(settings: LocalTurnSettings) {
+        val id = session?.id ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { sessionStore.updateTurnSettings(id, settings.toJson()) }
         }
     }
 
@@ -689,6 +753,11 @@ class LocalChatActivity : ComponentActivity() {
             val effortLabel = LocalChatModelPicker.label(state.reasoningEffort)
             if (reasoningButton.text.toString() != effortLabel) reasoningButton.text = effortLabel
         }
+
+        // «Параметры»: звёздочка, только когда человек реально что-то задал. Подпись
+        // статичная — чип про состояние, а не про значения (их видно в шторке).
+        val paramsLabel = if (state.turnSettingsCustom) "Параметры *" else "Параметры"
+        if (paramsButton.text.toString() != paramsLabel) paramsButton.text = paramsLabel
 
         scaffold.progress.visibility = if (state.streaming) View.VISIBLE else View.GONE
 
@@ -1110,7 +1179,13 @@ class LocalChatActivity : ComponentActivity() {
 
     private fun refresh() {
         if (!presenter.state.value.streaming) {
-            session?.let { presenter.restore(sessionStore.messages(it.id)) }
+            session?.let { loaded ->
+                presenter.restore(sessionStore.messages(loaded.id))
+                // Снимок параметров из меты: перезапуск возвращает те же настройки.
+                presenter.restoreTurnSettings(
+                    LocalTurnSettings.fromJson(sessionStore.meta(loaded.id)?.turnSettings),
+                )
+            }
         }
         updateNotice()
         transcript.scrollToBottom()

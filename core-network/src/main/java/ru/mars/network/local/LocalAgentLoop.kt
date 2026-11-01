@@ -51,6 +51,14 @@ class LocalAgentLoop(
         apiKey: String,
         history: List<LocalMessage>,
         tools: List<LocalToolSchema>,
+        /**
+         * Параметры сэмпсинга хода; `null` — прежнее поведение (значения из профиля).
+         *
+         * С дефолтом, а не отдельным методом: цикл не решает, ЧТО отправлять, он лишь
+         * передаёт решение транспорту. Фейки в тестах, которых параметры не касаются,
+         * продолжают вызывать прежнюю сигнатуру.
+         */
+        settings: LocalTurnSettings? = null,
     ): Flow<LocalChatEvent> = flow {
         // Рабочая копия: провайдеру уходит история вместе с шагами, которых ещё нет в
         // хранилище экрана (ответ модели с tool_calls и ответы инструментов).
@@ -67,7 +75,7 @@ class LocalAgentLoop(
             var stepFailed = false
 
             try {
-                client.stream(profile, apiKey, conversation.toList(), tools).collect { event ->
+                client.stream(profile, apiKey, conversation.toList(), tools, settings).collect { event ->
                     when (event) {
                         is LocalChatEvent.Delta -> {
                             streamed.append(event.text)

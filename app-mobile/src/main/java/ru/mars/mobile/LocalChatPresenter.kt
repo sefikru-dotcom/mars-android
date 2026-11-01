@@ -17,7 +17,9 @@ import ru.mars.network.local.LocalChatEvent
 import ru.mars.network.local.LocalMessage
 import ru.mars.network.local.LocalModelInfo
 import ru.mars.network.local.LocalProviderProfile
+import ru.mars.network.local.SettingsSource
 import ru.mars.network.local.LocalRole
+import ru.mars.network.local.LocalTurnSettings
 import ru.mars.network.local.LocalToolCall
 import ru.mars.network.local.LocalToolExecutor
 import ru.mars.network.local.LocalToolResult
@@ -187,6 +189,16 @@ data class LocalChatUiState(
     val reasoningEffort: String? = null,
     /** Показывать ли переключатель reasoning: только если модель его принимает. */
     val supportsReasoning: Boolean = false,
+    /**
+     * Параметры сэмпсинга текущего хода.
+     *
+     * Живут в состоянии, а не в экране: их читает и шторка, и шапка (подпись «свои
+     * настройки»), и тело запроса — одно место правды. `null` в полях означает
+     * «провайдер сам», а не ноль.
+     */
+    val turnSettings: LocalTurnSettings = LocalTurnSettings(),
+    /** Есть ли в настройках хоть одно значение, заданное человеком (для звёздочки в шапке). */
+    val turnSettingsCustom: Boolean = false,
 )
 
 /**
@@ -379,6 +391,47 @@ class LocalChatPresenter(
     }
 
     /**
+     * Заменить параметры хода целиком (результат шторки «Сохранить»).
+     *
+     * Уровень reasoning синхронизируется с профилем, а не остаётся только в настройках
+     * хода: его отправляет транспорт как поле профиля, и две расходящиеся копии дали бы
+     * «в шторке high, а уходит medium». Приоритет у шторки — человек только что правил
+     * именно её.
+     */
+    fun setTurnSettings(settings: LocalTurnSettings) {
+        _state.value = _state.value.copy(
+            turnSettings = settings,
+            turnSettingsCustom = hasCustomValues(settings),
+        )
+        settings.reasoningEffort?.let { effort -> setReasoning(effort) }
+    }
+
+    /**
+     * Сбросить параметры хода к дефолтам модели/профиля.
+     *
+     * Не «все поля в null», а именно [LocalTurnSettings.defaultsFor]: у модели может быть
+     * известный потолок ответа из каталога, и после сброса он должен вернуться, иначе
+     * человек получил бы «провайдер сам» там, где модель честно сообщила предел.
+     */
+    fun resetTurnSettings(defaults: LocalTurnSettings) {
+        setTurnSettings(defaults)
+    }
+
+    /** Загрузить снимок параметров из меты сессии; `null` — снимка нет, оставить как есть. */
+    fun restoreTurnSettings(settings: LocalTurnSettings?) {
+        if (settings == null) return
+        _state.value = _state.value.copy(
+            turnSettings = settings,
+            turnSettingsCustom = hasCustomValues(settings),
+        )
+    }
+
+    /** Есть ли хоть одно значение, заданное не «по умолчанию» — для звёздочки в шапке. */
+    private fun hasCustomValues(settings: LocalTurnSettings): Boolean =
+        settings.source == SettingsSource.SESSION ||
+            settings.stop.isNotEmpty()
+
+    /**
      * Загрузить диалог с диска. Лента собирается из тех же сообщений, что ушли бы провайдеру.
      *
      * [usage] — сохранённый расход диалога из меты сессии (W3). Из него НЕ выводится
@@ -472,7 +525,7 @@ class LocalChatPresenter(
         turnJob = currentCoroutineContext()[Job]
         try {
             LocalAgentLoop(client, executor, maxIterations)
-                .run(profile, apiKey, history, tools)
+                .run(profile, apiKey, history, tools, _state.value.turnSettings)
                 // Сеть и разбор SSE — на IO: экран не должен ловить
                 // NetworkOnMainThreadException из чужой реализации клиента.
                 .flowOn(Dispatchers.IO)

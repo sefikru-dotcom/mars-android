@@ -163,9 +163,12 @@ class LocalSessionStoreTest {
         val dir = tmp.newFolder()
         val store = store(dir)
         // Три диалога с разным updatedAt: самый старый должен уйти первым.
+        // `now` передаётся явно: по умолчанию `save` ставит текущее время, и три
+        // сохранения подряд получают одну и ту же миллисекунду — порядок эвикции тогда
+        // зависит от порядка файлов в каталоге, а не от `updatedAt`, и тест «плавает».
         repeat(3) { index ->
             val session = LocalSession("s$index", "Диалог $index", updatedAt = index.toLong())
-            store.save(session, messages(1))
+            store.save(session, messages(1), now = index.toLong())
         }
 
         val removed = LocalSessionRetention.prune(dir, limit = 2)

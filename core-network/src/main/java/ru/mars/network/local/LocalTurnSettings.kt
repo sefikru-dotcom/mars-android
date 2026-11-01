@@ -199,12 +199,12 @@ data class LocalTurnSettings(
          * из [SamplerParams] — это положение ползунка в UI, а не утверждение о том, какой
          * режим нужен модели. Пока человек их не трогал, о них молчим.
          */
-        fun defaultsFor(model: LocalModelInfo?, profile: LocalProviderProfile): LocalTurnSettings {
+        fun defaultsFor(model: LocalModelInfo?, profile: LocalProviderProfile?): LocalTurnSettings {
             val fromCatalog = model?.maxOutputTokens?.takeIf { it > 0 }
             return LocalTurnSettings(
-                temperature = profile.temperature,
-                maxTokens = fromCatalog ?: profile.maxTokens,
-                reasoningEffort = profile.reasoningEffort?.takeIf { it.isNotBlank() },
+                temperature = profile?.temperature,
+                maxTokens = fromCatalog ?: profile?.maxTokens,
+                reasoningEffort = profile?.reasoningEffort?.takeIf { it.isNotBlank() },
                 source = if (fromCatalog != null) SettingsSource.MODEL else SettingsSource.DEFAULT,
             )
         }
