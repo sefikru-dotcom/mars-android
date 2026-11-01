@@ -1,0 +1,705 @@
+package ru.mars.mobile
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+import ru.mars.network.local.LocalAgentLoop
+import ru.mars.network.local.LocalAttachment
+import ru.mars.network.local.LocalChatClient
+import ru.mars.network.local.LocalChatEvent
+import ru.mars.network.local.LocalMessage
+import ru.mars.network.local.LocalModelInfo
+import ru.mars.network.local.LocalProviderProfile
+import ru.mars.network.local.LocalRole
+import ru.mars.network.local.LocalToolCall
+import ru.mars.network.local.LocalToolExecutor
+import ru.mars.network.local.LocalToolResult
+import ru.mars.network.local.LocalToolSchema
+import ru.mars.network.local.LocalUsage
+import java.util.Locale
+import java.util.UUID
+
+/** Состояние карточки инструмента в ленте. */
+enum class LocalToolPhase {
+    /** Модель попросила вызов; исполнение ещё не началось. */
+    PENDING,
+
+    /** Инструмент выполняется (или ждёт подтверждения человека). */
+    RUNNING,
+
+    /** Выполнен успешно. */
+    DONE,
+
+    /** Выполнен с ошибкой либо отклонён. */
+    FAILED,
+}
+
+/** Карточка инструмента: имя, аргументы, результат. Свёрнута по умолчанию. */
+data class LocalToolCard(
+    val callId: String,
+    val name: String,
+    val argumentsJson: String,
+    val phase: LocalToolPhase = LocalToolPhase.PENDING,
+    val preview: String? = null,
+    /**
+     * Файл картинки, которую инструмент положил на диск (`generate_image`).
+     *
+     * Путь, а не байты: лента рисует его через `ImageView`, а не из истории. Сами байты
+     * лежат в кэше, копия — во вложении истории (см. [LocalChatActivity.persistGenerated]).
+     * null — инструмент картинку не возвращал (все остальные) или ответ её не содержал.
+     */
+    val imagePath: String? = null,
+)
+
+/** Строка ленты: сообщение или карточка инструмента. */
+data class LocalChatItem(
+    val id: String,
+    val role: LocalRole,
+    val text: String = "",
+    val streaming: Boolean = false,
+    val tool: LocalToolCard? = null,
+    /**
+     * Размышления reasoning-модели. Не ответ, а пометка «модель думает»: у
+     * `deepseek-v4.1-flash-1017` и подобных весь бюджет токенов может уйти сюда, и без
+     * этой строки человек видел пустой пузырь и решал, что ответ потерялся.
+     */
+    val thinking: String = "",
+)
+
+/** Состояние экрана диалога. Один источник правды для рендера. */
+data class LocalChatUiState(
+    val items: List<LocalChatItem> = emptyList(),
+    val streaming: Boolean = false,
+    /** Нейтральная подсказка (не настроен провайдер, нет инструментов). */
+    val notice: String? = null,
+    /** Ошибка хода; показывается плашкой, не заменяет ленту. */
+    val error: String? = null,
+    /** Текущий расход диалога: сумма usage по всем шагам. Нули — «провайдер не сообщил». */
+    val usage: LocalUsage = LocalUsage(),
+    /**
+     * Заполнение окна: `promptTokens` последнего шага / `contextWindow` модели.
+     * null — показывать нечего (окно неизвестно или замера ещё нет): фейковый 0%
+     * не рисуется, см. [LocalContextPolicy].
+     */
+    val context: LocalContextView? = null,
+    /** Модель активного профиля (для кнопки в шапке и выбора). */
+    val model: String? = null,
+    /** `reasoning_effort` активного профиля; null — «Авто» (поле не отправляется). */
+    val reasoningEffort: String? = null,
+    /** Показывать ли переключатель reasoning: только если модель его принимает. */
+    val supportsReasoning: Boolean = false,
+)
+
+/**
+ * Презентер диалога: история, стрим, карточки инструментов.
+ *
+ * Ни одного импорта `android.*` — состояние отдаётся [StateFlow], экран только рисует.
+ * Работа с ядром идёт **только через интерфейсы** (`LocalChatClient`,
+ * `LocalToolExecutor`, `LocalAgentLoop`), поэтому транспорт и инструменты заменяемы,
+ * а презентер проверяется на JVM фейками (см. `LocalChatPresenterTest`, W4).
+ *
+ * Подтверждение деструктивных инструментов сюда не входит: оно живёт в обёртке
+ * [LocalToolExecutor], которую собирает экран (`LocalChatToolSource.executor`).
+ * Презентер лишь исполняет то, что ему дали, — и потому «ToolRequested без
+ * подтверждения» физически не может выполниться в обход экрана.
+ *
+ * Расход считается в два разных числа, и путать их нельзя:
+ *  - [LocalChatUiState.usage] — сумма `totalTokens` по всем шагам диалога (кумулятивно);
+ *  - [LocalChatUiState.context] — заполнение окна по `promptTokens` ТОЛЬКО последнего шага.
+ *    Сумма `promptTokens` по шагам дала бы удвоенный процент: каждый следующий шаг уже
+ *    включает всю предыдущую историю.
+ */
+class LocalChatPresenter(
+    private val client: LocalChatClient,
+    baseExecutor: LocalToolExecutor,
+    /** Сохранение истории (файл на диске). Вызывается после каждого хода. */
+    private val onPersist: (List<LocalMessage>) -> Unit = {},
+    private val newId: () -> String = { "m-" + UUID.randomUUID().toString().replace("-", "").take(10) },
+    private val now: () -> Long = { System.currentTimeMillis() },
+    private val maxIterations: Int = LocalAgentLoop.MAX_ITERATIONS,
+    /**
+     * Сохранение расхода диалога в мету сессии.
+     *
+     * Отдельный колбэк, а не расширение [onPersist]: тот принимает только сообщения, и
+     * менять его сигнатуру значило бы ломать `LocalChatActivity.persist` и
+     * `LocalSessionStore.save` (ими владеет W3, не W2). Зовётся один раз за ход, с
+     * накопленным итогом, на IO-потоке, и только если провайдер реально прислал `usage`.
+     */
+    private val onUsagePersist: (LocalUsage) -> Unit = {},
+    /**
+     * Системный промпт из памяти: профиль владельца + запомненные факты.
+     *
+     * Собирается на каждый ход, а не один раз: человек мог только что добавить факт
+     * на экране памяти, и следующий же запрос обязан его видеть. Пустая строка —
+     * памяти нет, системное сообщение не добавляется вовсе.
+     */
+    private val systemPrompt: () -> String = { "" },
+    /**
+     * Записать изменённый активный профиль (модель, `reasoning_effort`) и вернуть
+     * сохранённый — окно контекста могло уточниться. null — отказ/профиля нет: тогда
+     * презентер оставляет профиль у себя и ничего не сохраняет.
+     */
+    private val onProfileChange: (LocalProviderProfile) -> LocalProviderProfile? = { null },
+    /**
+     * Метаданные модели из каталога `/models`: окно контекста и поддержка reasoning.
+     * null — модель в каталоге не найдена (или каталог ещё не загружен).
+     */
+    private val modelInfo: (String) -> LocalModelInfo? = { null },
+) {
+
+    private val _state = MutableStateFlow(LocalChatUiState())
+    val state: StateFlow<LocalChatUiState> = _state.asStateFlow()
+
+    /** История в формате провайдера (включая TOOL-сообщения) — её и сохраняем. */
+    private var history: List<LocalMessage> = emptyList()
+
+    /** Результаты инструментов текущего хода: нужны, чтобы TOOL-сообщение несло контент. */
+    private val toolResults = HashMap<String, LocalToolResult>()
+
+    /** Активный профиль: из него берутся модель, окно контекста и reasoning. */
+    private var activeProfile: LocalProviderProfile? = null
+
+    /** Накопленный расход диалога — сумма usage по шагам. */
+    private var usageTotal: LocalUsage = LocalUsage()
+
+    /**
+     * `promptTokens` последнего шага — единственный честный источник процента заполнения.
+     * Хранится отдельно от [usageTotal]: сумма promptTokens по шагам удвоила бы процент.
+     */
+    private var lastStepPromptTokens: Int = 0
+
+    /**
+     * Обёртка исполнения: запоминает полный результат для истории и пропускает вызов
+     * дальше. Ошибку не глотает — решение об ошибке принимает нижестоящий исполнитель.
+     */
+    val executor: LocalToolExecutor = LocalToolExecutor { call ->
+        val result = baseExecutor.execute(call)
+        toolResults[call.id] = result
+        result
+    }
+
+    /** Текущая история (копия) — для сохранения/диагностики. */
+    fun historySnapshot(): List<LocalMessage> = history
+
+    /**
+     * Сообщить активный профиль (при старте экрана и после возврата из настроек).
+     * Без этого модель и пилюля контекста неизвестны до первого сообщения.
+     */
+    fun bindProfile(profile: LocalProviderProfile?) {
+        val previous = activeProfile
+        activeProfile = profile
+        // Смена модели — замер заполнения относился к окну прежней модели: показывать его
+        // для новой значит показывать чужой процент. Расход диалога (`usage`) не трогаем.
+        if (profile != null && previous != null && previous.model != profile.model) {
+            lastStepPromptTokens = 0
+        }
+        _state.value = _state.value.copy(
+            model = profile?.model,
+            reasoningEffort = profile?.reasoningEffort,
+            supportsReasoning = supportsReasoning(profile),
+        )
+        publishUsage()
+    }
+
+    /**
+     * Переключить модель активного профиля.
+     *
+     * Контекст сбрасывается: замер `promptTokens` относился к окну прежней модели, и
+     * показывать его для новой — значит показывать чужой процент. Расход диалога
+     * (`usage`) сохраняется: это уже потраченные токены.
+     *
+     * Игнорируется, если профиль ещё не известен ([bindProfile] не звался и хода не было)
+     * или строка пустая.
+     */
+    fun setModel(id: String) {
+        val model = id.trim()
+        if (model.isEmpty()) return
+        val current = activeProfile ?: return
+        if (current.model == model) return
+        // Окно новой модели до ответа каталога неизвестно: null, а не окно прежней.
+        applyProfile(current.copy(model = model, contextWindow = null))
+    }
+
+    /**
+     * Переключить `reasoning_effort` активного профиля. null — «Авто» (поле в запрос не
+     * отправляется). Значения вне `low/medium/high` игнорируются: провайдер принимает
+     * только их, остальное проигнорировал бы молча — переключатель врал бы.
+     */
+    fun setReasoning(effort: String?) {
+        val current = activeProfile ?: return
+        // null — это «Авто». Пустая строка и мусор — не «Авто», а опечатка вызывающего:
+        // молча сбрасывать уровень в «Авто» из-за опечатки нельзя.
+        val normalized = if (effort == null) {
+            null
+        } else {
+            effort.trim().lowercase(Locale.ROOT).takeIf { it in REASONING_EFFORTS } ?: return
+        }
+        if (normalized == current.reasoningEffort) return
+        applyProfile(current.copy(reasoningEffort = normalized))
+    }
+
+    /**
+     * Загрузить диалог с диска. Лента собирается из тех же сообщений, что ушли бы провайдеру.
+     *
+     * [usage] — сохранённый расход диалога из меты сессии (W3). Из него НЕ выводится
+     * процент заполнения: в мете лежит сумма prompt по шагам, а не замер последнего шага,
+     * поэтому пилюля остаётся скрытой до первого хода — честно, а не «примерно».
+     */
+    fun restore(messages: List<LocalMessage>, usage: LocalUsage? = null) {
+        history = messages
+        val items = buildItems(messages)
+        if (usage != null && usage.isMeasured) {
+            usageTotal = usage
+            lastStepPromptTokens = 0
+            _state.value = _state.value.copy(items = items, usage = usageTotal, context = null, error = null)
+            return
+        }
+        // Расход, модель и замер не трогаем: restore зовётся и на обновление экрана,
+        // и стирание пилюли при каждом возврате было бы регрессом.
+        _state.value = _state.value.copy(items = items, error = null)
+    }
+
+    /**
+     * Отправить сообщение и довести ход до конца (включая шаги с инструментами).
+     *
+     * Отмена корутины — это и есть кнопка «Стоп»: поток ядра закрывается, частичный
+     * ответ остаётся в ленте и сохраняется. Исключений наружу не бывает.
+     */
+    suspend fun send(
+        profile: LocalProviderProfile,
+        apiKey: String,
+        tools: List<LocalToolSchema>,
+        text: String,
+        attachments: List<LocalAttachment> = emptyList(),
+    ) {
+        val body = text.trim()
+        if (body.isEmpty() || _state.value.streaming) return
+
+        // Профиль хода — источник модели, окна и reasoning для пилюли: экран мог не звать
+        // bindProfile после смены профиля в настройках.
+        activeProfile = profile
+        // Единственная строка, по которой видно модель ЗАПРОСА (а не подписи чипа):
+        // `adb logcat -s MarsModel`. Клиент в core-network собирает тело сам и `android.util.Log`
+        // там недоступен, поэтому логируется здесь — за шаг до `LocalAgentLoop.run(profile…)`.
+        MarsModelLog.log("request model=${profile.model} base=${profile.baseUrl}")
+        _state.value = _state.value.copy(
+            model = profile.model,
+            reasoningEffort = profile.reasoningEffort,
+            supportsReasoning = supportsReasoning(profile),
+        )
+        publishUsage()
+
+        val user = LocalMessage(
+            id = newId(),
+            role = LocalRole.USER,
+            text = body,
+            createdAt = now(),
+            // Вложения едут в исходящем сообщении: транспорт ядра собирает content
+            // массивом частей (картинка как image_url, текстовый файл как текст).
+            attachments = attachments,
+        )
+        history = history + user
+        // Память — первым сообщением хода: профиль владельца и запомненные факты.
+        // Роль SYSTEM уже поддерживается ядром и не рисуется в ленте (upsert её пропускает),
+        // поэтому человек видит обычный диалог, а модель — свои знания о нём.
+        history = withMemory(history)
+        toolResults.clear()
+
+        val assistantId = newId()
+        _state.value = _state.value.copy(
+            items = _state.value.items +
+                LocalChatItem(user.id, LocalRole.USER, user.text) +
+                LocalChatItem(assistantId, LocalRole.ASSISTANT, text = "", streaming = true),
+            streaming = true,
+            notice = null,
+            error = null,
+        )
+
+        var partial = ""
+        var committed = false
+        try {
+            LocalAgentLoop(client, executor, maxIterations)
+                .run(profile, apiKey, history, tools)
+                // Сеть и разбор SSE — на IO: экран не должен ловить
+                // NetworkOnMainThreadException из чужой реализации клиента.
+                .flowOn(Dispatchers.IO)
+                .collect { event ->
+                    val handled = handle(event, assistantId, partial)
+                    partial = handled.text
+                    committed = committed || handled.committed
+                }
+        } finally {
+            if (!committed && partial.isNotBlank()) {
+                // Отмена/обрыв после первого токена: то, что человек уже видел,
+                // обязано остаться в истории, иначе после перезапуска ответ исчезнет.
+                history = history + LocalMessage(
+                    id = newId(),
+                    role = LocalRole.ASSISTANT,
+                    text = partial,
+                    createdAt = now(),
+                )
+            }
+            finalizeStreaming(assistantId)
+            val snapshot = history
+            val spend = usageTotal
+            // NonCancellable: при «Стоп» контекст уже отменён, а запись на диск
+            // должна состояться — иначе ход терялся бы ровно в момент отмены.
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { onPersist(snapshot) }
+                // Расход — только если провайдер его прислал: записать нули значило бы
+                // утверждать «ход ничего не стоил».
+                if (spend.isMeasured) runCatching { onUsagePersist(spend) }
+            }
+        }
+    }
+
+    /** Пометить ход завершённым без сохранения (например, экран ушёл в фон до старта). */
+    fun cancelLocally() {
+        finalizeStreaming("")
+    }
+
+    /** Очистить ошибку (после показа плашки). */
+    fun clearError() {
+        if (_state.value.error != null) _state.value = _state.value.copy(error = null)
+    }
+
+    /** Показать/снять нейтральную подсказку экрана. */
+    fun setNotice(notice: String?) {
+        if (_state.value.notice != notice) _state.value = _state.value.copy(notice = notice)
+    }
+
+    private data class Handled(val text: String, val committed: Boolean)
+
+    private fun handle(event: LocalChatEvent, assistantId: String, partial: String): Handled {
+        when (event) {
+            is LocalChatEvent.Delta -> {
+                val next = partial + event.text
+                updateItem(assistantId) { it.copy(text = next, streaming = true) }
+                return Handled(next, false)
+            }
+
+            // Размышления провайдера: у reasoning-моделей (deepseek-v4.1-flash-1017,
+            // sonar-reasoning-pro) `content` может остаться пустым, а весь бюджет
+            // токенов уйти сюда — тогда человек видел пустой пузырь, который к тому же
+            // молча удалялся в finalizeStreaming. Показываем как отдельную пометку,
+            // чтобы было видно: модель работает, просто ещё думает.
+            is LocalChatEvent.ReasoningDelta -> {
+                val thought = event.text.trim()
+                if (thought.isNotEmpty()) {
+                    updateItem(assistantId) {
+                        it.copy(thinking = (it.thinking + event.text).take(THINKING_LIMIT))
+                    }
+                }
+                return Handled(partial, false)
+            }
+
+            is LocalChatEvent.ToolRequested -> {
+                addToolCard(event.call)
+                return Handled(partial, false)
+            }
+
+            is LocalChatEvent.ToolFinished -> {
+                updateTool(event.callId) { card ->
+                    card.copy(
+                        phase = if (event.ok) LocalToolPhase.DONE else LocalToolPhase.FAILED,
+                        preview = event.preview.ifBlank { null },
+                    )
+                }
+                return Handled(partial, false)
+            }
+
+            // Приходит ПЕРЕД AssistantFinished: пилюля обновляется тем же кадром, которым
+            // закрывается шаг, иначе между «ответ пришёл» и «процент обновился» виден скачок.
+            is LocalChatEvent.UsageReported -> {
+                recordUsage(event.usage)
+                return Handled(partial, false)
+            }
+
+            is LocalChatEvent.AssistantFinished -> {
+                val full = event.fullText.ifBlank { partial }
+                if (full.isNotBlank()) updateItem(assistantId) { it.copy(text = full, streaming = false) }
+                history = history + LocalMessage(
+                    id = newId(),
+                    role = LocalRole.ASSISTANT,
+                    text = event.fullText,
+                    toolCalls = event.toolCalls,
+                    createdAt = now(),
+                )
+                // TOOL-сообщения обязаны следовать за вызовом и нести контент:
+                // провайдеры отвергают историю с висящим tool_call.
+                event.toolCalls.forEach { call ->
+                    val result = toolResults[call.id]
+                    history = history + LocalMessage(
+                        id = newId(),
+                        role = LocalRole.TOOL,
+                        // Копия картинки могла попасть в результат этого же хода (её дописывает
+                        // экран при сохранении), а в запрос модели base64 уходить не должен.
+                        text = GeneratedImageStorage.strip(result?.content.orEmpty()),
+                        toolCallId = call.id,
+                        createdAt = now(),
+                    )
+                    if (result != null) {
+                        updateTool(call.id) { card ->
+                            card.copy(
+                                phase = if (result.ok) LocalToolPhase.DONE else LocalToolPhase.FAILED,
+                                preview = card.preview ?: result.preview.ifBlank { null },
+                            )
+                        }
+                    }
+                }
+                return Handled(full, true)
+            }
+
+            is LocalChatEvent.Error -> {
+                _state.value = _state.value.copy(error = event.message)
+                return Handled(partial, false)
+            }
+        }
+    }
+
+    /**
+     * Учесть расход шага: [usageTotal] копится суммой, заполнение окна — по последнему шагу.
+     * Нулевой замер (провайдер не прислал `usage`) игнорируется: иначе пилюля показывала бы
+     * «0%» после каждого хода у провайдера без usage.
+     */
+    private fun recordUsage(step: LocalUsage) {
+        if (!step.isMeasured) return
+        usageTotal = LocalUsage(
+            promptTokens = usageTotal.promptTokens + step.promptTokens,
+            completionTokens = usageTotal.completionTokens + step.completionTokens,
+            totalTokens = usageTotal.totalTokens + step.totalTokens,
+        )
+        lastStepPromptTokens = step.promptTokens
+        publishUsage()
+    }
+
+    /** Пересчитать пилюлю контекста по текущему замеру и окну активного профиля. */
+    private fun publishUsage() {
+        val view = LocalContextPolicy.view(lastStepPromptTokens, windowFor(activeProfile))
+        _state.value = _state.value.copy(
+            usage = usageTotal,
+            // Невидимая пилюля хранится как null: экран не должен различать «скрыта
+            // политикой» и «нет данных» — оба случая значат «показывать нечего».
+            context = view.takeIf { it.visible },
+        )
+    }
+
+    /** Окно контекста: из профиля (сохранено при выборе модели) либо из каталога. */
+    private fun windowFor(profile: LocalProviderProfile?): Int? {
+        if (profile == null) return null
+        val known = profile.contextWindow
+        if (known != null && known > 0) return known
+        return modelInfo(profile.model)?.contextWindow?.takeIf { it > 0 }
+    }
+
+    /** Поддерживает ли модель профиля `reasoning_effort` (по каталогу, а не по имени). */
+    private fun supportsReasoning(profile: LocalProviderProfile?): Boolean {
+        if (profile == null) return false
+        return modelInfo(profile.model)?.supportsReasoningEffort == true
+    }
+
+    /**
+     * Применить изменённый профиль: сохранить через колбэк, обновить состояние и сбросить
+     * замер заполнения — он относился к прежней модели и её окну.
+     */
+    private fun applyProfile(updated: LocalProviderProfile) {
+        val withWindow = if (updated.contextWindow == null) {
+            updated.copy(contextWindow = modelInfo(updated.model)?.contextWindow)
+        } else {
+            updated
+        }
+        val saved = onProfileChange(withWindow) ?: withWindow
+        activeProfile = saved
+        lastStepPromptTokens = 0
+        _state.value = _state.value.copy(
+            model = saved.model,
+            reasoningEffort = saved.reasoningEffort,
+            supportsReasoning = supportsReasoning(saved),
+            context = null,
+        )
+    }
+
+    /** Лента из сообщений истории: системный промпт не показываем, TOOL — карточками. */
+    private fun buildItems(messages: List<LocalMessage>): List<LocalChatItem> {
+        val items = ArrayList<LocalChatItem>(messages.size)
+        messages.forEach { message ->
+            when (message.role) {
+                LocalRole.USER -> items.add(LocalChatItem(message.id, LocalRole.USER, message.text))
+                LocalRole.ASSISTANT -> {
+                    if (message.text.isNotBlank() || message.toolCalls.isEmpty()) {
+                        items.add(LocalChatItem(message.id, LocalRole.ASSISTANT, message.text))
+                    }
+                    message.toolCalls.forEach { call ->
+                        items.add(
+                            LocalChatItem(
+                                id = toolItemId(call.id),
+                                role = LocalRole.TOOL,
+                                tool = LocalToolCard(
+                                    callId = call.id,
+                                    name = call.name,
+                                    argumentsJson = call.argumentsJson,
+                                    phase = LocalToolPhase.DONE,
+                                ),
+                            )
+                        )
+                    }
+                }
+                LocalRole.TOOL -> {
+                    // Результат крепится к карточке своего вызова. `ok` в файле не
+                    // хранится (TOOL-сообщение несёт только текст), поэтому после
+                    // перезапуска карточка нейтральна: DONE + превью.
+                    //
+                    // Текст копии картинки в превью НЕ идёт: base64 в карточке — это
+                    // мегабайт мусора; превью строится по тексту до маркера, а сама
+                    // картинка берётся лентой из копии (`GeneratedImageStorage`).
+                    val index = items.indexOfFirst { it.tool?.callId == message.toolCallId }
+                    if (index >= 0) {
+                        val card = items[index].tool
+                        if (card != null) {
+                            items[index] = items[index].copy(
+                                tool = card.copy(
+                                    phase = LocalToolPhase.DONE,
+                                    preview = GeneratedImageStorage.strip(message.text)
+                                        .take(PREVIEW_LIMIT).ifBlank { null },
+                                    // Файл из cacheDir мог не дожить до перезапуска —
+                                    // тогда лента возьмёт байты из копии в этом сообщении.
+                                    imagePath = card.imagePath
+                                        ?: message.id.takeIf {
+                                            GeneratedImageStorage.imageBytes(message.text) != null
+                                        },
+                                )
+                            )
+                        }
+                    }
+                }
+                LocalRole.SYSTEM -> Unit // системный промпт в ленте не показываем
+            }
+        }
+        return items
+    }
+
+    private fun addToolCard(call: LocalToolCall) {
+        val id = toolItemId(call.id)
+        if (_state.value.items.any { it.id == id }) {
+            updateTool(call.id) { it.copy(phase = LocalToolPhase.RUNNING) }
+            return
+        }
+        _state.value = _state.value.copy(
+            items = _state.value.items + LocalChatItem(
+                id = id,
+                role = LocalRole.TOOL,
+                tool = LocalToolCard(
+                    callId = call.id,
+                    name = call.name,
+                    argumentsJson = call.argumentsJson,
+                    phase = LocalToolPhase.RUNNING,
+                ),
+            )
+        )
+    }
+
+    private fun updateItem(id: String, transform: (LocalChatItem) -> LocalChatItem) {
+        val items = _state.value.items
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return
+        val updated = ArrayList(items)
+        updated[index] = transform(items[index])
+        _state.value = _state.value.copy(items = updated)
+    }
+
+    private fun updateTool(callId: String, transform: (LocalToolCard) -> LocalToolCard) {
+        val items = _state.value.items
+        val index = items.indexOfFirst { it.tool?.callId == callId }
+        if (index < 0) return
+        val card = items[index].tool ?: return
+        val updated = ArrayList(items)
+        updated[index] = items[index].copy(tool = transform(card))
+        _state.value = _state.value.copy(items = updated)
+    }
+
+    /**
+     * Вставить системное сообщение с памятью в начало истории — ровно одно.
+     *
+     * Провайдеры отвергают историю с двумя `system` подряд, а память меняется от хода
+     * к ходу (человек дописал факт), поэтому старое системное сообщение заменяется
+     * новым, а не накапливается. Если памяти нет — история остаётся как была.
+     */
+    private fun withMemory(source: List<LocalMessage>): List<LocalMessage> {
+        val block = runCatching { systemPrompt().trim() }.getOrDefault("")
+        val rest = source.filterNot { it.role == LocalRole.SYSTEM }
+        if (block.isEmpty()) return rest
+        val system = LocalMessage(
+            id = SYSTEM_MESSAGE_ID,
+            role = LocalRole.SYSTEM,
+            text = block,
+            createdAt = 0L,
+        )
+        return listOf(system) + rest
+    }
+
+    /** Снять флаг стрима и убрать пустой пузырь (ошибка до первого токена). */
+    private fun finalizeStreaming(assistantId: String) {
+        val items = _state.value.items
+        val cleaned = items.map { item ->
+            if (assistantId.isNotEmpty() && item.id == assistantId && item.streaming) {
+                // Пустой ответ reasoning-модели — не «ничего не произошло»: весь бюджет
+                // ушёл в размышления, и человек обязан видеть причину, а не пустоту.
+                // Раньше пузырь просто удалялся, и это выглядело как «Марс не ответил».
+                if (item.text.isBlank() && item.thinking.isNotBlank()) {
+                    item.copy(
+                        text = EMPTY_REASONING_ANSWER,
+                        streaming = false,
+                    )
+                } else {
+                    item.copy(streaming = false)
+                }
+            } else {
+                item
+            }
+        }.filterNot { item ->
+            item.streaming && item.text.isBlank() && (assistantId.isEmpty() || item.id == assistantId)
+        }
+        _state.value = _state.value.copy(items = cleaned, streaming = false)
+    }
+
+    private fun toolItemId(callId: String): String = "tool-" + callId
+
+    companion object {
+        /** Идентификатор системного сообщения: постоянный, чтобы память не плодила копии. */
+        private const val SYSTEM_MESSAGE_ID = "memory-system"
+
+        /** Сколько символов размышлений держим в элементе: они не ответ, длину не копим. */
+        private const val THINKING_LIMIT = 600
+
+        /**
+         * Текст вместо пустого ответа reasoning-модели: причина и что делать, а не пустота.
+         */
+        private const val EMPTY_REASONING_ANSWER =
+            "Модель израсходовала весь лимит на размышления и не успела ответить. " +
+                "Скажи вопрос короче или выбери другую модель."
+
+        /** Длина превью результата инструмента в карточке. */
+        const val PREVIEW_LIMIT = 200
+
+        /**
+         * Допустимые уровни `reasoning_effort` (проверено живым запросом, §2 контракта).
+         * «Авто» — это `null`, а не строка: поле в запрос не отправляется.
+         */
+        val REASONING_EFFORTS: List<String> = listOf("low", "medium", "high")
+    }
+}
+
+/**
+ * Заголовок диалога из первого сообщения: одна строка, без переводов строк,
+ * с усечением. Чистая функция — её же проверяет W4.
+ */
+internal fun localSessionTitle(text: String, limit: Int = 48): String {
+    val flat = text.replace(Regex("\\s+"), " ").trim()
+    if (flat.isEmpty()) return LocalSessionStore.DEFAULT_TITLE
+    if (flat.length <= limit) return flat
+    return flat.take(limit - 1).trimEnd() + "…"
+}

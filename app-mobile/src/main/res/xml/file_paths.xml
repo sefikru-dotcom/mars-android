@@ -5,4 +5,8 @@
     <cache-path
         name="session-exports"
         path="session-exports/" />
+    <!-- Ответ модели, пересобранный в DOCX/XLSX/TXT: только этот подкаталог. -->
+    <cache-path
+        name="exports"
+        path="exports/" />
 </paths>

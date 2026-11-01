@@ -78,6 +78,8 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
                 contextUsage = detail.contextUsage,
             )
             applySessionTitle(uiState.sessionTitle)
+            // Session truth only: the user's explicit picker choice is NOT cleared
+            // here, so explicit_model_pick survives opening/reloading a chat.
             modelSelection.setSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
             // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
@@ -142,6 +144,7 @@ internal suspend fun ChatActivity.showOfflineSessionCopy(sessionId: String) {
     composerGuard.onSessionSwitch()
     currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
     currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == sessionId }?.isSubagent == true
+    // Session truth only — the user's explicit pick (if any) stays on the wire.
     modelSelection.setSessionModel(
         uiState.sessions.firstOrNull { it.id == sessionId }?.model,
         uiState.sessions.firstOrNull { it.id == sessionId }?.modelProvider,
@@ -353,6 +356,8 @@ internal fun ChatActivity.reloadCurrentSession() {
                 contextUsage = detail.contextUsage,
             )
             applySessionTitle(uiState.sessionTitle)
+            // Session truth only: the user's explicit picker choice is NOT cleared
+            // here, so explicit_model_pick survives opening/reloading a chat.
             modelSelection.setSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
             // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.

@@ -161,24 +161,32 @@ class ModelDownloader(
     private fun unpack(archive: File, dest: File): Boolean {
         var extracted = 0
         try {
-            BZip2CompressorInputStream(BufferedInputStream(FileInputStream(archive))).use { bz ->
-                TarArchiveInputStream(bz).use { tar ->
-                    while (true) {
-                        val entry = tar.nextEntry ?: break
-                        if (entry.isDirectory) continue
-                        val name = entry.name.substringAfterLast('/')
-                        if (name !in store.expectedFiles) continue
-                        val expected = store.expectedFiles.getValue(name)
-                        if (entry.size != expected) {
-                            log("unexpected size for $name: ${entry.size} != $expected")
-                            return false
+            // Каждый поток закрывается своим `use`, вложенно: если
+            // BZip2CompressorInputStream бросит на битом заголовке, дескрипторы внутри
+            // всё равно закроются. Иначе FileInputStream остаётся открытым, а на Windows
+            // открытый handle блокирует archive.delete() в finally — на диске остаётся
+            // .part-файл (на Linux unlink работает и с открытым файлом, поэтому дефект
+            // виден только на Windows).
+            FileInputStream(archive).use { fis ->
+                BZip2CompressorInputStream(BufferedInputStream(fis)).use { bz ->
+                    TarArchiveInputStream(bz).use { tar ->
+                        while (true) {
+                            val entry = tar.nextEntry ?: break
+                            if (entry.isDirectory) continue
+                            val name = entry.name.substringAfterLast('/')
+                            if (name !in store.expectedFiles) continue
+                            val expected = store.expectedFiles.getValue(name)
+                            if (entry.size != expected) {
+                                log("unexpected size for $name: ${entry.size} != $expected")
+                                return false
+                            }
+                            val target = File(dest, name)
+                            // Имя — basename без разделителей, но проверяем канонический путь:
+                            // запись обязана остаться внутри staging-каталога.
+                            if (target.canonicalFile.parentFile != dest.canonicalFile) return false
+                            FileOutputStream(target).use { out -> copyEntry(tar, out) }
+                            extracted++
                         }
-                        val target = File(dest, name)
-                        // Имя — basename без разделителей, но проверяем канонический путь:
-                        // запись обязана остаться внутри staging-каталога.
-                        if (target.canonicalFile.parentFile != dest.canonicalFile) return false
-                        FileOutputStream(target).use { out -> copyEntry(tar, out) }
-                        extracted++
                     }
                 }
             }

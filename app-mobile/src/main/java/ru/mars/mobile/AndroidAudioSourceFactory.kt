@@ -60,19 +60,38 @@ class AndroidAudioSourceFactory(
     override fun create(): AudioSource {
         val bufferBytes = bufferBytesFor(sampleRate)
 
+        // Один AudioRecord на процесс. Второй захват не «делит» микрофон, а отбирает его: в
+        // логе это `AudioRecordImpl: [audioRecordData][mute] ... f:37189` — счётчик полученных
+        // байт замирает, и фоновый поиск фразы слышит тишину. Точка создания `AudioRecord(`
+        // в проекте одна (этот файл), поэтому владение ведётся здесь же: занятый захват
+        // логируется явно, а не проявляется молчаливым `[mute]`.
+        val owner = AudioCaptureLease.acquire("${sampleRate}Hz")
+        if (owner != null) {
+            Log.e(TAG, "second AudioRecord in process refused: $owner is already recording")
+            throw IllegalStateException("microphone is already captured by $owner")
+        }
+
         // The selector owns the retry loop; the closure below performs one platform open and keeps
         // the wrapper so effects can be attached to the session that actually opened.
         var opened: AudioRecordSource? = null
-        val capture = AudioCaptureSelector(
-            openSource = { candidate ->
-                openRecord(candidate, bufferBytes).also { opened = it }
-            },
-            onAttemptFailed = { candidate, error ->
-                Log.w(TAG, "capture source ${candidate.id} did not open, falling back", error)
-            },
-        ).open(echoCancellation)
+        val capture = try {
+            AudioCaptureSelector(
+                openSource = { candidate ->
+                    openRecord(candidate, bufferBytes).also { opened = it }
+                },
+                onAttemptFailed = { candidate, error ->
+                    Log.w(TAG, "capture source ${candidate.id} did not open, falling back", error)
+                },
+            ).open(echoCancellation)
+        } catch (error: Throwable) {
+            AudioCaptureLease.release()
+            throw error
+        }
 
-        val record = opened ?: throw IllegalStateException("capture opened without an AudioRecord")
+        val record = opened ?: run {
+            AudioCaptureLease.release()
+            throw IllegalStateException("capture opened without an AudioRecord")
+        }
         val activation = AudioCapturePolicy.activateEffects(
             AudioCapturePolicy.effectPlan(echoCancellation, noiseSuppression),
         ) { kind -> acquireEffect(kind, record.audioSessionId) }
@@ -248,10 +267,57 @@ class AndroidAudioSourceFactory(
             // освобождения AudioRecord их release() уже не гарантирован.
             effects.release()
             record.release()
+            // Владение микрофоном снимается последним: следующий захват (экран после «Стоп»,
+            // переоткрытие сервисом) вправе открыться только когда устройство реально свободно.
+            AudioCaptureLease.release()
         }
     }
 
     private companion object {
         const val TAG = "MarsAudioCapture"
+    }
+}
+
+/**
+ * Владение микрофоном в процессе: один `AudioRecord` за раз.
+ *
+ * ## Зачем
+ * Два одновременных `AudioRecord` в одном процессе не «делят» микрофон, а отбирают друг у друга
+ * звук: в логе устройства это
+ * `AudioRecordImpl: [audioRecordData][mute] 32s(f:37189 m:32002)`, где `f` (полученные байты)
+ * перестаёт расти. Фоновый поиск фразы при этом продолжает «работать» и не слышит ничего, а
+ * индикатор записи горит.
+ *
+ * Точка создания `AudioRecord(` в проекте одна — [AndroidAudioSourceFactory], поэтому владение
+ * ведётся здесь же: второй захват отвергается с громкой строкой в логе, а не тишиной в
+ * микрофоне. Отвергается именно ВТОРОЙ: освобождение идёт из [AudioRecordSource.release] через
+ * `finally` потока чтения, то есть захват не может «залипнуть» после нормального закрытия.
+ */
+internal object AudioCaptureLease {
+
+    private const val TAG = "MarsAudioCapture"
+
+    private var holder: String? = null
+
+    /**
+     * Забрать микрофон.
+     *
+     * @return `null` — захват наш; иначе описание того, кто уже записывает.
+     */
+    @Synchronized
+    fun acquire(owner: String): String? {
+        val current = holder
+        if (current != null) return current
+        holder = owner
+        Log.i(TAG, "capture acquired by $owner")
+        return null
+    }
+
+    /** Отпустить микрофон. Идемпотентно: чужое освобождение не снимает владение. */
+    @Synchronized
+    fun release() {
+        if (holder == null) return
+        Log.i(TAG, "capture released")
+        holder = null
     }
 }
