@@ -84,7 +84,46 @@ data class LocalMessage(
     val toolCallId: String? = null,
     val createdAt: Long = 0L,
     val attachments: List<LocalAttachment> = emptyList(),
+    /**
+     * Метрики хода для футера ответа; `null` — шаг не измерялся (старый файл, сообщение
+     * человека, TOOL-сообщение). Живёт рядом с текстом намеренно: иначе после перезапуска
+     * приложения футер пуст, хотя цифры были получены.
+     */
+    val metrics: LocalTurnMetrics? = null,
 )
+
+/**
+ * Метрики одного хода, переживающие сохранение в историю.
+ *
+ * Отличие от [LocalUsage]: [LocalUsage] — это то, что прислал провайдер, а здесь —
+ * то, что экран решил показать. `ttftMs`, [interrupted] и [truncated] провайдер не
+ * сообщает вовсе, их считает клиент, и в теле запроса они не участвуют.
+ */
+data class LocalTurnMetrics(
+    /** Токены запроса последнего шага (не сумма: каждый шаг включает всю историю). */
+    val promptTokens: Int = 0,
+    /** Токены ответа, сумма по шагам хода. */
+    val completionTokens: Int = 0,
+    /** Всего токенов, сумма по шагам хода. */
+    val totalTokens: Int = 0,
+    /** Время до первого символа, мс; 0 — не измеряли. */
+    val ttftMs: Long = 0L,
+    /** Ответ оборван «Стоп» или сбоем после того, как человек уже видел текст. */
+    val interrupted: Boolean = false,
+    /** Ответ упёрся в лимит токенов: достоверно только при `finish_reason = length`. */
+    val truncated: Boolean = false,
+    /** Дословный `finish_reason` последнего шага; `null` — провайдер не сообщил. */
+    val finishReason: String? = null,
+) {
+    /** Хоть что-то измерено: иначе метрику не сохраняем и футер не рисуем. */
+    val isMeasured: Boolean
+        get() = promptTokens > 0 || completionTokens > 0 || totalTokens > 0 || ttftMs > 0L
+
+    companion object {
+        /** Провайдер упёрся в лимит выходных токенов — единственный честный признак обрезки. */
+        const val REASON_LENGTH = "length"
+    }
+}
 
 /**
  * Модель принимает картинки.
@@ -183,8 +222,19 @@ sealed interface LocalChatEvent {
     /** Инструмент выполнен; `preview` — короткая строка для карточки в ленте. */
     data class ToolFinished(val callId: String, val ok: Boolean, val preview: String) : LocalChatEvent
 
-    /** Шаг модели закончен. Пустой текст при непустых вызовах — норма (только инструменты). */
-    data class AssistantFinished(val fullText: String, val toolCalls: List<LocalToolCall>) : LocalChatEvent
+    /**
+     * Шаг модели закончен. Пустой текст при непустых вызовах — норма (только инструменты).
+     *
+     * [finishReason] — дословный `finish_reason` провайдера (`stop`/`length`/`tool_calls`/
+     * `content_filter`/...), `null` — провайдер его не прислал или шаг закрыт по `[DONE]`/EOF.
+     * Экран по нему решает, показывать ли «ответ обрезан»: угадывать обрезку по длине
+     * текста нельзя, а `length` — единственный достоверный признак упора в лимит.
+     */
+    data class AssistantFinished(
+        val fullText: String,
+        val toolCalls: List<LocalToolCall>,
+        val finishReason: String? = null,
+    ) : LocalChatEvent
 
     /**
      * Расход шага. Приходит ПЕРЕД [AssistantFinished], если провайдер его отдал.

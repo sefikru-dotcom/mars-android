@@ -295,7 +295,7 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
             val calls = event.toolCalls
             val events = ArrayList<LocalChatEvent>(calls.size + 1)
             calls.forEach { events.add(LocalChatEvent.ToolRequested(it)) }
-            events.add(LocalChatEvent.AssistantFinished(event.text, calls))
+            events.add(LocalChatEvent.AssistantFinished(event.text, calls, event.finishReason))
             events
         }
         LocalSseParser.Event.Done -> emptyList()
