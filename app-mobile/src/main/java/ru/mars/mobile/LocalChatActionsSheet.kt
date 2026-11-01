@@ -10,13 +10,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * Лист действий над сообщением локального диалога: Копировать, Повторить, Выбрать текст,
- * Озвучить, Поделиться.
+ * Лист действий над сообщением локального диалога: Копировать, Повторить, Повторить другой
+ * моделью, Выбрать текст, Озвучить, Поделиться.
  *
  * Открывается долгим нажатием на сообщение (пузырь пользователя, карточка ассистента).
  * Состав листа — только реально выполнимые пункты: пустое сообщение нечего копировать и
  * шарить, «Повторить» существует лишь для последнего ответа ассистента (повторять середину
- * диалога нечего — ход уже ушёл), «Озвучить» скрыт, когда на устройстве нет движка TTS.
+ * диалога нечего — ход уже ушёл), «Озвучить» скрыт, когда на устройстве нет движка TTS,
+ * а «Повторить другой моделью» — когда список альтернатив пуст.
  * Мёртвых кнопок здесь нет по построению.
  *
  * Стилистика — [MarsDialog] (тот же лист пилюль, что у серверного чата), поэтому лист
@@ -26,6 +27,18 @@ internal object LocalChatActionsSheet {
 
     /** Подпись пункта «Повторить» (последний ответ ассистента). */
     const val RETRY_LABEL = "Повторить"
+
+    /**
+     * Повтор на другой модели: тот же вопрос, другой ответ.
+     *
+     * Отдельный пункт, а не выпадашка в «Повторить»: обычный повтор — действие в один тап
+     * (та же модель, тот же вопрос), и превращать его в выбор из списка значило бы
+     * замедлить самый частый случай.
+     */
+    const val RETRY_WITH_LABEL = "Повторить другой моделью"
+
+    /** Заголовок подсписка моделей. */
+    const val RETRY_WITH_TITLE = "Повторить на модели"
 
     const val COPY_LABEL = "Копировать"
     const val SELECT_LABEL = "Выбрать текст"
@@ -38,6 +51,12 @@ internal object LocalChatActionsSheet {
     /**
      * Показать лист действий. [canRetry] — сообщение является последним ответом
      * ассистента; [canSpeak] — на устройстве доступна озвучка.
+     *
+     * [models] — модели, доступные для повтора (готовый список от экрана: каталог
+     * провайдера плюс текущая), [currentModel] — модель этого ответа. Пункт «Повторить
+     * другой моделью» появляется только если есть ЧТО выбирать: сам по себе
+     * [currentModel] в списке не альтернатива, и мёртвой кнопки с единственным
+     * вариантом здесь не бывает.
      */
     fun show(
         activity: Activity,
@@ -50,11 +69,18 @@ internal object LocalChatActionsSheet {
         onSpeak: () -> Unit,
         onShare: () -> Unit,
         onSaveFile: (() -> Unit)? = null,
+        models: List<String> = emptyList(),
+        currentModel: String? = null,
+        onRetryWith: (String) -> Unit = {},
     ) {
         val hasText = text.isNotBlank()
-        val actions = ArrayList<Pair<String, () -> Unit>>(5)
+        val retryModels = alternatives(models, currentModel)
+        val actions = ArrayList<Pair<String, () -> Unit>>(6)
         if (hasText) actions += COPY_LABEL to onCopy
         if (canRetry) actions += RETRY_LABEL to onRetry
+        if (canRetry && retryModels.isNotEmpty()) {
+            actions += RETRY_WITH_LABEL to { showModelChooser(activity, retryModels, onRetryWith) }
+        }
         if (hasText) actions += SELECT_LABEL to onSelectText
         if (hasText && canSpeak) actions += SPEAK_LABEL to onSpeak
         if (hasText) actions += SHARE_LABEL to onShare
@@ -79,6 +105,56 @@ internal object LocalChatActionsSheet {
             emptyList()
         }
         dialog?.window?.setDimAmount(0.8f)
+    }
+
+    /**
+     * Альтернативы для повтора: пустые и совпадающие с текущей моделью выкинуты.
+     *
+     * Сравнение без учёта регистра и пробелов по краям: имена моделей в каталоге и в
+     * профиле приходят из разных мест и могут отличаться хвостовым пробелом — такой
+     * «другой» вариант дал бы повтор на той же модели.
+     */
+    internal fun alternatives(models: List<String>, currentModel: String?): List<String> {
+        val current = currentModel?.trim()?.lowercase()
+        return models
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it.lowercase() != current }
+            .distinct()
+    }
+
+    /** Подсписок моделей — тот же [MarsDialog.pillStack], без нового цвета. */
+    private fun showModelChooser(
+        activity: Activity,
+        models: List<String>,
+        onRetryWith: (String) -> Unit,
+    ) {
+        // Показ — следующим кадром: лист действий к этому моменту уже закрыт, и второй
+        // диалог не должен создаваться поверх ещё не снятого окна (на части прошивок
+        // такой диалог выходит без затемнения и без тени).
+        val host = activity.window?.decorView ?: return
+        host.post {
+            var dialog: Dialog? = null
+            // Экран мог закрыться между нажатием и этим кадром: падать из-за диалога
+            // поверх умершего окна нельзя (BadTokenException).
+            runCatching {
+                dialog = MarsDialog.show(activity) { root ->
+                    root.addView(MarsDialog.header(activity, RETRY_WITH_TITLE, null))
+                    root.addView(
+                        MarsDialog.pillStack(
+                            activity,
+                            models.map { model ->
+                                model to {
+                                    dialog?.dismiss()
+                                    onRetryWith(model)
+                                }
+                            },
+                        )
+                    )
+                    emptyList()
+                }
+                dialog?.window?.setDimAmount(0.8f)
+            }
+        }
     }
 
     /**
