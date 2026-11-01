@@ -88,13 +88,16 @@ class ModelSelectionTest {
     }
 
     @Test
-    fun serverSessionModelOverridesStaleLocalChoiceForDisplay() {
+    fun explicitPickWinsOverServerSessionModelForDisplay() {
         val selection = ModelSelection(FakeStorage())
-        selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex"))
+        selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
         selection.pickerEntries(realCatalog())
+        // Сервер сообщил модель сессии — но человек выбрал сам, и чип показывает его выбор:
+        // ровно эта модель и уйдёт в chat/start.
         selection.setSessionModel("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api")
-        assertEquals("GPT 6.1 SOL", selection.buttonLabel())
-        assertEquals("@custom:plusvibe-api:gpt-6.1-sol", selection.displayedChoice()?.modelId)
+        assertEquals("gemini-3.8-flash", selection.buttonLabel())
+        assertEquals("gemini-3.8-flash", selection.displayedChoice()?.modelId)
+        assertTrue(selection.displayedChoice()?.explicitPick == true)
     }
     @Test
     fun selectRejectsBlankModelId() {
@@ -141,9 +144,10 @@ class ModelSelectionTest {
     }
 
     @Test
-    fun wireChoiceUsesServerSessionModelWhenPresent() {
+    fun wireChoiceUsesServerSessionModelWhenNoExplicitPick() {
+        // Принятый серверный дефолт — НЕ пользовательский выбор: модель сессии важнее.
         val selection = ModelSelection(FakeStorage())
-        selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
+        selection.resolveEffective(realCatalog())
         selection.setSessionModel("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api")
         assertEquals(
             ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = false),
@@ -182,5 +186,110 @@ class ModelSelectionTest {
         val picked = selection.select(ModelInfo("gemini-3.8-flash", "Gemini", "Vertex", "custom:vertex-gemini"))
         selection.setSessionModel("   ", "custom:vertex-gemini")
         assertEquals(picked, selection.wireChoice())
+    }
+
+    // --- явный выбор пользователя переживает серверные ответы --------------------------------
+    //
+    // Владельческий баг: «в чате с Марсом не меняется модель при ручной смене, отвечает
+    // всегда haiku 5.5». Сервер `_resolve_chat_model` уважает чужое семейство только при
+    // `explicit_model_pick=true`, иначе откатывает на дефолт профиля. Флаг терялся, потому
+    // что `setSessionModel()` (деталь сессии, первый ход нового чата, reload) перезаписывал
+    // единственный источник выбора серверным значением с explicitPick=false.
+
+    private fun gptSol() = ModelInfo(
+        "@custom:plusvibe-api:gpt-6.1-sol", "GPT 6.1 SOL", "PlusVibe API", "custom:plusvibe-api"
+    )
+
+    private fun haiku() = ModelInfo("claude-haiku-5.5", "Claude Haiku 5.5", "Anthropic", "custom:anthropic")
+
+    @Test
+    fun explicitPickSurvivesServerSessionModelAndKeepsTheFlag() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(gptSol())
+        // Сервер сообщил СВОЮ модель сессии (в том числе откатанную) — выбор не затирается.
+        selection.setSessionModel("claude-haiku-5.5", "custom:anthropic")
+        assertEquals(
+            ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = true),
+            selection.wireChoice()
+        )
+        // Именно этот признак превращается в explicit_model_pick=true в теле chat/start.
+        assertTrue(selection.wireChoice()?.explicitPick == true)
+    }
+
+    @Test
+    fun repeatedServerAnswersNeverClearTheExplicitPick() {
+        // setSessionModel зовут и первый ход нового чата, и каждая загрузка детали сессии.
+        val selection = ModelSelection(FakeStorage())
+        selection.select(gptSol())
+        repeat(3) { selection.setSessionModel("claude-haiku-5.5", "custom:anthropic") }
+        // Сервер вообще не назвал модель — это тоже не повод сбрасывать выбор.
+        selection.setSessionModel(null, null)
+        assertEquals(
+            ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = true),
+            selection.wireChoice()
+        )
+    }
+
+    @Test
+    fun clearExplicitFallsBackToServerSessionModelWithoutFlag() {
+        val storage = FakeStorage()
+        val selection = ModelSelection(storage)
+        selection.select(gptSol())
+        selection.setSessionModel("claude-haiku-5.5", "custom:anthropic")
+        selection.clearExplicit()
+        assertEquals(
+            ModelChoice("claude-haiku-5.5", "custom:anthropic", explicitPick = false),
+            selection.wireChoice()
+        )
+        // Снятый выбор не возвращается и после перезапуска.
+        assertNull(storage.saved)
+    }
+
+    @Test
+    fun clearExplicitWithoutSessionKeepsTheModelButDropsTheFlag() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(gptSol())
+        selection.clearExplicit()
+        val wire = selection.wireChoice()
+        assertEquals("@custom:plusvibe-api:gpt-6.1-sol", wire?.modelId)
+        assertFalse(wire?.explicitPick == true)
+    }
+
+    @Test
+    fun restoredPickIsExplicitAndSurvivesSessionBind() {
+        val storage = FakeStorage()
+        ModelSelection(storage).select(gptSol())
+
+        // Перезапуск приложения: выбор восстановлен из prefs и снова явный.
+        val restored = ModelSelection(storage)
+        restored.setSessionModel("claude-haiku-5.5", "custom:anthropic")
+        assertEquals(
+            ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = true),
+            restored.wireChoice()
+        )
+    }
+
+    @Test
+    fun newChatKeepsTheExplicitPick() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(gptSol())
+        selection.setSessionModel("claude-haiku-5.5", "custom:anthropic")
+        selection.clearSessionModel() // «Новый чат»: серверной модели сессии больше нет.
+        assertEquals(
+            ModelChoice("@custom:plusvibe-api:gpt-6.1-sol", "custom:plusvibe-api", explicitPick = true),
+            selection.wireChoice()
+        )
+    }
+
+    @Test
+    fun selectingAnotherModelReplacesTheExplicitPick() {
+        val selection = ModelSelection(FakeStorage())
+        selection.select(gptSol())
+        selection.setSessionModel("claude-haiku-5.5", "custom:anthropic")
+        selection.select(haiku())
+        assertEquals(
+            ModelChoice("claude-haiku-5.5", "custom:anthropic", explicitPick = true),
+            selection.wireChoice()
+        )
     }
 }

@@ -73,14 +73,44 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         private set
 
     private var lastCatalog: ModelsResponse? = null
-    private var sessionModel: ModelChoice? = null
+
+    /**
+     * The model the USER deliberately picked in the picker. It lives longer than any
+     * session: server answers ([setSessionModel]) never touch it, so
+     * `explicit_model_pick=true` keeps going out with every following `chat/start`
+     * until the user picks another model or clears it ([clearExplicit]).
+     *
+     * Why it must be a field of its own: `sessionModel` is server truth and gets
+     * rewritten on every session load / first-turn response. Deriving the explicit
+     * flag from it meant the first server answer wiped the pick and the server then
+     * "repaired" the turn back to the profile default (haiku) — the owner's bug.
+     */
+    private var userPick: ModelChoice? = current?.takeIf { it.explicitPick }
 
     /** The server-authoritative model used by the currently opened session. */
+    private var sessionModel: ModelChoice? = null
+
+    /**
+     * The server reported the model of a session (session detail, `chat/start`
+     * response). This is session truth, NOT the user's choice: an explicit pick is
+     * deliberately preserved, otherwise the server sees `explicit_model_pick=false`
+     * and repairs the model back to its default.
+     */
     fun setSessionModel(modelId: String?, providerId: String?) {
         sessionModel = modelId?.takeIf { it.isNotBlank() }?.let { ModelChoice(it, providerId, explicitPick = false) }
     }
 
     fun clearSessionModel() { sessionModel = null }
+
+    /**
+     * «Как у сессии»: drops the explicit pick (also from persistence), so the wire
+     * falls back to the server's session model with `explicit_model_pick=false`.
+     */
+    fun clearExplicit() {
+        userPick = null
+        storage.clear()
+        current = sessionModel ?: current?.copy(explicitPick = false)
+    }
 
     /** Picker rows in server order, labeled `name · provider` from real catalog data. */
     fun pickerEntries(catalog: ModelsResponse): List<ModelPickerEntry> {
@@ -93,7 +123,11 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         if (model.id.isBlank()) return null
         val choice = ModelChoice(model.id, model.providerId, explicitPick = true)
         current = choice
-        sessionModel = choice
+        // The pick is remembered separately from the session model: no server answer
+        // may turn it into `explicitPick=false` and lose `explicit_model_pick`.
+        // [sessionModel] is left untouched on purpose — it only ever holds server
+        // truth (`explicitPick=false`), so nothing can resurrect a stale explicit flag.
+        userPick = choice
         storage.save(choice)
         return choice
     }
@@ -114,7 +148,7 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         return choice
     }
 
-    /** Header-button label from the effective server session, then the local picker choice. */
+    /** Header-button label from the effective wire choice (explicit pick, else session model). */
     fun buttonLabel(): String? {
         val choice = wireChoice() ?: return null
         val row = lastCatalog?.models?.firstOrNull { it.id == choice.modelId }
@@ -125,13 +159,19 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
 
     /**
      * THE choice for the wire (`POST /api/chat/start` model fields) and, by
-     * delegation, for display: the server-authoritative session model when one
-     * is bound ([setSessionModel]), otherwise the local [current] (persisted
-     * user pick, else adopted server default). Null means "no usable identity":
-     * send chat/start WITHOUT model fields so the server routes with its own
-     * session/configured default instead of a client-side guess.
+     * delegation, for display. Order of authority:
+     *
+     * 1. the user's explicit pick ([select]) — it keeps `explicitPick=true` so the
+     *    server honors a cross-family model instead of repairing it to the profile
+     *    default;
+     * 2. otherwise the server-authoritative session model ([setSessionModel]);
+     * 3. otherwise the local [current] (persisted pick, else adopted server default).
+     *
+     * Null means "no usable identity": send chat/start WITHOUT model fields so the
+     * server routes with its own session/configured default instead of a client-side
+     * guess.
      */
-    fun wireChoice(): ModelChoice? = sessionModel ?: current
+    fun wireChoice(): ModelChoice? = userPick ?: sessionModel ?: current
 
     private fun entryLabel(model: ModelInfo): String {
         val name = model.name?.takeIf { it.isNotBlank() } ?: model.id

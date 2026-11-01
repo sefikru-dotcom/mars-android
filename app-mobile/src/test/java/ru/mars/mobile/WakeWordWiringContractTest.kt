@@ -123,9 +123,18 @@ class WakeWordWiringContractTest {
 
     @Test
     fun `wake word stays in the foreground - no microphone foreground service in this wave`() {
-        assertFalse(
-            "фоновый микрофон требует FOREGROUND_SERVICE_MICROPHONE и отдельного решения",
+        // Волна 3 это решение приняла: разговор при заблокированном экране существует,
+        // и он требует типа microphone у foreground-сервиса. Проверка инвертирована
+        // осознанно — раньше она защищала от случайного фонового микрофона, теперь
+        // фиксирует, что разрешение и тип сервиса объявлены ВМЕСТЕ: одно без другого
+        // даёт SecurityException на Android 14+ и убитый процесс.
+        assertTrue(
+            "фоновый микрофон требует FOREGROUND_SERVICE_MICROPHONE",
             manifest.contains("FOREGROUND_SERVICE_MICROPHONE"),
+        )
+        assertTrue(
+            "сервис обязан объявить foregroundServiceType=\"microphone\"",
+            manifest.contains("foregroundServiceType=\"microphone\""),
         )
         assertTrue(
             "строка настроек и обе подсказки объявлены в ресурсах",

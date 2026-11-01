@@ -203,7 +203,7 @@ class ChatClickPathFlowTest {
     )
 
     @Test
-    fun `path - model chip adopts server default, explicit pick wins, opened session overrides wire choice`() {
+    fun `path - model chip adopts server default, explicit pick survives server session model`() {
         val storage = FakeModelStorage()
         val selection = ModelSelection(storage)
 
@@ -220,12 +220,19 @@ class ChatClickPathFlowTest {
         assertEquals(ModelChoice("gpt-x", "openai", explicitPick = true), picked)
         assertNotNull("Явный выбор персистентен", storage.saved)
 
-        // Открытие сессии: server-authoritative модель сессии побеждает локальный выбор
-        // для wire, но «новый чат» возвращает выбор пользователя.
+        // Открытие сессии: серверная модель сессии — только для отображения/фолбэка,
+        // явный выбор пользователя она не затирает (иначе сервер откатит модель на
+        // дефолт профиля, потому что explicit_model_pick не уйдёт).
         selection.setSessionModel("hermes-4", "nous")
-        assertEquals("hermes-4", selection.wireChoice()?.modelId)
-        selection.clearSessionModel()
         assertEquals("gpt-x", selection.wireChoice()?.modelId)
+        assertTrue(selection.wireChoice()?.explicitPick == true)
+        // «Как у сессии»: явный выбор снят — на провод идёт серверная модель без флага.
+        selection.clearExplicit()
+        assertEquals("hermes-4", selection.wireChoice()?.modelId)
+        assertFalse(selection.wireChoice()?.explicitPick == true)
+        // «Новый чат» без явного выбора тоже не теряет серверную модель сессии.
+        selection.clearSessionModel()
+        assertEquals("hermes-4", selection.wireChoice()?.modelId)
     }
 
     @Test

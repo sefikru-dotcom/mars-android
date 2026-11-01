@@ -58,6 +58,8 @@ object AppNavIntents {
         AppDestination.ANALYTICS -> InsightsActivity.newIntent(context)
         // Каталог пространств и выбор рабочего контекста для следующих сообщений.
         AppDestination.SPACES -> Intent(context, SpacesActivity::class.java)
+        // Локальный чат: свой список диалогов, сервер Марса для него не нужен вовсе.
+        AppDestination.LOCAL -> LocalSessionsActivity.newIntent(context)
         AppDestination.SETTINGS -> Intent(context, SettingsActivity::class.java)
     }
 

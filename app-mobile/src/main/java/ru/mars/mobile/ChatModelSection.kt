@@ -108,8 +108,12 @@ internal fun ChatActivity.chooseModel() {
         android.app.AlertDialog.Builder(this@chooseModel)
             .setTitle("Модель Марса")
             .setSingleChoiceItems(labels, checked) { d, which ->
+                // The pick itself becomes the wire choice (explicit_model_pick=true).
+                // Do NOT re-bind it through setSessionModel(): that wrote the same id
+                // back as server truth with explicitPick=false, so the very next
+                // chat/start lost the flag and the server repaired the model to the
+                // profile default (haiku).
                 val picked = modelSelection.select(entries[which].model)
-                modelSelection.setSessionModel(picked?.modelId, picked?.providerId)
                 d.dismiss()
                 if (picked != null) {
                     updateModelButton()

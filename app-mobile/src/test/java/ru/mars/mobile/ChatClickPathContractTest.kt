@@ -259,8 +259,16 @@ class ChatClickPathContractTest {
             choose.contains("modelSelection.pickerEntries(")
         )
         assertTrue(
-            "Выбор обязан сохраняться через modelSelection.select и применяться к сессии",
-            choose.contains("modelSelection.select(") && choose.contains("modelSelection.setSessionModel(")
+            "Выбор обязан сохраняться через modelSelection.select (он же — выбор для chat/start)",
+            choose.contains("modelSelection.select(")
+        )
+        // select() уже выставляет выбор как wire-choice с explicitPick=true. Повторный
+        // setSessionModel(...) в пикере переписывал его серверной правдой с
+        // explicitPick=false: explicit_model_pick пропадал из chat/start и сервер
+        // откатывал модель на дефолт профиля (haiku 5.5) — жалоба владельца.
+        assertFalse(
+            "Пикер НЕ должен переписывать выбор через setSessionModel",
+            choose.contains("modelSelection.setSessionModel(")
         )
     }
 
