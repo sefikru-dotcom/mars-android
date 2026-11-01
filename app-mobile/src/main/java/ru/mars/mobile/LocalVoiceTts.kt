@@ -1,11 +1,15 @@
 package ru.mars.mobile
 
 import android.content.Context
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import ru.mars.mobile.tts.OfflineTtsPort
+import ru.mars.mobile.voice.SpeechChunker
 
 /**
  * Озвучка ответа локального чата: серверный синтез, если он дан, и системный TTS как
@@ -36,6 +40,26 @@ import ru.mars.mobile.tts.OfflineTtsPort
  *   длительность речи и partial ASR проверяет [BargeInGate], и только его `Trigger`
  *   останавливает озвучку. На динамике без AEC одного текста мало, на наушниках хватает
  *   длительности — это уже внутри гейта, здесь дублировать нельзя.
+ *
+ * ## Ранний старт речи ([beginStream]/[appendStream]/[endStream])
+ * [speak] читает ответ ОДНОЙ репликой — так локальный чат и живёт: хост отдаёт готовый текст.
+ * Чтобы первое слово звучало на секунды раньше, есть потоковый вход: хост кормит дельты, а
+ * [ru.mars.mobile.voice.SpeechChunker] режет первый кусок по клаузу (запятая/точка/двоеточие/
+ * тире/перевод строки), следующие — пачками ~300 символов по границе слова. Куски уходят в
+ * синтез по очереди: пока движок говорит текущий, следующий ждёт в очереди, а фаза SPEAKING
+ * между кусками НЕ гаснет (иначе кнопка мигала бы «Говорю → Голос» на каждой пачке).
+ * Эталон эха в гейте растёт вместе с ответом ([BargeInGate.onAssistantTextUpdated]), поэтому
+ * перебивание продолжает отличать наш динамик от человека и на потоковой озвучке.
+ *
+ * ## Фаза «говорит»: точность ограничена движком
+ * [onSpeakingChanged] включается на ПРИНЯТОМ синтезе, а не на первом аудиочанке: у
+ * [VoiceOutputController.SpeechEngine] нет события начала воспроизведения —
+ * [AndroidSpeechEngine] объявляет `UtteranceProgressListener.onStart` пустым, у офлайн-порта
+ * ([OfflineTtsPort]) такого колбэка нет вовсе, [AndroidServerTtsPlayback] сообщает только
+ * конец. Поэтому индикатор «Говорю» может опередить звук на время прогрева движка (у Piper —
+ * до нескольких сотен миллисекунд). Выдумывать несуществующее событие нельзя: это дало бы ещё
+ * более врущее состояние. Когда колбэк старта появится в движке — переключать здесь, в
+ * [speakPieceNow], и только в этом месте.
  *
  * @param context любой контекст (хранится `applicationContext`);
  * @param scope область для фонового серверного синтеза; `null` — своя, освобождается в [release];
@@ -91,7 +115,7 @@ class LocalVoiceTts(
             // Без серверного канала отказ системного TTS = озвучки нет вовсе.
             if (serverTts == null) publishAvailable(available)
         },
-        onSpeechFinished = { finishSpeaking() },
+        onSpeechFinished = { onEngineSilent() },
     )
 
     /** Проигрывание серверных байтов: только когда серверный клиент реально дан. */
@@ -99,7 +123,7 @@ class LocalVoiceTts(
         if (serverTts == null) {
             null
         } else {
-            AndroidServerTtsPlayback(appContext, onFinished = { finishSpeaking() })
+            AndroidServerTtsPlayback(appContext, onFinished = { onEngineSilent() })
         }
 
     /** Один движок для контроллера: офлайн (Piper) → серверный → системный. */
@@ -124,7 +148,7 @@ class LocalVoiceTts(
                 context = appContext,
                 port = port,
                 onSpeakingChanged = { speaking: Boolean ->
-                    if (speaking) setSpeaking(true) else finishSpeaking()
+                    if (speaking) setSpeaking(true) else onEngineSilent()
                 },
             )
         }
@@ -160,31 +184,93 @@ class LocalVoiceTts(
         if (released) return false
         val body = text?.trim().orEmpty()
         if (body.isEmpty()) return false
-        // Эталон эха — весь ответ сразу: локальный чат говорит одной репликой, а не фразами,
-        // поэтому окно произносимого текста в гейте равно ответу.
-        gate.onAnswerStarted(nowMs(), route(), aecActive(), body)
-        return when (output.speakNow(body)) {
-            VoiceOutputController.SpeakOutcome.SPOKEN -> {
-                setSpeaking(true)
-                true
-            }
+        // Новая реплика не наследует нарезку предыдущей: буфер и очередь прошлого ответа в мусор.
+        resetStream()
+        // Старый звук убирается СТРОГО до нового и с подтверждением тишины (см. [cutCurrent]):
+        // иначе стоп-флаг движка глушит первое слово новой реплики.
+        cutCurrent()
+        pending.addLast(Piece(body, first = true))
+        return pump()
+    }
 
-            VoiceOutputController.SpeakOutcome.NOTHING_TO_SPEAK -> {
-                gate.onAnswerFinished()
-                false
-            }
+    /**
+     * Начать ответ в потоковом режиме: текста ещё нет, но всё прежнее должно замолчать.
+     *
+     * Зачем отдельно от [speak]: первый кусок ответа ещё не пришёл, а старую озвучку (например
+     * подсказку «Секунду, думаю») надо погасить заранее — тогда первая же дельта уходит в синтез,
+     * не тратя время на отмену.
+     *
+     * @return `false` — объект освобождён.
+     */
+    fun beginStream(): Boolean {
+        if (released) return false
+        resetStream()
+        streamOpen = true
+        cutCurrent()
+        return true
+    }
 
-            VoiceOutputController.SpeakOutcome.ENGINE_UNAVAILABLE -> {
-                gate.onAnswerFinished()
-                publishAvailable(false)
-                false
-            }
+    /**
+     * Отдать очередную дельту текста ответа.
+     *
+     * Нарезка ([ru.mars.mobile.voice.SpeechChunker]) решает сама: первый кусок — по клаузу,
+     * следующие — пачками ~300 символов по границе слова. Куски не теряются: пока движок
+     * говорит, они ждут в очереди и стартуют сразу после конца предыдущего.
+     *
+     * @return `true` — в синтез ушёл (или встал в очередь) хотя бы один кусок; `false` —
+     *   накопили, но говорить пока нечего, либо поток не начат.
+     */
+    fun appendStream(delta: String?): Boolean {
+        if (released || !streamOpen) return false
+        if (delta.isNullOrEmpty()) return false
+        chunkBuffer += delta
+        var emitted = false
+        while (true) {
+            val chunk = SpeechChunker.nextChunk(chunkBuffer, first = chunksSaid == 0) ?: break
+            chunkBuffer = chunk.rest
+            chunksSaid++
+            pending.addLast(Piece(chunk.text, first = chunksSaid == 1))
+            emitted = true
         }
+        if (!emitted) return false
+        pump()
+        return true
+    }
+
+    /**
+     * Текст ответа кончился: отдать остаток буфера и закрыть поток.
+     *
+     * Остаток короче пачки уходит целиком — это хвост ответа, ждать больше нечего. Фаза
+     * SPEAKING погаснет сама, когда отзвучит последний кусок.
+     *
+     * @return `true` — остаток (или очередь) принят; `false` — поток не был начат.
+     */
+    fun endStream(): Boolean {
+        if (released || !streamOpen) return false
+        val tail = SpeechChunker.flush(chunkBuffer)
+        chunkBuffer = ""
+        streamOpen = false
+        tail.forEach { text ->
+            chunksSaid++
+            pending.addLast(Piece(text, first = chunksSaid == 1))
+        }
+        return pump() || pending.isNotEmpty() || engineBusy
     }
 
     /** Немедленная тишина (новый ход, уход с экрана, конец диалога). */
     fun stop() {
+        // Очередь и буфер выбрасываются ДО стопа: колбэк движка «кончилось» иначе запустил бы
+        // следующий кусок уже отменённого ответа.
+        pending.clear()
+        resetStream()
+        val waiter = silenceWaiter
+        silenceWaiter = null
+        stopping = true
         runCatching { output.stopSpeaking() }
+        stopping = false
+        engineBusy = false
+        // Ожидавший старт больше не нужен: его кусок выброшен вместе с очередью.
+        waiter?.complete(Unit)
         finishSpeaking()
     }
 
@@ -195,6 +281,159 @@ class LocalVoiceTts(
     fun stopByUser() {
         gate.reset()
         stop()
+    }
+
+    // --- очередь кусков и стоп старого звука -------------------------------------------------
+
+    /**
+     * Куски речи по порядку. Очередь, а не «сказать всё сразу», потому что движок синтезирует
+     * одну реплику за раз; фаза SPEAKING при этом не гаснет между кусками (см. [onEngineSilent]).
+     */
+    private val pending = ArrayDeque<Piece>()
+
+    /** Накопленный, но ещё не отданный в синтез текст текущего потока. */
+    private var chunkBuffer: String = ""
+
+    /** Сколько кусков текущего ответа уже отдано: по нему решается «это первый кусок?». */
+    private var chunksSaid: Int = 0
+
+    /** Поток ответа открыт (ждём ещё текст): между кусками «говорит» не выключаем. */
+    private var streamOpen: Boolean = false
+
+    /** Движок занят нашей репликой: новый кусок либо ждёт, либо требует отмены (см. [cutCurrent]). */
+    private var engineBusy: Boolean = false
+
+    /** Мы сами гасим звук: колбэк движка в этот момент не означает «можно говорить дальше». */
+    private var stopping: Boolean = false
+
+    /** Кто ждёт подтверждённой тишины перед стартом — резолвится в [onEngineSilent]. */
+    private var silenceWaiter: CompletableDeferred<Unit>? = null
+
+    /** Один кусок речи и признак «первый в ответе» (первый задаёт эталон эха в гейте). */
+    private data class Piece(val text: String, val first: Boolean)
+
+    /** Сбросить состояние нарезки: буфер, счётчик кусков, открытость потока, очередь. */
+    private fun resetStream() {
+        chunkBuffer = ""
+        chunksSaid = 0
+        streamOpen = false
+        pending.clear()
+    }
+
+    /**
+     * Отдать в синтез всё, что можно отдать прямо сейчас.
+     *
+     * @return `true` — кусок принят движком или ждёт своей очереди; `false` — говорить нечего.
+     */
+    private fun pump(): Boolean {
+        if (released) return false
+        // Движок занят: кусок остаётся в очереди и стартует из [onEngineSilent].
+        if (engineBusy) return true
+        val piece = pending.removeFirstOrNull() ?: return false
+        return speakPieceNow(piece)
+    }
+
+    /**
+     * Сказать один кусок НЕМЕДЛЕННО (движок свободен).
+     *
+     * Фаза «говорит» включается здесь, на принятом синтезе. Точнее нельзя: события «первый
+     * аудиочанк» у [VoiceOutputController.SpeechEngine] нет — это ограничение движка, а не
+     * недосмотр (см. KDoc класса).
+     */
+    private fun speakPieceNow(piece: Piece): Boolean {
+        if (piece.first) {
+            // Эталон эха — произносимый кусок; дальше он растёт вместе с ответом.
+            gate.onAnswerStarted(nowMs(), route(), aecActive(), piece.text)
+        } else {
+            gate.onAssistantTextUpdated(piece.text)
+        }
+        return when (output.speakNow(piece.text)) {
+            VoiceOutputController.SpeakOutcome.SPOKEN -> {
+                engineBusy = true
+                setSpeaking(true)
+                true
+            }
+
+            VoiceOutputController.SpeakOutcome.NOTHING_TO_SPEAK -> {
+                // Читать нечего (markdown, код, ссылки). Среди чужих кусков это норма: кусок
+                // пропускаем и идём дальше — иначе один блок кода обрывал бы весь ответ.
+                engineBusy = false
+                if (pending.isNotEmpty()) return pump()
+                if (streamOpen) return true
+                resetStream()
+                gate.onAnswerFinished()
+                finishSpeaking()
+                false
+            }
+
+            VoiceOutputController.SpeakOutcome.ENGINE_UNAVAILABLE -> {
+                pending.clear()
+                resetStream()
+                gate.onAnswerFinished()
+                finishSpeaking()
+                publishAvailable(false)
+                false
+            }
+        }
+    }
+
+    /**
+     * Убрать звучащий кусок и ДОЖДАТЬСЯ подтверждения тишины перед новым.
+     *
+     * Почему нельзя просто `stop(); speak()`: стоп-флаг движка живёт ещё мгновение после
+     * `stop()`. На Android офлайн-порт (Piper) освобождает `AudioTrack` в своём потоке записи, и
+     * реплика, отданная сразу, попадает под тот же стоп — первое предложение нового ответа
+     * пропадало. Ждём именно колбэк «звук кончился» ([onEngineSilent]) с жёстким таймаутом-
+     * страховкой, а не паузу-сон: сон и короче реальной отмены (слово всё равно терялось), и
+     * дольше неё (лишняя тишина в каждом ответе).
+     */
+    private fun cutCurrent() {
+        if (!engineBusy) return
+        val waiter = CompletableDeferred<Unit>()
+        silenceWaiter = waiter
+        stopping = true
+        runCatching { output.stopSpeaking() }
+        stopping = false
+        if (!engineBusy) {
+            // Движок подтвердил отмену синхронно (системный TTS, офлайн-порт) — ждать нечего,
+            // и никакой задержки в этом, самом частом, случае не добавляется.
+            if (silenceWaiter === waiter) silenceWaiter = null
+            return
+        }
+        workScope.launch {
+            val confirmed = withTimeoutOrNull(SILENCE_WAIT_MS) { waiter.await() }
+            if (silenceWaiter === waiter) silenceWaiter = null
+            if (released) return@launch
+            // Пока ждали, колбэк мог уже отдать очередь дальше: тогда движок занят новым
+            // куском и трогать его состояние нельзя.
+            // Колбэка не было вовсе — идём дальше своими силами, иначе новый ответ не
+            // зазвучал бы никогда.
+            if (confirmed == null) engineBusy = false
+            pump()
+        }
+    }
+
+    /**
+     * Движок сообщил «реплика кончилась»: дочитал, упал или её остановили мы.
+     *
+     * Здесь же решается, кончился ли ОТВЕТ: пока в очереди есть куски или поток ещё открыт,
+     * фаза SPEAKING не гаснет — иначе кнопка мигала бы на каждой пачке.
+     */
+    private fun onEngineSilent() {
+        engineBusy = false
+        val waiter = silenceWaiter
+        silenceWaiter = null
+        // Подтверждённая тишина: ожидавший старт может отдавать свой кусок.
+        waiter?.complete(Unit)
+        // Отменяли мы сами: следующий кусок отдаст вызывающий (cutCurrent → pump), а не колбэк.
+        if (stopping) return
+        if (pending.isNotEmpty()) {
+            pump()
+            return
+        }
+        // Поток жив, а текста пока нет: ответ ещё не кончился, ждём следующей дельты.
+        if (streamOpen) return
+        finishSpeaking()
     }
 
     /**
@@ -228,6 +467,11 @@ class LocalVoiceTts(
         if (released) return
         released = true
         speaking = false
+        pending.clear()
+        resetStream()
+        // Ожидавший старт не должен пережить освобождение: его куска уже нет.
+        silenceWaiter?.complete(Unit)
+        silenceWaiter = null
         runCatching { output.onDestroy() }
         gate.reset()
         ownedScope?.cancel()
@@ -254,6 +498,8 @@ class LocalVoiceTts(
     private fun finishSpeaking() {
         if (!speaking) return
         speaking = false
+        engineBusy = false
+        resetStream()
         gate.onAnswerFinished()
         runCatching { onSpeakingChanged(false) }
     }
@@ -263,5 +509,14 @@ class LocalVoiceTts(
         if (lastAvailable == value) return
         lastAvailable = value
         runCatching { onAvailableChanged(value) }
+    }
+
+    private companion object {
+        /**
+         * Сколько ждём подтверждения отмены перед стартом нового куска. Это страховка от
+         * «движок не прислал колбэк», а не пауза тишины: обычно подтверждение приходит
+         * синхронно/за миллисекунды, и ожидание заканчивается сразу.
+         */
+        const val SILENCE_WAIT_MS = 400L
     }
 }
