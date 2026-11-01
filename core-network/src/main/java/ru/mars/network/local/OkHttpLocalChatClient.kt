@@ -58,11 +58,33 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
         )
         .lenient()
 
+    /**
+     * Шаг без настроек хода — прежнее поведение: `temperature`/`maxTokens` из профиля.
+     *
+     * Сводится к перегрузке с `settings = null`, чтобы путь сборки тела был ровно один:
+     * две копии «почти одинаковой» сборки JSON расходятся на первой же правке, а тело
+     * запроса — то, что проверяют чужие тесты и чужой сервер.
+     */
     override fun stream(
         profile: LocalProviderProfile,
         apiKey: String,
         messages: List<LocalMessage>,
         tools: List<LocalToolSchema>,
+    ): Flow<LocalChatEvent> = stream(profile, apiKey, messages, tools, null)
+
+    /**
+     * Шаг с параметрами сэмпсинга этого хода.
+     *
+     * `settings == null` — байт в байт прежнее тело: старые вызывающие и сохранённые
+     * профили не должны заметить появления настроек. Если настройки заданы, поля берутся
+     * из них, а значения, оставленные провайдеру, в тело НЕ попадают ([SamplerParams]).
+     */
+    override fun stream(
+        profile: LocalProviderProfile,
+        apiKey: String,
+        messages: List<LocalMessage>,
+        tools: List<LocalToolSchema>,
+        settings: LocalTurnSettings?,
     ): Flow<LocalChatEvent> = flow {
         val url = LocalProviderUrls.chatCompletionsUrl(profile.baseUrl).toHttpUrlOrNull()
         if (url == null) {
@@ -77,7 +99,7 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
             emit(LocalChatEvent.Error(refusal))
             return@flow
         }
-        val payload = buildRequestBody(profile, messages, tools)
+        val payload = buildRequestBody(profile, messages, tools, settings)
 
         var attempts = 0
         var receivedToken = false
@@ -281,10 +303,20 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
 
     // --- тело запроса ---------------------------------------------------------
 
+    /**
+     * Тело `POST /chat/completions`.
+     *
+     * `settings == null` — ровно прежняя сборка (`temperature`/`maxTokens`/`reasoningEffort`
+     * из профиля), чтобы сохранённые профили и чужие тесты тела запроса не менялись.
+     * Настройки хода, если заданы, ПОЛНОСТЬЮ замещают профильные поля: профиль — это
+     * дефолт для всех моделей, и смешивать его с настройками конкретного хода значило бы
+     * отправлять чужую температуру, ровно ту беду, из-за которой эти настройки появились.
+     */
     private fun buildRequestBody(
         profile: LocalProviderProfile,
         messages: List<LocalMessage>,
         tools: List<LocalToolSchema>,
+        settings: LocalTurnSettings?,
     ): String {
         val body = StringBuilder(256 + messages.size * 64 + tools.size * 128)
         body.append('{')
@@ -294,10 +326,16 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
         // и пилюля контекста останется пустой. Провайдер, который поля не знает, его
         // игнорирует, поэтому «лишнее поле» здесь безопаснее «недосланного» (контракт §3, W1 п. 3).
         body.append(",\"stream_options\":{\"include_usage\":true}")
-        profile.temperature?.let { body.append(",\"temperature\":").append(it.toString()) }
-        profile.maxTokens?.let { body.append(",\"max_tokens\":").append(it) }
-        profile.reasoningEffort?.takeIf { it.isNotBlank() }?.let {
-            body.append(",\"reasoning_effort\":").append(JsonStringEncoding.escape(it))
+        if (settings == null) {
+            // Прежний путь, байт в байт: профиль — единственный источник, пока ход не
+            // получил собственные настройки.
+            profile.temperature?.let { body.append(",\"temperature\":").append(it.toString()) }
+            profile.maxTokens?.let { body.append(",\"max_tokens\":").append(it) }
+            profile.reasoningEffort?.takeIf { it.isNotBlank() }?.let {
+                body.append(",\"reasoning_effort\":").append(JsonStringEncoding.escape(it))
+            }
+        } else {
+            appendSamplerFields(body, settings)
         }
 
         body.append(",\"messages\":[")
@@ -318,6 +356,63 @@ class OkHttpLocalChatClient(private val client: OkHttpClient = HttpClients.rest)
         }
         body.append('}')
         return body.toString()
+    }
+
+    /**
+     * Поля сэмпсинга из настроек хода.
+     *
+     * Порядок — как в таблице [SamplerParam]: тело читают глазами в логах и в отладке, и
+     * произвольный порядок превращает сравнение двух запросов в работу. Экранирование и
+     * формат чисел — те же, что у остальных полей: [JsonStringEncoding] и `toString()` у
+     * `Double` (JSON принимает и `1.0`), целые — без дробной части.
+     *
+     * `stop` отправляется массивом строк и только непустым: пустой массив часть
+     * посредников читает как «стоп-последовательностей нет», часть — как ошибку, а
+     * молчание означает ровно то же самое и никого не смущает.
+     */
+    private fun appendSamplerFields(body: StringBuilder, settings: LocalTurnSettings) {
+        appendNumericField(body, SamplerParam.TEMPERATURE, settings.temperature)
+        appendNumericField(body, SamplerParam.TOP_P, settings.topP)
+        appendNumericField(body, SamplerParam.TOP_K, settings.topK?.toDouble())
+        appendNumericField(body, SamplerParam.MIN_P, settings.minP)
+        appendNumericField(body, SamplerParam.PRESENCE_PENALTY, settings.presencePenalty)
+        appendNumericField(body, SamplerParam.FREQUENCY_PENALTY, settings.frequencyPenalty)
+        appendNumericField(body, SamplerParam.REPETITION_PENALTY, settings.repetitionPenalty)
+        appendNumericField(body, SamplerParam.SEED, settings.seed?.toDouble())
+        appendNumericField(body, SamplerParam.MAX_TOKENS, settings.maxTokens?.toDouble())
+
+        if (settings.stop.isNotEmpty()) {
+            body.append(",\"stop\":[")
+            settings.stop.forEachIndexed { index, marker ->
+                if (index > 0) body.append(',')
+                body.append(JsonStringEncoding.escape(marker))
+            }
+            body.append(']')
+        }
+
+        settings.reasoningEffort?.takeIf { it.isNotBlank() }?.let {
+            body.append(",\"reasoning_effort\":").append(JsonStringEncoding.escape(it))
+        }
+    }
+
+    /**
+     * Одно числовое поле — или ничего, если человек его не задавал / оставил дефолтом.
+     *
+     * Значение приводится к границам и шагу ДО сравнения с дефолтом и до записи: иначе
+     * испорченное `temperature: 9` ушло бы как есть и вернуло 400 на весь запрос, а
+     * «0.9999999999» считалось бы заданным значением.
+     */
+    private fun appendNumericField(body: StringBuilder, param: SamplerParam, raw: Double?) {
+        if (raw == null) return
+        val value = SamplerParams.clamp(param, raw)
+        if (SamplerParams.isLeftToProvider(param, value)) return
+        body.append(",\"").append(param.wireName).append("\":")
+        if (param.kind == SamplerKind.INTEGER) {
+            // Целое не должно уехать как `200000.0`: часть посредников такое отвергает.
+            body.append(value.toLong())
+        } else {
+            body.append(value)
+        }
     }
 
     private fun appendMessage(body: StringBuilder, message: LocalMessage) {
