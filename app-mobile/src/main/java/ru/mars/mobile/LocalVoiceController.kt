@@ -87,6 +87,14 @@ class LocalVoiceController(
     private var routes: AndroidAudioRouteMonitor? = null
     private var tts: LocalVoiceTts? = null
 
+    /**
+     * Темп, выбранный до готовности движка (или применённый сейчас).
+     *
+     * Хранится копией, а не в [VoiceProsodyPrefs]: настройки читает экран, а контроллер
+     * обязан быть независим от хранилища — его тесты собирают контроллер без Android.
+     */
+    private var pendingProsody: VoiceProsody? = null
+
     private var loading = false
     private var pendingStart = false
 
@@ -387,6 +395,23 @@ class LocalVoiceController(
         if (tail && state.phase != LocalVoicePhase.SPEAKING) {
             emit(state.copy(phase = LocalVoicePhase.SPEAKING, partial = "", ttsAvailable = true))
         }
+    }
+
+    /**
+     * Применить темп и голос к озвучке.
+     *
+     * Живёт здесь, а не на экране: экран владеет шторкой, а речь — контроллер. Он же
+     * знает, поднят ли движок ([ensureTts]): до первого звука темпа применять некуда,
+     * но и терять его нельзя — значение запоминается в [pendingProsody] и применяется
+     * при создании движка. Иначе человек, выбравший 1.3× до первого ответа, слушал бы
+     * обычный темп и считал настройку сломанной.
+     *
+     * @param prosody темп и голос; `null` — вернуть умолчания.
+     */
+    fun setProsody(prosody: VoiceProsody?) {
+        val value = prosody ?: VoiceProsody()
+        pendingProsody = value
+        runCatching { tts?.setProsody(value) }
     }
 
     /** Озвучить произвольный текст (пункт «Озвучить» у сообщения). */
@@ -797,6 +822,10 @@ class LocalVoiceController(
             onSpeakingChanged = { speaking -> post { onTtsSpeakingChanged(speaking) } },
             onAvailableChanged = { available -> post { emit(state.copy(ttsAvailable = available)) } },
         )
+
+        // Темп, выбранный ДО первого звука: применяется сразу, как только движок
+        // появился. Без этого настройка терялась бы до второго запуска экрана.
+        pendingProsody?.let { saved -> runCatching { created.setProsody(saved) } }
         tts = created
         emit(state.copy(ttsAvailable = created.available))
         return created

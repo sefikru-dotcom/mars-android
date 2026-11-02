@@ -11,13 +11,15 @@ import android.widget.TextView
 
 /**
  * Лист действий над сообщением локального диалога: Копировать, Повторить, Повторить другой
- * моделью, Выбрать текст, Озвучить, Поделиться.
+ * моделью, Изменить, Выбрать текст, Озвучить, Поделиться.
  *
  * Открывается долгим нажатием на сообщение (пузырь пользователя, карточка ассистента).
  * Состав листа — только реально выполнимые пункты: пустое сообщение нечего копировать и
  * шарить, «Повторить» существует лишь для последнего ответа ассистента (повторять середину
  * диалога нечего — ход уже ушёл), «Озвучить» скрыт, когда на устройстве нет движка TTS,
  * а «Повторить другой моделью» — когда список альтернатив пуст.
+ * «Изменить» есть только у своей реплики и только когда ход не идёт — правило живёт в
+ * [LocalChatEditPolicy.canEdit], лист его не пересчитывает.
  * Мёртвых кнопок здесь нет по построению.
  *
  * Стилистика — [MarsDialog] (тот же лист пилюль, что у серверного чата), поэтому лист
@@ -42,6 +44,16 @@ internal object LocalChatActionsSheet {
 
     const val COPY_LABEL = "Копировать"
     const val SELECT_LABEL = "Выбрать текст"
+
+    /**
+     * Правка своей реплики: текст уходит провайдеру заново, ответы после неё — в мусор.
+     *
+     * Отдельный пункт, а не «Повторить с правкой»: это разные намерения. «Повторить»
+     * переспрашивает тот же вопрос (человек ждёт другой ответ на то же), «Изменить» —
+     * исправляет сам вопрос (опечатка, забытое условие), и прежний ответ после этого
+     * недействителен.
+     */
+    const val EDIT_LABEL = "Изменить"
     const val SPEAK_LABEL = "Озвучить"
 
     /** Дописать обрезанный ответ с того места, где модель упёрлась в лимит токенов. */
@@ -83,15 +95,29 @@ internal object LocalChatActionsSheet {
          */
         canContinue: Boolean = false,
         onContinue: () -> Unit = {},
+        /**
+         * Предложить «Изменить»: своя реплика и ход не идёт.
+         *
+         * Решает экран через [LocalChatEditPolicy.canEdit]: лист не пересчитывает ленту
+         * и не знает, где она кончается, — правило обязано жить в одном месте, иначе
+         * лист однажды предложит пункт, который политика отклонит, и нажатие молча
+         * ничего не сделает.
+         */
+        canEdit: Boolean = false,
+        onEdit: () -> Unit = {},
     ) {
         val hasText = text.isNotBlank()
         val retryModels = alternatives(models, currentModel)
-        val actions = ArrayList<Pair<String, () -> Unit>>(7)
+        val actions = ArrayList<Pair<String, () -> Unit>>(8)
         if (hasText) actions += COPY_LABEL to onCopy
         if (canRetry) actions += RETRY_LABEL to onRetry
         if (canRetry && retryModels.isNotEmpty()) {
             actions += RETRY_WITH_LABEL to { showModelChooser(activity, retryModels, onRetryWith) }
         }
+        // Порядок из контракта волны: Копировать → Повторить → Изменить → Выбрать.
+        // «Изменить» стоит перед «Выбрать текст»: обе работают с текстом реплики,
+        // и глаз ищет их рядом, а не через «Озвучить» и «Поделиться».
+        if (canEdit && hasText) actions += EDIT_LABEL to onEdit
         if (hasText) actions += SELECT_LABEL to onSelectText
         if (hasText && canSpeak) actions += SPEAK_LABEL to onSpeak
         if (hasText) actions += SHARE_LABEL to onShare

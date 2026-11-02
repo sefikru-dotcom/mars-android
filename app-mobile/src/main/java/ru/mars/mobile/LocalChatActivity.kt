@@ -136,6 +136,15 @@ class LocalChatActivity : ComponentActivity() {
     private lateinit var reasoningButton: TextView
 
     /** Чип «Параметры»: сэмпсинг текущего диалога. */
+    /**
+     * Чип «Голос» рядом с подписью диалога: выбор голоса и темпа речи.
+     *
+     * Отдельный чип от «Параметров»: там КАК отвечает модель (температура, лимиты),
+     * здесь — как это звучит. Смешать их в одной шторке значило бы каждый раз
+     * вспоминать, в каком из двух списков темп.
+     */
+    private lateinit var voiceProsodyButton: TextView
+
     private lateinit var paramsButton: TextView
 
     /** Голосовой ввод (микрофон → ASR → композер). Инициализируется в [buildView]. */
@@ -200,6 +209,12 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     private lateinit var client: LocalChatClient
+    /** Темп и голос озвучки: живут в настройках приложения, а не в диалоге. */
+    private lateinit var voiceProsodyStore: VoiceProsodyPrefs
+
+    /** Подпись чипа «Голос», когда темп обычный и голос не выбран. */
+    private val DEFAULT_VOICE_CHIP: String = "Голос"
+
     private lateinit var presenter: LocalChatPresenter
     private var deviceTools: List<LocalDeviceTool> = emptyList()
 
@@ -268,6 +283,9 @@ class LocalChatActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Темп и голос — из настроек, до первого звука: иначе первая фраза после
+        // запуска зазвучала бы дефолтом, а человек уже слышал свой выбор вчера.
+        voiceProsodyStore = VoiceProsodyPrefs(this)
         providerStore = LocalProviderPrefsStore(this)
         sessionStore = LocalSessionStore.forContext(this)
         client = LocalChatTransport.clientOrUnavailable()
@@ -596,6 +614,15 @@ class LocalChatActivity : ComponentActivity() {
         // Голос живёт внутри капсулы композера, слева от поля ввода — как в серверном чате.
         // Отдельной строкой под композером кнопка отнимала место у ленты и была неудобна.
         composer.attachVoice(voice.root)
+        // Темп и голос — из настроек, до первого звука: движки держат их глобально и
+        // берут при следующей реплике, поэтому первая же фраза зазвучит как настроено.
+        // Без этого человек слышал бы дефолт после каждого запуска, а свой выбор — только
+        // внутри текущей сессии.
+        runCatching {
+            val saved = voiceProsodyStore.load()
+            voice.setProsody(saved)
+            updateVoiceProsodyChip(saved)
+        }
         return scaffold.root
     }
 
@@ -696,6 +723,12 @@ class LocalChatActivity : ComponentActivity() {
             contentDescription = "Параметры хода: температура, top_p, лимиты"
         }
 
+        // «Голос» — темп и голос озвучки. Стоит рядом с параметрами модели, потому что
+        // человек ищет «как звучит» там же, где «как отвечает».
+        voiceProsodyButton = chip(::openVoiceProsody).apply {
+            contentDescription = "Голос и темп речи"
+        }
+
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -703,6 +736,7 @@ class LocalChatActivity : ComponentActivity() {
             addView(modelButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(reasoningButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(paramsButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+            addView(voiceProsodyButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(wakeChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(memoryChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
         }
@@ -715,6 +749,46 @@ class LocalChatActivity : ComponentActivity() {
      * каталога потолок ответа, и после сброса он обязан вернуться — иначе человек получил
      * бы «провайдер сам» там, где модель честно сообщила предел.
      */
+    /**
+     * Открыть шторку «Голос и темп».
+     *
+     * Темп сохраняется в настройках приложения ([VoiceProsodyPrefs]) и применяется к
+     * движку сразу, ещё до закрытия шторки: человек должен услышать правку на кнопке
+     * «Проверить», а не узнавать о ней в следующем ответе.
+     *
+     * «Проверить» синтезирует короткую фразу тем же путём, что обычная озвучка: через
+     * [voice], то есть с учётом того, какой движок сейчас в работе. Отдельного движка
+     * для проверки нет — иначе проверялся бы не тот голос, который звучит в ответах.
+     */
+    private fun openVoiceProsody() {
+        VoiceProsodySheet.show(
+            activity = this,
+            current = voiceProsodyStore.load(),
+            onApply = { next ->
+                voiceProsodyStore.save(next)
+                if (::voice.isInitialized) voice.setProsody(next)
+                updateVoiceProsodyChip(next)
+            },
+            onPreview = { draft ->
+                if (::voice.isInitialized) {
+                    voice.setProsody(draft)
+                    voice.speakNow(VoiceProsodyPolicy.PREVIEW_TEXT)
+                }
+            },
+        )
+    }
+
+    /**
+     * Подпись чипа «Голос»: текущий темп или «Голос», если настройка обычная.
+     *
+     * Показывается только темп: имя голоса заняло бы всю строку, а человек меняет его
+     * редко и помнит, что выбрал. Темп же правится чаще и сразу слышен.
+     */
+    private fun updateVoiceProsodyChip(prosody: VoiceProsody) {
+        val label = if (prosody.isDefault) DEFAULT_VOICE_CHIP else prosody.speedLabel()
+        if (voiceProsodyButton.text.toString() != label) voiceProsodyButton.text = label
+    }
+
     private fun openTurnSettings() {
         val state = presenter.state.value
         // Модель может быть не выбрана (первый запуск): тогда потолок неизвестен и его
@@ -1466,6 +1540,11 @@ class LocalChatActivity : ComponentActivity() {
             onRetry = ::retryLastTurn,
             onSelectText = { LocalChatActionsSheet.showSelectableText(this, item.text) },
             onSpeak = { speak(item.text) },
+            // Правка своей реплики: инлайн-диалог + перезапрос с этого места.
+            // Правило «можно ли» живёт в политике, а не здесь — иначе оно разъедется
+            // с листом и с тестами (см. LocalChatEditPolicy).
+            canEdit = LocalChatEditPolicy.canEdit(item, presenter.state.value.streaming),
+            onEdit = { startEditMessage(item) },
             // Лист отдаёт действие без аргумента: текст сообщения захватываем здесь,
             // иначе `::share` не подходит по типу (функция с параметром).
             onShare = { share(item.text) },
@@ -1618,6 +1697,54 @@ class LocalChatActivity : ComponentActivity() {
         composer.input.setText(lastUser)
         composer.input.setSelection(lastUser.length)
         send()
+    }
+
+    /**
+     * Правка своей реплики: диалог → обрезка истории → перезапрос.
+     *
+     * Три шага именно в этом порядке, и каждый важен:
+     * 1. [LocalChatEditPolicy.plan] решает, что будет удалено, и даёт человеку честную
+     *    подсказку («будет удалено N сообщений») ДО нажатия. Молча срезать половину
+     *    диалога нельзя — это выглядело бы как потеря истории.
+     * 2. [LocalChatPresenter.truncateFrom] убирает реплику и всё после неё из истории и с
+     *    экрана. Возврат `false` означает, что реплики в истории уже нет — тогда отправка
+     *    не начинается, иначе вопрос ушёл бы дважды.
+     * 3. Только теперь текст уходит провайдеру тем же путём, что и обычная отправка:
+     *    отдельного транспорта для правки нет, иначе правленый ход терял бы вложения,
+     *    инструменты и метрики.
+     *
+     * Своё сообщение НЕ остаётся в ленте до ответа: [send] добавит его заново с новым
+     * текстом. Иначе на экране на миг было бы две версии одного вопроса.
+     */
+    private fun startEditMessage(item: LocalChatItem) {
+        if (presenter.state.value.streaming) return
+        val plan = LocalChatEditPolicy.plan(
+            items = presenter.state.value.items,
+            messageId = item.id,
+            newText = item.text,
+        ) ?: return
+        LocalChatEditSheet.show(
+            activity = this,
+            initialText = item.text,
+            hint = LocalChatEditPolicy.hint(plan),
+        ) { newText ->
+            val fresh = LocalChatEditPolicy.plan(
+                items = presenter.state.value.items,
+                messageId = item.id,
+                newText = newText,
+            )
+            if (fresh == null || fresh.isNoop) {
+                Toast.makeText(this, LocalChatEditPolicy.EMPTY_HINT, Toast.LENGTH_SHORT).show()
+                return@show
+            }
+            // Сколько строк исчезнет, человеку уже сказала подсказка в диалоге.
+            // Второй тост после нажатия — шум поверх того же самого.
+            if (!presenter.truncateFrom(item.id)) return@show
+            // Тот же путь отправки, но служебным параметром: он читает текст из аргумента,
+            // а не из поля ввода. Отправка через композер потребовала бы печатать текст
+            // в поле и очищать его — лишний видимый мигающий шаг.
+            send(internal = newText)
+        }
     }
 
     /**

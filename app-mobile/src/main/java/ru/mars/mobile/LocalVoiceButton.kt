@@ -154,6 +154,15 @@ class LocalVoiceButton(
     /** Озвучить произвольный текст (пункт «Озвучить» у сообщения). */
     fun speakNow(text: String?) = controller.speakNow(text)
 
+    /**
+     * Темп и голос озвучки.
+     *
+     * Прокси к контроллеру, а не отдельное состояние: кнопка — это лицо канала, и
+     * экран, у которого на руках только она, не должен знать, что внутри есть
+     * [LocalVoiceController]. `null` — вернуть умолчания.
+     */
+    fun setProsody(prosody: VoiceProsody?) = controller.setProsody(prosody)
+
     /** Немедленная тишина. */
     fun stopSpeaking() = controller.stopSpeaking()
 

@@ -111,6 +111,9 @@
              внутри него (паритет двухуровневого стека CHAT). adjustResize — чтобы
              композер не уезжал под клавиатуру. -->
         <activity android:name=".LocalSessionsActivity" />
+        <!-- Полноэкранный голосовой режим: орб и одна кнопка, без ленты текста.
+             Запускается из голосовой кнопки локального чата (координатор). -->
+        <activity android:name=".VoiceModeActivity" />
         <activity
             android:name=".LocalChatActivity"
             android:windowSoftInputMode="adjustResize" />

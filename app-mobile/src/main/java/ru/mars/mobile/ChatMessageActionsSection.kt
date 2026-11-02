@@ -38,6 +38,8 @@ internal fun ChatActivity.copyMessage(text: String) {
  * Доступность серверных операций решает [TurnOpsPolicy] — по индексу сообщения,
  * роли и признакам read-only/субагента.
  */
+internal const val EDIT_LABEL: String = "Изменить и отправить заново"
+
 internal fun ChatActivity.showMessageActions(message: ChatMessage, index: Int) {
     val actions = MessageActionPolicy.actionsFor(message.text)
     val turnOps = TurnOpsPolicy.messageOps(
@@ -68,6 +70,17 @@ internal fun ChatActivity.showMessageActions(message: ChatMessage, index: Int) {
                 }
             })
             root.addView(opsStack)
+        }
+        // Правка своей реплики: удалить её и всё после, отправить заново.
+        // Отдельной строкой от серверных операций: это действие человека над ТЕКСТОМ,
+        // а не операция над историей — «Откатить до этого хода» сообщение оставляет,
+        // правка заменяет его новым и переспрашивает модель.
+        if (message.role == "user" && !currentSessionReadOnly && !currentSessionIsSubagent) {
+            val editStack = MarsDialog.pillStack(
+                this,
+                listOf(EDIT_LABEL to { dialog?.dismiss(); editUserMessage(message, index) }),
+            )
+            root.addView(editStack)
         }
         listOf(stack)
     }
@@ -140,6 +153,54 @@ internal fun ChatActivity.runTurnOp(kind: TurnOpKind, sessionId: String, keepCou
             }
         } else {
             (outcome.reloadSessionId ?: sessionId).let { reloadCurrentSession() }
+        }
+    }
+}
+
+/**
+ * Правка своей реплики в серверном чате.
+ *
+ * Почему через truncate плюс отдельная отправка, а не «отредактировать сообщение на
+ * сервере»: ручки правки сообщения у сервера нет — есть только обрезка истории
+ * (`POST /api/session/truncate` с `keep_count`). Поэтому правка выражается честно: срезать
+ * всё до правимой реплики (саму реплику тоже), затем отправить новый текст обычным путём.
+ * Тот же приём, что в локальном чате, — разница лишь в том, кто хранит историю.
+ *
+ * `keepCount` считается по индексу в транскрипте, а не по «числу сообщений после»: индекс
+ * уже учитывает карточки инструментов, которые сервер считает частью истории.
+ *
+ * @param message правимая реплика (нужна для проверки, что она пользовательская);
+ * @param index её позиция в текущем транскрипте.
+ */
+internal fun ChatActivity.editUserMessage(message: ChatMessage, index: Int) {
+    val sessionId = currentSessionId ?: run {
+        Toast.makeText(this, TurnOpsRunner.NO_SESSION, Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (message.role != "user") return
+    val keepCount = TurnOpsPolicy.keepCountForTruncate(index)
+    ChatMessageEditSheet.show(this, message.text, keepCount) { newText ->
+        val credential = store.read() ?: run {
+            Toast.makeText(this, TurnOpsRunner.NO_CREDENTIAL, Toast.LENGTH_SHORT).show()
+            return@show
+        }
+        lifecycleScope.launch {
+            // Сначала обрезка: если она не прошла, новый текст отправлять нельзя —
+            // модель получила бы его поверх старой пары «вопрос-ответ», и правка
+            // выглядела бы как второй вопрос.
+            val outcome = TurnOpsRunner.run(
+                kind = TurnOpKind.TRUNCATE,
+                sessionId = sessionId,
+                credential = credential,
+                baseUrl = ChatActivity.BASE_URL,
+                keepCount = keepCount,
+            )
+            if (!outcome.ok) {
+                Toast.makeText(this@editUserMessage, outcome.message, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            reloadCurrentSession()
+            quickSend(newText)
         }
     }
 }

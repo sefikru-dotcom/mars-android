@@ -95,6 +95,16 @@ class LocalVoiceTts(
 
     private val workScope: CoroutineScope = scope ?: ownedScope!!
 
+    /**
+     * Серверный клиент, если он несёт темп сам ([RepositoryServerTtsClient]).
+     *
+     * Тип проверяется по факту: [ServerTtsClient] — общий порт, и требовать от любого
+     * его реализации метод темпа значило бы ломать тестовые фейки. null — клиент темпа
+     * не принимает, и сервер озвучит прежним темпом.
+     */
+    private val serverClientProsody: RepositoryServerTtsClient? =
+        (serverTts as? RepositoryServerTtsClient)
+
     @Volatile
     private var released: Boolean = false
 
@@ -180,6 +190,27 @@ class LocalVoiceTts(
      *   движок); `false` — звука не будет: пустой текст, нечего читать после фильтрации или
      *   движки уже мертвы.
      */
+    /**
+     * Применить темп и голос к движку.
+     *
+     * Живёт здесь, а не на экране, по одной причине: экран знает только шторку, а тем
+     * надо доехать до ТОГО движка, который реально говорит — Piper, серверный или
+     * системный. Цепочка выбирается в конструкторе, и только этот класс знает, какой
+     * из трёх сейчас в работе.
+     *
+     * Вызов безопасен в любой момент: движки применяют значение к СЛЕДУЮЩЕЙ реплике и
+     * не обрывают текущую (человек двигал настройку, а не просил тишины).
+     *
+     * `null` — вернуть темп по умолчанию (сброс настройки).
+     */
+    fun setProsody(prosody: VoiceProsody?) {
+        val value = prosody ?: VoiceProsody()
+        runCatching { engine.setProsody(value) }
+        // Серверный движок держит темп у себя в запросе: он получает значение отдельно,
+        // потому что обёртка [PreferOfflineEngine] не обязана знать про `api/tts`.
+        runCatching { serverClientProsody?.setProsody(value) }
+    }
+
     fun speak(text: String?): Boolean {
         if (released) return false
         val body = text?.trim().orEmpty()

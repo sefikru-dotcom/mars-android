@@ -3,6 +3,7 @@ package ru.mars.mobile
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import ru.mars.mobile.tts.OfflineTtsBackend
 import ru.mars.mobile.tts.OfflineTtsPort
 import ru.mars.mobile.VoiceOutputController.SpeechEngine
 
@@ -59,6 +60,7 @@ class OfflineTtsSpeechEngine(
 
     override fun speak(text: String): Boolean {
         if (released) return false
+
         val body = text.trim()
         if (body.isEmpty()) return false
         if (!port.isReady()) return false
@@ -76,6 +78,20 @@ class OfflineTtsSpeechEngine(
         if (!speaking) return
         runCatching { port.stop() }
         finishSpeaking()
+    }
+
+    /**
+     * Темп для последующих реплик.
+     *
+     * Порт объявлен как [OfflineTtsPort] — в нём метода темпа нет (контракт писался под
+     * вызовы, а не под настройку), поэтому проверяется фактический тип: боевой бэкенд —
+     * [OfflineTtsBackend]. Проверка по типу, а не расширение интерфейса, нарочно: тестовые
+     * фейки порта не должны обязаны уметь темп, иначе они перестанут компилироваться у
+     * всех, кто их писал. Отказ молча — это особенность, а не сбой.
+     */
+    override fun setProsody(prosody: VoiceProsody) {
+        val backend = port as? OfflineTtsBackend ?: return
+        runCatching { backend.setSpeed(prosody.offlineSpeed()) }
     }
 
     override fun shutdown() {

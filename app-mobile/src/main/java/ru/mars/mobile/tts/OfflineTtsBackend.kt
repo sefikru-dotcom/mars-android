@@ -83,7 +83,8 @@ class OfflineTtsBackend(
     context: Context,
     private val model: OfflineTtsModel = OfflineTtsModel.forApp(context),
     /** Темп: 1.0 — как в модели, >1 быстрее. Уходит в `lengthScale` конфига VITS. */
-    private val speed: Float = 1.0f,
+    private val initialSpeed: Float = 1.0f,
+
     /** Индекс голоса. У irina он один (0); при `numSpeakers() == 1` значение игнорируется. */
     private val speakerId: Int = 0,
     /** «Звук пошёл / звук кончился» для хоста (сервис W2 переключает состояние уведомления). */
@@ -92,6 +93,18 @@ class OfflineTtsBackend(
 ) : OfflineTtsPort {
 
     private val lock = Any()
+
+    /**
+     * Текущий темп. Изменяемое поле, а не только параметр конструктора: человек меняет
+     * скорость посреди диалога, а движок создаётся ОДИН раз на сессию (подготовка
+     * модели — секунды). Пересоздавать его ради «1.15×» значило бы заново читать
+     * 60 МБ с диска.
+     *
+     * `@Volatile`: пишется с главного потока, читается из потока синтеза. Значение
+     * атомарно, но видимость обязана быть.
+     */
+    @Volatile
+    private var speed: Float = initialSpeed
 
     /** Подготовка сериализуется: два параллельных `prepare` не должны качать модель дважды. */
     private val prepareMutex = Mutex()
@@ -191,6 +204,25 @@ class OfflineTtsBackend(
     }
 
     override fun isReady(): Boolean = synchronized(lock) { !released && engine != null }
+
+    /**
+     * Сменить темп для последующих реплик.
+     *
+     * Два пути, и выбор между ними не косметический:
+     *  - движок уже поднят → меняем только поле [speed]. Нативный объект берёт темп
+     *    аргументом КАЖДОГО `generateWithCallback`, поэтому следующая фраза зазвучит
+     *    с новым темпом без пересоздания модели;
+     *  - движок ещё не поднят → значение сгорит в конфиге при [prepare] (`lengthScale`
+     *    считается из него). Это не двойная запись, а единственный способ не потерять
+     *    настройку, выставленную до первого синтеза.
+     *
+     * Текущая реплика НЕ обрывается: человек менял настройку, а не просил тишины.
+     * Значение вне границ зажимается — native на `lengthScale <= 0` даёт мусор, а не ошибку.
+     */
+    fun setSpeed(value: Float) {
+        if (value.isNaN()) return
+        speed = value.coerceIn(MIN_SPEED, MAX_SPEED)
+    }
 
     override fun release() {
         val utterance: Utterance?

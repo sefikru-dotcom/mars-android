@@ -119,6 +119,21 @@ class VoiceSegmenter(
     /** Хвост непарного байта: граница чанка не должна рвать сэмпл. */
     private var pendingByte: Byte? = null
 
+    /**
+     * RMS последнего ЧАНКА РЕЧИ (выше порога) и среднее по плато.
+     *
+     * Нужно смысловому детектору конца ([EndpointPolicy]): «голос просел» — это падение
+     * последнего ЗВУЧНОГО чанка относительно собственного плато человека, а не тишина после
+     * него. Сравнение с тишиной ничего бы не дало: она всегда ниже порога, и правило
+     * срабатывало бы на любой паузе.
+     *
+     * Плато — скользящее среднее по последним [PLATEAU_CHUNKS] звучаым чанкам: интонация
+     * падает за 300–400 мс, и среднее за более длинное окно размыло бы как раз тот
+     * перепад, который ищем.
+     */
+    private var lastVoicedRms: Int = 0
+    private val plateauRms = ArrayDeque<Int>()
+
     /** Сырой pre-roll (звук ДО подтверждённого начала речи). */
     private val preRoll = ArrayDeque<Buffered>()
 
@@ -200,6 +215,8 @@ class VoiceSegmenter(
         if (loud) {
             speechSamples += audio.size / BYTES_PER_SAMPLE
             silentSinceMs = null
+            // Плато обновляется только речью: тишина не должна усредняться в «уровень человека».
+            rememberVoiced(rms.toInt())
         } else if (silentSinceMs == null) {
             silentSinceMs = nowMs
         }
@@ -218,9 +235,19 @@ class VoiceSegmenter(
         }
 
         val silenceSince = silentSinceMs
-        if (silenceSince != null && nowMs - silenceSince >= hangoverMs) {
-            val closed = takeSegment()
-            return closed ?: Event.None
+        if (silenceSince != null) {
+            // Решение о конце реплики — по смысловой политике, а не по одному таймеру:
+            // тишина плюс падение уровня закрывают фразу раньше, а «оборванная» тишина
+            // без падения держится до жёсткого предела. Текст ASR сегментеру недоступен,
+            // поэтому lastWords пуст и работают RMS-ветки — честное «знаю только звук».
+            val decision = EndpointPolicy.decide(
+                features = endpointFeatures(nowMs),
+                hangoverMs = hangoverMs,
+            )
+            if (decision == EndpointDecision.END_UTTERANCE) {
+                val closed = takeSegment()
+                return closed ?: Event.None
+            }
         }
         return Event.None
     }
@@ -250,6 +277,8 @@ class VoiceSegmenter(
         silentSinceMs = null
         sessionStartMs = null
         pendingByte = null
+        lastVoicedRms = 0
+        plateauRms.clear()
         preRoll.clear()
         preRollHeld = 0
         preRollSpeechSamples = 0
@@ -258,6 +287,49 @@ class VoiceSegmenter(
     }
 
     // --- внутреннее ---------------------------------------------------------------------------
+
+    /**
+     * Запомнить уровень ЗВУЧНОГО чанка и обновить плато.
+     *
+     * Плато ограничено [PLATEAU_CHUNKS] последними значениями — не «всей репликой»: человек,
+     * говоривший громко минуту назад и уронивший голос сейчас, должен получить конец фразы
+     * по СЕГОДНЯШНЕМУ уровню, а не по среднему за минуту.
+     */
+    private fun rememberVoiced(rms: Int) {
+        lastVoicedRms = rms
+        plateauRms.addLast(rms)
+        while (plateauRms.size > PLATEAU_CHUNKS) plateauRms.removeFirst()
+    }
+
+    /** Средний уровень плато; 0 — речи ещё не было (сравнивать не с чем). */
+    private val plateauAverageRms: Int
+        get() = if (plateauRms.isEmpty()) 0 else plateauRms.sum() / plateauRms.size
+
+    /**
+     * Признаки хвоста для смыслового детектора конца ([EndpointPolicy]).
+     *
+     * Зачем этот метод, а не разбор `Event.Segment`: сегмент отдаётся уже ПОСЛЕ решения о
+     * конце фразы, то есть спросить «а не рано ли» можно только до него. Все числа —
+     * внутренние оценки сегментера (RMS последнего звука, плато, текущая тишина), поэтому
+     * решение опирается на то же, чем живёт сам захват, а не на второй набор порогов.
+     *
+     * [lastWords] сюда не входит: текста у сегментера нет (он видит только звук). Текст
+     * подставляет вызывающий слой, когда потоковый ASR уже что-то распознал.
+     *
+     * @param nowMs монотонное время вызова; тишина считается от последнего звучащего чанка,
+     *   время которого сегментер помнит сам.
+     */
+    fun endpointFeatures(nowMs: Long, lastWords: String = ""): EndpointFeatures {
+        val silenceSince = silentSinceMs
+        val silence = if (silenceSince == null || segment == null) 0L else (nowMs - silenceSince).coerceAtLeast(0L)
+        return EndpointFeatures(
+            silenceMs = silence,
+            lastSpeechRms = lastVoicedRms,
+            averageSpeechRms = plateauAverageRms,
+            lastWords = lastWords,
+        )
+    }
+
 
     /**
      * Отдать текущий сегмент, если в нём достаточно РЕЧИ (а не тишины). Слишком короткий
@@ -375,6 +447,14 @@ class VoiceSegmenter(
 
         /** Окно оценки шумового пола: 50 чанков по 100 мс = 5 с. */
         const val NOISE_WINDOW_CHUNKS = 50
+
+        /**
+         * Окно плато уровня речи: 4 чанка по 100 мс = 400 мс.
+         *
+         * Короче — и плато скачет вместе с каждым слогом, длиннее — и перепад интонации
+         * на конце фразы растворяется в среднем. 400 мс — примерно одна синтагма.
+         */
+        const val PLATEAU_CHUNKS = 4
 
         /** Порог = фон × 3: гул заметно ниже речи, но и не «дышит» на паузах. */
         const val NOISE_FLOOR_FACTOR = 3.0

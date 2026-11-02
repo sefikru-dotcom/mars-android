@@ -244,6 +244,19 @@ class RepositoryServerTtsClient(
     private val baseUrl: String,
     private val credentialProvider: () -> ConsumedDeviceCredential?,
     private val selector: SpeechVoiceProfileSelector? = SpeechVoiceProfileSelector(),
+    /**
+     * Темп и высота, выбранные человеком. `null` — «как в вебе»: `rate`/`pitch` не
+     * отправляем вовсе, сервер берёт свои дефолты.
+     *
+     * Живёт здесь, а НЕ в [ServerTtsVoiceProfile], потому что темп — не свойство голоса:
+     * Svetlana с ускорением 1.15× — тот же голос, а не второй профиль. Положив темп в
+     * профиль, мы получили бы по профилю на каждую ступень темпа и сломали бы политику
+     * понижения — она знает только «этот голос работает / не работает».
+     *
+     * `@Volatile`: ставится с главного потока из шторки, читается из корутины синтеза.
+     */
+    @Volatile
+    private var prosody: VoiceProsody? = null,
     private val transport: ServerTtsTransport = ServerTtsTransport { url, credential, request ->
         ServerTtsRepository().synthesize(url, credential, request)
     },
@@ -320,12 +333,39 @@ class RepositoryServerTtsClient(
         credential: ConsumedDeviceCredential,
         profile: ServerTtsVoiceProfile?,
     ): ServerTtsResult = try {
-        transport.synthesize(baseUrl, credential, ServerTtsSpeechRequest.of(text, profile))
+        transport.synthesize(baseUrl, credential, withProsody(ServerTtsSpeechRequest.of(text, profile)))
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Exception) {
         // Репозиторий и сам не бросает; страховка — фолбэк вместо падения.
         ServerTtsResult.Unavailable("transport")
+    }
+
+    /**
+     * Наложить выбранный темп на запрос.
+     *
+     * Темп человека ПЕРЕБИВАЕТ темп профиля: профиль несёт «эталонный» темп голоса
+     * (`+10%` у Svetlana), а человек в шторке двигает его от обычного. Если бы темп
+     * профиля оставался, ползунок 1.0× звучал бы как 1.1×, и шторка врала бы на первом
+     * же шаге. Обратное тоже неверно (темп человека только при явном выборе) — поэтому
+     * `null` в [VoiceProsody] не перебивает ничего.
+     */
+    private fun withProsody(request: ServerTtsSpeechRequest): ServerTtsSpeechRequest {
+        val chosen = prosody ?: return request
+        return request.copy(
+            rate = chosen.serverRate() ?: request.rate,
+            pitch = chosen.serverPitch() ?: request.pitch,
+        )
+    }
+
+    /**
+     * Выбранный человеком темп: применяется к СЛЕДУЮЩЕЙ реплике.
+     *
+     * Текущая фраза не обрывается: сервер синтезирует её уже отправленной, и рвать звук
+     * ради нового значения значило бы наказать человека за настройку.
+     */
+    fun setProsody(value: VoiceProsody) {
+        prosody = value
     }
 
     companion object {
