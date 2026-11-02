@@ -33,6 +33,24 @@ class PreferOfflineEngine(
         return runCatching { fallback.speak(body) }.getOrDefault(false)
     }
 
+    /**
+     * Темп и голос — в ОБА движка, а не только в офлайн.
+     *
+     * Без этого метода обёртка молча съедала настройку: [SpeechEngine.setProsody] имеет
+     * тело по умолчанию, поэтому вызов от хоста доходил до обёртки и останавливался —
+     * ни Piper, ни резерв не меняли темп. Симптом на устройстве выглядел бы как
+     * «ползунок ни на что не влияет».
+     *
+     * Порядок и отсутствие проверок: движок, который темп не поддерживает, просто
+     * проигнорирует вызов (у каждого свой `runCatching`). Узнавать, кто из двух сейчас
+     * в работе, не нужно и вредно — при следующей реплике выбор может смениться, и
+     * второй движок должен быть уже настроен.
+     */
+    override fun setProsody(prosody: VoiceProsody) {
+        runCatching { offline.setProsody(prosody) }
+        runCatching { fallback.setProsody(prosody) }
+    }
+
     override fun stop() {
         runCatching { offline.stop() }
         runCatching { fallback.stop() }

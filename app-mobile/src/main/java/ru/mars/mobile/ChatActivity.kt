@@ -213,6 +213,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var voiceOutput: VoiceOutputController
     /** Серверный TTS (POST /api/tts) с фолбэком на [speechEngine] — движок контроллера. */
     internal lateinit var serverTtsEngine: ServerTtsSpeechEngine
+
+    /**
+     * Темп речи серверного чата.
+     *
+     * Отдельное поле от настроек: клиенты синтеза читают его лямбдой на каждую реплику
+     * ([ChatInitSection]), поэтому менять значение можно в любой момент — пересоздавать
+     * клиентов не нужно.
+     */
+    internal var voiceProsody: VoiceProsody = VoiceProsody()
     internal lateinit var serverTtsPlayback: AndroidServerTtsPlayback
     /**
      * Потоковая озвучка: дельты ответа → фразы → звук, не дожидаясь конца хода. Живёт

@@ -118,6 +118,19 @@ class VoiceOutputController(
     }
 
     /** Platform engine init result (async). `false` disables all output gracefully. */
+    /**
+     * Применить темп и высоту к движку: единственный вход для хоста.
+     *
+     * Зачем прокси, а не прямой вызов движка: у хоста на руках только контроллер, а
+     * движков внутри цепочки три (Piper → сервер → системный). Если бы экран выбирал
+     * движок сам, он повторил бы ту же логику выбора и однажды разошёлся бы с ней.
+     *
+     * Неудача молчит: движок, не поддерживающий темп, не должен ломать озвучку.
+     */
+    fun setProsody(prosody: VoiceProsody) {
+        runCatching { engine.setProsody(prosody) }
+    }
+
     fun onEngineReady(available: Boolean) {
         engineAvailable = available
         if (!available) speakNextAnswer = false

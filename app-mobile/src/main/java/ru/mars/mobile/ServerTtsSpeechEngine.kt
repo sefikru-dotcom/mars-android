@@ -180,6 +180,18 @@ class ServerTtsSpeechEngine(
         return true
     }
 
+    /**
+     * Темп и высота: сервер получает их в теле запроса, а системный резерв — вызовом.
+     *
+     * Две разные дороги, и обе нужны: у `api/tts` темп едет полем запроса (его подставляет
+     * [RepositoryServerTtsClient]), а платформенный TTS меняет темп только через
+     * `setSpeechRate`. Если пробросить вызов лишь в одну сторону, человек услышит свой
+     * темп ровно до первого отказа сервера, а дальше — прежний.
+     */
+    override fun setProsody(prosody: VoiceProsody) {
+        runCatching { fallback.setProsody(prosody) }
+    }
+
     /** Тишина: отменяет серверную попытку и глушит оба канала. */
     override fun stop() {
         attempt?.cancel()
@@ -244,6 +256,18 @@ class RepositoryServerTtsClient(
     private val baseUrl: String,
     private val credentialProvider: () -> ConsumedDeviceCredential?,
     private val selector: SpeechVoiceProfileSelector? = SpeechVoiceProfileSelector(),
+    /**
+     * Источник темпа и голоса для КАЖДОЙ реплики.
+     *
+     * Лямбда, а не значение: человек меняет темп в шторке во время диалога, и клиент
+     * обязан видеть новое значение на следующей фразе. Передавать сюда снимок значило
+     * бы применять темп только после пересоздания клиента — то есть никогда.
+     *
+     * `null` — клиент создан без источника (тесты контракта, старая проводка): работает
+     * ровно как раньше, темп берётся из профиля голоса. Это не дыра, а обратная
+     * совместимость: темп появился позже самого клиента.
+     */
+    private val prosodyProvider: (() -> VoiceProsody)? = null,
     /**
      * Темп и высота, выбранные человеком. `null` — «как в вебе»: `rate`/`pitch` не
      * отправляем вовсе, сервер берёт свои дефолты.
@@ -333,7 +357,8 @@ class RepositoryServerTtsClient(
         credential: ConsumedDeviceCredential,
         profile: ServerTtsVoiceProfile?,
     ): ServerTtsResult = try {
-        transport.synthesize(baseUrl, credential, withProsody(ServerTtsSpeechRequest.of(text, profile)))
+        val base = ServerTtsSpeechRequest.of(text, profile)
+        transport.synthesize(baseUrl, credential, withProsody(base, prosodyProvider?.invoke()))
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Exception) {
@@ -350,11 +375,14 @@ class RepositoryServerTtsClient(
      * же шаге. Обратное тоже неверно (темп человека только при явном выборе) — поэтому
      * `null` в [VoiceProsody] не перебивает ничего.
      */
-    private fun withProsody(request: ServerTtsSpeechRequest): ServerTtsSpeechRequest {
-        val chosen = prosody ?: return request
+    private fun withProsody(
+        request: ServerTtsSpeechRequest,
+        chosen: VoiceProsody? = null,
+    ): ServerTtsSpeechRequest {
+        val effective = chosen ?: this.prosody ?: return request
         return request.copy(
-            rate = chosen.serverRate() ?: request.rate,
-            pitch = chosen.serverPitch() ?: request.pitch,
+            rate = effective.serverRate() ?: request.rate,
+            pitch = effective.serverPitch() ?: request.pitch,
         )
     }
 

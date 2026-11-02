@@ -96,14 +96,16 @@ class LocalVoiceTts(
     private val workScope: CoroutineScope = scope ?: ownedScope!!
 
     /**
-     * Серверный клиент, если он несёт темп сам ([RepositoryServerTtsClient]).
+     * Серверный клиент — типизированный, только ради темпа.
      *
-     * Тип проверяется по факту: [ServerTtsClient] — общий порт, и требовать от любого
-     * его реализации метод темпа значило бы ломать тестовые фейки. null — клиент темпа
-     * не принимает, и сервер озвучит прежним темпом.
+     * Поле объявлено как [RepositoryServerTtsClient], а не как общий [ServerTtsClient],
+     * потому что темп живёт у него (`setProsody`), а не в порту: порт принимает только
+     * текст, и требовать от любого его реализации метод темпа значило бы ломать фейки.
+     * `as?` не нужен: боевой путь собирает именно этот класс, а тестовый фейк просто не
+     * попадёт в поле — он передаётся в параметр [serverTts].
      */
     private val serverClientProsody: RepositoryServerTtsClient? =
-        (serverTts as? RepositoryServerTtsClient)
+        serverTts as? RepositoryServerTtsClient
 
     @Volatile
     private var released: Boolean = false

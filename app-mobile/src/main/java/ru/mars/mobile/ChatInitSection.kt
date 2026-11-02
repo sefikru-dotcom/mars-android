@@ -194,6 +194,10 @@ internal fun ChatActivity.initializeVoiceStack() {
                 baseUrl = ChatActivity.BASE_URL,
                 credentialProvider = { store.read() },
                 selector = voiceSelector,
+                // Темп берётся на КАЖДУЮ реплику: человек меняет его в шторке посреди
+                // диалога, и снимок, сделанный при сборке клиента, применился бы только
+                // после перезапуска экрана.
+                prosodyProvider = { voiceProsody },
             ),
             playback = serverTtsPlayback,
             scope = lifecycleScope,
@@ -215,6 +219,10 @@ internal fun ChatActivity.initializeVoiceStack() {
                 baseUrl = ChatActivity.BASE_URL,
                 credentialProvider = { store.read() },
                 selector = voiceSelector,
+                // Темп берётся на КАЖДУЮ реплику: человек меняет его в шторке посреди
+                // диалога, и снимок, сделанный при сборке клиента, применился бы только
+                // после перезапуска экрана.
+                prosodyProvider = { voiceProsody },
             ),
             scope = lifecycleScope,
             onFirstAudio = { runOnUiThread { onStreamSpeechStarted() } },

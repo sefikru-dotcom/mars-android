@@ -212,6 +212,15 @@ class LocalChatActivity : ComponentActivity() {
     /** Темп и голос озвучки: живут в настройках приложения, а не в диалоге. */
     private lateinit var voiceProsodyStore: VoiceProsodyPrefs
 
+    /**
+     * Текущий темп — одна копия на экран.
+     *
+     * Хранится здесь, а не только в настройках: шторка меняет значение чаще, чем пишет
+     * на диск, а применить его надо и к движку, и к подписи чипа. Одно поле — один
+     * источник правды, иначе чип показывал бы одно, а звучало другое.
+     */
+    private var voiceProsody: VoiceProsody = VoiceProsody()
+
     /** Подпись чипа «Голос», когда темп обычный и голос не выбран. */
     private val DEFAULT_VOICE_CHIP: String = "Голос"
 
@@ -620,6 +629,7 @@ class LocalChatActivity : ComponentActivity() {
         // внутри текущей сессии.
         runCatching {
             val saved = voiceProsodyStore.load()
+            voiceProsody = saved
             voice.setProsody(saved)
             updateVoiceProsodyChip(saved)
         }
@@ -765,6 +775,7 @@ class LocalChatActivity : ComponentActivity() {
             activity = this,
             current = voiceProsodyStore.load(),
             onApply = { next ->
+                voiceProsody = next
                 voiceProsodyStore.save(next)
                 if (::voice.isInitialized) voice.setProsody(next)
                 updateVoiceProsodyChip(next)
