@@ -119,6 +119,19 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
             echoPendingOfflineMessages()
             initialRestoreDone = true
             flushOfflineQueue()
+            // Ответ из шторки, ждавший этот диалог: поле ввода и черновики уже
+            // восстановлены, read-only известен — теперь можно отправлять.
+            pendingPushReply?.let { queued ->
+                pendingPushReply = null
+                if (PushReplyPolicy.canReply(currentSessionId, currentSessionReadOnly, currentSessionIsSubagent)) {
+                    input.setText(queued)
+                    input.setSelection(queued.length)
+                    sendMessage()
+                } else {
+                    explicitStatus = PushReplyPolicy.failureNotice("сессия только для чтения")
+                }
+                setStatus()
+            }
         } else if (detail == null && sessionNavigation.isCurrent(token)) {
             showOfflineSessionCopy(sessionId)
         }

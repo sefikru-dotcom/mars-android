@@ -130,6 +130,33 @@ class LocalChatActivity : ComponentActivity() {
     private lateinit var sessionStore: LocalSessionStore
 
     private lateinit var scaffold: SectionScaffold.Parts
+
+    /**
+     * Полоска «Запомнил: …» под лентой.
+     *
+     * Создаётся лениво, в [buildView], и живёт до конца экрана: подсказка появляется
+     * считанные разы за диалог, поэтому её место в памяти дешевле, чем пересоздание
+     * вьюхи посреди ленты на каждое сохранение факта.
+     */
+    private var memoryNoticeView: MemoryNoticeView? = null
+
+    /** Снятие подсказки по сроку: перезаписывается новым фактом, снимается в onDestroy. */
+    private var memoryNoticeHide: Runnable? = null
+
+    /** Что показано сейчас: по нему отличаем новую запись от повторного рендера. */
+    private var lastMemoryNotice: MemoryNotice? = null
+
+    /**
+     * Включённый перевод: с какого языка на какой. null — обычный разговор.
+     *
+     * Живёт в экране, а не в слое: направление подставляется в системный промпт каждого
+     * хода, то есть это свойство разговора, а не оформления. Слой только показывает его.
+     *
+     * Хранится в памяти сессии, а не в настройках: перевод — это режим на «сейчас»
+     * (перевести один разговор), а не постоянный выбор. Иначе человек, включив однажды
+     * перевод для поездки, получил бы его же в обычном разговоре через неделю.
+     */
+    private var translateDirection: TranslateDirection? = null
     private lateinit var transcript: LocalChatTranscript
     private lateinit var composer: LocalChatComposerBar
     private lateinit var subtitle: TextView
@@ -423,6 +450,10 @@ class LocalChatActivity : ComponentActivity() {
             turnScope.cancel()
         }
         turn = null
+        // Отложенное снятие подсказки памяти: вьюха умирает вместе с экраном, и Runnable,
+        // оставшийся в очереди корня, держал бы её в памяти до конца процесса.
+        memoryNoticeHide?.let { scaffold.root.removeCallbacks(it) }
+        memoryNoticeHide = null
         if (::voice.isInitialized) voice.release()
         // Офлайн-синтез держит нативный движок и AudioTrack: без release() они
         // переживут экран и продолжат занимать память с аудио-фокусом. Но пока идёт
@@ -593,8 +624,14 @@ class LocalChatActivity : ComponentActivity() {
         """.trimIndent()
         // Правила уходят всегда, даже когда памяти и профиля ещё нет: иначе на вопрос
         // «какая ты модель» модель осталась бы без разрешения называть себя.
-        if (parts.isEmpty()) return rules
-        return rules + "\n\n" + parts.joinToString("\n\n")
+        val base = if (parts.isEmpty()) rules else rules + "\n\n" + parts.joinToString("\n\n")
+        // Перевод — первым блоком, ДО правил Марса: инструкция «переведи и верни только
+        // перевод» обязана перебивать «отвечай по-русски, коротко и по делу», иначе
+        // модель ответит по-русски о переводе, а не переводом.
+        val translation = translateDirection
+            ?.let { TranslatePolicy.promptOrNull(it) }
+            ?.takeIf { it.isNotBlank() }
+        return if (translation == null) base else translation + "\n\n" + base
     }
 
     private fun buildView(): View {
@@ -609,6 +646,14 @@ class LocalChatActivity : ComponentActivity() {
         scaffold.content.addView(
             headerRow(),
             LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
+        )
+
+        // «Запомнил: …» — над лентой, сразу под шапкой: факт относится к диалогу в целом,
+        // а не к последнему сообщению, и в ленте он занял бы место ответа.
+        memoryNoticeView = MemoryNoticeView(this)
+        scaffold.content.addView(
+            memoryNoticeView!!.root,
+            LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(6) },
         )
 
         transcript = LocalChatTranscript(
@@ -839,6 +884,7 @@ class LocalChatActivity : ComponentActivity() {
             override fun onMicTap() = voice.controller.toggle()
             override fun onStopSpeech() = voice.stopSpeaking()
             override fun onRetry() = retryLastTurn()
+            override fun onPickDirection() = pickTranslateDirection()
             override fun onClose() {
                 // Уход из режима не должен оставлять открытый микрофон: иначе человек
                 // вернулся в чат, а его продолжают слушать.
@@ -846,7 +892,37 @@ class LocalChatActivity : ComponentActivity() {
             }
         }
         voiceMode.show(scaffold.root as android.view.ViewGroup)
+        voiceMode.renderDirection(translateDirection)
         voiceMode.render(VoiceModeState.from(voice.controller.state()))
+    }
+
+    /**
+     * Выбор направления перевода из голосового режима.
+     *
+     * Исходное значение — текущее направление или «с русского на английский»: лист не
+     * открывается с пустым выбором. Выбранное направление сразу уходит в слой — человек
+     * видит включённый режим, ещё не сказав ни слова.
+     *
+     * «Выключить» — отдельное нажатие по подписи уже включённого перевода: шторка не
+     * нужна для того, чтобы вернуться к обычному разговору.
+     */
+    private fun pickTranslateDirection() {
+        val current = translateDirection
+        if (current != null) {
+            // Второй тап по включённому переводу выключает его: это быстрее, чем искать
+            // «выкл» в шторке, и не требует лишнего экрана на ходу.
+            translateDirection = null
+            if (::voiceMode.isInitialized) voiceMode.renderDirection(null)
+            return
+        }
+        TranslateSheet.show(
+            activity = this,
+            current = TranslatePolicy.defaultDirection(),
+            onApply = { direction ->
+                translateDirection = direction
+                if (::voiceMode.isInitialized) voiceMode.renderDirection(direction)
+            },
+        )
     }
 
     /**
@@ -1028,11 +1104,48 @@ class LocalChatActivity : ComponentActivity() {
         }
         wasStreaming = state.streaming
 
+        renderMemoryNotice(state.memoryNotice)
+
         val notice = state.error ?: state.notice
         scaffold.statusLine.apply {
             text = notice.orEmpty()
             visibility = if (notice == null) View.GONE else View.VISIBLE
         }
+    }
+
+    /**
+     * Показать «Запомнил: …» и убрать его по сроку.
+     *
+     * Срок держит экран, а не вьюха: время снимается одним [Runnable] на экран, поэтому
+     * новая запись отменяет снятие предыдущей. Иначе таймер старого факта погасил бы
+     * новый — человек не увидел бы второго «Запомнил» вовсе.
+     *
+     * Повтор того же факта не перезапускает анимацию и не мигает: сравниваем ссылку —
+     * состояние публикует новый объект только на новую запись.
+     */
+    private fun renderMemoryNotice(notice: MemoryNotice?) {
+        val view = memoryNoticeView ?: return
+        if (notice == null) {
+            memoryNoticeHide?.let { scaffold.root.removeCallbacks(it) }
+            memoryNoticeHide = null
+            view.hide()
+            return
+        }
+        if (notice === lastMemoryNotice) return
+        lastMemoryNotice = notice
+        // Просроченный факт показывать нечего: он пришёл из восстановленного состояния.
+        if (MemoryNoticePolicy.isExpired(notice, System.currentTimeMillis())) {
+            view.hide()
+            return
+        }
+        memoryNoticeHide?.let { scaffold.root.removeCallbacks(it) }
+        view.show(notice)
+        val hide = Runnable {
+            view.hide()
+            memoryNoticeHide = null
+        }
+        memoryNoticeHide = hide
+        scaffold.root.postDelayed(hide, MemoryNoticePolicy.LIFETIME_MS)
     }
 
     /** Клик единственной кнопки композера: во время хода — стоп, иначе отправка. */
@@ -1667,6 +1780,11 @@ class LocalChatActivity : ComponentActivity() {
             // Пересборка в файл: провайдер умеет только текст, поэтому DOCX/XLSX/TXT
             // собираются здесь, на телефоне, и отдаются в системное «Поделиться».
             onSaveFile = { chooseFileFormat(item.text) },
+            // «Открыть» — панель для ответа, который не помещается в ленту целиком.
+            // Решает политика: она же задаёт формат сохранения по содержимому
+            // (таблица → XLSX, листинг → TXT, длинный текст → DOCX).
+            canOpenAsArtifact = canOpenAsArtifact(item),
+            onOpenAsArtifact = { openArtifact(item.text) },
             // «Продолжить» — только честная обрезка по лимиту токенов у последнего ответа.
             // Правило живёт в LocalContinuePolicy, здесь только вопрос «предлагать ли».
             canContinue = LocalChatActions.canContinue(item, isLastAssistant) &&
@@ -1695,6 +1813,39 @@ class LocalChatActivity : ComponentActivity() {
      * Модель возвращает текст — в файл его превращает [DocumentBuilder] на самом телефоне:
      * сервер Марса в этом не участвует. Для таблицы текст разбирается на строки и ячейки.
      */
+    /**
+     * Открывать ли панель артефакта для этой строки.
+     *
+     * Только ответ ассистента и только цельный текст: карточка инструмента и своя реплика
+     * в панели не нужны — там нечего сохранять в файл, а открывать их отдельно значило бы
+     * предложить пункт, который ничего не добавляет к «Копировать».
+     */
+    private fun canOpenAsArtifact(item: LocalChatItem): Boolean {
+        if (item.role != LocalRole.ASSISTANT || item.tool != null) return false
+        if (item.streaming) return false
+        return ArtifactPolicy.decide(item.text).isArtifact
+    }
+
+    /**
+     * Панель артефакта: текст целиком, подпись «что это», сохранение в предложенном формате.
+     *
+     * Формат предлагает политика по содержимому, но кнопка одна — «Сохранить XLSX».
+     * Три кнопки форматов заставляли бы выбирать между DOCX и XLSX там, где выбор уже
+     * сделан по содержимому; кому нужен другой формат, у того есть лист действий.
+     */
+    private fun openArtifact(text: String) {
+        val decision = ArtifactPolicy.decide(text)
+        if (!decision.isArtifact) return
+        ArtifactSheet.show(
+            activity = this,
+            decision = decision,
+            text = text,
+            onSave = { format -> writeResponseFile(text, format.name) },
+            onCopy = { copyToClipboard(text) },
+            onShare = { share(text) },
+        )
+    }
+
     private fun chooseFileFormat(text: String) {
         val body = text.trim()
         if (body.isEmpty()) return
@@ -1741,8 +1892,11 @@ class LocalChatActivity : ComponentActivity() {
     private fun writeResponseFile(text: String, format: String) {
         val base = "mars-ответ-" + SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(Date())
         val (suffix, bytes) = when (format) {
+            // Строки берём ТОЛЬКО из таблицы: rowsFromText тянет в Excel весь ответ —
+            // прозу строками из одной ячейки и заборы ``` как обычный текст. Если таблицы
+            // в ответе нет, весь текст кладём одной ячейкой: пустой книги быть не должно.
             "XLSX" -> "xlsx" to DocumentBuilder.buildXlsx(
-                DocumentBuilder.rowsFromText(text).ifEmpty { listOf(listOf(text)) },
+                ArtifactPolicy.tableRows(text).ifEmpty { listOf(listOf(text.trim())) },
             )
             "DOCX" -> "docx" to DocumentBuilder.buildDocx(text)
             else -> "txt" to DocumentBuilder.buildTxt(text)

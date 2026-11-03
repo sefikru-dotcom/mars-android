@@ -230,6 +230,17 @@ object TranslatePolicy {
         "${direction.from.label} → ${direction.to.label}"
 
     /**
+     * Короткая подпись для тесного места: «Рус → Англ».
+     *
+     * Три буквы, а не две: «Ру → Анг» читается как обрезанное слово, а не как код языка.
+     * Полная подпись не помещается в шапку голосового слоя рядом с крестиком, и человек
+     * видел бы обрезанное «Русский → Ан…», то есть не знал бы второго языка.
+     */
+    fun shortLabel(direction: TranslateDirection): String =
+        "${direction.from.label.take(3).trimEnd('.').replaceFirstChar { it.uppercase() }} → " +
+            direction.to.label.take(3).replaceFirstChar { it.uppercase() }
+
+    /**
      * Язык по тегу BCP-47 (`ru`, `EN`, ` en `).
      *
      * Тег приходит из трёх источников — настройки, распознавание речи, сохранённое

@@ -163,6 +163,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal var explicitStatus: String? = null
 
     /**
+     * Ответ из шторки, ждущий загрузки своего диалога.
+     *
+     * Класть текст в поле ввода сразу нельзя: `restoreComposerDraft()` затрёт его
+     * черновиком загружаемого диалога, а `drafts.onSessionSwitch` сохранит предустановленный
+     * текст как черновик ПРЕДЫДУЩЕГО, то есть отправит его не туда. Поэтому текст ждёт
+     * здесь, пока сессия загрузится, и отправляется только после.
+     */
+    internal var pendingPushReply: String? = null
+
+    /**
      * Транзиентная строка статуса префилл-контекста (SSE `context_status`,
      * [ContextStatusPresenter]): видна в статус-баре ограниченное время и
      * сбрасывается/перезаписывается каждым новым кадром — не накапливается.
@@ -445,6 +455,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // Пересоздание экрана (поворот/тема/смерть процесса): открытый диалог восстанавливается
         // из savedInstanceState; на холодном старте savedInstanceState == null -> новый чат.
         restoreOpenSession(savedInstanceState)
+        // Кнопка «Ответить» при убитом процессе приходит в onCreate, а не в onNewIntent:
+        // без этой строки первый в жизни ответ из шторки терялся бы молча.
+        if (PushReplyPolicy.matchesAction(intent?.action)) intent?.let(::handlePushReply)
     }
 
     override fun onDestroy() {
@@ -626,6 +639,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // Ответ из уведомления — отдельная ветка: интент приносит текст из RemoteInput,
+        // а не намерение показать диалог. Раньше он уходил бы в проверку session_id и
+        // просто открывал чат, теряя набранное.
+        if (PushReplyPolicy.matchesAction(intent.action)) {
+            handlePushReply(intent)
+            return
+        }
         val requested = intent.getStringExtra(EXTRA_OPEN_SESSION_ID)?.trim().orEmpty()
         if (requested.isNotEmpty() && requested != currentSessionId) {
             loadSessionById(requested)

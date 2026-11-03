@@ -57,6 +57,9 @@ internal object LocalChatActionsSheet {
     const val SPEAK_LABEL = "Озвучить"
 
     /** Дописать обрезанный ответ с того места, где модель упёрлась в лимит токенов. */
+    /** Пункт «Открыть»: длинный ответ в отдельной панели. */
+    const val OPEN_LABEL: String = "Открыть"
+
     const val CONTINUE_LABEL = "Продолжить"
 
     /** Пересобрать ответ в файл DOCX/XLSX/TXT и отдать в «Поделиться». */
@@ -105,11 +108,24 @@ internal object LocalChatActionsSheet {
          */
         canEdit: Boolean = false,
         onEdit: () -> Unit = {},
+        /**
+         * Предложить «Открыть»: ответ достаточно крупный, чтобы читать его отдельно.
+         *
+         * Решает экран через [ArtifactPolicy.decide]: лист не считает строки и не разбирает
+         * markdown — иначе правило «что считать артефактом» разъехалось бы с панелью и
+         * тестами. Обычный ответ остаётся в ленте: открывать ради него панель — лишний шаг.
+         */
+        canOpenAsArtifact: Boolean = false,
+        onOpenAsArtifact: () -> Unit = {},
     ) {
         val hasText = text.isNotBlank()
         val retryModels = alternatives(models, currentModel)
         val actions = ArrayList<Pair<String, () -> Unit>>(8)
         if (hasText) actions += COPY_LABEL to onCopy
+        // «Открыть» — до «Повторить»: у длинного ответа человек ищет «прочитать целиком»,
+        // а не «сгенерировать заново». Пункт не дублирует «Копировать»: там текст уходит
+        // в буфер, здесь — в панель с сохранением в файл.
+        if (canOpenAsArtifact && hasText) actions += OPEN_LABEL to onOpenAsArtifact
         if (canRetry) actions += RETRY_LABEL to onRetry
         if (canRetry && retryModels.isNotEmpty()) {
             actions += RETRY_WITH_LABEL to { showModelChooser(activity, retryModels, onRetryWith) }

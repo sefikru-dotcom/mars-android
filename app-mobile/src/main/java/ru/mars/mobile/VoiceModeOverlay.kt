@@ -9,6 +9,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.text.TextUtils
 import android.widget.TextView
 
 /**
@@ -49,6 +50,14 @@ internal class VoiceModeOverlay(activity: Activity) {
 
         /** Вторая кнопка после неудачного хода. */
         fun onRetry()
+
+        /**
+         * Тап по языковой пилюле: открыть выбор направления перевода.
+         *
+         * Слой не выбирает языки сам: список, запрет «тот же язык» и промпт живут в
+         * [TranslatePolicy], а шторка — в [TranslateSheet]. Здесь только кнопка.
+         */
+        fun onPickDirection()
     }
 
     private val context: Activity = activity
@@ -130,6 +139,28 @@ internal class VoiceModeOverlay(activity: Activity) {
         setOnClickListener { close() }
     }
 
+    /**
+     * Пилюля направления перевода: «Перевод выкл.» или «Рус → Англ».
+     *
+     * Стоит слева от крестика, а не в нижнем блоке: язык — это режим, в котором идёт
+     * разговор, и он должен быть виден всё время, а не только когда человек дотянется
+     * до нижних кнопок. Доступность зеркалит состояние: скринридер читает, включён ли
+     * перевод, а не только пару языков.
+     */
+    private val directionLabel = TextView(context).apply {
+        textSize = 13f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        // min-width: 0 — иначе длинная подпись распирает шапку слоя.
+        minimumWidth = 0
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        setPadding(dp(10), dp(8), dp(10), dp(8))
+        setOnClickListener { callbacks?.onPickDirection() }
+    }
+
     /** Показывать ли текст реплик. Слух — основной канал, но видеть услышанное важно. */
     private var showTranscript: Boolean = true
 
@@ -188,11 +219,45 @@ internal class VoiceModeOverlay(activity: Activity) {
             leftMargin = dp(24)
             rightMargin = dp(24)
         })
+        // Исходное состояние — «выключен»: до первого показа слоя направление ещё
+        // не выбрано, и подпись не должна обещать перевод, которого нет.
+        renderDirection(null)
+        root.addView(directionLabel, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.START
+            topMargin = dp(16)
+            leftMargin = dp(12)
+        })
         root.addView(closeButton, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = dp(16)
             rightMargin = dp(8)
         })
+    }
+
+    /**
+     * Подпись языковой пары. null — перевод выключен («Перевод выкл.»).
+     *
+     * Отдельным методом, а не полем состояния: направление живёт в экране и сохраняется
+     * в настройках, слой о нём не помнит — иначе после поворота экрана подпись
+     * разошлась бы с тем, что реально уходит в промпт.
+     */
+    fun renderDirection(direction: TranslateDirection?) {
+        val label = if (direction == null) {
+            DIRECTION_OFF
+        } else {
+            TranslatePolicy.shortLabel(direction)
+        }
+        directionLabel.text = label
+        directionLabel.contentDescription = if (direction == null) {
+            DIRECTION_OFF_DESCRIPTION
+        } else {
+            "Перевод: ${TranslatePolicy.directionLabel(direction)}. Нажмите, чтобы изменить"
+        }
+        directionLabel.setTextColor(
+            if (direction == null) MarsTheme.TEXT_MUTED else MarsTheme.ACCENT,
+        )
+        // Пока переводим — цвет акцента: режим отличается от обычного разговора на глаз.
+        directionLabel.visibility = View.VISIBLE
     }
 
     /** Показать слой поверх [parent] (обычно `scaffold.root`). Идемпотентно. */
@@ -293,6 +358,12 @@ internal class VoiceModeOverlay(activity: Activity) {
     private fun dp(value: Int): Int = MarsTheme.dp(context, value)
 
     private companion object {
+        /** Подпись, когда перевод выключен: режим виден, но не мешает. */
+        const val DIRECTION_OFF = "Перевод выкл."
+
+        /** Описание для скринридера: что произойдёт по нажатию. */
+        const val DIRECTION_OFF_DESCRIPTION = "Перевод выключен. Нажмите, чтобы включить"
+
         const val ORB_DP = 232
         const val PRIMARY_HEIGHT_DP = 56
         const val SECONDARY_HEIGHT_DP = 48

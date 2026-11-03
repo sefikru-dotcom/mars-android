@@ -125,6 +125,19 @@ class TranslatePolicyTest {
     }
 
     @Test
+    fun `короткая подпись помещается в шапку и различает языки`() {
+        // В шапке голосового слоя полная подпись обрезалась бы до «Русский → Ан…»,
+        // и человек не знал бы второго языка. Три буквы на язык — компромисс.
+        val short = TranslatePolicy.shortLabel(TranslatePolicy.defaultDirection())
+        assertEquals("Русский → Английский".length > short.length, true)
+        assertTrue(short.startsWith("Рус"))
+        assertTrue(short.contains("→"))
+        // Оба языка различимы: короткие подписи разных направлений не совпадают.
+        val back = TranslatePolicy.shortLabel(TranslatePolicy.swap(TranslatePolicy.defaultDirection()))
+        assertTrue(short != back)
+    }
+
+    @Test
     fun `подпись направления читается как пара языков`() {
         assertEquals(
             "Русский → Английский",

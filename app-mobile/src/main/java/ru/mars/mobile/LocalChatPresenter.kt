@@ -213,6 +213,14 @@ data class LocalChatUiState(
     val stopping: Boolean = false,
     /** Нейтральная подсказка (не настроен провайдер, нет инструментов). */
     val notice: String? = null,
+    /**
+     * «Запомнил: …» — что инструмент памяти только что записал.
+     *
+     * Отдельное поле, а не строковая подсказка [notice]: у памяти свой срок жизни
+     * ([MemoryNoticePolicy.LIFETIME_MS]) и своё место в ленте, а [notice] живёт до
+     * следующего события хода. Смешать их значило бы гасить причину ошибки ради факта.
+     */
+    val memoryNotice: MemoryNotice? = null,
     /** Ошибка хода; показывается плашкой, не заменяет ленту. */
     val error: String? = null,
     /** Текущий расход диалога: сумма usage по всем шагам. Нули — «провайдер не сообщил». */
@@ -898,6 +906,15 @@ class LocalChatPresenter(
                         preview = event.preview.ifBlank { null },
                     )
                 }
+                // Факт берём из полного ответа инструмента, а не из preview: «Запомнил: »
+                // с обрезанным на 200 символах фактом показал бы меньше, чем записано
+                // в памяти, — человек решил бы, что фраза сохранена не целиком.
+                val card = _state.value.items.firstOrNull { it.tool?.callId == event.callId }?.tool
+                if (card?.name == REMEMBER_TOOL) {
+                    val full = toolResults[event.callId]?.content.orEmpty()
+                    MemoryNoticePolicy.fromToolResult(full, System.currentTimeMillis())
+                        ?.let { _state.value = _state.value.copy(memoryNotice = it) }
+                }
                 return Handled(partial, false)
             }
 
@@ -1213,6 +1230,9 @@ class LocalChatPresenter(
     private fun toolItemId(callId: String): String = "tool-" + callId
 
     companion object {
+        /** Имя инструмента памяти: по нему лента узнаёт, что показать «Запомнил: …». */
+        private const val REMEMBER_TOOL = "remember"
+
         /** Идентификатор системного сообщения: постоянный, чтобы память не плодила копии. */
         private const val SYSTEM_MESSAGE_ID = "memory-system"
 

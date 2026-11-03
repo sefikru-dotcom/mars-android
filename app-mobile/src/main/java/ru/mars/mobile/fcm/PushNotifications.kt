@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,6 +15,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import ru.mars.mobile.ChatActivity
 import ru.mars.mobile.MarsTheme
+import ru.mars.mobile.PushReplyPolicy
 import ru.mars.mobile.R
 import ru.mars.network.model.PushChannelSpec
 import ru.mars.network.model.PushNotificationSpec
@@ -57,7 +59,7 @@ object PushNotifications {
         ensureChannels(context)
         if (!canPost(context)) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val notification = Notification.Builder(context, spec.channel.id)
+        val builder = Notification.Builder(context, spec.channel.id)
             .setSmallIcon(R.drawable.ic_mars)
             .setContentTitle(spec.title)
             .setContentText(spec.body)
@@ -65,7 +67,11 @@ object PushNotifications {
             .setColor(MarsTheme.ACCENT)
             .setContentIntent(tapIntent(context, spec))
             .setAutoCancel(true)
-            .build()
+        // «Ответить» прямо в шторке: без открытия экрана. Кнопки нет, когда адресата
+        // нет (notification-only пуш без session_id): ответ ушёл бы в последний диалог,
+        // то есть не туда, куда человек думает.
+        replyAction(context, spec)?.let { builder.addAction(it) }
+        val notification = builder.build()
         manager.notify(spec.notificationId, notification)
     }
 
@@ -112,11 +118,67 @@ object PushNotifications {
         )
     }
 
+    /**
+     * Кнопка «Ответить»: RemoteInput + адресный интент в чат.
+     *
+     * Флаги mutable обязательны: система дописывает в такой PendingIntent текст из
+     * RemoteInput, а immutable его отбрасывает — ответ приходил бы пустым.
+     *
+     * request code отличается от кода тапа (`xor`): при `FLAG_UPDATE_CURRENT` второй
+     * `getActivity` с тем же кодом ПЕРЕЗАПИСАЛ бы extras первого, и уведомление
+     * перестало бы открывать нужный диалог — оставался бы только ответ.
+     */
+    private fun replyAction(context: Context, spec: PushNotificationSpec): Notification.Action? {
+        if (!PushReplyPolicy.canReply(spec.sessionId, readOnly = false, subagent = false)) return null
+        val remoteInput = RemoteInput
+            .Builder(PushReplyPolicy.KEY_TEXT)
+            .setLabel(PushReplyPolicy.HINT)
+            .build()
+        val intent = Intent(context, ChatActivity::class.java).apply {
+            action = PushReplyPolicy.ACTION_REPLY
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            spec.sessionId?.let {
+                putExtra(PushReplyPolicy.EXTRA_SESSION_ID, it)
+                // Тот же диалог должен открыться и по тапу: иначе после ответа человек
+                // увидит чужую переписку.
+                putExtra(ChatActivity.EXTRA_OPEN_SESSION_ID, it)
+            }
+            putExtra(PushReplyPolicy.EXTRA_NOTIFICATION_ID, spec.notificationId)
+        }
+        val mutability = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_MUTABLE
+        } else {
+            0
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            spec.notificationId xor REPLY_REQUEST_SALT,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or mutability,
+        )
+        return Notification.Action.Builder(
+            R.drawable.ic_mars,
+            PushReplyPolicy.LABEL_REPLY,
+            pending,
+        ).addRemoteInput(remoteInput).build()
+    }
+
     private fun canPost(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
         return ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
     }
+
+    /**
+     * Соль для request code кнопки «Ответить».
+     *
+     * Код должен отличаться от кода тапа по тому же уведомлению: два PendingIntent
+     * с одинаковым кодом и FLAG_UPDATE_CURRENT перезаписывают друг друга, и вместе
+     * с кнопкой ответа пропадал бы переход в нужный диалог.
+     */
+    private const val REPLY_REQUEST_SALT = 0x5250
 
     private fun createChannel(manager: NotificationManager, channel: PushChannelSpec) {
         if (manager.getNotificationChannel(channel.id) != null) return
