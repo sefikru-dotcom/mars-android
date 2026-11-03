@@ -114,6 +114,41 @@ git checkout feat/local-chat-wave
   сессии — иначе `restoreComposerDraft()` затирает текст, а `drafts.onSessionSwitch`
   сохраняет его как черновик предыдущего.
 
+### Установка на POCO F5: только release с боевым ключом
+
+Debug-APK на телефон НЕ ставится:
+
+```
+INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package ru.mars.mobile signatures do not match
+```
+
+Установленная сборка подписана боевым ключом (`mars-boevoy.keystore`, SHA-256
+`15:da:3b:02…`), а variant `debug` в `app-mobile/build.gradle.kts` не имеет signingConfig
+вовсе. Правильный путь:
+
+```bash
+cd /c/Users/SKY/.zcode/workspace/default
+MARS_RELEASE_KEYSTORE="C:/Users/SKY/.zcode/workspace/default/mars-boevoy.keystore" \
+MARS_RELEASE_KEYSTORE_PASSWORD=android \
+MARS_RELEASE_KEY_ALIAS=androiddebugkey \
+MARS_RELEASE_KEY_PASSWORD=android \
+bash build-mars.sh :app-mobile:assembleRelease --no-daemon
+adb install -r mars-android/app-mobile/build/outputs/apk/release/app-mobile-release.apk
+```
+
+Перепаковка debug-APK вручную (`apksigner` поверх распакованного архива) НЕ работает:
+`INSTALL_FAILED_INVALID_APK: Failed to extract native libraries` — ломается выравнивание
+`.so` в архиве.
+
+### Проверено на устройстве (3 ноября)
+
+- Release встал с первой попытки, `versionCode 46`, приложение запускается.
+- Локальный чат открывается, диалог грузится, падений в `logcat -b crash` нет.
+- Голосовой слой поверх `LocalChatActivity` открывается, орб рисуется.
+- Пилюля «Перевод выкл.» на месте и тапается.
+- Шторка перевода отрисована целиком: подсказка направления, два блока по четыре языка,
+  несовместимые языки погашены, «Поменять» и «Готово» в одну строку, налезаний нет.
+
 ### Что в волне 14 НЕ проверено на устройстве
 Всё перечисленное выше проверено компилятором и юнит-тестами (3314 тестов, 0 падений).
 На POCO не проверено ничего: телефон не подключался к ADB ни разу за две волны.
