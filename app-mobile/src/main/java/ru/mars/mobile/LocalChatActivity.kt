@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.FileProvider
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -145,6 +146,9 @@ class LocalChatActivity : ComponentActivity() {
      */
     private lateinit var voiceProsodyButton: TextView
 
+    /** Чип входа в полноэкранный разговор. */
+    private lateinit var voiceModeButton: TextView
+
     private lateinit var paramsButton: TextView
 
     /** Голосовой ввод (микрофон → ASR → композер). Инициализируется в [buildView]. */
@@ -210,6 +214,12 @@ class LocalChatActivity : ComponentActivity() {
 
     private lateinit var client: LocalChatClient
     /** Темп и голос озвучки: живут в настройках приложения, а не в диалоге. */
+    /**
+     * Полноэкранный голосовой режим. Слой, а не Activity: отдельный экран отправил бы
+     * этот в `onPause`, а там микрофон закрывается (см. KDoc [VoiceModeOverlay]).
+     */
+    private lateinit var voiceMode: VoiceModeOverlay
+
     private lateinit var voiceProsodyStore: VoiceProsodyPrefs
 
     /**
@@ -358,12 +368,34 @@ class LocalChatActivity : ComponentActivity() {
         updateNotice()
     }
 
+    /**
+     * «Назад» при открытом голосовом режиме сворачивает ЕГО, а не диалог.
+     *
+     * Через `OnBackPressedDispatcher`, а не переопределением `onBackPressed`: активность
+     * на `ComponentActivity`, и старый способ здесь не вызывается вовсе — экран просто
+     * закрылся бы вместе с режимом. Колбэк снимается в `onDestroy`, чтобы не держать
+     * ссылку на активность после её смерти.
+     */
+    private var voiceModeBack: OnBackPressedCallback? = null
+
+    private fun installVoiceModeBack() {
+        val callback = object : OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() {
+                closeVoiceModeIfShown()
+            }
+        }
+        voiceModeBack = callback
+        onBackPressedDispatcher.addCallback(this, callback)
+    }
     override fun onResume() {
         super.onResume()
         // Провайдера и модель могли поменять в соседнем экране — чипы обязаны обновиться.
         presenter.bindProfile(providerStore.state().active)
         updateNotice()
         if (::voice.isInitialized) voice.onResume()
+        // Возврат на экран: слой перерисовывается из текущего состояния канала,
+        // чтобы после паузы орб снова показывал реальную фазу, а не покой.
+        if (::voiceMode.isInitialized) voiceMode.onResume()
     }
 
     override fun onPause() {
@@ -371,6 +403,8 @@ class LocalChatActivity : ComponentActivity() {
         if (::voiceOutput.isInitialized) voiceOutput.onPause()
         // Микрофон закрываем сразу: запись из кармана — это расход батареи и утечка звука.
         if (::voice.isInitialized) voice.onPause()
+        // Слой перестаёт крутить кадры: невидимая анимация в фоне — расход батареи.
+        if (::voiceMode.isInitialized) voiceMode.onPause()
         super.onPause()
     }
 
@@ -735,8 +769,23 @@ class LocalChatActivity : ComponentActivity() {
 
         // «Голос» — темп и голос озвучки. Стоит рядом с параметрами модели, потому что
         // человек ищет «как звучит» там же, где «как отвечает».
+        // Слой создаётся здесь, а не лениво в поле: ему нужен уже собранный корень
+        // экрана, и он же кладёт себя в него при первом показе.
+        voiceMode = VoiceModeOverlay(this)
+        // Перехват «назад» ставится сразу: он выключен, пока слой скрыт, и
+        // включается в renderVoiceMode при показе.
+        installVoiceModeBack()
+
         voiceProsodyButton = chip(::openVoiceProsody).apply {
             contentDescription = "Голос и темп речи"
+        }
+
+        // «Разговор» — тот же микрофон, но на весь экран: орб, фаза и одна кнопка.
+        // Отдельным чипом, а не вторым режимом кнопки-микрофона: это ДРУГОЙ способ
+        // говорить (смотрю на экран, а не на клавиатуру), и путать его с обычным
+        // голосовым вводом значило бы менять поведение микрофона молча.
+        voiceModeButton = chip(::openVoiceMode).apply {
+            contentDescription = "Полноэкранный голосовой режим"
         }
 
         return LinearLayout(this).apply {
@@ -747,6 +796,7 @@ class LocalChatActivity : ComponentActivity() {
             addView(reasoningButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(paramsButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(voiceProsodyButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+            addView(voiceModeButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(wakeChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(memoryChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
         }
@@ -770,6 +820,54 @@ class LocalChatActivity : ComponentActivity() {
      * [voice], то есть с учётом того, какой движок сейчас в работе. Отдельного движка
      * для проверки нет — иначе проверялся бы не тот голос, который звучит в ответах.
      */
+    /**
+     * Войти в полноэкранный разговор.
+     *
+     * Слой кладётся поверх корня экрана и получает колбэки, которые дёргают ТОТ ЖЕ
+     * голосовой канал, что и кнопка в композере: [LocalVoiceButton] остаётся
+     * единственным владельцем микрофона, а слой — только его лицом на весь экран.
+     *
+     * Первый снимок берётся сразу: без него человек увидел бы пустой экран до первого
+     * изменения фазы, то есть до того, как сам начнёт говорить.
+     */
+    private fun openVoiceMode() {
+        voiceMode.callbacks = object : VoiceModeOverlay.Callbacks {
+            override fun onMicTap() = voice.controller.toggle()
+            override fun onStopSpeech() = voice.stopSpeaking()
+            override fun onRetry() = retryLastTurn()
+            override fun onClose() {
+                // Уход из режима не должен оставлять открытый микрофон: иначе человек
+                // вернулся в чат, а его продолжают слушать.
+                if (voice.controller.state().phase == LocalVoicePhase.LISTENING) voice.controller.toggle()
+            }
+        }
+        voiceMode.show(scaffold.root as android.view.ViewGroup)
+        voiceMode.render(VoiceModeState.from(voice.controller.state()))
+    }
+
+    /**
+     * Перерисовать слой под текущую фазу канала.
+     *
+     * Зовётся из [render] на каждое изменение состояния: дельты стрима идут потоком, а
+     * лишний `render` у орба дешёвый (кадры перезапускаются только при смене фазы).
+     */
+    private fun renderVoiceMode() {
+        // Перехват «назад» включается ровно на время показа слоя: иначе он глотал бы
+        // системный жест в обычном чате.
+        voiceModeBack?.isEnabled = ::voiceMode.isInitialized && voiceMode.isShowing
+        if (!::voiceMode.isInitialized || !voiceMode.isShowing) return
+        if (!::voice.isInitialized) return
+        voiceMode.render(VoiceModeState.from(voice.controller.state()))
+    }
+
+    /** Системный «назад» в голосовом режиме: сначала свернуть его, потом выходить. */
+    private fun closeVoiceModeIfShown(): Boolean {
+        if (!::voiceMode.isInitialized || !voiceMode.isShowing) return false
+        voiceMode.hide()
+        if (voice.controller.state().phase == LocalVoicePhase.LISTENING) voice.controller.toggle()
+        return true
+    }
+
     private fun openVoiceProsody() {
         VoiceProsodySheet.show(
             activity = this,
@@ -862,6 +960,9 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     private fun render(state: LocalChatUiState) {
+        // Слой голосового режима живёт на том же состоянии: фаза канала меняется от
+        // действий на нём же, поэтому обновляется на каждый render, а не только при входе.
+        renderVoiceMode()
         transcript.render(state)
         composer.render(state)
 
