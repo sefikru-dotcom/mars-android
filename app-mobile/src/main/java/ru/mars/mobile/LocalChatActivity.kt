@@ -234,6 +234,9 @@ class LocalChatActivity : ComponentActivity() {
     /** Подпись чипа «Голос», когда темп обычный и голос не выбран. */
     private val DEFAULT_VOICE_CHIP: String = "Голос"
 
+    /** Подпись чипа входа в полноэкранный разговор. */
+    private val VOICE_MODE_CHIP: String = "Разговор"
+
     private lateinit var presenter: LocalChatPresenter
     private var deviceTools: List<LocalDeviceTool> = emptyList()
 
@@ -785,6 +788,7 @@ class LocalChatActivity : ComponentActivity() {
         // говорить (смотрю на экран, а не на клавиатуру), и путать его с обычным
         // голосовым вводом значило бы менять поведение микрофона молча.
         voiceModeButton = chip(::openVoiceMode).apply {
+            text = VOICE_MODE_CHIP
             contentDescription = "Полноэкранный голосовой режим"
         }
 
