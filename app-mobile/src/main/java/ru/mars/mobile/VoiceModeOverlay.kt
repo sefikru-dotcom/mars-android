@@ -3,6 +3,7 @@ package ru.mars.mobile
 import android.app.Activity
 import android.graphics.Typeface
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -90,6 +91,15 @@ internal class VoiceModeOverlay(activity: Activity) {
         textSize = 15f
         gravity = Gravity.CENTER
         setTextColor(MarsTheme.TEXT_EM)
+        setLineSpacing(dp(2).toFloat(), 1.05f)
+        // Стеклянная капсула, а не «текст в пустоте»: поверх космоса и звёзд строка без
+        // подложки терялась, и распознанную речь приходилось читать на ощупь.
+        background = capsule()
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        // Капсула, а не лента: три строки — предел, дальше многоточие. Иначе длинная реплика
+        // выдавила бы орб вверх и кнопка уехала бы из-под большого пальца.
+        maxLines = LINE_MAX
+        ellipsize = TextUtils.TruncateAt.END
         visibility = View.GONE
     }
 
@@ -98,6 +108,13 @@ internal class VoiceModeOverlay(activity: Activity) {
         textSize = 15f
         gravity = Gravity.CENTER
         setTextColor(MarsTheme.TEXT_MUTED)
+        setLineSpacing(dp(2).toFloat(), 1.05f)
+        // Та же капсула, что у реплики человека: две строки диалога читаются как пара
+        // «вопрос — ответ», а не как два случайных абзаца на фоне планеты.
+        background = capsule()
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        maxLines = LINE_MAX
+        ellipsize = TextUtils.TruncateAt.END
         visibility = View.GONE
     }
 
@@ -137,6 +154,20 @@ internal class VoiceModeOverlay(activity: Activity) {
         contentDescription = CLOSE_DESCRIPTION
         setPadding(dp(12), dp(12), dp(12), dp(12))
         setOnClickListener { close() }
+    }
+
+    /**
+     * Верхняя панель одной стеклянной капсулой: направление перевода слева, «Свернуть» справа.
+     *
+     * Раньше это были две подписи прямо на фоне: на светлом участке кадра они сливались со
+     * звёздами и планетой, а «Свернуть» ещё и попадала под системный жест. Капсула даёт обеим
+     * контрастную подложку и общий край экрана.
+     */
+    private val topPanel = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = capsule()
+        setPadding(dp(6), dp(4), dp(6), dp(4))
     }
 
     /**
@@ -180,6 +211,18 @@ internal class VoiceModeOverlay(activity: Activity) {
     }
 
     init {
+        // Большой светящийся шар в центре — самая очевидная цель для пальца: тап по нему делает
+        // ровно то же, что основная кнопка (начать реплику, закончить её, заглушить ответ).
+        // Раньше орб был чистой графикой (`isClickable = false`), и человек, ткнув в него,
+        // не получал ничего — приходилось искать кнопку под шаром.
+        orb.isClickable = true
+        orb.isFocusable = true
+        orb.contentDescription = ORB_DESCRIPTION
+        orb.setOnClickListener { view ->
+            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            primaryButton.performClick()
+        }
+
         val column = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -222,15 +265,14 @@ internal class VoiceModeOverlay(activity: Activity) {
         // Исходное состояние — «выключен»: до первого показа слоя направление ещё
         // не выбрано, и подпись не должна обещать перевод, которого нет.
         renderDirection(null)
-        root.addView(directionLabel, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-            gravity = Gravity.TOP or Gravity.START
-            topMargin = dp(16)
+        // Верхняя панель — одной капсулой: направление слева (растягивается), «Свернуть» справа.
+        topPanel.addView(directionLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        topPanel.addView(closeButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        root.addView(topPanel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.TOP
+            topMargin = dp(12)
             leftMargin = dp(12)
-        })
-        root.addView(closeButton, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-            gravity = Gravity.TOP or Gravity.END
-            topMargin = dp(16)
-            rightMargin = dp(8)
+            rightMargin = dp(12)
         })
     }
 
@@ -260,7 +302,13 @@ internal class VoiceModeOverlay(activity: Activity) {
         directionLabel.visibility = View.VISIBLE
     }
 
-    /** Показать слой поверх [parent] (обычно `scaffold.root`). Идемпотентно. */
+    /**
+     * Показать слой поверх [parent] (обычно `scaffold.root`). Идемпотентно.
+     *
+     * Показ включает **непрерывный разговор**: «Разговор» — это диалог, а не одна реплика.
+     * Микрофон открывается сразу (человек вошёл говорить), а после каждого ответа Марса
+     * [LocalVoiceController] откроет его сам — тянуться к кнопке «Говорить» больше не нужно.
+     */
     fun show(parent: ViewGroup) {
         if (parent.indexOfChild(root) < 0) {
             parent.addView(root, ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -268,14 +316,39 @@ internal class VoiceModeOverlay(activity: Activity) {
         root.visibility = View.VISIBLE
         isShowing = true
         render(lastState)
+        val channel = LocalVoiceController.active()
+        channel?.continuousConversation = true
+        // Живая громкость речи → неоновая пульсация планеты: подписка на время показа слоя,
+        // потому что в чате этот колбэк никто не слушает, а кадры орба там не нужны.
+        channel?.onAudioLevel = { level -> setLevel(level) }
+        // Модель распознавания (23 МиБ) греется именно здесь: человек уже выбрал голосовой
+        // режим, и ждать загрузку на первом слове он не должен.
+        channel?.warmUpAsrInBackground()
+        if (channel != null && channel.state().phase == LocalVoicePhase.IDLE) {
+            channel.startListening()
+        }
     }
 
-    /** Свернуть слой. Состояние диалога и микрофона не трогается: это дело хоста. */
+    /**
+     * Свернуть слой.
+     *
+     * Непрерывный разговор выключается вместе с ним: в обычном чате микрофон по-прежнему
+     * «одна реплика на одно нажатие». Открытая реплика закрывается — человек вернулся в чат,
+     * а его продолжали бы слушать.
+     */
     fun hide() {
         root.visibility = View.GONE
         isShowing = false
         // Орб гаснет: невидимый слой не должен крутить кадры в фоне (батарея).
         orb.render(VoiceModeTone.IDLE, pulses = false)
+        val channel = LocalVoiceController.active()
+        channel?.continuousConversation = false
+        // Слой скрыт — подписка на громкость снимается: орба на экране нет, кадры не нужны.
+        channel?.onAudioLevel = null
+        setLevel(0f)
+        if (channel != null && channel.state().phase == LocalVoicePhase.LISTENING) {
+            channel.cancelListening()
+        }
     }
 
     /** Крестик: сначала сообщаем хосту (он может остановить речь), потом прячемся. */
@@ -355,6 +428,20 @@ internal class VoiceModeOverlay(activity: Activity) {
         strokeColor = if (enabled) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER,
     )
 
+    /**
+     * Стеклянная капсула для текста поверх космоса.
+     *
+     * [MarsTheme.glassSurface], а не [MarsTheme.card] с полупрозрачным цветом: у стекла верхний
+     * слой плотнее нижнего, поэтому и «просвечивание» есть, и контраст держится на любом участке
+     * кадра — включая яркий лимб планеты за спиной.
+     */
+    private fun capsule() = MarsTheme.glassSurface(
+        context,
+        radiusDp = CAPSULE_RADIUS_DP,
+        fill = MarsTheme.GLASS_FILL,
+        strokeColor = MarsTheme.GLASS_STROKE,
+    )
+
     private fun dp(value: Int): Int = MarsTheme.dp(context, value)
 
     private companion object {
@@ -367,9 +454,18 @@ internal class VoiceModeOverlay(activity: Activity) {
         const val ORB_DP = 232
         const val PRIMARY_HEIGHT_DP = 56
         const val SECONDARY_HEIGHT_DP = 48
+
+        /** Радиус стеклянных капсул: достаточно круглый для «пилюли», но не «таблетка». */
+        const val CAPSULE_RADIUS_DP = 18
+
+        /** Предел строк в капсуле реплики: транскрипт не должен превращать экран в ленту. */
+        const val LINE_MAX = 3
         const val DISABLED_ALPHA = 0.65f
         const val CLOSE_LABEL = "Свернуть"
         const val CLOSE_DESCRIPTION = "Свернуть голосовой режим"
+
+        /** Орб теперь нажимается: скринридер обязан сказать, что именно он делает. */
+        const val ORB_DESCRIPTION = "Планета Марс. Нажмите, чтобы говорить или остановить ответ"
         const val RETRY_LABEL = "Повторить"
     }
 }

@@ -11,6 +11,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -66,6 +67,16 @@ class LocalSessionsActivity : ComponentActivity() {
     private lateinit var scaffold: SectionScaffold.Parts
     private lateinit var body: LinearLayout
     private lateinit var providerLine: TextView
+
+    /** Стеклянная плитка провайдера: точка статуса + две строки текста. */
+    private lateinit var providerTile: LinearLayout
+
+    /** Хозяин цветной точки: перерисовывается при каждой перезагрузке статуса. */
+    private lateinit var providerDotHost: LinearLayout
+
+    /** Заголовок плитки: «Провайдер готов» / «Нужен API-ключ» / «Провайдер не настроен». */
+    private lateinit var providerTitle: TextView
+
     private lateinit var searchInput: EditText
 
     /** Текущий запрос поиска; пусто — показываем всю историю. */
@@ -101,21 +112,13 @@ class LocalSessionsActivity : ComponentActivity() {
             LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
         )
         scaffold.content.addView(
+            providerStatusTile(),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
+        )
+        scaffold.content.addView(
             searchBox(),
             LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
         )
-
-        providerLine = TextView(this).apply {
-            textSize = 12f
-            setTextColor(MarsTheme.TEXT_MUTED)
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-            isClickable = true
-            isFocusable = true
-            setPadding(dp(2), dp(2), dp(2), dp(8))
-            setOnClickListener { openProviderSettings() }
-        }
-        scaffold.content.addView(providerLine, LinearLayout.LayoutParams(-1, -2))
 
         body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -133,8 +136,14 @@ class LocalSessionsActivity : ComponentActivity() {
     }
 
     /**
-     * Действия экрана: «Новый чат» — тихая текстовая кнопка с вектором (глиф «＋»
-     * на HyperOS приходит из CJK-фолбэка и не красится), настройки — круглая иконка.
+     * Быстрые действия экрана: «Новый чат», «Разговор» и «Провайдер».
+     *
+     * Ряд прокручивается по горизонтали, а не сжимается: три подписи с иконками на
+     * 360dp-экране не влезают, и раньше правый край уезжал за границу. Прокрутка
+     * честнее обрезки — видно, что кнопок три.
+     *
+     * «Разговор» ведёт в [VoiceModeActivity] — тот же полноэкранный орб, что и в чате:
+     * начать говорить можно, не открывая диалог.
      */
     private fun actionsRow(): View {
         val row = LinearLayout(this).apply {
@@ -145,20 +154,84 @@ class LocalSessionsActivity : ComponentActivity() {
             MarsDialog.quietButton(this, "Новый чат", R.drawable.ic_add) { openChat(null) },
             LinearLayout.LayoutParams(-2, -2),
         )
-        row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         row.addView(
-            MarsTheme.circleIconButton(
-                this,
-                R.drawable.ic_settings,
-                "Настройки провайдера",
-                bg = MarsTheme.SURFACE,
-                iconTint = MarsTheme.TEXT,
-                sizeDp = 40,
-                strokeColor = MarsTheme.BORDER,
-            ).apply { setOnClickListener { openProviderSettings() } },
-            LinearLayout.LayoutParams(dp(48), dp(48)),
+            MarsDialog.quietButton(this, "Разговор", R.drawable.ic_mic) {
+                startActivity(VoiceModeActivity.intentFor(this@LocalSessionsActivity))
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
         )
-        return row
+        row.addView(
+            MarsDialog.quietButton(this, "Провайдер", R.drawable.ic_settings) {
+                openProviderSettings()
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
+        )
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = false
+            addView(row, LinearLayout.LayoutParams(-2, -2))
+        }
+    }
+
+    /**
+     * Плитка активного провайдера: стеклянная карточка с цветной точкой статуса.
+     *
+     * Зелёная точка — провайдер выбран и ключ сохранён, жёлтая — ключа нет (или
+     * провайдер не настроен вовсе). Раньше это была серая строка мелким шрифтом:
+     * состояние приходилось вычитывать из текста, а «ключ не сохранён» ничем не
+     * отличалось от обычной подписи. Тап по всей плитке — настройки провайдера.
+     */
+    private fun providerStatusTile(): View {
+        providerDotHost = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        providerTitle = TextView(this).apply {
+            textSize = 13f
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium",
+                android.graphics.Typeface.BOLD,
+            )
+            setTextColor(MarsTheme.TEXT_STRONG)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        providerLine = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(providerTitle, LinearLayout.LayoutParams(-1, -2))
+            addView(providerLine, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+        }
+        providerTile = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = MarsTheme.glassSurface(this@LocalSessionsActivity, radiusDp = 14)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { openProviderSettings() }
+            addView(
+                providerDotHost,
+                LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(10) },
+            )
+            addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(
+                ImageView(this@LocalSessionsActivity).apply {
+                    setImageDrawable(
+                        ContextCompat.getDrawable(this@LocalSessionsActivity, R.drawable.ic_arrow_forward),
+                    )
+                    imageTintList =
+                        android.content.res.ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+                },
+                LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginStart = dp(8) },
+            )
+        }
+        return providerTile
     }
 
     /**
@@ -316,19 +389,42 @@ class LocalSessionsActivity : ComponentActivity() {
         return box
     }
 
+    /**
+     * Статус провайдера на плитке: цветная точка + два текста.
+     *
+     * Точка — единственный индикатор «готов / нужен ключ»: зелёная, когда провайдер
+     * выбран и ключ сохранён, жёлтая во всех остальных случаях. Текст под заголовком
+     * называет причину, чтобы жёлтая точка не была загадкой.
+     */
     private fun renderProviderLine() {
+        // Плитка собирается в buildView; если статус запросили раньше — молчим, а не падаем.
+        if (!::providerDotHost.isInitialized) return
         val state = runCatching { providerStore.state() }.getOrNull()
         val active = state?.active
         val hasKey = active != null && !providerStore.apiKey(active.id).isNullOrBlank()
-        providerLine.apply {
-            text = when {
-                active == null -> "Провайдер не настроен · нажмите, чтобы настроить"
-                !hasKey -> "Провайдер: ${active.title} · ключ не сохранён"
-                else -> "Провайдер: ${active.title} · ${active.model}"
-            }
-            setTextColor(if (active == null || !hasKey) MarsTheme.STATUS_WARNING else MarsTheme.TEXT_MUTED)
-            contentDescription = "$text. Открыть настройки провайдера"
+        val ready = active != null && hasKey
+        providerDotHost.removeAllViews()
+        providerDotHost.addView(
+            MarsTheme.glowingStatusDot(
+                this,
+                if (ready) MarsTheme.STATUS_ONLINE else MarsTheme.STATUS_WARNING,
+            ),
+            LinearLayout.LayoutParams(dp(10), dp(10)),
+        )
+        providerTitle.text = when {
+            active == null -> "Провайдер не настроен"
+            !hasKey -> "Нужен API-ключ"
+            else -> "Провайдер готов"
         }
+        providerTitle.setTextColor(if (ready) MarsTheme.TEXT_STRONG else MarsTheme.STATUS_WARNING)
+        providerLine.text = when {
+            active == null -> "Нажмите, чтобы выбрать провайдера и вставить ключ"
+            !hasKey -> "${active.title} · ключ не сохранён — нажмите, чтобы добавить"
+            else -> "${active.title} · ${active.model}"
+        }
+        providerLine.setTextColor(MarsTheme.TEXT_MUTED)
+        providerTile.contentDescription =
+            "${providerTitle.text}. ${providerLine.text}. Открыть настройки провайдера"
     }
 
     /**

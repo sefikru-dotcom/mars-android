@@ -748,12 +748,13 @@ object ChatScreenScaffold {
         root.addView(liveRunPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
         // Двухуровневая стеклянная капсула композера (паритет с WebUI).
-        // Отступы капсулы намеренно ровные и достаточные: скругление капсулы — 22dp, поэтому
-        // текст обязан начинаться дальше внутреннего контура угла (иначе первые и последние
-        // символы строки наезжали на рамку), а у самого поля есть собственная подложка radius 14.
+        // Вложенной прямоугольной подложки у поля ввода больше НЕТ: капсула — единственная
+        // рамка композера («овал и в овале квадрат» убран). Отступы капсулы 14/10/14/8
+        // держат текст и курсор внутри ровной зоны: скругление капсулы — полный овал,
+        // поэтому первые и последние символы строки не наезжают на её борта.
         val composer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(8))
+            setPadding(dp(14), dp(10), dp(14), dp(8))
             clipToPadding = false
             background = MarsTheme.composerCapsule(context)
         }
@@ -803,22 +804,18 @@ object ChatScreenScaffold {
         composer.addView(composerQuoteView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
         // Поле ввода: многострочное, чистое, отзывчивое.
-        // У поля СВОЯ подложка (radius 14) внутри капсулы (radius 22): текст живёт в ровном
-        // прямоугольнике со скруглением 14 и симметричным отступом 14/10, поэтому ни символы,
-        // ни курсор, ни выносные элементы высоких глифов не подходят к скруглённым бортам
-        // капсулы — при 1–5 строках ввод физически не может вылезти за рамку плашки.
+        // Подложки у поля НЕТ (`background = null`): внутри овальной капсулы композера
+        // больше не рисуется второй прямоугольник — рамка у композера одна.
+        // Симметричные отступы 10/8 держат символы, курсор и выносные элементы высоких
+        // глифов внутри ровной зоны: при 1–5 строках ввод физически не выходит за
+        // скругление капсулы.
         val input = EditText(context).apply {
             hint = ComposerLayoutPresenter.HINT
             setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
             textSize = 15f
-            background = MarsTheme.card(
-                context,
-                Color.argb(110, 10, 14, 22),
-                radiusDp = 14,
-                strokeColor = MarsTheme.BORDER_SUBTLE,
-            )
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = null
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             // Текст прижат к верхнему левому углу: капсула растёт вниз, а не «центрирует»
             // первую строку по мере набора.
             gravity = Gravity.TOP or Gravity.START
@@ -842,12 +839,12 @@ object ChatScreenScaffold {
             includeFontPadding = true
             // Ровный межстрочный ритм: 1.05 множителя + 2dp добавки на строку.
             setLineSpacing(dp(2).toFloat(), 1.05f)
-            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля (10 + 10).
+            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля (8 + 8).
             // Держит капсулу в рамках даже если платформа проигнорирует maxLines
             // (не наезжает на нижнюю панель кнопок).
             maxHeight = ComposerInputTypePolicy.maxHeightPx(
                 lineHeightPx = paint.fontMetricsInt.let { it.descent - it.ascent },
-                verticalPaddingPx = dp(10) + dp(10),
+                verticalPaddingPx = dp(8) + dp(8),
             )
             imeOptions = ComposerInputTypePolicy.IME_OPTIONS
             setOnEditorActionListener { _, action, _ ->

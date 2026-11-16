@@ -94,6 +94,12 @@ class LocalChatActivity : ComponentActivity() {
                 if (!sessionId.isNullOrBlank()) putExtra(EXTRA_SESSION_ID, sessionId)
             }
 
+        /** Быстрый бабл «Ок»: согласие с предложенным планом. */
+        private const val QUICK_OK = "Ок, принимаю предложенный план, реализуй"
+
+        /** Быстрый бабл «Продолжай»: модель оборвалась на полуслове. */
+        private const val QUICK_CONTINUE = "Продолжай"
+
         private const val NOT_CONFIGURED =
             "Провайдер не настроен — нажмите, чтобы открыть настройки"
         private const val NO_KEY = "Ключ API не сохранён — нажмите, чтобы открыть настройки"
@@ -175,6 +181,9 @@ class LocalChatActivity : ComponentActivity() {
 
     /** Чип входа в полноэкранный разговор. */
     private lateinit var voiceModeButton: TextView
+
+    /** Кнопка «Новый» в верхней строке: чистый диалог без захода в список. */
+    private lateinit var newChatButton: TextView
 
     private lateinit var paramsButton: TextView
 
@@ -527,16 +536,18 @@ class LocalChatActivity : ComponentActivity() {
         warmUpJob = lifecycleScope.launch {
             val ok = ttsWarmup.warmUp { done, total ->
                 runOnUiThread {
-                    if (total > 0) {
+                    // Прогресс синтеза не должен спорить с живым транскриптом: пока
+                    // человек диктует, строкой владеет голосовой ввод.
+                    if (total > 0 && !voiceStatusOwned) {
                         voiceStatusLine?.visibility = android.view.View.VISIBLE
                         voiceStatusLine?.text = "Готовлю голос… ${done * 100 / total}%"
                     }
                 }
             }
-            if (!ok) {
+            if (!ok && !voiceStatusOwned) {
                 voiceStatusLine?.visibility = android.view.View.VISIBLE
                 voiceStatusLine?.text = ttsWarmup.lastFailure ?: "синтез недоступен"
-            } else {
+            } else if (ok && !voiceStatusOwned) {
                 voiceStatusLine?.visibility = android.view.View.GONE
             }
         }
@@ -544,6 +555,49 @@ class LocalChatActivity : ComponentActivity() {
 
     /** Строка статуса голоса; задаётся в buildView, если экран её показывает. */
     private var voiceStatusLine: android.widget.TextView? = null
+
+    /**
+     * Строкой статуса владеет живой голосовой ввод.
+     *
+     * Тот же TextView занят прогрессом прогрева синтеза («Готовлю голос… 40%»), и без
+     * этого флага две записи перетирали бы друг друга: фаза «слушаю» гасла бы от
+     * случайного кадра скачивания, а хвост «Готовлю голос…» висел бы поверх транскрипта.
+     */
+    private var voiceStatusOwned = false
+
+    /**
+     * Живой статус голосового ввода над композером.
+     *
+     * Пока человек диктует, над полем видно каждое распознанное слово: без этого
+     * микрофон выглядит «нажал и тишина», и человек говорит в пустоту. Фаза «думаю» —
+     * честное «распознаю», а не пустой экран: ответа ещё нет, но работа идёт.
+     */
+    private fun renderVoiceStatusLine(state: LocalVoiceState) {
+        val line = voiceStatusLine ?: return
+        val live = when (state.phase) {
+            LocalVoicePhase.LISTENING -> if (state.partial.isNotBlank()) {
+                "🎙 Слушаю: «${state.partial}» — нажмите микрофон для отправки"
+            } else {
+                "🎙 Слушаю вас — говорите… (нажмите микрофон для отправки)"
+            }
+            LocalVoicePhase.THINKING -> "⏳ Распознаю и обдумываю ответ…"
+            else -> null
+        }
+        if (live != null) {
+            voiceStatusOwned = true
+            line.text = live
+            line.setTextColor(MarsTheme.TEXT_EM)
+            line.visibility = View.VISIBLE
+            return
+        }
+        // Свою плашку снимаем сами: чужие тексты (прогресс синтеза) не трогаем.
+        if (voiceStatusOwned) {
+            voiceStatusOwned = false
+            line.text = ""
+            line.setTextColor(0xFF9AA0A6.toInt())
+            line.visibility = View.GONE
+        }
+    }
 
     /**
      * Отправить реплику и дождаться готового ответа (для озвучки в фоне).
@@ -666,10 +720,26 @@ class LocalChatActivity : ComponentActivity() {
         )
         scaffold.content.addView(transcript.view, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        composer = LocalChatComposerBar(this, ::onPrimaryAction, ::pickAttachment)
+        // Композер сам зовёт окно «Контекст и параметры» (пилюля слева внизу) и отдаёт
+        // нажатия быстрых баблов: экран остаётся владельцем действий и текстов реплик.
+        composer = LocalChatComposerBar(
+            this,
+            ::onPrimaryAction,
+            ::pickAttachment,
+            onOpenContextHub = ::showLocalContextAndSettingsSheet,
+            onQuickAction = ::handleQuickAction,
+        )
         voiceStatusLine = android.widget.TextView(this).apply {
-            textSize = 12f
+            textSize = 12.5f
             setTextColor(0xFF9AA0A6.toInt())
+            // Плашка, а не голая строка: живой транскрипт («🎙 Слушаю: „…“») должен
+            // бросаться в глаза над композером, а не теряться между лентой и полем ввода.
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = MarsTheme.pill(
+                this@LocalChatActivity,
+                MarsTheme.SURFACE,
+                strokeColor = MarsTheme.BORDER_SUBTLE,
+            )
             visibility = android.view.View.GONE
         }
         scaffold.content.addView(
@@ -696,7 +766,12 @@ class LocalChatActivity : ComponentActivity() {
                     send()
                 }
             },
-            onState = { state -> state.notice?.let(scaffold.statusLine::setText) },
+            onState = { state ->
+                state.notice?.let(scaffold.statusLine::setText)
+                // Живой транскрипт над композером: партиал меняется на каждом слове, и
+                // человек обязан видеть, что микрофон действительно его слышит.
+                renderVoiceStatusLine(state)
+            },
             onOpenX = { openAppSettings() },
             serverTts = null,
             // Офлайн-Piper для автоозвучки: без него ответ читает системный робот.
@@ -718,13 +793,6 @@ class LocalChatActivity : ComponentActivity() {
         return scaffold.root
     }
 
-    /**
-     * Строка под заголовком: название диалога, чип модели и чип уровня размышлений.
-     *
-     * Чипы живут здесь, а не внутри `SectionScaffold`: у общего шаблона шапки нет слота
-     * для действий, а дописывать в его строку на узком экране значило бы отнять место
-     * у заголовка. Визуально это тот же блок шапки — прямо под её заголовком.
-     */
     /**
      * Включить/выключить прослушивание «Марс, слушай» в фоне.
      *
@@ -763,6 +831,20 @@ class LocalChatActivity : ComponentActivity() {
             if (wakeArmed) "Прослушивание включено. Выключить" else "Включить «Марс, слушай»"
     }
 
+    /**
+     * Строка под заголовком: название диалога слева, две компактные кнопки справа.
+     *
+     * Раньше здесь в одну строку без скролла стояли восемь элементов (заголовок и семь
+     * чипов) — на 360dp они сплющивали друг друга и обрезались по буквам. На экране
+     * осталось только то, что нужно каждый раз: имя диалога, вход в полноэкранный
+     * разговор и новый чистый чат.
+     *
+     * Остальные чипы (`modelButton`, `reasoningButton`, `paramsButton`,
+     * `voiceProsodyButton`, `wakeChip`, `memoryChip`) по-прежнему инициализируются — их
+     * подписи обновляет [render], — но живут в скрытом контейнере: их настройки переехали
+     * в единое окно «Контекст и параметры» ([showLocalContextAndSettingsSheet]).
+     * Сносить поля нельзя: `render()` и обработчики шторок обращаются к ним напрямую.
+     */
     private fun headerRow(): View {
         wakeChip = chip(::toggleWakeService).apply {
             text = if (wakeArmed) "Слушаю фон" else "Фон"
@@ -775,7 +857,7 @@ class LocalChatActivity : ComponentActivity() {
         }
         subtitle = TextView(this).apply {
             text = session?.title.orEmpty()
-            textSize = 12f
+            textSize = 13f
             setTextColor(MarsTheme.TEXT_MUTED)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -835,19 +917,75 @@ class LocalChatActivity : ComponentActivity() {
         voiceModeButton = chip(::openVoiceMode).apply {
             text = VOICE_MODE_CHIP
             contentDescription = "Полноэкранный голосовой режим"
+            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                ContextCompat.getDrawable(this@LocalChatActivity, R.drawable.ic_mic)
+                    ?.mutate()
+                    ?.apply {
+                        setTint(MarsTheme.TEXT_EM)
+                        val size = dp(12)
+                        setBounds(0, 0, size, size)
+                    },
+                null,
+                null,
+                null,
+            )
+            compoundDrawablePadding = dp(4)
         }
 
-        return LinearLayout(this).apply {
+        // «Новый» — единственный способ начать чистый диалог прямо с экрана чата:
+        // очистка ленты и сброс сессии живут в [startNewLocalChat].
+        newChatButton = chip(::startNewLocalChat).apply {
+            text = "Новый"
+            contentDescription = "Новый чистый диалог"
+            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                ContextCompat.getDrawable(this@LocalChatActivity, R.drawable.ic_add)
+                    ?.mutate()
+                    ?.apply {
+                        setTint(MarsTheme.TEXT_EM)
+                        val size = dp(12)
+                        setBounds(0, 0, size, size)
+                    },
+                null,
+                null,
+                null,
+            )
+            compoundDrawablePadding = dp(4)
+        }
+
+        // Видимая строка: имя диалога забирает весь остаток ширины, кнопки — свои
+        // собственные. Никаких восьми элементов в ряд: два чипа по краю.
+        val visibleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(subtitle, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(modelButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+            addView(
+                voiceModeButton,
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) },
+            )
+            addView(
+                newChatButton,
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
+            )
+        }
+
+        // Скрытый контейнер: чипы живы (render() пишет в них подписи и видимость), но
+        // с экрана убраны — их настройки открываются единым окном из композера.
+        val hiddenControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            addView(modelButton, LinearLayout.LayoutParams(-2, -2))
             addView(reasoningButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(paramsButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(voiceProsodyButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
-            addView(voiceModeButton, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(wakeChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
             addView(memoryChip, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(visibleRow, LinearLayout.LayoutParams(-1, -2))
+            addView(hiddenControls, LinearLayout.LayoutParams(-1, -2))
         }
     }
 
@@ -893,7 +1031,31 @@ class LocalChatActivity : ComponentActivity() {
         }
         voiceMode.show(scaffold.root as android.view.ViewGroup)
         voiceMode.renderDirection(translateDirection)
-        voiceMode.render(VoiceModeState.from(voice.controller.state()))
+        voiceMode.render(voiceModeSnapshot())
+    }
+
+    /**
+     * Снимок для полноэкранного орба: фаза канала + обе строки диалога.
+     *
+     * [VoiceModeState.from] несёт только партиал реплики, и на орбе после ответа
+     * оставался один вопрос — ответа Марса не было видно вовсе. Поэтому строки
+     * дополняются из ленты: партиал важнее (человек говорит прямо сейчас), а без него —
+     * последняя реплика человека и последний ответ ассистента. Считается на каждый
+     * кадр, потому что лента дописывается дельтами.
+     */
+    private fun voiceModeSnapshot(): VoiceModeState {
+        val base = if (::voice.isInitialized) {
+            VoiceModeState.from(voice.controller.state())
+        } else {
+            VoiceModeState()
+        }
+        val items = presenter.state.value.items
+        val lastUser = items.lastOrNull { it.role == LocalRole.USER }?.text.orEmpty()
+        val lastAssistant = items.lastOrNull { it.role == LocalRole.ASSISTANT }?.text.orEmpty()
+        return base.copy(
+            userLine = base.userLine.ifBlank { lastUser },
+            assistantLine = lastAssistant,
+        )
     }
 
     /**
@@ -937,7 +1099,7 @@ class LocalChatActivity : ComponentActivity() {
         voiceModeBack?.isEnabled = ::voiceMode.isInitialized && voiceMode.isShowing
         if (!::voiceMode.isInitialized || !voiceMode.isShowing) return
         if (!::voice.isInitialized) return
-        voiceMode.render(VoiceModeState.from(voice.controller.state()))
+        voiceMode.render(voiceModeSnapshot())
     }
 
     /** Системный «назад» в голосовом режиме: сначала свернуть его, потом выходить. */
@@ -1039,12 +1201,316 @@ class LocalChatActivity : ComponentActivity() {
         setOnClickListener { onClick() }
     }
 
+    /**
+     * Единое окно «Контекст и параметры» локального чата.
+     *
+     * Раньше все настройки висели семью мелкими чипами в одной строке под шапкой и
+     * сплющивали друг друга до нечитаемости. Теперь вход один — пилюля контекста в
+     * композере, — а внутри стеклянного [MarsDialog] всё разложено по трём полочкам, как
+     * в серверном чате (`ChatActivity.showContextUsageDetails`):
+     *
+     * 1. окно контекста и расход диалога (полоса заполнения + точные цифры токенов);
+     * 2. модель, мышление и параметры генерации (строки-карточки, тап открывает пикер);
+     * 3. голос, память и фоновый слух.
+     *
+     * Ничего не пересчитывается здесь заново: проценты и текст разбивки берутся из
+     * [LocalContextPolicy], действия — прежние методы экрана. Окно только раскладывает.
+     */
+    private fun showLocalContextAndSettingsSheet() {
+        val state = presenter.state.value
+        val windowTokens = state.context?.windowTokens
+        val percent = state.context?.takeIf { it.visible }?.percent
+        val level = state.context?.takeIf { it.visible }?.level
+        var dialog: android.app.Dialog? = null
+
+        fun closeWindow() {
+            dialog?.dismiss()
+        }
+
+        /** Заголовок полочки: маленькие капс-буквы акцентом, как в шторках серверного чата. */
+        fun sectionTitle(title: String): View = TextView(this).apply {
+            text = title
+            textSize = 10f
+            setTextColor(MarsTheme.ACCENT_TEXT)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            letterSpacing = 0.08f
+            includeFontPadding = false
+            setPadding(0, dp(16), 0, dp(8))
+        }
+
+        /** Строка «подпись слева — значение справа» внутри карточки. */
+        fun statRow(title: String, value: String): View = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                TextView(this@LocalChatActivity).apply {
+                    text = title
+                    textSize = 12.5f
+                    setTextColor(MarsTheme.TEXT_MUTED)
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(0, -2, 1f),
+            )
+            addView(
+                TextView(this@LocalChatActivity).apply {
+                    text = value
+                    textSize = 12.5f
+                    setTextColor(MarsTheme.TEXT_STRONG)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    gravity = Gravity.END
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) },
+            )
+        }
+
+        /**
+         * Кликабельная стеклянная строка-карточка параметра: слева название, справа
+         * текущее значение, на краю шеврон. Тап закрывает окно и открывает пикер —
+         * второй слой поверх шторки читался бы как «ничего не произошло».
+         */
+        fun controlRow(title: String, value: String, onClick: () -> Unit): View =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = MarsTheme.card(
+                    this@LocalChatActivity,
+                    MarsTheme.SURFACE_SUBTLE,
+                    radiusDp = 12,
+                    strokeColor = MarsTheme.BORDER_SUBTLE,
+                )
+                setPadding(dp(14), dp(11), dp(12), dp(11))
+                isClickable = true
+                isFocusable = true
+                contentDescription = "$title: $value"
+                setOnClickListener { onClick() }
+                addView(
+                    TextView(this@LocalChatActivity).apply {
+                        text = title
+                        textSize = 12.5f
+                        setTextColor(MarsTheme.TEXT)
+                        maxLines = 2
+                        includeFontPadding = false
+                    },
+                    LinearLayout.LayoutParams(0, -2, 1f),
+                )
+                addView(
+                    TextView(this@LocalChatActivity).apply {
+                        text = value
+                        textSize = 12f
+                        setTextColor(MarsTheme.ACCENT_TEXT)
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
+                        gravity = Gravity.END
+                        maxWidth = dp(176)
+                        includeFontPadding = false
+                    },
+                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) },
+                )
+                addView(
+                    android.widget.ImageView(this@LocalChatActivity).apply {
+                        setImageDrawable(
+                            ContextCompat.getDrawable(this@LocalChatActivity, R.drawable.ic_arrow_forward),
+                        )
+                        imageTintList =
+                            android.content.res.ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
+                    },
+                    LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginStart = dp(8) },
+                )
+            }
+
+        // --- Полочка 1: окно контекста и расход ---------------------------------------
+        // Цвет полосы — тот же порог, что у пилюли в композере: одна цифра не может
+        // быть зелёной внизу и красной в окне.
+        val tone = when (level) {
+            LocalContextLevel.CRITICAL -> MarsTheme.STATUS_ERROR
+            LocalContextLevel.WARNING -> MarsTheme.STATUS_WARNING
+            else -> MarsTheme.STATUS_ONLINE
+        }
+        val fillBar = ContextFillBarView(this).apply { render(percent, tone) }
+        val contextCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.glassSurface(this@LocalChatActivity, radiusDp = 14)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            addView(statRow("Заполнение контекста", percent?.let { "$it%" } ?: "не измерено"))
+            addView(
+                fillBar,
+                LinearLayout.LayoutParams(-1, dp(ContextFillBarView.BAR_HEIGHT_DP))
+                    .apply { topMargin = dp(8) },
+            )
+            addView(
+                TextView(this@LocalChatActivity).apply {
+                    // Текст политики: сколько занято из окна, сколько ушло на запрос и
+                    // ответ и где пороги. Экран не считает это второй раз.
+                    text = LocalContextPolicy.detailsText(state.usage, windowTokens)
+                    textSize = 12f
+                    setTextColor(MarsTheme.TEXT_EM)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) },
+            )
+        }
+
+        // --- Полочка 2: модель, мышление и генерация ----------------------------------
+        val modelRow = controlRow(
+            "Модель провайдера",
+            state.model?.takeIf { it.isNotBlank() } ?: "Не выбрана",
+        ) {
+            closeWindow()
+            chooseModel()
+        }
+        val reasoningRow = controlRow(
+            "Уровень размышлений (Reasoning)",
+            if (state.supportsReasoning) {
+                LocalChatModelPicker.label(state.reasoningEffort)
+            } else {
+                "Не поддерживается моделью"
+            },
+        ) {
+            // У модели без reasoning_controls строки-пикера нет: мёртвый тап хуже
+            // честной подписи «не поддерживается».
+            if (state.supportsReasoning) {
+                closeWindow()
+                chooseReasoning()
+            }
+        }
+        val samplingRow = controlRow(
+            "Параметры сэмплинга (Temp, Top-P, Лимит)",
+            if (state.turnSettingsCustom) "Настроены вручную *" else "По умолчанию",
+        ) {
+            closeWindow()
+            openTurnSettings()
+        }
+
+        // --- Полочка 3: голос, память и фоновый слух -----------------------------------
+        val voiceModeRow = controlRow(
+            "Полноэкранный голосовой разговор",
+            "Живой диалог с орбом и перебиванием",
+        ) {
+            closeWindow()
+            openVoiceMode()
+        }
+        val prosodyValue = voiceProsody.speedLabel() + " · " +
+            if (hasOfflineVoice()) "Голос Ирины готов (22 кГц)" else "Подготовка / системный резерв"
+        val prosodyRow = controlRow("Голос и темп речи (Piper офлайн)", prosodyValue) {
+            closeWindow()
+            openVoiceProsody()
+        }
+        val wakeRow = controlRow(
+            "Фоновый слух („Марс, слушай“)",
+            if (wakeArmed) "Включено — слушает в фоне" else "Выключено",
+        ) {
+            // Окно закрываем до переключения: включение может запросить разрешение на
+            // микрофон, и системный диалог поверх шторки выглядел бы зависанием.
+            closeWindow()
+            toggleWakeService()
+        }
+        val memoryRow = controlRow(
+            "Память владельца и факты",
+            "Профиль и долгосрочная память на телефоне",
+        ) {
+            closeWindow()
+            startActivity(LocalMemoryActivity.newIntent(this@LocalChatActivity))
+        }
+
+        dialog = MarsDialog.show(this) { root ->
+            root.addView(MarsDialog.header(this, "Контекст и параметры", null))
+
+            root.addView(sectionTitle("ОКНО КОНТЕКСТА И РАСХОД"))
+            root.addView(contextCard, LinearLayout.LayoutParams(-1, -2))
+            root.addView(
+                MarsDialog.primaryButton(this, "Новый диалог") {
+                    closeWindow()
+                    startNewLocalChat()
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) },
+            )
+            root.addView(
+                MarsDialog.secondaryButton(this, "Настройки провайдера / API-ключ") {
+                    closeWindow()
+                    openSettings()
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) },
+            )
+
+            root.addView(sectionTitle("МОДЕЛЬ, МЫШЛЕНИЕ И ГЕНЕРАЦИЯ"))
+            listOf(modelRow, reasoningRow, samplingRow).forEachIndexed { index, row ->
+                root.addView(
+                    row,
+                    LinearLayout.LayoutParams(-1, -2).apply { if (index > 0) topMargin = dp(8) },
+                )
+            }
+
+            root.addView(sectionTitle("ГОЛОС, ПАМЯТЬ И ФОНОВЫЙ СЛУХ"))
+            listOf(voiceModeRow, prosodyRow, wakeRow, memoryRow).forEachIndexed { index, row ->
+                root.addView(
+                    row,
+                    LinearLayout.LayoutParams(-1, -2).apply { if (index > 0) topMargin = dp(8) },
+                )
+            }
+
+            root.addView(
+                MarsDialog.quietButton(this, "Закрыть") { closeWindow() },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) },
+            )
+            emptyList()
+        }
+    }
+
+    /**
+     * Быстрые баблы композера.
+     *
+     * «Ок» и «Продолжай» — готовые реплики на типовой ответ модели («вот план»,
+     * «оборвался на полуслове»): набирать их вручную на ходу незачем. Реплика уходит
+     * обычным сообщением (видна в ленте), а не служебной строкой. «Новый» — чистый диалог.
+     */
+    private fun handleQuickAction(action: String) {
+        when (action.lowercase(Locale.ROOT)) {
+            "ok", "ок" -> quickSend(QUICK_OK)
+            "continue", "продолжай" -> quickSend(QUICK_CONTINUE)
+            "new", "новый" -> startNewLocalChat()
+            else -> Unit
+        }
+    }
+
+    /** Отправить готовую реплику так, будто человек набрал её сам. */
+    private fun quickSend(text: String) {
+        if (presenter.state.value.streaming) return
+        composer.input.setText(text)
+        composer.input.setSelection(text.length)
+        send()
+    }
+
+    /**
+     * Новый чистый диалог, не уходя в список.
+     *
+     * Экран пересоздаётся без id сессии: так сбрасываются и лента, и мета расхода, и
+     * параметры хода — то же, что даёт «Новый чат» в списке. Если диалог и так пуст,
+     * перезапускать нечего: чистим поле ввода и вложения.
+     */
+    private fun startNewLocalChat() {
+        if (presenter.state.value.streaming) stopTurn()
+        val empty = session == null && presenter.state.value.items.isEmpty()
+        if (empty) {
+            composer.input.setText("")
+            clearAttachments()
+            presenter.setNotice("Новый диалог")
+            return
+        }
+        startActivity(LocalChatActivity.newIntent(this, null))
+        finish()
+    }
+
     private fun render(state: LocalChatUiState) {
         // Слой голосового режима живёт на том же состоянии: фаза канала меняется от
         // действий на нём же, поэтому обновляется на каждый render, а не только при входе.
         renderVoiceMode()
         transcript.render(state)
         composer.render(state)
+        // Пилюля контекста в композере показывает модель, а быстрые баблы — только когда
+        // есть что продолжать и ответ не идёт: во время стрима они уходили бы в пустоту.
+        composer.setModelSummary(state.model?.takeIf { it.isNotBlank() } ?: "Контекст")
+        composer.setQuickChipsVisible(state.items.isNotEmpty() && !state.streaming)
 
         // Подписи чипов меняются редко, а render() зовётся на каждой дельте стрима:
         // лишний setText каждый кадр — лишний layout.
@@ -1111,6 +1577,10 @@ class LocalChatActivity : ComponentActivity() {
             text = notice.orEmpty()
             visibility = if (notice == null) View.GONE else View.VISIBLE
         }
+
+        // Живой статус микрофона: фаза меняется не только кнопкой, но и ходом (реплика
+        // ушла → «думаю»), поэтому строка обновляется на каждом кадре состояния.
+        if (::voice.isInitialized) renderVoiceStatusLine(voice.controller.state())
     }
 
     /**
