@@ -9,6 +9,7 @@ import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsResult
+import ru.mars.network.repository.ServerTtsVoices
 
 /**
  * Поведение серверного TTS с ПРОЗРАЧНЫМ фолбэком на системный Android TTS.
@@ -358,12 +359,14 @@ class ServerTtsSpeechEngineTest {
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
         assertTrue("503 по естественному голосу не должен съедать фразу", result is ServerTtsResult.Audio)
-        assertEquals(listOf("edge", "piper"), engines)
+        // Оба сетевых голоса (Светлана, Дмитрий) живут на одном движке edge: если он не
+        // установлен, отказ получают оба, и фразу подхватывает локальный piper.
+        assertEquals(listOf("edge", "edge", "piper"), engines)
         assertEquals("local-irina", client.lastProfileId)
     }
 
     @Test
-    fun `invalid natural voice on the server falls back to the local profile`() {
+    fun `invalid svetlana on the server falls back to the other web voice`() {
         val voices = mutableListOf<String?>()
         val client = bridge { _, _, request ->
             voices += request.voice
@@ -377,7 +380,8 @@ class ServerTtsSpeechEngineTest {
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
         assertTrue("400 invalid voice не должен оставлять фразу без звука", result is ServerTtsResult.Audio)
-        assertEquals(listOf("ru-RU-SvetlanaNeural", "ru_RU-irina-medium"), voices)
+        assertEquals(listOf("ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"), voices)
+        assertEquals("natural-dmitry", client.lastProfileId)
     }
 
     @Test
@@ -395,7 +399,7 @@ class ServerTtsSpeechEngineTest {
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
         assertTrue("таймаут не должен съедать фразу", result is ServerTtsResult.Audio)
-        assertEquals(listOf("edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "piper"), engines)
     }
 
     @Test
@@ -412,7 +416,7 @@ class ServerTtsSpeechEngineTest {
 
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
-        assertEquals("цепочка должна быть пройдена целиком", listOf("edge", "piper"), engines)
+        assertEquals("цепочка должна быть пройдена целиком", listOf("edge", "edge", "piper"), engines)
         assertTrue("исчерпанная цепочка — это ошибка, а не пустой ответ", result is ServerTtsResult.Unavailable)
         assertEquals("profiles_exhausted", (result as ServerTtsResult.Unavailable).reason)
     }
@@ -467,7 +471,7 @@ class ServerTtsSpeechEngineTest {
         }
 
         kotlinx.coroutines.runBlocking { client.synthesize("раз") }
-        assertEquals(listOf("edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "piper"), engines)
 
         // Тот же экран, следующий ответ: естественный голос на паузе — сразу локальный, без 503.
         engines.clear()
@@ -497,8 +501,279 @@ class ServerTtsSpeechEngineTest {
 
         // Причина каждого шага видна снаружи: «голос сменился» без причины необъяснимо.
         assertEquals(
-            listOf("natural-svetlana" to 503, "local-irina" to 400),
+            listOf("natural-svetlana" to 503, "natural-dmitry" to 503, "local-irina" to 400),
             client.lastAttempts.map { it.profileId to it.httpCode },
         )
+    }
+
+    // --- Выбранный человеком голос идёт ПЕРВЫМ --------------------------------------------
+    //
+    // Требование: выбор в шторке («Светлана» / «Дмитрий» / «Ирина») обязан слышаться.
+    // Раньше `synthesize` брал `selector.candidates()` и игнорировал `voiceId`, поэтому
+    // любой выбор звучал дефолтным голосом. Проверяется наблюдаемое: какой `voice` ушёл
+    // в запрос ПЕРВЫМ.
+
+    /** Мост с явно заданным выбором человека (без живого провайдера). */
+    private fun bridgeWithProsody(
+        prosody: VoiceProsody,
+        selector: SpeechVoiceProfileSelector = SpeechVoiceProfileSelector(),
+        prosodyProvider: (() -> VoiceProsody)? = null,
+        transport: ServerTtsTransport,
+    ) = RepositoryServerTtsClient(
+        baseUrl = "https://marscore.ru",
+        credentialProvider = { credential },
+        selector = selector,
+        prosodyProvider = prosodyProvider,
+        prosody = prosody,
+        transport = transport,
+    )
+
+    @Test
+    fun `chosen dmitry is requested first instead of the default svetlana`() {
+        val voices = mutableListOf<String?>()
+        val client = bridgeWithProsody(
+            VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id),
+        ) { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        assertEquals("выбор «Дмитрий» обязан звучать Дмитрием", listOf("ru-RU-DmitryNeural"), voices)
+        assertEquals("natural-dmitry", client.lastProfileId)
+    }
+
+    @Test
+    fun `chosen irina is requested first even though the web voice is available`() {
+        val engines = mutableListOf<String?>()
+        val client = bridgeWithProsody(
+            VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id),
+        ) { _, _, request ->
+            engines += request.engine
+            ServerTtsResult.Audio(byteArrayOf(2), "audio/wav")
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertEquals("выбор «Ирина» не должен перебиваться Светланой", listOf("piper"), engines)
+        assertEquals("local-irina", client.lastProfileId)
+    }
+
+    @Test
+    fun `the live prosody provider wins over the stored prosody`() {
+        val voices = mutableListOf<String?>()
+        val client = bridgeWithProsody(
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id),
+            prosodyProvider = { VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id) },
+        ) { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(3), "audio/mpeg")
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        // Шторка меняет выбор посреди диалога: снимок из конструктора уже неактуален.
+        assertEquals(listOf("ru-RU-SvetlanaNeural"), voices)
+    }
+
+    @Test
+    fun `unknown voice id keeps the default order instead of a broken profile`() {
+        val voices = mutableListOf<String?>()
+        val client = bridgeWithProsody(VoiceProsody(voiceId = "удалённый-голос")) { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(4), "audio/mpeg")
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertEquals(listOf("ru-RU-SvetlanaNeural"), voices)
+        assertEquals("natural-svetlana", client.lastProfileId)
+    }
+
+    @Test
+    fun `chosen voice has no duplicates in the chain`() {
+        val ids = mutableListOf<String?>()
+        val client = bridgeWithProsody(
+            VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id),
+        ) { _, _, request ->
+            ids += request.voice
+            ServerTtsResult.Unavailable("server_error", 503)
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        // Светлана первая и ровно один раз: остальные профили идут хвостом.
+        assertEquals(
+            listOf("ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru_RU-irina-medium"),
+            ids,
+        )
+        assertEquals(ids.size, ids.distinct().size)
+    }
+
+    @Test
+    fun `changing the voice clears the temporary cooldown of the new choice`() {
+        val engines = mutableListOf<String?>()
+        val selector = SpeechVoiceProfileSelector(nowMs = { 0L })
+        val client = bridgeWithProsody(
+            prosody = VoiceProsody(),
+            selector = selector,
+        ) { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Unavailable("http_400", 400)
+            }
+        }
+
+        // Все профили отказали: оба edge-голоса понижены на 45 с, piper — на 10 минут.
+        val first = kotlinx.coroutines.runBlocking { client.synthesize("раз") }
+        assertEquals(listOf("edge", "edge", "piper"), engines)
+        assertEquals("profiles_exhausted", (first as ServerTtsResult.Unavailable).reason)
+
+        // Человек выбрал Ирину руками: паузы сняты, и после её отказа сетевые голоса снова
+        // получают попытку (без `reset()` они бы ещё висели на кулдауне и не запрашивались).
+        client.setProsody(VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id))
+        engines.clear()
+        kotlinx.coroutines.runBlocking { client.synthesize("два") }
+
+        assertEquals(listOf("piper", "edge", "edge"), engines)
+    }
+
+    @Test
+    fun `changing only the tempo keeps the cooldown knowledge`() {
+        val engines = mutableListOf<String?>()
+        val selector = SpeechVoiceProfileSelector(nowMs = { 0L })
+        val client = bridgeWithProsody(
+            prosody = VoiceProsody(),
+            selector = selector,
+        ) { _, _, request ->
+            engines += request.engine
+            if (request.engine == "edge") {
+                ServerTtsResult.Unavailable("server_error", 503)
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(6), "audio/wav")
+            }
+        }
+
+        kotlinx.coroutines.runBlocking { client.synthesize("раз") }
+        engines.clear()
+
+        // Темп — не смена голоса: «голос не работает» остаётся фактом, лишних запросов нет.
+        client.setProsody(VoiceProsody(speed = 1.15f))
+        kotlinx.coroutines.runBlocking { client.synthesize("два") }
+
+        assertEquals(listOf("piper"), engines)
+    }
+
+    // --- PreferOfflineEngine: выбранный голос решает, кто говорит --------------------------
+    //
+    // Требование: выбран сетевой голос («как в вебе», Светлана, Дмитрий) — реплику получает
+    // серверный движок; выбран local-irina — сразу Piper. Раньше обёртка всегда звала Piper.
+
+    @Test
+    fun `network voice goes to the server channel and piper stays silent`() {
+        val offline = FakeSystemTts()
+        val system = FakeSystemTts()
+        val client = FakeClient(audio)
+        val playback = FakePlayback()
+        val prefer = PreferOfflineEngine(offline, engine(system, client, playback))
+
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id))
+        assertTrue(prefer.speak("привет, Марс"))
+
+        assertEquals(listOf("привет, Марс"), client.requests)
+        assertEquals(1, playback.played.size)
+        assertTrue("при выбранном сетевом голосе Piper звучать не должен", offline.spoken.isEmpty())
+    }
+
+    @Test
+    fun `chosen dmitry really reaches the server as dmitry`() {
+        val voices = mutableListOf<String?>()
+        val client = bridgeWithProsody(
+            VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id),
+        ) { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(7), "audio/mpeg")
+        }
+        val offline = FakeSystemTts()
+        val prefer = PreferOfflineEngine(
+            offline = offline,
+            fallback = ServerTtsSpeechEngine(
+                fallback = FakeSystemTts(),
+                client = client,
+                playback = FakePlayback(),
+                scope = CoroutineScope(Dispatchers.Unconfined),
+            ),
+        )
+
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id))
+        assertTrue(prefer.speak("привет"))
+
+        assertEquals(listOf("ru-RU-DmitryNeural"), voices)
+        assertTrue(offline.spoken.isEmpty())
+    }
+
+    @Test
+    fun `chosen irina speaks locally without touching the server`() {
+        val offline = FakeSystemTts()
+        val client = FakeClient(audio)
+        val prefer = PreferOfflineEngine(offline, engine(client = client))
+
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id))
+        assertTrue(prefer.speak("привет"))
+
+        assertEquals(listOf("привет"), offline.spoken)
+        assertTrue("локальный выбор не должен ходить в сеть", client.requests.isEmpty())
+    }
+
+    @Test
+    fun `voice id null means the web voice and goes to the server`() {
+        val offline = FakeSystemTts()
+        val client = FakeClient(audio)
+        val prefer = PreferOfflineEngine(offline, engine(client = client))
+
+        prefer.setProsody(VoiceProsody())
+        assertTrue(prefer.speak("привет"))
+
+        assertEquals(listOf("привет"), client.requests)
+        assertTrue(offline.spoken.isEmpty())
+    }
+
+    @Test
+    fun `dead server channel hands the phrase to piper instead of silence`() {
+        val offline = FakeSystemTts()
+        val prefer = PreferOfflineEngine(
+            offline = offline,
+            // Системный TTS мёртв, сервер отвечает 401: сетевой канал не даст звука.
+            fallback = engine(
+                system = FakeSystemTts(accept = false),
+                client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401)),
+            ),
+        )
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id))
+
+        assertTrue(prefer.speak("первый"))
+        assertTrue("первая попытка уходит в серверный канал", offline.spoken.isEmpty())
+
+        // Оба канала мертвы — обёртка честно пробует локальный Piper, а не молчит.
+        assertTrue(prefer.speak("второй"))
+        assertEquals(listOf("второй"), offline.spoken)
+    }
+
+    @Test
+    fun `fallback that cannot synthesize from the server keeps piper first`() {
+        val offline = FakeSystemTts()
+        val system = FakeSystemTts()
+        val prefer = PreferOfflineEngine(offline, system)
+
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id))
+        assertTrue(prefer.speak("привет"))
+
+        // Запасной движок — платформенный TTS, серверного канала нет: прежний порядок.
+        assertEquals(listOf("привет"), offline.spoken)
+        assertTrue(system.spoken.isEmpty())
     }
 }

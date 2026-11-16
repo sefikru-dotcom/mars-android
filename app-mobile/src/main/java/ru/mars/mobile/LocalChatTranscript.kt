@@ -3,6 +3,7 @@ package ru.mars.mobile
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.Gravity
@@ -45,6 +46,14 @@ internal class LocalChatTranscript(
      * сообщения. Нужна, когда файл в cacheDir уже вычищен системой, а диалог открыт снова.
      */
     private val onStoredImage: (String) -> ByteArray? = { null },
+    /**
+     * Быстрое действие «Ответить» на карточке сообщения: цитирование в композер.
+     * Пустая реализация по умолчанию — до склейки в [LocalChatActivity] экран ещё не
+     * знает про цитату, и лента обязана собираться без неё.
+     */
+    private val onReply: (LocalChatItem) -> Unit = {},
+    /** Быстрое действие «Озвучить»: текст ответа уходит в озвучку экрана. */
+    private val onSpeakText: (String) -> Unit = {},
 ) {
 
     private val column: LinearLayout = LinearLayout(context).apply {
@@ -175,18 +184,47 @@ internal class LocalChatTranscript(
         }
     }
 
-    /** Пузырь пользователя: справа, сапфировый градиент, ограничение по ширине. */
+    /**
+     * Пузырь пользователя: справа, сапфировый градиент, ограничение по ширине.
+     *
+     * Шапка пузыря — «Вы» и час сообщения, под текстом — компактная строка быстрых
+     * действий («Копировать», «Ответить», «⋮»). Раньше это был голый TextView: час
+     * терялся, а про копирование/ответ человек мог узнать только из долгого нажатия.
+     *
+     * Текст по-прежнему кладётся в [userBubbles]: инкрементальный [update] обновляет
+     * ровно его, не пересобирая пузырь (иначе правка сообщения мигала бы всей лентой).
+     */
     private fun userBubble(item: LocalChatItem): View {
+        val bubble = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.userBubble(context)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(context).apply {
+            text = "Вы"
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(MarsTheme.TEXT_MUTED)
+        })
+        // Распорка: час прижат к правому краю пузыря, как в серверном чате.
+        header.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        header.addView(clockView(item.createdAt), LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+        bubble.addView(header, LinearLayout.LayoutParams(-1, -2))
+
         val text = TextView(context).apply {
             this.text = item.text
             textSize = 14f
             setTextColor(MarsTheme.TEXT_STRONG)
             setLineSpacing(0f, 1.15f)
-            background = MarsTheme.userBubble(context)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
             // Длинное сообщение не должно упираться в край: пузырь занимает не больше
-            // 84% ширины, остальное — воздух (как в WebUI).
-            maxWidth = (context.resources.displayMetrics.widthPixels * 0.84f).toInt()
+            // 84% ширины, остальное — воздух (как в WebUI). Паддинги теперь у пузыря,
+            // поэтому из лимита вычтена их сумма.
+            maxWidth = (context.resources.displayMetrics.widthPixels * 0.84f).toInt() - dp(28)
             // Своё сообщение тоже выделяется построчно/пословно: setTextIsSelectable
             // ставится строго ПОСЛЕ text, а выделение подсвечивается рубиновым
             // полупрозрачным ACCENT_BG (как в серверном чате).
@@ -194,15 +232,64 @@ internal class LocalChatTranscript(
             highlightColor = MarsTheme.ACCENT_BG
         }
         userBubbles[item.id] = text
+        bubble.addView(text, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+
+        val actions = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        // Копируется ЖИВОЙ текст вьюхи: сообщение могли отредактировать, а элемент
+        // ленты в этот момент ещё держит прежний снимок.
+        actions.addView(quickAction("Копировать") { onCopyText(text.text.toString()) })
+        actions.addView(
+            quickAction("Ответить") { onReply(item) },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(14) },
+        )
+        actions.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        val more = MarsTheme.circleIconButton(
+            context,
+            R.drawable.ic_more_vert,
+            "Действия с сообщением",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 30,
+            strokeColor = 0,
+        ).apply {
+            setOnClickListener { onMessageLongPress(item, false) }
+        }
+        actions.addView(more, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(6) })
+        bubble.addView(actions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
-            addView(text, LinearLayout.LayoutParams(-2, -2))
+            addView(bubble, LinearLayout.LayoutParams(-2, -2))
         }
-        // Лист действий — только по пустому месту вокруг пузыря: сам текст отдан
-        // нативному выделению (долгое нажатие на слово/строку → «Копировать»).
+        // Лист действий — только по пустому месту вокруг пузыря и по его шапке: сам текст
+        // отдан нативному выделению (долгое нажатие на слово/строку → «Копировать»).
         attachLongPress(row, item)
+        attachLongPress(header, item)
         return row
+    }
+
+    /** Час сообщения для шапки карточки: 11sp [MarsTheme.TEXT_EM]; пусто — метки нет. */
+    private fun clockView(timestamp: Long): TextView = TextView(context).apply {
+        text = MessageTimePolicy.clockLabel(timestamp).orEmpty()
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_EM)
+        isSingleLine = true
+        maxLines = 1
+    }
+
+    /** Компактная текстовая кнопка ряда быстрых действий (11sp, без фона). */
+    private fun quickAction(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setPadding(0, dp(2), 0, dp(2))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
     }
 
     private fun emptyHint(): View = TextView(context).apply {
@@ -277,21 +364,85 @@ internal class LocalChatTranscript(
         private var current: LocalChatItem = item
         private var index: Int = 0
 
+        /** Час сообщения в шапке; обновляется в [bind] — элемент переживает кадры стрима. */
+        private val clock: TextView
+
+        /** Ряд быстрых действий под карточкой; виден только у законченного непустого ответа. */
+        private val actionsRow: LinearLayout
+
         init {
+            // Шапка как в серверном чате: слева живая точка статуса и «Марс», справа — час.
+            // Раньше здесь было одно слово «Марс», и час с быстрыми действиями искать было
+            // негде: копирование/ответ прятались в долгом нажатии по заголовку.
+            val header = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            header.addView(
+                MarsTheme.glowingStatusDot(context, MarsTheme.STATUS_ONLINE),
+                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) },
+            )
             val title = TextView(context).apply {
                 text = "Марс"
                 textSize = 11f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(MarsTheme.TEXT_MUTED)
             }
-            root.addView(title)
+            header.addView(title)
+            // Распорка: час уходит к правому краю карточки.
+            header.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            clock = clockView(item.createdAt)
+            header.addView(clock, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+
+            root.addView(header)
             root.addView(placeholder, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             root.addView(body, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             // Футер — последним: он читается как подпись под ответом, а не как его часть.
             root.addView(footer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+            actionsRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                visibility = View.GONE
+            }
+            // Тексты берутся из [current] в момент клика: карточка живёт кадры стрима,
+            // и захваченный при сборке снимок успевает устареть.
+            actionsRow.addView(quickAction("Копировать") { onCopyText(current.text) })
+            actionsRow.addView(
+                quickAction("Ответить") { onReply(current) },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(14) },
+            )
+            actionsRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            val speak = MarsTheme.circleIconButton(
+                context,
+                R.drawable.ic_volume,
+                "Озвучить сообщение",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30,
+                strokeColor = 0,
+            ).apply {
+                setOnClickListener { onSpeakText(current.text) }
+            }
+            actionsRow.addView(speak, LinearLayout.LayoutParams(dp(30), dp(30)))
+            val more = MarsTheme.circleIconButton(
+                context,
+                R.drawable.ic_more_vert,
+                "Действия с сообщением",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30,
+                strokeColor = 0,
+            ).apply {
+                setOnClickListener { onMessageLongPress(current, current.id == lastAssistantId) }
+            }
+            actionsRow.addView(more, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(6) })
+            root.addView(actionsRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
             // Лист действий — только на шапке карточки и на пустом месте root.
             // Строки тела сюда НЕ вешаются: у них своё нативное выделение текста.
             attachCardLongPress(title)
+            attachCardLongPress(header)
             attachCardLongPress(root)
         }
 
@@ -317,6 +468,14 @@ internal class LocalChatTranscript(
             footer.text = footerLine
             footer.visibility = if (footerLine == null) View.GONE else View.VISIBLE
             footer.contentDescription = footerLine
+            // Час и быстрые действия — тоже ДО раннего выхода: час уже известен, а ряд
+            // обязан исчезнуть, как только ответ начал стримиться заново.
+            clock.text = MessageTimePolicy.clockLabel(item.createdAt).orEmpty()
+            actionsRow.visibility = if (!item.streaming && item.text.isNotBlank()) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
             if (item.streaming && item.text.isBlank()) {
                 placeholder.visibility = View.VISIBLE
                 body.visibility = View.GONE

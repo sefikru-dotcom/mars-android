@@ -719,7 +719,13 @@ class VoiceDialogLoop(
         when (state) {
             State.LISTENING -> {
                 val clean = text.trim()
-                if (monitorUtterance && clean.isNotEmpty() && bargeInGate.isEchoOfAssistant(clean)) {
+                // Монитор-реплика слышала динамик: без эталона текста ответа отличить эхо от
+                // человека нечем — такой финал не становится ходом (см. [onFinalWhileSpeaking]).
+                val echoUnverifiable =
+                    monitorUtterance && bargeInGate.route.isEchoRisk && answerSpokenText.isNullOrBlank()
+                if (monitorUtterance && clean.isNotEmpty() &&
+                    (echoUnverifiable || bargeInGate.isEchoOfAssistant(clean))
+                ) {
                     echoFinalsDropped++
                     discardUtterance()
                     beginUtterance()
@@ -735,11 +741,18 @@ class VoiceDialogLoop(
     /**
      * `Final` во время озвучки. Разделяем эхо и речь человека: эхо — в мусор, речь — в новый ход
      * (и озвучку останавливаем: человек уже договорил, слушать больше нечего).
+     *
+     * На динамике без известного текста ответа проверять нечего: слова «эха» не с чем сравнить, а
+     * ASR на громком динамике выдаёт целые фразы — в том числе сам ответ Марса. Такой `Final`
+     * выбрасывается, иначе озвучка вернулась бы в чат репликой человека (Марс отвечает сам себе).
+     * Это ровно то же правило, что уже действует для partial в [BargeInGate]: без эталона эха
+     * текстовое доказательство на эхо-опасном маршруте не принимается.
      */
     private fun onFinalWhileSpeaking(raw: String) {
         if (!bargeInEnabled) return
         val clean = raw.trim()
-        if (clean.isEmpty() || bargeInGate.isEchoOfAssistant(clean)) {
+        val echoUnverifiable = bargeInGate.route.isEchoRisk && answerSpokenText.isNullOrBlank()
+        if (clean.isEmpty() || echoUnverifiable || bargeInGate.isEchoOfAssistant(clean)) {
             echoFinalsDropped++
             // Реплика остаётся монитором: человек может заговорить в ту же секунду.
             discardUtterance()

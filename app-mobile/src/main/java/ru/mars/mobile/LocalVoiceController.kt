@@ -177,6 +177,16 @@ class LocalVoiceController(
     private var answerPending = false
 
     /**
+     * Когда отзвучал последний сэмпл речи Марса (монотонные часы, [watchdogClock]).
+     *
+     * Нужен, чтобы пауза [CONTINUOUS_RESTART_DELAY_MS] отсчитывалась от РЕАЛЬНОГО конца звука, а не
+     * от момента, когда о конце сообщил движок: между ними хвост аудиобуфера `AudioTrack` и
+     * реверберация комнаты, и открытый в этот кадр микрофон записал бы собственный ответ Марса как
+     * вопрос человека. `0` — речи в этой сессии ещё не было, ждать нечего.
+     */
+    private var lastSpeechEndedAtMs: Long = 0L
+
+    /**
      * Системный распознаватель Android (`android.speech.SpeechRecognizer`) — мгновенный
      * резерв, пока офлайн-модель sherpa-onnx (23 МиБ) качается или не встала.
      *
@@ -189,14 +199,24 @@ class LocalVoiceController(
     private var platformListening = false
 
     /** Отложенный автостарт следующей реплики в режиме непрерывного разговора. */
-    private val continuousRestart = Runnable {
-        if (released || paused || !continuousConversation) return@Runnable
-        // Пока ждали, человек мог начать новую реплику или уйти с экрана.
-        if (state.phase != LocalVoicePhase.IDLE) return@Runnable
-        // Ответ всё-таки зазвучал (вторая половина фразы после паузы) — микрофон не открываем.
-        if (tts?.isSpeaking == true) return@Runnable
-        if (blockedByBackgroundConversation()) return@Runnable
-        startListening()
+    private val continuousRestart: Runnable = object : Runnable {
+        override fun run() {
+            // Все условия ещё раз: пока тикал таймер, ответ мог зазвучать, а человек — начать реплику.
+            if (!canRestartContinuous()) return
+            // Хвост речи ещё не затих: добираем остаток паузы, а не открываем микрофон раньше срока.
+            val remaining = ContinuousListenPolicy.remainingQuietMs(
+                lastSpeechEndedAtMs = lastSpeechEndedAtMs,
+                nowMs = watchdogClock(),
+                delayMs = CONTINUOUS_RESTART_DELAY_MS,
+            )
+            if (remaining > 0L) {
+                main.removeCallbacks(this)
+                main.postDelayed(this, remaining)
+                return
+            }
+            if (blockedByBackgroundConversation()) return
+            startListening()
+        }
     }
 
     /**
@@ -441,9 +461,11 @@ class LocalVoiceController(
     fun onAnswerStarted(): Boolean {
         if (released) return false
         if (!speakAnswers || !voiceTurn) return false
-        if (state.phase == LocalVoicePhase.LISTENING || capture?.isCapturing == true) return false
         val voice = ensureTts() ?: return false
         if (!voice.available) return false
+        // Ответ будет озвучен — значит микрофон обязан быть закрыт ДО первого слова. Захват,
+        // оставшийся открытым, услышал бы этот ответ и отправил его новым вопросом.
+        closeMicForAssistantSpeech()
         cancelThinkingHint()
         streamedTurn = false
         return runCatching { voice.beginStream() }.getOrDefault(false)
@@ -464,6 +486,9 @@ class LocalVoiceController(
         if (!speakAnswers || !voiceTurn) return false
         if (delta.isNullOrEmpty()) return false
         val voice = tts ?: return false
+        // Первый же кусок означает «сейчас зазвучит речь»: открытый микрофон надо закрыть до него,
+        // иначе ранний старт озвучки сам себя запишет.
+        closeMicForAssistantSpeech()
         cancelThinkingHint()
         // Первый же принятый кусок отменяет подсказку: текст появился — заглушка не нужна.
         val accepted = runCatching { voice.appendStream(delta) }.getOrDefault(false)
@@ -608,6 +633,8 @@ class LocalVoiceController(
             emit(state.copy(ttsAvailable = false, notice = TTS_UNAVAILABLE))
             return
         }
+        // Речь с динамика в открытый микрофон попадать не должна — ни при каком пути к озвучке.
+        closeMicForAssistantSpeech()
         if (runCatching { voice.speak(body) }.getOrDefault(false)) {
             emit(state.copy(phase = LocalVoicePhase.SPEAKING, ttsAvailable = true, notice = null))
         }
@@ -615,9 +642,13 @@ class LocalVoiceController(
 
     /** Немедленная тишина (перебивание жестом или конец диалога). */
     fun stopSpeaking() {
+        val wasSpeaking = tts?.isSpeaking == true || state.phase == LocalVoicePhase.SPEAKING
         tts?.stopByUser()
         stopSpeechEnvelope()
         publishLevel(0f)
+        // Заглушили своими руками — это тоже конец звука: пауза перед автостартом микрофона
+        // отсчитывается от него, а не от последнего слова.
+        if (wasSpeaking) lastSpeechEndedAtMs = watchdogClock()
         if (state.phase == LocalVoicePhase.SPEAKING) emit(state.copy(phase = LocalVoicePhase.IDLE))
     }
 
@@ -940,17 +971,35 @@ class LocalVoiceController(
      *
      * Пауза [CONTINUOUS_RESTART_DELAY_MS] — не косметика: сразу после последнего сэмпла динамик
      * ещё отдаёт хвост и реверберацию, и открытый в тот же кадр микрофон записал бы собственный
-     * ответ Марса как вопрос человека.
+     * ответ Марса как вопрос человека. Поэтому мало «подождать таймер» — надо ещё, чтобы к моменту
+     * старта ОТВЕТ ДЕЙСТВИТЕЛЬНО КОНЧИЛСЯ: ответ, ещё не отданный в синтез, звучащую речь и
+     * незакрытый поток дельт отсекает [canRestartContinuous], а остаток паузы добирает
+     * [continuousRestart].
      */
     private fun scheduleContinuousListening() {
-        if (released || paused || !continuousConversation) return
-        // Ответ ещё не отдан в синтез: сейчас заговорит он, а не человек.
-        if (answerPending) return
-        if (state.phase != LocalVoicePhase.IDLE) return
+        if (!canRestartContinuous()) return
         if (blockedByBackgroundConversation()) return
         main.removeCallbacks(continuousRestart)
         main.postDelayed(continuousRestart, CONTINUOUS_RESTART_DELAY_MS)
     }
+
+    /**
+     * Можно ли открывать микрофон сам, без нажатия.
+     *
+     * Чистое решение вынесено в [ContinuousListenPolicy] — оно проверяется юнит-тестом, а не только
+     * повторной приёмкой на телефоне. Здесь только сбор фактов: «идёт ход», «идёт потоковая
+     * озвучка» и «движок реально говорит» — три разные причины молчать, и каждая из них раньше
+     * открывала микрофон посреди речи Марса.
+     */
+    private fun canRestartContinuous(): Boolean = ContinuousListenPolicy.canRestart(
+        released = released,
+        paused = paused,
+        continuous = continuousConversation,
+        answerPending = answerPending,
+        streamedTurn = streamedTurn,
+        ttsSpeaking = tts?.isSpeaking == true,
+        phase = state.phase,
+    )
 
     private fun cancelContinuousRestart() {
         main.removeCallbacks(continuousRestart)
@@ -1295,22 +1344,63 @@ class LocalVoiceController(
             // Заговорил снова (вторая половина ответа после паузы) — отложенный автостарт
             // микрофона отменяется: иначе он открылся бы посреди речи Марса.
             cancelContinuousRestart()
+            // Микрофон физически не может слушать динамик Марса: закрываем ЛЮБОЙ активный захват,
+            // в том числе открытый в фазе LISTENING. Иначе ответ уходил в ASR и возвращался в чат
+            // как новый вопрос — Марс отвечал сам себе.
+            closeMicForAssistantSpeech()
             // Микрофон закрыт на время озвучки, поэтому громкость «речи» синтетическая:
             // орб должен дышать вместе с голосом, а не застывать.
             startSpeechEnvelope()
-            // Микрофон уже открыт — человек говорит; фазу не перебиваем, иначе следующий тап
-            // «закончить» ушёл бы в [stopSpeaking] и реплика потерялась бы.
-            if (state.phase != LocalVoicePhase.SPEAKING && state.phase != LocalVoicePhase.LISTENING) {
+            // Фаза — SPEAKING, даже если до этого было LISTENING: захват уже закрыт выше, значит
+            // «Слушаю» больше не правда, а следующий тап обязан глушить звук, а не искать
+            // несуществующую реплику.
+            if (state.phase != LocalVoicePhase.SPEAKING) {
                 emit(state.copy(phase = LocalVoicePhase.SPEAKING, ttsAvailable = true))
             }
         } else {
             stopSpeechEnvelope()
+            // Точка отсчёта паузы перед автостартом микрофона: хвост `AudioTrack` и реверберация
+            // комнаты уже позади, но им нужно ещё [CONTINUOUS_RESTART_DELAY_MS].
+            lastSpeechEndedAtMs = watchdogClock()
             if (state.phase == LocalVoicePhase.SPEAKING) {
                 emit(state.copy(phase = LocalVoicePhase.IDLE))
-                // Непрерывный разговор: Марс договорил — микрофон открывается сам.
-                scheduleContinuousListening()
             }
+            // Непрерывный разговор: Марс договорил — микрофон открывается сам. Решение принимает
+            // [scheduleContinuousListening]: пока ответ не отдан в синтез, пока идёт потоковая
+            // озвучка или пока движок реально говорит, таймер не ставится.
+            scheduleContinuousListening()
         }
+    }
+
+    /**
+     * Закрыть микрофон перед речью Марса (и на её старте).
+     *
+     * Зачем отдельный метод, а не два `if` в каждом месте: путей к озвучке четыре — событие
+     * движка «звук пошёл», старт потока ответа, первая дельта и пункт «Озвучить» у сообщения, — и
+     * в каждом из них забытый захват означал одно и то же: динамик попадал в микрофон, ASR
+     * распознавал ответ, и он уходил в чат новым вопросом.
+     *
+     * Закрывается и `HandsFreeCapture`, и системный распознаватель: это два разных владельца
+     * микрофона, и «полузакрытый» любой из них всё равно держит `AudioRecord`.
+     *
+     * @return `true` — микрофон был открыт и закрыт сейчас (фаза LISTENING снята).
+     */
+    private fun closeMicForAssistantSpeech(): Boolean {
+        val wasListening = platformListening || capture?.isCapturing == true
+        if (platformListening) {
+            platformListening = false
+            runCatching { platformAsr?.cancel() }
+        }
+        if (capture != null) closeCapture()
+        if (!wasListening) return false
+        // Недописанная реплика выбрасывается: её звук — это голос Марса из динамика, а не вопрос.
+        // `handledUtterance` закрывает путь позднему `Final`, который иначе отправил бы эхо в чат.
+        runCatching { stt?.cancelUtterance() }
+        handledUtterance = true
+        if (state.phase == LocalVoicePhase.LISTENING) {
+            emit(state.copy(phase = LocalVoicePhase.IDLE, partial = "", notice = null))
+        }
+        return true
     }
 
     /**
@@ -1433,11 +1523,12 @@ class LocalVoiceController(
         /**
          * Пауза перед автостартом следующей реплики в непрерывном разговоре.
          *
-         * 400 мс — не «чтобы было плавно»: динамик после последнего сэмпла ещё отдаёт хвост и
-         * реверберацию комнаты, и микрофон, открытый в тот же кадр, записал бы собственный ответ
-         * Марса как вопрос человека.
+         * 650 мс — не «чтобы было плавно»: динамик после последнего сэмпла ещё отдаёт хвост
+         * аудиобуфера `AudioTrack` и реверберацию комнаты (на маленькой кухне/в ванной — сотни
+         * миллисекунд), и микрофон, открытый в тот же кадр, записал бы собственный ответ Марса как
+         * вопрос человека. 400 мс хвост не покрывали: эхо попадало в ASR и уходило новым ходом.
          */
-        const val CONTINUOUS_RESTART_DELAY_MS: Long = 400L
+        const val CONTINUOUS_RESTART_DELAY_MS: Long = 650L
 
         /**
          * Троттлинг уровня громкости: поток чтения микрофона даёт ~50 буферов в секунду, а орбу
@@ -1471,5 +1562,59 @@ class LocalVoiceController(
          * не звучит вовсе — «не произносить, если текст появился сразу».
          */
         private const val THINKING_HINT_DELAY_MS = 700L
+    }
+}
+
+/**
+ * Чистое решение «можно ли снова открыть микрофон после ответа Марса».
+ *
+ * Зачем отдельный объект. Автостарт микрофона в непрерывном разговоре — единственное место, где
+ * захват открывается БЕЗ человека, и ошибка здесь стоит дороже всего: микрофон, открытый пока
+ * Марс говорит, записывает его же ответ, ASR превращает его в текст, и Марс отвечает сам себе.
+ * Поэтому решение собрано в одну функцию без `Handler`, без Android и без полей состояния — его
+ * можно проверить юнит-тестом в каждом из шести условий, а не только повторной приёмкой на
+ * телефоне.
+ *
+ * Все условия обязательны одновременно, и каждое закрывает свой наблюдавшийся сценарий:
+ * - [released]/[paused] — экран закрыт или ушёл в фон (микрофон в кармане — не разговор);
+ * - [continuous] — обычный чат живёт по правилу «одна реплика на одно нажатие»;
+ * - [answerPending] — заглушка «Секунду, думаю.» договорила, а ответ ещё впереди;
+ * - [streamedTurn] — ответ ещё докатывается дельтами в синтез;
+ * - [ttsSpeaking] — движок реально произносит реплику (включая хвост `AudioTrack`);
+ * - [phase] — не IDLE значит, что канал уже чем-то занят (слушает, думает, говорит).
+ */
+internal object ContinuousListenPolicy {
+
+    /** @return `true` — автостарт разрешён; `false` — микрофон открывать нельзя ни в коем случае. */
+    fun canRestart(
+        released: Boolean,
+        paused: Boolean,
+        continuous: Boolean,
+        answerPending: Boolean,
+        streamedTurn: Boolean,
+        ttsSpeaking: Boolean,
+        phase: LocalVoicePhase,
+    ): Boolean {
+        if (released || paused || !continuous) return false
+        if (answerPending || streamedTurn) return false
+        if (ttsSpeaking) return false
+        return phase == LocalVoicePhase.IDLE
+    }
+
+    /**
+     * Сколько ещё ждать, прежде чем открывать микрофон.
+     *
+     * Пауза отсчитывается от РЕАЛЬНОГО конца звука ([lastSpeechEndedAtMs]), а не от момента
+     * планирования таймера: между этими моментами может пройти целый ответ, и таймер, поставленный
+     * заранее, открыл бы микрофон посреди речи.
+     *
+     * @param lastSpeechEndedAtMs монотонная метка конца речи; `<= 0` — речи ещё не было.
+     * @return остаток паузы в миллисекундах; `0` — можно открывать сейчас.
+     */
+    fun remainingQuietMs(lastSpeechEndedAtMs: Long, nowMs: Long, delayMs: Long): Long {
+        if (lastSpeechEndedAtMs <= 0L || delayMs <= 0L) return 0L
+        val elapsed = nowMs - lastSpeechEndedAtMs
+        // Часы ушли назад (не должно быть на монотонных часах) — ждём полную паузу, а не ноль.
+        return (delayMs - elapsed).coerceIn(0L, delayMs)
     }
 }

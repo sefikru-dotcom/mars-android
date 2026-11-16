@@ -48,8 +48,9 @@ data class ServerTtsVoiceProfile(
  * Профили голоса, которыми пользуется приложение.
  *
  * Порядок [VOICE_DIALOG] — это и есть политика: сначала естественный Svetlana, затем
- * локальный резерв irina. Менять порядок местами нельзя: это превратило бы резерв в
- * «навязанный» голос и вернуло бы ровно ту проблему, ради которой профили и заведены.
+ * мужской Dmitry (тоже edge-нейросеть), локальный резерв irina — последним. Менять
+ * порядок местами нельзя: это превратило бы резерв в «навязанный» голос и вернуло бы
+ * ровно ту проблему, ради которой профили и заведены.
  */
 object ServerTtsVoices {
 
@@ -78,6 +79,26 @@ object ServerTtsVoices {
     )
 
     /**
+     * Мужской естественный голос веба: edge-tts, `ru-RU-DmitryNeural`, темп +5 %.
+     *
+     * Зачем второй сетевой голос: человеку нужен ВЫБОР пола голоса, а не одна Светлана.
+     * Dmitry — тот же движок (`edge`), поэтому доступность у него та же, что у Svetlana:
+     * если edge на сервере установлен, работает и он. Свой темп `+5%` вместо `+10%`:
+     * мужская нейросеть на ускорении Светланы звучит торопливо.
+     *
+     * Стоит ВТОРЫМ в [VOICE_DIALOG], а не первым: голос веба по умолчанию — Светлана, и
+     * Dmitry обязан быть выбором, а не подменой.
+     */
+    val NATURAL_DMITRY: ServerTtsVoiceProfile = ServerTtsVoiceProfile(
+        id = "natural-dmitry",
+        engine = "edge",
+        voice = "ru-RU-DmitryNeural",
+        rate = "+5%",
+        natural = true,
+        needsNetwork = true,
+    )
+
+    /**
      * Локальный резерв: piper `ru_RU-irina-medium`, TTFB ≈ 0.22 с, RTF 0.052.
      *
      * Почему именно irina: единственный проверенный piper-голос, который произносит
@@ -96,8 +117,14 @@ object ServerTtsVoices {
         needsNetwork = false,
     )
 
-    /** Политика голосового диалога: естественный первым, локальный резерв вторым. */
-    val VOICE_DIALOG: List<ServerTtsVoiceProfile> = listOf(NATURAL_SVETLANA, LOCAL_IRINA)
+    /**
+     * Политика голосового диалога: Светлана, Дмитрий, локальный резерв Ирина.
+     *
+     * `first()` обязан оставаться Светланой: это голос веба по умолчанию, и понижение
+     * профиля в селекторе голоса отсчитывается именно от него.
+     */
+    val VOICE_DIALOG: List<ServerTtsVoiceProfile> =
+        listOf(NATURAL_SVETLANA, NATURAL_DMITRY, LOCAL_IRINA)
 
     /** Профиль по [id] или null (для настроек и миграции сохранённого выбора). */
     fun byId(id: String?): ServerTtsVoiceProfile? =

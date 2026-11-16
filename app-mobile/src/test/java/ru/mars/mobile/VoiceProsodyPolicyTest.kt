@@ -78,10 +78,47 @@ class VoiceProsodyPolicyTest {
     fun `список голосов непустой и первый — естественный`() {
         val options = VoiceProsodyPolicy.options()
         assertTrue(options.isNotEmpty())
-        // Порядок из ServerTtsVoices.VOICE_DIALOG: Svetlana основная, irina резерв.
-        // id — это id ПРОФИЛЯ (natural-svetlana), а не имя движка: по нему хранится выбор.
+        // Порядок из ServerTtsVoices.VOICE_DIALOG: Svetlana основная, Dmitry выбор,
+        // irina резерв. id — это id ПРОФИЛЯ (natural-svetlana), а не имя движка:
+        // по нему хранится выбор.
         assertEquals(ServerTtsVoices.NATURAL_SVETLANA.id, options.first().id)
         assertEquals("Светлана", options.first().label)
+    }
+
+    @Test
+    fun `два сетевых голоса различаются подписью, а не флагом natural`() {
+        val options = VoiceProsodyPolicy.options()
+
+        // Оба профиля помечены natural (оба — голоса веба), поэтому подпись обязана
+        // различаться по id: иначе «Дмитрий» показался бы человеку Светланой.
+        assertEquals(
+            listOf(
+                ServerTtsVoices.NATURAL_SVETLANA.id,
+                ServerTtsVoices.NATURAL_DMITRY.id,
+                ServerTtsVoices.LOCAL_IRINA.id,
+            ),
+            options.map { it.id },
+        )
+        assertEquals("Светлана", options[0].label)
+        assertEquals("Естественный голос веба, нужна сеть", options[0].hint)
+        assertEquals("Дмитрий", options[1].label)
+        assertEquals("Мужской голос веба, нужна сеть", options[1].hint)
+        assertEquals("Ирина", options[2].label)
+    }
+
+    @Test
+    fun `выбор Дмитрия подсвечивается и доезжает до профиля`() {
+        val chosen = VoiceProsodyPolicy.selected(
+            VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id),
+        )
+
+        assertEquals("Дмитрий", chosen?.label)
+        // voiceId строки списка — id профиля: по нему клиент синтеза ставит голос первым.
+        assertEquals(ServerTtsVoices.NATURAL_DMITRY.id, chosen?.prosody?.voiceId)
+        assertEquals(
+            "Дмитрий",
+            VoiceProsodyPolicy.voiceLabel(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id)),
+        )
     }
 
     @Test

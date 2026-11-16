@@ -112,6 +112,15 @@ data class LocalChatItem(
      * провайдер отдаёт их одним кадром в конце, без отметок времени.
      */
     val ttftMs: Long = 0,
+    /**
+     * Время сообщения (epoch-мс) — для шапки карточки ленты.
+     *
+     * Раньше метка терялась при сборке элемента: [LocalMessage.createdAt] сохранялся в
+     * истории, но в ленту не попадал, и час в карточке было неоткуда взять. Ноль —
+     * «время неизвестно» ([MessageTimePolicy.UNKNOWN_TIMESTAMP]): час тогда не рисуется.
+     * Дефолт обязателен: элемент собирают и тесты, которым время не нужно.
+     */
+    val createdAt: Long = 0L,
 )
 
 /**
@@ -585,9 +594,22 @@ class LocalChatPresenter(
         _state.value = _state.value.copy(
             items = _state.value.items +
                 (listOfNotNull(
-                    LocalChatItem(user.id, LocalRole.USER, user.text).takeIf { showInFeed },
+                    LocalChatItem(
+                        id = user.id,
+                        role = LocalRole.USER,
+                        text = user.text,
+                        createdAt = user.createdAt,
+                    ).takeIf { showInFeed },
                 ) +
-                    LocalChatItem(assistantId, LocalRole.ASSISTANT, text = "", streaming = true)),
+                    LocalChatItem(
+                        id = assistantId,
+                        role = LocalRole.ASSISTANT,
+                        text = "",
+                        streaming = true,
+                        // Время хода фиксируется сразу: пока стрим идёт, история ещё не
+                        // перечитана, а час в шапке карточки уже обязан быть.
+                        createdAt = now(),
+                    )),
             streaming = true,
             // Новый ход снимает фазу остановки прошлого: иначе экран остался бы
             // заблокированным «Останавливаю…» после удачного следующего вопроса.
@@ -1072,7 +1094,14 @@ class LocalChatPresenter(
         val items = ArrayList<LocalChatItem>(messages.size)
         messages.forEach { message ->
             when (message.role) {
-                LocalRole.USER -> items.add(LocalChatItem(message.id, LocalRole.USER, message.text))
+                LocalRole.USER -> items.add(
+                    LocalChatItem(
+                        id = message.id,
+                        role = LocalRole.USER,
+                        text = message.text,
+                        createdAt = message.createdAt,
+                    )
+                )
                 LocalRole.ASSISTANT -> {
                     if (message.text.isNotBlank() || message.toolCalls.isEmpty()) {
                         // Метрики хода поднимаются из истории в элемент ленты: без этого
@@ -1085,6 +1114,7 @@ class LocalChatPresenter(
                                 id = message.id,
                                 role = LocalRole.ASSISTANT,
                                 text = message.text,
+                                createdAt = message.createdAt,
                                 promptTokens = metrics?.promptTokens ?: 0,
                                 completionTokens = metrics?.completionTokens ?: 0,
                                 totalTokens = metrics?.totalTokens ?: 0,

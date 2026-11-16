@@ -42,7 +42,7 @@ class ServerTtsVoiceContractTest {
     @Test
     fun `natural svetlana is first in the voice dialog policy`() {
         assertEquals(
-            listOf("natural-svetlana", "local-irina"),
+            listOf("natural-svetlana", "natural-dmitry", "local-irina"),
             ServerTtsVoices.VOICE_DIALOG.map { it.id },
         )
         val natural = ServerTtsVoices.VOICE_DIALOG.first()
@@ -51,6 +51,20 @@ class ServerTtsVoiceContractTest {
         assertEquals("ru-RU-SvetlanaNeural", natural.voice)
         assertEquals("+10%", natural.rate)
         assertTrue("edge требует сети", natural.needsNetwork)
+    }
+
+    @Test
+    fun `natural dmitry is the second web voice and still needs the network`() {
+        val dmitry = ServerTtsVoices.byId("natural-dmitry")!!
+
+        assertEquals("edge", dmitry.engine)
+        assertEquals("ru-RU-DmitryNeural", dmitry.voice)
+        assertEquals("+5%", dmitry.rate)
+        assertTrue("Dmitry — голос веба, а не резерв", dmitry.natural)
+        assertTrue("edge требует сети", dmitry.needsNetwork)
+        assertFalse(dmitry.isLocal)
+        // Второй, а не первый: голос веба по умолчанию — Светлана.
+        assertEquals(dmitry, ServerTtsVoices.VOICE_DIALOG[1])
     }
 
     @Test

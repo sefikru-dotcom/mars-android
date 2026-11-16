@@ -67,6 +67,14 @@ object ChatMessageCardRenderer {
 
         fun copyMessage(text: String)
 
+        /**
+         * Быстрое действие «Ответить» на карточке: цитирование сообщения в композер.
+         *
+         * Тело по умолчанию пустое намеренно: цитата — состояние экрана, а рендерер
+         * карточки не должен требовать её от каждого [Host] (фейковые хосты в тестах).
+         */
+        fun replyToMessage(message: ChatMessage) {}
+
         fun speakMessage(text: String)
 
         fun showMessageActions(message: ChatMessage, index: Int)
@@ -241,6 +249,21 @@ object ChatMessageCardRenderer {
                 setOnClickListener { host.copyMessage(host.messageAt(index)?.text ?: message.text) }
             }
             actionsRow.addView(copyBtn)
+            // «Ответить» — та же цитата, что в шторке «⋮» (MessageActionKind.QUOTE), но
+            // одним тапом: раньше о ней знал только тот, кто открывал шторку.
+            val replyBtn = Button(context).apply {
+                text = "Ответить"
+                textSize = 11f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                background = null
+                isAllCaps = false
+                setPadding(0, 0, 0, 0)
+                minimumHeight = 0
+                minHeight = 0
+                gravity = Gravity.START
+                setOnClickListener { host.replyToMessage(host.messageAt(index) ?: message) }
+            }
+            actionsRow.addView(replyBtn, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
             // «⋮» button: full message-actions sheet (copy/quote/share), WebUI parity.
             val moreBtn = MarsTheme.circleIconButton(
                 context,

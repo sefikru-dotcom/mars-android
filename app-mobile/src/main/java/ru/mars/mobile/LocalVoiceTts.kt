@@ -179,7 +179,16 @@ class LocalVoiceTts(
     private val output: VoiceOutputController =
         VoiceOutputController(engine = engine, autoSpeakInitially = true)
 
-    /** Звук идёт прямо сейчас. */
+    /**
+     * Звук идёт прямо сейчас.
+     *
+     * Точность этого флага — не косметика: контроллер голосового режима по нему решает, можно ли
+     * открывать микрофон ([LocalVoiceController] → `canRestartContinuous`). `true` держится от
+     * принятого синтеза до РЕАЛЬНОГО конца последнего сэмпла: движок сообщает тишину только после
+     * того, как доигран `AudioTrack` (у офлайн-порта — по [ru.mars.mobile.tts.OfflineTtsBackend.isSpeaking],
+     * а не по `isReady()`, который истинен и во время речи). Между кусками потокового ответа флаг
+     * тоже не гаснет, иначе микрофон открывался бы в паузах посреди фразы.
+     */
     val isSpeaking: Boolean get() = speaking
 
     /** Есть ли чем озвучивать: системный движок жив или серверный канал ещё не отказал. */

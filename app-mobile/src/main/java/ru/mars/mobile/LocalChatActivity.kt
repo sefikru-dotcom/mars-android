@@ -53,6 +53,8 @@ import ru.mars.network.local.LocalRole
 import ru.mars.network.local.LocalSession
 import ru.mars.network.local.LocalToolCall
 import ru.mars.network.local.LocalUsage
+import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.repository.ServerTtsVoices
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -134,6 +136,7 @@ class LocalChatActivity : ComponentActivity() {
 
     private lateinit var providerStore: LocalProviderStore
     private lateinit var sessionStore: LocalSessionStore
+    private lateinit var credentialStore: AndroidKeyStoreCredentialStore
 
     private lateinit var scaffold: SectionScaffold.Parts
 
@@ -346,6 +349,7 @@ class LocalChatActivity : ComponentActivity() {
         voiceProsodyStore = VoiceProsodyPrefs(this)
         providerStore = LocalProviderPrefsStore(this)
         sessionStore = LocalSessionStore.forContext(this)
+        credentialStore = AndroidKeyStoreCredentialStore(this)
         client = LocalChatTransport.clientOrUnavailable()
         deviceTools = LocalChatToolSource.tools(this)
         session = intent.getStringExtra(EXTRA_SESSION_ID)?.let { id ->
@@ -717,6 +721,8 @@ class LocalChatActivity : ComponentActivity() {
             onOpenUrl = ::openUrl,
             onSaveImage = ::saveGeneratedImage,
             onStoredImage = ::storedImage,
+            onReply = ::replyToItem,
+            onSpeakText = ::speak,
         )
         scaffold.content.addView(transcript.view, LinearLayout.LayoutParams(-1, 0, 1f))
 
@@ -773,7 +779,12 @@ class LocalChatActivity : ComponentActivity() {
                 renderVoiceStatusLine(state)
             },
             onOpenX = { openAppSettings() },
-            serverTts = null,
+            serverTts = RepositoryServerTtsClient(
+                baseUrl = ChatActivity.BASE_URL,
+                credentialProvider = { runCatching { credentialStore.read() }.getOrNull() },
+                selector = SpeechVoiceProfileSelector(),
+                prosodyProvider = { voiceProsody },
+            ),
             // Офлайн-Piper для автоозвучки: без него ответ читает системный робот.
             offlineTts = { offlineTts() },
         )
@@ -2421,6 +2432,22 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     /**
+     * Быстрая кнопка «Ответить» на карточке сообщения: вставляет markdown-цитату (`> …`)
+     * в начало композера и переводит фокус на поле ввода.
+     */
+    private fun replyToItem(item: LocalChatItem) {
+        if (item.text.isBlank()) return
+        val current = composer.input.text.toString()
+        val quoted = MessageActionPolicy.composeQuote(current, item.text)
+        composer.input.setText(quoted.text)
+        composer.input.setSelection(quoted.cursor.coerceIn(0, quoted.text.length))
+        composer.input.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+        imm?.showSoftInput(composer.input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        Toast.makeText(this, "Цитата добавлена в поле ввода", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
      * Повтор последнего запроса: текст последнего сообщения пользователя снова уходит
      * провайдеру как новый ход. Перегенерации «поверх» ответа у локального презентера
      * нет — он только дописывает историю, поэтому повтор виден как новая пара сообщений.
@@ -2596,6 +2623,16 @@ class LocalChatActivity : ComponentActivity() {
         val body = text.trim()
         if (body.isEmpty()) {
             Toast.makeText(this, "Нечего озвучивать", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Если голосовой контроллер инициализирован, озвучиваем через него: там уже
+        // подключены и серверные голоса (Светлана, Дмитрий), и офлайн-Piper (Ирина),
+        // и выбранный пользователем темп/профиль в VoiceProsody!
+        if (::voice.isInitialized) {
+            voice.setProsody(voiceProsody)
+            voice.speakNow(body)
+            Toast.makeText(this, "Озвучиваю", Toast.LENGTH_SHORT).show()
             return
         }
 
