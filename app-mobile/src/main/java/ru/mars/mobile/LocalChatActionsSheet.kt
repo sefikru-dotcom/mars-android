@@ -158,7 +158,7 @@ internal object LocalChatActionsSheet {
             )
             emptyList()
         }
-        dialog?.window?.setDimAmount(0.8f)
+        dialog?.window?.setDimAmount(0.55f)
     }
 
     /**
@@ -206,7 +206,7 @@ internal object LocalChatActionsSheet {
                     )
                     emptyList()
                 }
-                dialog?.window?.setDimAmount(0.8f)
+                dialog?.window?.setDimAmount(0.55f)
             }
         }
     }

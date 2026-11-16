@@ -103,7 +103,7 @@ internal fun ChatActivity.buildView(): View {
     drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.SCREEN_VEIL) }
     drawer.addView(buildChatContent(), DrawerLayout.LayoutParams(-1, -1))
     drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
-    return drawer
+    return MarsSpaceBackgroundView.wrap(this, drawer)
 }
 
 /**

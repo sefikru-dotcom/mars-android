@@ -119,4 +119,58 @@ class PushMessagePolicyTest {
         requireNotNull(withJunk); requireNotNull(without)
         assertEquals(without.notificationId, withJunk.notificationId)
     }
+
+    // --- адресат события: url/tag, а не только session_id --------------------------------
+
+    @Test
+    fun `server push with url and tag gets a session id`() {
+        // Ровно тот payload, что шлёт сервер по завершении хода
+        // (api/push_fcm.py, api/streaming.py):
+        // {"url": "session/<sid>", "tag": "hermes-<sid>"} — без ключа session_id.
+        val spec = PushMessagePolicy.parse(
+            notificationTitle = "Марс: ответ готов",
+            notificationBody = "Ход завершён",
+            data = mapOf("ts" to "1763000000", "url" to "session/s-55", "tag" to "hermes-s-55"),
+        )
+        requireNotNull(spec)
+        assertEquals("s-55", spec.sessionId)
+        assertEquals("session/s-55", spec.url)
+        assertEquals("hermes-s-55", spec.tag)
+    }
+
+    @Test
+    fun `session is recovered from the tag alone`() {
+        val spec = PushMessagePolicy.parse("t", "b", mapOf("tag" to "hermes-s-56"))
+        requireNotNull(spec)
+        assertEquals("s-56", spec.sessionId)
+    }
+
+    @Test
+    fun `explicit session_id wins over url and tag`() {
+        val spec = PushMessagePolicy.parse(
+            "t", "b",
+            mapOf(
+                "session_id" to "from-key",
+                "url" to "session/from-url",
+                "tag" to "hermes-from-tag",
+            ),
+        )
+        requireNotNull(spec)
+        assertEquals("from-key", spec.sessionId)
+    }
+
+    @Test
+    fun `test push tag alone yields no session id`() {
+        // Тап по тестовому пушу не должен вести в несуществующий диалог.
+        val spec = PushMessagePolicy.parse("t", "b", mapOf("tag" to "hermes-push-test"))
+        requireNotNull(spec)
+        assertNull(spec.sessionId)
+    }
+
+    @Test
+    fun `push without any address yields no session id`() {
+        val spec = PushMessagePolicy.parse("t", "b", mapOf("kind" to "chat"))
+        requireNotNull(spec)
+        assertNull(spec.sessionId)
+    }
 }

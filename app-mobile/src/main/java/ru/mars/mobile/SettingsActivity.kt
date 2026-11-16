@@ -280,7 +280,7 @@ class SettingsActivity : ComponentActivity() {
 
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        return root
+        return MarsSpaceBackgroundView.wrap(this, root)
     }
 
     private fun buildSectionHeader(title: String): TextView = TextView(this).apply {

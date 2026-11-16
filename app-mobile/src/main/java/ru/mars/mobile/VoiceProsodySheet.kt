@@ -205,7 +205,7 @@ internal object VoiceProsodySheet {
             emptyList()
         }
         // Тот же уровень затемнения, что у листа действий: два листа подряд не мерцают.
-        dialog?.window?.setDimAmount(0.8f)
+        dialog?.window?.setDimAmount(0.55f)
     }
 
     /** Строка списка голосов: `root` (кликабельный) и два уровня текста внутри. */

@@ -135,7 +135,7 @@ internal object LocalChatEditSheet {
             )
             listOf(input, applyButton)
         }
-        dialog?.window?.setDimAmount(0.8f)
+        dialog?.window?.setDimAmount(0.55f)
 
         // Клавиатура — сразу: человек пришёл сюда печатать, и лишний тап по полю был бы
         // единственным, что отделяет его от правки. Следующим кадром, потому что до показа

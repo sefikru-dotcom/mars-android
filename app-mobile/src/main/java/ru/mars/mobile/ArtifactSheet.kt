@@ -118,7 +118,7 @@ internal object ArtifactSheet {
             )
             emptyList()
         }
-        dialog?.window?.setDimAmount(0.8f)
+        dialog?.window?.setDimAmount(0.55f)
         clampHeight(activity, dialog)
     }
 

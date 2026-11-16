@@ -78,9 +78,10 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
                 contextUsage = detail.contextUsage,
             )
             applySessionTitle(uiState.sessionTitle)
-            // Session truth only: the user's explicit picker choice is NOT cleared
-            // here, so explicit_model_pick survives opening/reloading a chat.
-            modelSelection.setSessionModel(detail.model, detail.modelProvider)
+            // Model of the opened chat is the truth for the chip and for the wire (WebUI
+            // parity): [ModelSelection.bindOpenedSessionModel] drops a pick remembered
+            // from another chat and canonicalises the id through the catalog.
+            applyOpenedSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
             // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
             toolsetsPresenter.bind(detail.enabledToolsets)
@@ -94,6 +95,9 @@ internal fun ChatActivity.loadSessionById(sessionId: String) {
             uiState.setActiveTurn(detail.activeTurn)
             uiState.setTodoState(detail.todoState)
             currentSessionId = detail.id
+            // The reasoning ladder is per-model AND per-session: ask only after the opened
+            // session id is bound, otherwise the previous chat's status would be queried.
+            refreshReasoningStatus()
             // A15: окно дебаунса и «последний записанный» относятся к прежнему диалогу.
             serverDraftSync.onSessionChanged()
             restoreComposerDraft()
@@ -155,13 +159,12 @@ internal suspend fun ChatActivity.showOfflineSessionCopy(sessionId: String) {
     val cached = withContext(Dispatchers.IO) { offlineCache.loadMessages(sessionId) } ?: return
     drafts.onSessionSwitch(currentSessionId, sessionId, input.text.toString())
     composerGuard.onSessionSwitch()
-    currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == sessionId }?.readOnly == true
-    currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == sessionId }?.isSubagent == true
-    // Session truth only — the user's explicit pick (if any) stays on the wire.
-    modelSelection.setSessionModel(
-        uiState.sessions.firstOrNull { it.id == sessionId }?.model,
-        uiState.sessions.firstOrNull { it.id == sessionId }?.modelProvider,
-    )
+    val sessionRow = uiState.sessions.firstOrNull { it.id == sessionId }
+    currentSessionReadOnly = sessionRow?.readOnly == true
+    currentSessionIsSubagent = sessionRow?.isSubagent == true
+    // Модель открытого диалога (пусть и из списка, без детали) — его собственная модель:
+    // старый глобальный выбор снимается, чип показывает именно её.
+    applyOpenedSessionModel(sessionRow?.model, sessionRow?.modelProvider)
     uiState.bindSession(
         sessionId,
         uiState.sessions.firstOrNull { it.id == sessionId }?.title,
@@ -179,7 +182,28 @@ internal suspend fun ChatActivity.showOfflineSessionCopy(sessionId: String) {
     setStatus()
     updateControlsFromSection()
     updateTodoWidget()
+    // Офлайн-копия тоже открывает конкретный чат: лестница размышлений — его модели.
+    refreshReasoningStatus()
     flushOfflineQueue()
+}
+
+/**
+ * Модель ОТКРЫВАЕМОГО диалога -> [ModelSelection].
+ *
+ * Открытие существующего чата — не «сервер что-то сказал»: у диалога уже есть модель,
+ * и показывать/отправлять нужно именно её (паритет с WebUI), даже если в prefs лежит
+ * выбор из другого чата. Для непустой модели вызывается
+ * [ModelSelection.bindOpenedSessionModel] (снимает старый глобальный выбор, подтягивает
+ * канонический id/provider из каталога), для пустой — прежний
+ * [ModelSelection.setSessionModel] (новый чат: серверной модели ещё нет, а выбор
+ * пользователя до первого сообщения обязан выжить).
+ */
+internal fun ChatActivity.applyOpenedSessionModel(modelId: String?, providerId: String?) {
+    if (modelId?.isNotBlank() == true) {
+        modelSelection.bindOpenedSessionModel(modelId, providerId)
+    } else {
+        modelSelection.setSessionModel(modelId, providerId)
+    }
 }
 
 /**
@@ -369,9 +393,10 @@ internal fun ChatActivity.reloadCurrentSession() {
                 contextUsage = detail.contextUsage,
             )
             applySessionTitle(uiState.sessionTitle)
-            // Session truth only: the user's explicit picker choice is NOT cleared
-            // here, so explicit_model_pick survives opening/reloading a chat.
-            modelSelection.setSessionModel(detail.model, detail.modelProvider)
+            // Model of the opened chat is the truth for the chip and for the wire (WebUI
+            // parity): [ModelSelection.bindOpenedSessionModel] drops a pick remembered
+            // from another chat and canonicalises the id through the catalog.
+            applyOpenedSessionModel(detail.model, detail.modelProvider)
             // A9: набор инструментов приходит вместе с деталью сессии — привязываем
             // серверное значение до отрисовки чипов, чтобы не мигнуть чужим набором.
             toolsetsPresenter.bind(detail.enabledToolsets)
@@ -381,6 +406,8 @@ internal fun ChatActivity.reloadCurrentSession() {
             currentSessionReadOnly = uiState.sessions.firstOrNull { it.id == detail.id }?.readOnly == true
             currentSessionIsSubagent = uiState.sessions.firstOrNull { it.id == detail.id }?.isSubagent == true
             modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
+            // The reasoning ladder is per-model: the opened chat may carry another one.
+            refreshReasoningStatus()
             uiState.setActiveTurn(detail.activeTurn)
             uiState.setTodoState(detail.todoState)
             autoScroll.pinToBottom()

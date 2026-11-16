@@ -87,7 +87,7 @@ internal object ChatMessageEditSheet {
             listOf(apply)
         }
         field?.requestFocus()
-        dialog?.window?.setDimAmount(0.8f)
+        dialog?.window?.setDimAmount(0.55f)
     }
 
     /** Подпись поля ввода. */

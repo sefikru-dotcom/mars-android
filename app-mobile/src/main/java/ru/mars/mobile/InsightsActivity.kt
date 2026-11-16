@@ -131,7 +131,7 @@ class InsightsActivity : ComponentActivity() {
 
     // --------------------------------------------------------------- layout
 
-    private fun buildRootLayout(): LinearLayout {
+    private fun buildRootLayout(): View {
         // Волна 4: safe-area, «Назад», заголовок, индикатор и «Обновить» — общий
         // shell разделов в особом компактном варианте шапки монитора
         // (HeaderStyle.COMPACT); «Обновить» перезагружает активную вкладку.

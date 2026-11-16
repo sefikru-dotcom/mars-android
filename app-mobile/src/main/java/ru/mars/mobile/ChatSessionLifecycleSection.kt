@@ -105,6 +105,7 @@ internal fun ChatActivity.startNewChat() {
     applySessionTitle(uiState.sessionTitle)
     modelSelection.clearSessionModel()
     modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
+    refreshReasoningStatus()
     currentSessionId = null
     explicitStatus = null
     // A15/A14: у нового чата нет ни серверного черновика, ни измеренного расхода.

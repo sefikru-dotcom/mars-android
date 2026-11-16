@@ -104,7 +104,10 @@ internal fun ChatActivity.chooseModel() {
             return@launch
         }
         val labels = entries.map { it.label }.toTypedArray()
-        val checked = entries.indexOfFirst { it.model.id == modelSelection.displayedChoice()?.modelId }
+        // Checked row through the catalog-aware matcher: the session's model may be the
+        // bare id (`claude-sonnet-5.5`) while the catalog row is `@provider:model`, and
+        // a plain `id ==` left the picker with nothing selected.
+        val checked = entries.indexOfFirst { modelSelection.matchesCatalogModel(it.model, modelSelection.displayedChoice()) }
         android.app.AlertDialog.Builder(this@chooseModel)
             .setTitle("Модель Марса")
             .setSingleChoiceItems(labels, checked) { d, which ->
@@ -120,6 +123,23 @@ internal fun ChatActivity.chooseModel() {
                     statusView.text = "Модель: ${picked.modelId}"
                     // The effort ladder is per-model: re-read it after a model change.
                     refreshReasoningStatus()
+                    // An opened chat's model IS session state: the WebUI writes it with
+                    // POST /api/session/update, so the phone does the same — otherwise the
+                    // next browser turn would run on the model the server still holds.
+                    val sid = currentSessionId
+                    if (sid != null) {
+                        lifecycleScope.launch {
+                            withContext(Dispatchers.IO) {
+                                SessionRepository().updateSessionModel(
+                                    ChatActivity.BASE_URL,
+                                    c,
+                                    sid,
+                                    picked.modelId,
+                                    picked.providerId,
+                                )
+                            }
+                        }
+                    }
                 }
             }
             .show()

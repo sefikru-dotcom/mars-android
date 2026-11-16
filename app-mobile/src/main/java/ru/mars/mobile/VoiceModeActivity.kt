@@ -178,7 +178,7 @@ class VoiceModeActivity : Activity() {
     private fun buildScreen(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(MarsTheme.BG)
+            setBackgroundColor(MarsTheme.SCREEN_VEIL)
             setPadding(dp(24), dp(8), dp(24), dp(24))
         }
 
@@ -260,7 +260,7 @@ class VoiceModeActivity : Activity() {
         bottom.addView(primaryButton, LinearLayout.LayoutParams(MATCH_PARENT, dp(PRIMARY_HEIGHT_DP)))
 
         root.addView(bottom, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        return root
+        return MarsSpaceBackgroundView.wrap(this, root)
     }
 
     /** Шапка: только «свернуть» — на этом экране больше некуда идти. */

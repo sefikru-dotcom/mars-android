@@ -46,7 +46,7 @@ class SessionActiveTurnTest {
                 }}
             """.trimIndent()))
             val detail = SessionRepository().getSessionDetail(server.url("/").toString(), credential, "s1")!!
-            assertEquals("/api/session?session_id=s1", server.takeRequest().path)
+            assertEquals("/api/session?session_id=s1&resolve_model=1", server.takeRequest().path)
             assertEquals(
                 ActiveTurnInfo(
                     activeStreamId = "st-42",

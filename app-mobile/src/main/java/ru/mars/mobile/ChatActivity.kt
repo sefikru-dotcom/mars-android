@@ -20,6 +20,7 @@ import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionUsage
 import ru.mars.network.repository.CompressionSummary
 import ru.mars.network.repository.LiveEventsRepository
+import ru.mars.network.repository.PushTapRouting
 import ru.mars.network.repository.SessionRepository
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
@@ -454,6 +455,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         loadWorkspaces()
         // Пересоздание экрана (поворот/тема/смерть процесса): открытый диалог восстанавливается
         // из savedInstanceState; на холодном старте savedInstanceState == null -> новый чат.
+        // Тап по системному FCM-уведомлению приносит адресат «сырыми» ключами data
+        // (`session_id`, `url`, `tag`), а не нашим extra: распознанный диалог фиксируем в
+        // интенте ДО восстановления, иначе restoreOpenSession нечего открывать.
+        resolvePushSessionId(intent)?.let { sid -> intent?.putExtra(EXTRA_OPEN_SESSION_ID, sid) }
         restoreOpenSession(savedInstanceState)
         // Кнопка «Ответить» при убитом процессе приходит в onCreate, а не в onNewIntent:
         // без этой строки первый в жизни ответ из шторки терялся бы молча.
@@ -632,12 +637,38 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
 
     /**
+     * Адресат push-тапа из интента; null — интент не про конкретный диалог.
+     *
+     * Один разбор на все входы: наш собственный [EXTRA_OPEN_SESSION_ID] (навигация
+     * приложения), затем сырые ключи data-payload FCM (`session_id`,
+     * `push_session_id` кнопки «Ответить»), затем deep-link (`url`/`dataString`) и
+     * `tag` (`hermes-<sid>`). Системный трей показывает уведомление сам, когда
+     * процесс спит, и переименовывать ключи не станет — поэтому «сырые» имена
+     * читаются здесь, а не в платформенном слое.
+     */
+    internal fun resolvePushSessionId(src: Intent?): String? {
+        if (src == null) return null
+        return PushTapRouting.extractSessionId(
+            explicitExtra = src.getStringExtra(EXTRA_OPEN_SESSION_ID),
+            sessionId = src.getStringExtra(KEY_FCM_SESSION_ID)
+                ?: src.getStringExtra(PushReplyPolicy.EXTRA_SESSION_ID),
+            url = src.getStringExtra(KEY_FCM_URL) ?: src.dataString,
+            tag = src.getStringExtra(KEY_FCM_TAG),
+        )
+    }
+
+    /**
      * Повторный вход в уровень диалога (корень списка под стеком переиспользуется
      * флагами CLEAR_TOP|SINGLE_TOP): новый [EXTRA_OPEN_SESSION_ID] открывает
      * соответствующий чат; без extra экран остаётся как есть.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Адресат считается ДО setIntent: системный тап по уведомлению приносит
+        // только сырые ключи data, и без нормализации в [EXTRA_OPEN_SESSION_ID]
+        // пересоздание экрана (поворот) потеряло бы диалог.
+        val requested = resolvePushSessionId(intent).orEmpty()
+        if (requested.isNotEmpty()) intent.putExtra(EXTRA_OPEN_SESSION_ID, requested)
         setIntent(intent)
         // Ответ из уведомления — отдельная ветка: интент приносит текст из RemoteInput,
         // а не намерение показать диалог. Раньше он уходил бы в проверку session_id и
@@ -646,7 +677,6 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             handlePushReply(intent)
             return
         }
-        val requested = intent.getStringExtra(EXTRA_OPEN_SESSION_ID)?.trim().orEmpty()
         if (requested.isNotEmpty() && requested != currentSessionId) {
             loadSessionById(requested)
         }
@@ -865,6 +895,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         internal const val KEY_OPEN_SESSION_ID = "open_session_id"
+
+        /**
+         * Ключи data-payload FCM как их переносит системный трей: сервер
+         * (`api/push_fcm.py`, `api/streaming.py`) шлёт `session_id`, `url`
+         * (`session/<sid>`) и `tag` (`hermes-<sid>`) без переименования.
+         */
+        private const val KEY_FCM_SESSION_ID = "session_id"
+        private const val KEY_FCM_URL = "url"
+        private const val KEY_FCM_TAG = "tag"
         /** Privately-stored plaintext data cleared on every auth-exit path (набор — [AuthExitStores]). */
         internal const val DRAFTS_PREFS = AuthExitStores.DRAFTS_PREFS
         private const val MUSIC_HISTORY_PREFS = AuthExitStores.MUSIC_HISTORY_PREFS

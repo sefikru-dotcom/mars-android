@@ -30,8 +30,9 @@ import ru.mars.mobile.InteractiveDialogSpec.SENDING_LABEL
 /**
  * Custom Mars modal primitives: the full replacement for the stock Android AlertDialog.
  *
- * Every dialog is a plain [Dialog] with a transparent window, a dimmed scrim and a hand-built
- * obsidian surface (#10131B card, hairline #1E2433 border, 18dp corners). Components: ruby
+ * Every dialog is a plain [Dialog] with a transparent window, a soft dim (55%) and a hand-built
+ * obsidian glass panel ([MarsTheme.GLASS_PANEL], hairline #1E2433 border, 18dp corners) so the
+ * live space frame stays visible behind the modal. Components: ruby
  * header with title + queue badge, monospace code block for commands (no emojis, web code-card
  * parity), choice pills, ruby primary buttons and a quiet text action. All visuals come from
  * [MarsTheme] — the platform dialog chrome is never shown.
@@ -55,7 +56,9 @@ object MarsDialog {
         val dialog = Dialog(activity)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val card = GradientDrawable().apply {
-            setColor(MarsTheme.SURFACE)
+            // Полупрозрачная стеклянная панель: за диалогом виден живой космос.
+            // Плотность 81% держит контраст текста, но не превращает модалку в плиту.
+            setColor(MarsTheme.GLASS_PANEL)
             cornerRadius = MarsTheme.dp(activity, 18).toFloat()
             setStroke(MarsTheme.dp(activity, 1), MarsTheme.BORDER_DIALOG)
         }
@@ -78,7 +81,7 @@ object MarsDialog {
         }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.72f)
+            setDimAmount(0.55f)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             val metrics = activity.resources.displayMetrics
             val maxW = MarsTheme.dp(activity, MAX_WIDTH_DP)

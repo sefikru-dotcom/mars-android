@@ -100,6 +100,84 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
         sessionModel = modelId?.takeIf { it.isNotBlank() }?.let { ModelChoice(it, providerId, explicitPick = false) }
     }
 
+    /**
+     * Binds the model of a chat the user OPENED (drawer tap, reload, offline copy).
+     *
+     * Unlike [setSessionModel] this is not "the server said something": opening an
+     * existing dialog means its model is the truth for display and for the wire,
+     * exactly like in the WebUI. A pick remembered from another chat (or restored
+     * from SharedPreferences days ago) must NOT keep the chip on a foreign model,
+     * so the explicit pick is dropped ([clearExplicit]) and [current] is moved onto
+     * the session model. A blank [modelId] means "this chat has no model yet" — the
+     * previous behaviour ([setSessionModel]) applies and nothing is reset.
+     *
+     * The canonical catalog row (id + providerId) is used when [lastCatalog] already
+     * knows this model, so a bare `claude-sonnet-5.5` becomes
+     * `@custom:plusvibe-api:claude-sonnet-5.5` with its provider and the chip shows
+     * the human `name` instead of a raw id.
+     */
+    fun bindOpenedSessionModel(modelId: String?, providerId: String?) {
+        val id = modelId?.trim()?.takeIf { it.isNotEmpty() }
+        if (id == null) {
+            setSessionModel(modelId, providerId)
+            return
+        }
+        val row = findCatalogModel(id, providerId)
+        val choice = ModelChoice(
+            modelId = row?.id ?: id,
+            providerId = row?.providerId ?: providerId,
+            explicitPick = false,
+        )
+        sessionModel = choice
+        // Old global pick is not this chat's model: drop it (also from persistence).
+        clearExplicit()
+        current = choice
+    }
+
+    /**
+     * Catalog row for a model identity that may come in any of the three live wire
+     * shapes: the catalog id itself (`@custom:plusvibe-api:claude-sonnet-5.5`), the
+     * bare model id the session detail returns (`claude-sonnet-5.5`) or the
+     * `vendor/model` form (`anthropic/claude-sonnet-5.5`). Mirrors the WebUI
+     * `_findModelInDropdown`, so the phone and the browser agree on one row.
+     *
+     * Order: exact id (respecting [providerId]) -> `@provider:model` for
+     * `custom*` providers -> normalized match (leading `@provider:`/`vendor/`
+     * stripped, lowercase, `-` treated as `.`), preferring the same provider.
+     * Returns null when the catalog is unknown or carries no such model — the
+     * caller then shows the raw id instead of inventing a name.
+     */
+    fun findCatalogModel(modelId: String, providerId: String? = null): ModelInfo? {
+        val id = modelId.trim()
+        if (id.isEmpty()) return null
+        val rows = lastCatalog?.models.orEmpty()
+        if (rows.isEmpty()) return null
+        val provider = providerId?.trim()?.takeIf { it.isNotEmpty() }
+
+        rows.firstOrNull { it.id.equals(id, ignoreCase = true) && (provider == null || it.providerId == null || it.providerId.equals(provider, ignoreCase = true)) }
+            ?.let { return it }
+        if (provider != null && provider.startsWith("custom")) {
+            rows.firstOrNull { it.id.equals("@$provider:$id", ignoreCase = true) }?.let { return it }
+        }
+        val normalized = normalizeModelId(id)
+        val sameId = rows.filter { normalizeModelId(it.id) == normalized }
+        return sameId.firstOrNull { provider != null && it.providerId.equals(provider, ignoreCase = true) }
+            ?: sameId.firstOrNull()
+    }
+
+    /**
+     * True when the picker row [model] is the model of [choice] (defaults to the
+     * effective choice). Used for the `checked` row of the picker: a plain
+     * `model.id == choice.modelId` missed every session whose server id was the bare
+     * model name while the catalog row is `@provider:model`, leaving nothing checked.
+     */
+    fun matchesCatalogModel(model: ModelInfo, choice: ModelChoice? = null): Boolean {
+        val target = choice ?: wireChoice() ?: return false
+        if (model.id == target.modelId) return true
+        findCatalogModel(target.modelId, target.providerId)?.let { return it.id == model.id }
+        return normalizeModelId(model.id) == normalizeModelId(target.modelId)
+    }
+
     fun clearSessionModel() { sessionModel = null }
 
     /**
@@ -151,7 +229,9 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
     /** Header-button label from the effective wire choice (explicit pick, else session model). */
     fun buttonLabel(): String? {
         val choice = wireChoice() ?: return null
-        val row = lastCatalog?.models?.firstOrNull { it.id == choice.modelId }
+        // Catalog lookup tolerates the wire shapes (`claude-sonnet-5.5`,
+        // `anthropic/claude-sonnet-5.5`) — a bare `id ==` check showed the raw id.
+        val row = findCatalogModel(choice.modelId, choice.providerId)
         return row?.name?.takeIf { it.isNotBlank() } ?: choice.modelId
     }
 
@@ -172,6 +252,20 @@ class ModelSelection(private val storage: ModelChoiceStorage) {
      * guess.
      */
     fun wireChoice(): ModelChoice? = userPick ?: sessionModel ?: current
+
+    /**
+     * Model identity normalization shared with the WebUI `_findModelInDropdown`:
+     * drop the leading `@provider:` prefix (`@custom:plusvibe-api:model`), drop the
+     * leading `vendor/` (`anthropic/model`), lowercase and treat `-` as `.`
+     * (`claude-sonnet-5.5` == `claude.sonnet.5.5`). Only used for MATCHING — the
+     * wire always carries the catalog id.
+     */
+    private fun normalizeModelId(raw: String): String =
+        raw.trim()
+            .replace(Regex("^@([^:]+:)+"), "")
+            .replace(Regex("^[^/]+/"), "")
+            .lowercase()
+            .replace('-', '.')
 
     private fun entryLabel(model: ModelInfo): String {
         val name = model.name?.takeIf { it.isNotBlank() } ?: model.id

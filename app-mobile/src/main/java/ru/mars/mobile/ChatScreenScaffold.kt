@@ -582,7 +582,7 @@ object ChatScreenScaffold {
                 text = title
                 textSize = 12f
                 setTextColor(MarsTheme.TEXT)
-                background = MarsTheme.pill(context, MarsTheme.SURFACE, strokeColor = MarsTheme.BORDER)
+                background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER)
                 setPadding(dp(12), dp(4), dp(12), dp(4))
                 setOnClickListener { action() }
             }, LinearLayout.LayoutParams(-2, dp(32)).apply { marginEnd = dp(6) })
@@ -721,7 +721,7 @@ object ChatScreenScaffold {
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
             setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = MarsTheme.card(context, MarsTheme.SURFACE_0, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
+            background = MarsTheme.card(context, MarsTheme.SURFACE_CARD, radiusDp = 10, strokeColor = MarsTheme.ACCENT_BORDER)
         }
         val liveRunDot = MarsTheme.glowingStatusDot(context, MarsTheme.STATUS_RUNNING)
         liveRunPlate.addView(liveRunDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
@@ -753,7 +753,7 @@ object ChatScreenScaffold {
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
             setPadding(dp(8), dp(4), dp(4), dp(4))
-            background = MarsTheme.card(context, MarsTheme.SURFACE_1, radiusDp = 8, strokeColor = MarsTheme.ACCENT_BORDER)
+            background = MarsTheme.card(context, MarsTheme.SURFACE_SUBTLE, radiusDp = 8, strokeColor = MarsTheme.ACCENT_BORDER)
         }
         val quoteAccentBar = View(context).apply {
             setBackgroundColor(MarsTheme.ACCENT)
@@ -856,7 +856,7 @@ object ChatScreenScaffold {
             text = host.modelChipLabel()
             textSize = 10.5f
             contentDescription = "Модель"
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(8), 0, dp(8), 0)
             minimumHeight = 0
             minHeight = 0
@@ -871,7 +871,7 @@ object ChatScreenScaffold {
             text = "Авто"
             textSize = 10.5f
             contentDescription = "Уровень размышлений"
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(8), 0, dp(8), 0)
             minimumHeight = 0
             minHeight = 0
@@ -887,7 +887,7 @@ object ChatScreenScaffold {
             text = host.activityModeChipLabel()
             textSize = 10.5f
             contentDescription = "Режим активности"
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(8), 0, dp(8), 0)
             minimumHeight = 0
             minHeight = 0
@@ -902,7 +902,7 @@ object ChatScreenScaffold {
             text = host.workspaceChipLabel()
             textSize = 10.5f
             contentDescription = "Рабочее пространство"
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(8), 0, dp(8), 0)
             minimumHeight = 0
             minHeight = 0
@@ -921,7 +921,7 @@ object ChatScreenScaffold {
         // второй — процент окна из metering-кадров. NaN-подобный «$0.00» не показываем.
         val usageIndicator = TextView(context).apply {
             textSize = 9.5f
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(7), dp(2), dp(7), dp(2))
             setTextColor(MarsTheme.TEXT_MUTED)
             visibility = View.GONE
@@ -937,7 +937,7 @@ object ChatScreenScaffold {
             text = host.toolsetsChipLabel()
             textSize = 10.5f
             contentDescription = host.toolsetsChipDescription()
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(8), 0, dp(8), 0)
             minimumHeight = 0
             minHeight = 0
@@ -953,7 +953,7 @@ object ChatScreenScaffold {
         // состояние берётся из полей ответа (supported/status), а не из HTTP-кода.
         val quotaChip = TextView(context).apply {
             textSize = 9.5f
-            background = MarsTheme.pill(context, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
             setPadding(dp(7), dp(2), dp(7), dp(2))
             setTextColor(MarsTheme.TEXT_MUTED)
             visibility = View.GONE

@@ -172,7 +172,7 @@ internal class VoiceModeOverlay(activity: Activity) {
      * диалога, и «полный экран» превратился бы в подкрашенную копию чата.
      */
     val root: FrameLayout = FrameLayout(context).apply {
-        setBackgroundColor(MarsTheme.BG)
+        setBackgroundColor(MarsTheme.GLASS_PANEL)
         visibility = View.GONE
         isClickable = true
         // Фон перехватывает тапы: иначе нажатие мимо кнопки проваливалось бы в чат.

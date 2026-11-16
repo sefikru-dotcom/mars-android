@@ -25,6 +25,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.repository.PairingRepository
+import ru.mars.network.repository.PushTapRouting
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: AndroidKeyStoreCredentialStore
@@ -152,7 +153,7 @@ class MainActivity : ComponentActivity() {
             isFillViewport = true
         }
         root.addView(scroll, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        return root
+        return MarsSpaceBackgroundView.wrap(this, root)
     }
 
     private fun performLogin() {
@@ -192,10 +193,39 @@ class MainActivity : ComponentActivity() {
         imm?.hideSoftInputFromWindow(passwordInput.windowToken, 0)
     }
 
+    /**
+     * Открывает чат и забирает с собой контекст запуска.
+     *
+     * Экран логина — единственный, через который проходит запуск при
+     * отсутствующем credential, и он же LAUNCHER-цель для системного тапа по
+     * FCM-уведомлению, когда процесс убит. Пустой `Intent(this, ChatActivity)`
+     * терял адресат диалога из `extras`/`data`, поэтому после входа человек
+     * попадал в «Новый чат» вместо чата, о котором сообщил push.
+     */
     private fun openChat() {
-        startActivity(Intent(this, ChatActivity::class.java))
+        val target = Intent(this, ChatActivity::class.java)
+        intent?.extras?.let { target.putExtras(it) }
+        intent?.data?.let { target.data = it }
+        pushSessionId()?.let { target.putExtra(ChatActivity.EXTRA_OPEN_SESSION_ID, it) }
+        startActivity(target)
         finish()
     }
+
+    /**
+     * Адресат push-тапа из текущего интента; null — обычный запуск.
+     *
+     * Ключи читаются «сырыми» (`session_id`, `url`, `tag`): системный трей
+     * переносит data-payload FCM без переименования. Разбор — общий с
+     * заставкой и чатом, чтобы все три точки понимали один и тот же payload
+     * одинаково.
+     */
+    private fun pushSessionId(): String? = PushTapRouting.extractSessionId(
+        explicitExtra = intent?.getStringExtra(ChatActivity.EXTRA_OPEN_SESSION_ID),
+        sessionId = intent?.getStringExtra(KEY_SESSION_ID)
+            ?: intent?.getStringExtra(PushReplyPolicy.EXTRA_SESSION_ID),
+        url = intent?.getStringExtra(KEY_URL) ?: intent?.dataString,
+        tag = intent?.getStringExtra(KEY_TAG),
+    )
 
     private fun dp(value: Int) = MarsTheme.dp(this, value)
 
@@ -204,5 +234,13 @@ class MainActivity : ComponentActivity() {
         private const val ROOT_ID = 2001
         /** Intent extra (String): notice to show in the status line, e.g. after a forced re-auth. */
         const val EXTRA_AUTH_NOTICE = "auth_notice"
+
+        /**
+         * Ключи data-payload FCM как их переносит системный трей в extras
+         * LAUNCHER-интента (`session_id`, `url`, `tag` — без переименования).
+         */
+        private const val KEY_SESSION_ID = "session_id"
+        private const val KEY_URL = "url"
+        private const val KEY_TAG = "tag"
     }
 }
