@@ -159,5 +159,35 @@
         <activity
             android:name=".MainActivity"
             android:exported="true" />
+        <!--
+          Виджеты рабочего стола (волна 17, пункт 4 владельца).
+
+          exported=true обязателен: APPWIDGET_UPDATE присылает системный лаунчер, то есть
+          ЧУЖОЙ процесс. С exported=false система не сможет доставить обновление, и виджет
+          навсегда останется с initialLayout (пустые тексты, нерабочие тапы).
+          android:label — подпись в пикере виджетов, meta-data — разметка и правила ресайза.
+        -->
+        <receiver
+            android:name=".widget.MarsQuickWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_mars_quick_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/mars_quick_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.MarsCompactWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_mars_compact_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/mars_compact_widget_info" />
+        </receiver>
     </application>
 </manifest>

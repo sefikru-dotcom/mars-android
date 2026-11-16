@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Виджет «Марс — Панель управления и последний чат» (4x2, масштабируется 4x1..4x3).
+
+    Разметка собрана ТОЛЬКО из view, которые умеет RemoteViews (LinearLayout,
+    TextView, ImageView, ImageButton, View): всё остальное лаунчер молча выбросит.
+
+    Смысл композиции — минимальная работа с рабочего стола в один тап:
+      * верхний блок (`widget_mars_dialog`) — живое состояние: планета, «МАРС», имя
+        последнего диалога и превью последнего ответа агента. Тап по блоку открывает
+        ИМЕННО этот диалог; чип «Диалоги» внутри блока — отдельная тап-цель со списком
+        всех диалогов (вложенный клик в RemoteViews перехватывается раньше родителя);
+      * нижняя часть — четыре быстрых действия: капсула ввода с клавиатурой,
+        микрофон (сразу диктовка), живой голос (VoiceModeActivity) и звезда
+        нового чистого чата в тёмном рубиновом ореоле.
+
+    Высоты подобраны под две ячейки домашнего экрана (~145dp): при уменьшении до
+    4x1 лаунчер обрежет превью, но панель действий останется последней строкой
+    и не уедет за границу.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_mars_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_mars_bg"
+    android:orientation="vertical"
+    android:paddingStart="10dp"
+    android:paddingTop="10dp"
+    android:paddingEnd="10dp"
+    android:paddingBottom="10dp">
+
+    <!-- ============ Блок последнего диалога: тап открывает именно его ================= -->
+    <LinearLayout
+        android:id="@+id/widget_mars_dialog"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Планета, бренд, время обновления и чип «Диалоги». -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/widget_mars_planet"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:contentDescription="@string/widget_mars_label"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_mars" />
+
+            <TextView
+                android:id="@+id/widget_mars_brand"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:letterSpacing="0.18"
+                android:maxLines="1"
+                android:text="@string/widget_mars_label"
+                android:textColor="@color/mars_accent_text"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_mars_updated"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:gravity="end|center_vertical"
+                android:maxLines="1"
+                android:textColor="@color/mars_muted"
+                android:textSize="10sp" />
+
+            <TextView
+                android:id="@+id/widget_mars_sessions"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/widget_mars_input_pill"
+                android:maxLines="1"
+                android:paddingStart="10dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="4dp"
+                android:text="@string/widget_mars_sessions"
+                android:textColor="@color/mars_text_em"
+                android:textSize="11sp" />
+
+        </LinearLayout>
+
+        <!-- Имя последнего активного диалога. -->
+        <TextView
+            android:id="@+id/widget_mars_session_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/widget_mars_state_default_title"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <!-- Превью последнего ответа агента: 1–2 строки, дальше многоточие. -->
+        <TextView
+            android:id="@+id/widget_mars_snippet"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="end"
+            android:lineSpacingExtra="1dp"
+            android:maxLines="2"
+            android:text="@string/widget_mars_state_default_snippet"
+            android:textColor="@color/mars_muted_on_glass"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+
+    <!-- Тонкая рубиновая линия: разделяет «состояние» и «действия» без второй карточки. -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:background="@color/mars_accent_bg" />
+
+    <!-- ================= Панель быстрых действий (один тап с рабочего стола) ========== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_mars_input"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_input_pill"
+            android:ellipsize="end"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/widget_mars_compose_hint"
+            android:textColor="@color/mars_muted"
+            android:textSize="12sp" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_mic"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/widget_mars_action_btn"
+            android:contentDescription="@string/widget_mars_action_voice"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_mic"
+            android:tint="@color/mars_text_em" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_voice_mode"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/widget_mars_action_btn"
+            android:contentDescription="@string/widget_mars_action_voice_mode"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_nav_local"
+            android:tint="@color/mars_text_em" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_star"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/widget_mars_star_btn"
+            android:contentDescription="@string/widget_mars_action_new_chat"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_send"
+            android:tint="@color/mars_accent_text" />
+
+    </LinearLayout>
+
+</LinearLayout>

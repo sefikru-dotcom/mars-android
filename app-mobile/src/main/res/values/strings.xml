@@ -61,4 +61,24 @@
     <string name="settings_voice_wake_word_hint">Скажите «Марс, слушай» — диалог начнётся сам. Микрофон работает, пока экран открыт: расходует батарею</string>
     <!-- Флаг включён, а модели на диске нет: честная причина вместо «включил и ничего не происходит». -->
     <string name="settings_voice_wake_word_no_model">Модель распознавания ещё не скачана — «Марс» начнёт слушать после первого голосового диалога</string>
+
+    <!--
+      Виджеты рабочего стола (волна 17). Подписи видны в пикере виджетов и в самой
+      карточке на домашнем экране, поэтому они короткие и без технических терминов:
+      человек выбирает «панель управления», а не «RemoteViews 4x2».
+    -->
+    <string name="widget_mars_quick_title">Марс — Панель управления</string>
+    <string name="widget_mars_quick_description">Последний диалог, быстрый ввод, голос и новый чат — с рабочего стола</string>
+    <string name="widget_mars_compact_title">Марс — Быстрый ввод и голос</string>
+    <string name="widget_mars_compact_description">Капсула «Спросить Марс…» с микрофоном и звездой нового чата</string>
+    <!-- Бренд в виджете: те же четыре буквы, что в шапке приложения. -->
+    <string name="widget_mars_label">МАРС</string>
+    <string name="widget_mars_sessions">Диалоги</string>
+    <string name="widget_mars_compose_hint">Спросить Марс…</string>
+    <string name="widget_mars_action_voice">Голос</string>
+    <string name="widget_mars_action_voice_mode">Живой голос</string>
+    <string name="widget_mars_action_new_chat">Новый чат</string>
+    <!-- Дефолты состояния: совпадают с MarsWidgetActionsPolicy.DEFAULT_* (контрактный тест). -->
+    <string name="widget_mars_state_default_title">Готов к работе</string>
+    <string name="widget_mars_state_default_snippet">Нажмите, чтобы продолжить диалог или задать вопрос</string>
 </resources>

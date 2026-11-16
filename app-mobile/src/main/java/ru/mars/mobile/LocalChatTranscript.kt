@@ -187,8 +187,11 @@ internal class LocalChatTranscript(
             // Длинное сообщение не должно упираться в край: пузырь занимает не больше
             // 84% ширины, остальное — воздух (как в WebUI).
             maxWidth = (context.resources.displayMetrics.widthPixels * 0.84f).toInt()
-            // Выделение текста живёт в листе действий («Выбрать текст»): textIsSelectable
-            // перехватывает долгое нажатие, и лист тогда не открывается вовсе.
+            // Своё сообщение тоже выделяется построчно/пословно: setTextIsSelectable
+            // ставится строго ПОСЛЕ text, а выделение подсвечивается рубиновым
+            // полупрозрачным ACCENT_BG (как в серверном чате).
+            setTextIsSelectable(true)
+            highlightColor = MarsTheme.ACCENT_BG
         }
         userBubbles[item.id] = text
         val row = LinearLayout(context).apply {
@@ -196,8 +199,9 @@ internal class LocalChatTranscript(
             gravity = Gravity.END
             addView(text, LinearLayout.LayoutParams(-2, -2))
         }
+        // Лист действий — только по пустому месту вокруг пузыря: сам текст отдан
+        // нативному выделению (долгое нажатие на слово/строку → «Копировать»).
         attachLongPress(row, item)
-        attachLongPress(text, item)
         return row
     }
 
@@ -210,16 +214,18 @@ internal class LocalChatTranscript(
         setPadding(dp(4), dp(12), dp(4), dp(12))
     }
 
-    /** Долгое нажатие на вьюху и на всех её потомках: markdown-абзацы перехватывают тач. */
+    /**
+     * Долгое нажатие на вьюху — лист действий над сообщением.
+     *
+     * НЕ рекурсивно: markdown-строки внутри тела ответа создаются с
+     * [TextView.setTextIsSelectable] и обязаны сами обрабатывать long-press нативным
+     * выделением строки/слова. Прежний рекурсивный обход вешал листенер на каждый
+     * TextView тела и напрочь блокировал выделение одной строчки.
+     */
     private fun attachLongPress(view: View, item: LocalChatItem) {
         view.setOnLongClickListener {
             onMessageLongPress(item, item.id == lastAssistantId)
             true
-        }
-        if (view is ViewGroup) {
-            for (index in 0 until view.childCount) {
-                attachLongPress(view.getChildAt(index), item)
-            }
         }
     }
 
@@ -272,17 +278,34 @@ internal class LocalChatTranscript(
         private var index: Int = 0
 
         init {
-            root.addView(TextView(context).apply {
+            val title = TextView(context).apply {
                 text = "Марс"
                 textSize = 11f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(MarsTheme.TEXT_MUTED)
-            })
+            }
+            root.addView(title)
             root.addView(placeholder, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             root.addView(body, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             // Футер — последним: он читается как подпись под ответом, а не как его часть.
             root.addView(footer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-            attachLongPress(root, item)
+            // Лист действий — только на шапке карточки и на пустом месте root.
+            // Строки тела сюда НЕ вешаются: у них своё нативное выделение текста.
+            attachCardLongPress(title)
+            attachCardLongPress(root)
+        }
+
+        /**
+         * Долгое нажатие над ВСЕМ сообщением — только для шапки и пустого места карточки.
+         *
+         * Элемент берётся из [current] в момент нажатия: карточка живёт кадры стрима и
+         * захваченный при сборке снимок успевает устареть.
+         */
+        private fun attachCardLongPress(view: View) {
+            view.setOnLongClickListener {
+                onMessageLongPress(current, current.id == lastAssistantId)
+                true
+            }
         }
 
         fun bind(item: LocalChatItem, index: Int, windowTokens: Int? = null) {
@@ -294,7 +317,6 @@ internal class LocalChatTranscript(
             footer.text = footerLine
             footer.visibility = if (footerLine == null) View.GONE else View.VISIBLE
             footer.contentDescription = footerLine
-            attachLongPress(root, item)
             if (item.streaming && item.text.isBlank()) {
                 placeholder.visibility = View.VISIBLE
                 body.visibility = View.GONE
@@ -327,7 +349,9 @@ internal class LocalChatTranscript(
                 openImage = onOpenUrl,
                 openUrl = onOpenUrl,
             )
-            attachLongPress(body, current)
+            // Рекурсивный attachLongPress(body, …) здесь больше НЕ нужен и вреден:
+            // он вешал лист действий на каждый TextView тела и блокировал нативное
+            // выделение отдельной строки/слова (setTextIsSelectable в рендерере).
         }
 
         /**

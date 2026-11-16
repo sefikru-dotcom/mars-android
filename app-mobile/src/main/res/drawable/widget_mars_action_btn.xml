@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Тёмный ореол круглых кнопок действий виджета (микрофон, живой голос).
+
+    Тот же благородный тон, что у кнопок композера (MarsTheme.COMPOSER_ACTION_BG
+    #B8121620 + грань #26FFFFFF), но здесь он зафиксирован в XML: RemoteViews
+    собирает разметку в процессе лаунчера, и Kotlin-палитра туда не доедет.
+-->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#33FFFFFF">
+
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#B8121620" />
+            <stroke
+                android:width="1dp"
+                android:color="#26FFFFFF" />
+        </shape>
+    </item>
+
+</ripple>

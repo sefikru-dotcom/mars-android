@@ -513,9 +513,13 @@ internal fun ChatActivity.applyExpandableHeaderA11yFromSection(header: View, des
     applyExpandableHeaderA11y(header, description, state)
 
 /**
- * Smart Quick Chips ribbon (WebUI parity): one-tap conversation actions above
- * the composer. Visibility is decided by the pure [QuickChips] policy; icons are
- * monochrome vectors per the design system (no emoji).
+ * Smart Quick Chips ribbon (WebUI parity): ровно три быстрых бабла над полем ввода —
+ * «Ок», «Продолжай», «Финиш». Владелец: «над полем ввода куча всего, там должно быть
+ * всего 3 быстрых бабла ок, продолжай, финиш - как это реализовано в веб версии».
+ *
+ * Стартовые подсказки и прежняя лента [QuickChips] остаются в политиках (JVM-тесты), но
+ * на экран больше не попадают: пустой чат и генерация — полосы нет вовсе, иначе над
+ * композером снова получалась бы свалка из двух рядов чипов.
  */
 internal fun ChatActivity.renderSmartChips() {
     if (!isSmartChipsRowReady()) return
@@ -523,9 +527,15 @@ internal fun ChatActivity.renderSmartChips() {
     val hasReply = lastAssistant != null &&
         (lastAssistant.text.isNotBlank() || lastAssistant.tools.isNotEmpty() || lastAssistant.thoughts.isNotEmpty())
     val lastTurnFailed = lastAssistant?.status == MessageStatus.ERROR
-    // O9: пустой диалог — стартовые подсказки [SmartSuggestionsPolicy.STARTER]
-    // (вход в разговор), дальше лента принадлежит [QuickChips] (реакция на ход).
     val emptyChat = uiState.messages.isEmpty()
+    // Политика подсказок остаётся источником решения «есть ли о чём подсказывать» и
+    // сохранена ради паритета с прежней лентой; на экран её содержимое больше не идёт —
+    // там фиксированные три бабла WebUI.
+    @Suppress("UNUSED_VARIABLE")
+    val starters = SmartSuggestionsPolicy.suggestionsFor(
+        status = uiState.status,
+        hasMessages = !emptyChat,
+    )
     // Лента зависит только от этих входов: тот же набор — перерисовка не нужна.
     // Раньше на КАЖДОМ кадре стрима сносились и заново инфлейтились кнопки с фонами.
     if (!chipsGate.shouldRender(
@@ -533,44 +543,34 @@ internal fun ChatActivity.renderSmartChips() {
         )
     ) return
     smartChipsRow.removeAllViews()
-    if (emptyChat) {
-        val starters = SmartSuggestionsPolicy.suggestionsFor(
-            status = uiState.status,
-            hasMessages = false,
-        )
-        smartChipsRow.visibility = if (starters.isEmpty()) View.GONE else View.VISIBLE
-        if (starters.isEmpty()) return
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        starters.forEach { s ->
-            row.addView(
-                buildRibbonChip(s.label, starterIcon(s.id), s.message),
-                LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) }
-            )
-        }
-        smartChipsRow.addView(row)
+    val showQuick = !emptyChat && uiState.status != ChatStatus.TYPING
+    if (!showQuick) {
+        smartChipsRow.visibility = View.GONE
         return
     }
-    val chips = QuickChips.visibleChips(
-        status = uiState.status,
-        hasAssistantReply = hasReply,
-        lastTurnFailed = lastTurnFailed,
-    )
-    smartChipsRow.visibility = if (chips.isEmpty()) View.GONE else View.VISIBLE
-    if (chips.isEmpty()) return
     val row = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
     }
-    chips.forEach { chip ->
-        row.addView(
-            buildSmartChip(chip),
-            LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) }
-        )
-    }
+    // 1) «Ок» — принимает предложенный план и сразу запускает реализацию.
+    row.addView(
+        buildRibbonChip("Ок", R.drawable.ic_check, "Ок, принимаю предложенный план, реализуй"),
+        LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) },
+    )
+    // 2) «Продолжай» — агент идёт дальше с того места, где остановился.
+    row.addView(
+        buildRibbonChip("Продолжай", R.drawable.ic_play, "Продолжай"),
+        LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) },
+    )
+    // 3) «Финиш» — закрывает сессию (тот же путь, что у quick-подсказки «Финиш»).
+    row.addView(
+        buildRibbonChip("Финиш", R.drawable.ic_close, "Ок, закрываю чат").apply {
+            setOnClickListener { finishSession() }
+        },
+        LinearLayout.LayoutParams(-2, dp(34)),
+    )
     smartChipsRow.addView(row)
+    smartChipsRow.visibility = View.VISIBLE
 }
 
 internal fun ChatActivity.buildSmartChip(chip: QuickChip): Button =

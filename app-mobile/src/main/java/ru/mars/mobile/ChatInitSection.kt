@@ -47,6 +47,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.offline.OfflineStores
+import ru.mars.mobile.widget.MarsQuickWidgetProvider
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy.WidgetAction
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
@@ -297,21 +300,40 @@ internal fun ChatActivity.initializeVoiceStack() {
         // Voice-input state machine: guards the capture session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
+            /**
+             * КАЖДЫЙ переход IDLE → LISTENING → PROCESSING → IDLE/ERROR обновляет строку
+             * статуса И кнопку микрофона одним вызовом [setStatus] (он же зовёт
+             * [renderVoiceButton]). Раньше одиночная запись не отражалась на кнопке вовсе:
+             * человек нажимал микрофон и не видел, что запись пошла, а подсказка «Слушаю…»
+             * затиралась первым же обычным статусом чата.
+             */
+            override fun onStateChanged(state: VoiceSessionController.State) {
+                setStatus()
+            }
+
             override fun onListeningStarted() {
+                // Микрофон открылся: тактильный отклик + ярко-красная кнопка со «стопом» и
+                // подсказка «Слушаю — говорите…» тем же кадром (setStatus рисует оба).
                 voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                statusView.text = VOICE_LISTENING_STATUS
+                setStatus()
             }
 
             override fun onResult(text: String) {
                 // O7: диктовка — действие пользователя, а не программная перезапись.
                 setComposerTextProgrammatically(text, TextApplyOrigin.VOICE_INPUT)
                 input.setSelection(text.length)
+                // Распознавание доехало: короткий отклик подтверждает, что текст уже в поле
+                // (кнопка к этому моменту гаснет — микрофон больше не слушает).
+                voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 // The user explicitly spoke — arm reading of this turn's completed answer.
                 voiceOutput.armSpeakNextAnswer()
             }
 
             override fun onError(message: String) {
+                // Причина (пустая запись, отказ сети, нет привязки) остаётся на виду, а кнопка
+                // уже погашена переходом в ERROR: «красная, хотя микрофон закрыт» не бывает.
                 statusView.text = message
+                renderVoiceButton()
             }
         })
 }
@@ -431,12 +453,19 @@ internal fun ChatActivity.resumeChat() {
             workspaceSelection.reloadFromStorage()
             updateWorkspaceButton()
         }
+        // Виджет: возврат на экран — состояние могло измениться, пока экран был в фоне
+        // (другой экран приложения, переименование диалога, сжатие контекста).
+        syncWidgetState()
 }
 
 /** Уход в фон: черновик, стоп озвучки, стоп hands-free. */
 internal fun ChatActivity.pauseChat() {
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
+        // Виджет рабочего стола: уход в фон — точка, где последний ответ агента уже точно
+        // лежит в транскрипте, а обновление виджета не стоит ничего живому стриму
+        // (на каждом SSE-кадре это был бы IPC в процесс лаунчера).
+        syncWidgetState()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
         if (isVoiceOutputReady()) voiceOutput.onPause()
         /*
@@ -462,3 +491,99 @@ internal fun ChatActivity.handleVoicePermissionResult(requestCode: Int, grantRes
     }
     if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
 }
+
+// --- Виджеты рабочего стола (волна 17) -------------------------------------------------------
+
+/**
+ * Действие виджета, с которым открыли экран чата.
+ *
+ * Контракт extra — [MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION] (чистая JVM-политика):
+ * `compose` — фокус в поле ввода и клавиатура, `voice` — сразу диктовка, `new_chat` —
+ * чистый диалог. Виджет и экран живут в РАЗНЫХ процессах (лаунчер / приложение), поэтому
+ * значение приходит строкой из интента, а не вызовом метода, и маршрутизируется здесь
+ * единственной точкой.
+ *
+ * Порядок важен: для `new_chat` сначала сбрасывается диалог ([startNewChat]), и только
+ * потом поднимается клавиатура — иначе фокус достался бы полю, которое следующий же кадр
+ * очистит, и человек увидел бы, что клавиатура «мигнула и пропала».
+ */
+internal fun ChatActivity.applyWidgetAction(rawAction: String?) {
+    when (MarsWidgetActionsPolicy.actionFor(rawAction)) {
+        WidgetAction.NEW_CHAT -> {
+            startNewChat()
+            focusComposerFromWidget()
+        }
+        WidgetAction.COMPOSE -> focusComposerFromWidget()
+        // Голос: запуск записи — после того как поле ввода реально построено и получило
+        // фокус (startVoiceInput читает состояние микрофона и пишет в поле распознанный
+        // текст). post() гарантирует, что это произойдёт уже на готовом экране.
+        WidgetAction.VOICE -> if (isInputReady()) {
+            input.post {
+                if (isFinishing || isDestroyed) return@post
+                startVoiceInput()
+            }
+        }
+        WidgetAction.NONE -> Unit
+    }
+}
+
+/**
+ * Прочитать действие виджета из интента и СРАЗУ его снять.
+ *
+ * Одноразовость — не косметика: интент переживает пересоздание экрана (поворот, смена
+ * темы, возврат из фона), и оставленный `new_chat` сработал бы повторно, стерев открытый
+ * диалог. Плюс `removeExtra` не даёт повторно применить действие, если интент пришёл
+ * ещё раз тем же объектом (onNewIntent).
+ */
+internal fun ChatActivity.consumeWidgetAction(): String? {
+    val action = intent?.getStringExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION) ?: return null
+    intent?.removeExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION)
+    return action
+}
+
+/**
+ * Фокус в поле ввода + клавиатура (`SHOW_IMPLICIT`).
+ *
+ * `showSoftInput` вызывается из `post`: сразу после `startActivity` окно ещё не имеет
+ * фокуса, и запрос IME молча теряется — человек тапает «Спросить Марс…» и не видит
+ * клавиатуры. Отложенный вызов выполняется уже после первого layout'а.
+ */
+internal fun ChatActivity.focusComposerFromWidget() {
+    if (!isInputReady()) return
+    input.requestFocus()
+    input.post {
+        if (isFinishing || isDestroyed) return@post
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return@post
+        imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+    }
+}
+
+/**
+ * Сохранить живое состояние для виджета рабочего стола и перерисовать его.
+ *
+ * Пишем ровно то, что виджет показывает: адресат тапа (sessionId), имя диалога и последний
+ * ответ агента. Вызывается из точек, где состояние экрана действительно изменилось —
+ * смена диалога, конец хода, уход экрана в фон, — а НЕ на каждом SSE-кадре: обновление
+ * виджета это IPC в процесс лаунчера, и вызов на токен стоил бы дороже самого стрима.
+ */
+internal fun ChatActivity.syncWidgetState() {
+    if (isFinishing || isDestroyed) return
+    // Выход из авторизации: подпись последнего диалога не должна пережить logout —
+    // виджет на домашнем экране видит любой, кто взял телефон в руки.
+    if (isCredentialStoreReady() && store.read() == null) {
+        MarsQuickWidgetProvider.publishState(this, sessionId = null, sessionTitle = null, lastSnippet = null)
+        return
+    }
+    val sessionId = currentSessionId
+    // Имя: живой заголовок шапки (SSE-кадр `title`), иначе строка списка диалогов — у
+    // только что открытого чата заголовок может прийти позже первого кадра.
+    val title = uiState.sessionTitle?.takeIf { it.isNotBlank() }
+        ?: sessionId?.let { id -> uiState.sessions.firstOrNull { it.id == id }?.title }
+    MarsQuickWidgetProvider.publishState(
+        context = this,
+        sessionId = sessionId,
+        sessionTitle = title,
+        lastSnippet = if (isMessagesReady()) uiState.lastAssistantText() else "",
+    )
+}
+

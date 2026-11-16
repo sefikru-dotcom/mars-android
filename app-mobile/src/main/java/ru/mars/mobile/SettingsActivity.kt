@@ -12,10 +12,10 @@ import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -347,11 +347,20 @@ class SettingsActivity : ComponentActivity() {
     }
 
     /**
-     * Строка-переключатель: подпись и пояснение слева, компактный [SwitchCompat] справа.
+     * Строка-переключатель: подпись и пояснение слева, компактный платформенный
+     * [Switch] справа.
      *
      * Тот же каркас строки, что у [buildNavRow]/[buildInfoRow], — переключатель не должен
      * выглядеть главным действием экрана (кнопка во всю ширину для него слишком крупная).
      * Тап по всей строке переключает то же значение: это привычное поведение строк настроек.
+     *
+     * Почему платформенный `Switch`, а не appcompat-переключатель:
+     * темы приложения наследуют `android:style/Theme.Material.NoActionBar`, то есть
+     * не несут `Theme.AppCompat`. На такой теме appcompat-тумблер либо падает в
+     * `ThemeEnforcement.checkAppCompatTheme`, либо создаётся с `textOn`/`textOff` = null,
+     * и его `onMeasure` валится с NPE (`StaticLayout` от null `CharSequence`). Платформенный
+     * `Switch` не требует AppCompat-темы; `textOn`/`textOff` задаются явно (пустыми), а
+     * `showText = false` убирает подписи на дорожке — NPE-путь недостижим.
      */
     private fun buildToggleRow(
         label: String,
@@ -382,8 +391,14 @@ class SettingsActivity : ComponentActivity() {
         })
         addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
 
-        val toggle = SwitchCompat(this@SettingsActivity).apply {
+        val toggle = Switch(this@SettingsActivity).apply {
             isChecked = checked
+            // Подписи на дорожке не показываем, но задаём явно: null в textOn/textOff —
+            // ровно тот вход, на котором onMeasure платформенного Switch пытался бы
+            // построить StaticLayout от null. Пустые строки + showText = false закрывают путь.
+            textOn = ""
+            textOff = ""
+            showText = false
             // Палитра дизайн-системы, а не системный акцент: на тёмном экране включённое
             // состояние должно читаться тем же красным, что и остальные акценты Марса.
             thumbTintList = ColorStateList(
@@ -392,12 +407,13 @@ class SettingsActivity : ComponentActivity() {
             )
             trackTintList = ColorStateList(
                 arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                intArrayOf(MarsTheme.ACCENT_BORDER, MarsTheme.BORDER),
+                intArrayOf(MarsTheme.ACCENT_BG, MarsTheme.SURFACE_SUBTLE),
             )
             setOnCheckedChangeListener { _, value -> onCheckedChange(value) }
         }
         addView(toggle, LinearLayout.LayoutParams(-2, -2))
-        setOnClickListener { toggle.toggle() }
+        // CompoundButton.toggle() есть только с API 33, а minSdk 28: инвертируем сами.
+        setOnClickListener { toggle.isChecked = !toggle.isChecked }
     }
 
     /**

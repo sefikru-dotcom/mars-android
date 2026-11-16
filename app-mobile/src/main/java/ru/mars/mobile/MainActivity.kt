@@ -194,20 +194,30 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Открывает чат и забирает с собой контекст запуска.
+     * Открывает следующий экран после авторизации и забирает с собой контекст запуска.
      *
      * Экран логина — единственный, через который проходит запуск при
      * отсутствующем credential, и он же LAUNCHER-цель для системного тапа по
      * FCM-уведомлению, когда процесс убит. Пустой `Intent(this, ChatActivity)`
      * терял адресат диалога из `extras`/`data`, поэтому после входа человек
      * попадал в «Новый чат» вместо чата, о котором сообщил push.
+     *
+     * Отсюда две ветки: тап по пушу (или кнопка «Ответить» — [PushReplyPolicy.matchesAction])
+     * ведёт прямо в диалог, а обычный вход/запуск — на страницу «Диалоги»
+     * ([ChatSessionsActivity]), чтобы человек начинал с выбора диалога, а не с
+     * пустого «Нового чата».
      */
     private fun openChat() {
-        val target = Intent(this, ChatActivity::class.java)
-        intent?.extras?.let { target.putExtras(it) }
-        intent?.data?.let { target.data = it }
-        pushSessionId()?.let { target.putExtra(ChatActivity.EXTRA_OPEN_SESSION_ID, it) }
-        startActivity(target)
+        val sessionId = pushSessionId()
+        val fromPush = sessionId != null || PushReplyPolicy.matchesAction(intent?.action)
+        val target = if (fromPush) ChatActivity::class.java else ChatSessionsActivity::class.java
+        val outgoing = Intent(this, target)
+        if (fromPush) {
+            intent?.extras?.let { outgoing.putExtras(it) }
+            intent?.data?.let { outgoing.data = it }
+            sessionId?.let { outgoing.putExtra(ChatActivity.EXTRA_OPEN_SESSION_ID, it) }
+        }
+        startActivity(outgoing)
         finish()
     }
 

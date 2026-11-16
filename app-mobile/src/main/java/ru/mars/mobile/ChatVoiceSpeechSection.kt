@@ -129,8 +129,65 @@ internal fun ChatActivity.isVoiceSpeakingNow(): Boolean =
  */
 internal fun ChatActivity.currentVoiceUi(): VoiceDialogUi {
     val loopState = if (isVoiceLoopReady() && voiceLoop.isActive) voiceLoop.state else null
+    // Одиночная запись (обычный тап по микрофону) живёт ВНЕ цикла: без этой ветки кнопка
+    // оставалась тускло-серой всю запись, и человек не понимал, нажалась ли она вообще.
+    if (loopState == null) manualVoiceUi()?.let { return it }
     val phase = voicePresentation.phaseFor(loopState, isVoiceSpeakingNow())
     return voicePresentation.uiFor(phase, voiceIcons)
+}
+
+/** Подпись статусной строки, пока идёт одиночная запись: что делать прямо сейчас. */
+internal const val VOICE_MANUAL_LISTENING_LABEL = "Слушаю — говорите… (нажмите, чтобы отправить)"
+
+/** Подпись статусной строки, когда запись уже закрыта и текст распознаётся. */
+internal const val VOICE_MANUAL_THINKING_LABEL = "Запись завершена — распознаю речь…"
+
+/** TalkBack: действие тапа во время записи (закончить и отправить), а не только цвет. */
+internal const val VOICE_MANUAL_LISTENING_DESCRIPTION =
+    "Идёт запись голоса. Нажмите, чтобы закончить и отправить"
+
+/** TalkBack: микрофон больше не слушает — идёт распознавание. */
+internal const val VOICE_MANUAL_THINKING_DESCRIPTION = "Распознаю речь"
+
+/**
+ * Вид кнопки и статуса на время ОДИНОЧНОГО голосового ввода (`voiceSession`), когда
+ * непрерывный диалог (`voiceLoop`, включается долгим нажатием) не запущен.
+ *
+ * `null` — одиночной сессии нет, и видом владеет цикл либо обычная строка чата. Так
+ * вызывающая сторона отличает «голосом сейчас заняты» от «просто тишина»: иначе статус
+ * «Слушаю…» висел бы на экране и после отправки.
+ *
+ * Фазы переиспользуются те же, что у диалога: LISTENING — микрофон открыт (ярко-красная
+ * кнопка со «стопом»), THINKING — запись закрыта, идёт распознавание (иконка «…»). Человек
+ * видит один и тот же язык состояний и в одиночном вводе, и в hands-free.
+ */
+internal fun ChatActivity.manualVoiceUi(): VoiceDialogUi? {
+    val state = if (isVoiceSessionReady()) voiceSession.state else VoiceSessionController.State.IDLE
+    if (state == VoiceSessionController.State.LISTENING) {
+        return VoiceDialogUi(
+            phase = VoiceDialogPhase.LISTENING,
+            active = true,
+            // «Стоп» вместо микрофона: тап сейчас ЗАКАНЧИВАЕТ запись, и иконка это обещает.
+            iconRes = R.drawable.ic_stop,
+            label = VOICE_MANUAL_LISTENING_LABEL,
+            contentDescription = VOICE_MANUAL_LISTENING_DESCRIPTION,
+            stateDescription = "Слушаю",
+            showsStopAffordance = true,
+        )
+    }
+    // Сеть уже работает (или сессия успела уйти в PROCESSING) — микрофон закрыт, идёт текст.
+    if (state == VoiceSessionController.State.PROCESSING || voiceTranscribeJob?.isActive == true) {
+        return VoiceDialogUi(
+            phase = VoiceDialogPhase.THINKING,
+            active = true,
+            iconRes = voiceIcons.thinking,
+            label = VOICE_MANUAL_THINKING_LABEL,
+            contentDescription = VOICE_MANUAL_THINKING_DESCRIPTION,
+            stateDescription = "Распознаю речь",
+            showsStopAffordance = false,
+        )
+    }
+    return null
 }
 
 /** Подпись для статусной строки; `null` — режим выключен, строкой владеет чат. */

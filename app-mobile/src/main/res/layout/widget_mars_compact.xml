@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Виджет «Марс — Быстрый ввод и голос» (компактная полоса 3x1 / 4x1).
+
+    Одна строка, четыре зоны — весь путь «спросить Марса» без открытия приложения:
+      * планета слева — список диалогов (ChatSessionsActivity);
+      * капсула «Спросить Марс…» — открывает чат и сразу поднимает клавиатуру;
+      * микрофон — открывает чат и сразу включает диктовку;
+      * звезда в тёмном рубиновом ореоле — новый чистый диалог.
+
+    Высота 56dp: на домашнем экране это ровно одна ячейка, а внутренние 36dp
+    оставляют тап-цель заметно выше минимальных 48dp по площади (36dp кнопка
+    плюс 8dp паддинга карточки со всех сторон).
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_compact_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_mars_bg"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="10dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="10dp"
+    android:paddingBottom="8dp">
+
+    <ImageView
+        android:id="@+id/widget_compact_planet"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:contentDescription="@string/widget_mars_sessions"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_mars" />
+
+    <TextView
+        android:id="@+id/widget_compact_input"
+        android:layout_width="0dp"
+        android:layout_height="36dp"
+        android:layout_marginStart="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_mars_input_pill"
+        android:ellipsize="end"
+        android:gravity="center_vertical"
+        android:maxLines="1"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:text="@string/widget_mars_compose_hint"
+        android:textColor="@color/mars_muted"
+        android:textSize="12sp" />
+
+    <ImageButton
+        android:id="@+id/widget_compact_mic"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/widget_mars_action_btn"
+        android:contentDescription="@string/widget_mars_action_voice"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_mic"
+        android:tint="@color/mars_text_em" />
+
+    <ImageButton
+        android:id="@+id/widget_compact_star"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_marginStart="6dp"
+        android:background="@drawable/widget_mars_star_btn"
+        android:contentDescription="@string/widget_mars_action_new_chat"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_send"
+        android:tint="@color/mars_accent_text" />
+
+</LinearLayout>

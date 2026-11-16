@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.widget.ImageButton
 import androidx.appcompat.widget.AppCompatImageButton
@@ -11,7 +12,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 
 /**
- * Круглая кнопка голосового состояния локального чата: микрофон, 40 dp, без подписи.
+ * Круглая кнопка голосового состояния локального чата: микрофон, 36 dp, без подписи.
  * Классические View, цвета только из [MarsTheme], без новых зависимостей.
  *
  * ## Почему иконка, а не капсула с текстом
@@ -31,7 +32,7 @@ import android.widget.LinearLayout
  *     onState = { state -> state.notice?.let { presenter.setNotice(it) } },
  *     onOpenX = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)) },
  * )
- * capsule.addView(voice.root, LinearLayout.LayoutParams(dp(40), dp(40)))
+ * capsule.addView(voice.root, LinearLayout.LayoutParams(dp(36), dp(36)))
  * // в onDestroy: voice.release()
  * ```
  *
@@ -39,8 +40,9 @@ import android.widget.LinearLayout
  * заново; блок при этом рисуется — голосовой ввод от этого не перестаёт работать.
  *
  * ## Цвет — это состояние, а не украшение
- * - покой — поверхность [MarsTheme.SURFACE] с контуром [MarsTheme.BORDER], иконка
- *   [MarsTheme.TEXT_MUTED]: действие доступно, но ничего не происходит;
+ * - покой — тёмный стеклянный ореол [MarsTheme.COMPOSER_ACTION_BG] с гранью
+ *   [MarsTheme.COMPOSER_ACTION_BORDER] и иконкой [MarsTheme.TEXT_EM]: ровно тот же тон,
+ *   что у скрепки композера, — ряд кнопок читается как один;
  * - «Слушаю» — акцент [MarsTheme.ACCENT]: микрофон открыт, человек говорит;
  * - «Думаю» — предупреждение [MarsTheme.STATUS_WARNING] и приглушённая кнопка: нажатие
  *   в этой фазе ничего не делает (остановка хода — дело композера);
@@ -75,7 +77,7 @@ class LocalVoiceButton(
      *
      * Размер задан самой вьюхой ([FixedCircleButton]), а не только layout-параметрами:
      * экран добавляет root с `wrap_content`, и без фиксированного `onMeasure` ширина
-     * снова поехала бы за содержимым (иконка + padding). 40 dp — всегда.
+     * снова поехала бы за содержимым (иконка + padding). 36 dp — всегда.
      */
     val root: ImageButton = FixedCircleButton(context, dp(SIZE_DP)).apply {
         isClickable = true
@@ -92,6 +94,14 @@ class LocalVoiceButton(
     /** Фаза последнего рендера: фон пересобирается только при её смене. */
     private var lastPhase: LocalVoicePhase? = null
 
+    /**
+     * Фаза, о смене которой уже сообщили тактильно и подписью.
+     *
+     * Отдельно от [lastPhase]: перерисовка и объявление — разные поводы. На кадр стрима
+     * (partial-текст) фаза не меняется, и отклик не повторяется.
+     */
+    private var announcedPhase: LocalVoicePhase? = null
+
     private val main = Handler(Looper.getMainLooper())
 
     /** Кнопка уже освобождена: отложенный refresh не должен трогать движки. */
@@ -102,8 +112,13 @@ class LocalVoiceButton(
             activity = activity,
             onTranscript = onTranscript,
             onState = { next ->
-                render(next)
-                onState(next)
+                // Снимок для экрана: смена фазы даёт тактильный отклик и понятную подпись
+                // («Слушаю — говорите…» / «Запись завершена — распознаю…»), поэтому и в
+                // локальном чате видно и чувствуется, когда говорить, а когда микрофон уже
+                // закрыт. Причина контроллера (нет разрешения, микрофон занят) сильнее.
+                val presented = present(next)
+                render(presented)
+                onState(presented)
             },
             asrEngine = asrEngine,
             serverTts = serverTts,
@@ -124,6 +139,41 @@ class LocalVoiceButton(
         root.isEnabled = state.phase != LocalVoicePhase.THINKING
         root.alpha = if (state.phase == LocalVoicePhase.THINKING) 0.65f else 1f
         root.visibility = if (state.visible) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Снимок состояния для экрана: на смену фазы — тактильный отклик и подсказка-слово.
+     *
+     * Зачем копия, а не прямой проброс: [LocalVoiceController] описывает техническое
+     * состояние, а человеку нужно действие («говорите», «распознаю»). Подсказка фазы
+     * добавляется ТОЛЬКО когда контроллер не сказал ничего важнее (нет разрешения, микрофон
+     * занят): его причина всегда конкретнее и не должна затираться.
+     */
+    private fun present(state: LocalVoiceState): LocalVoiceState {
+        if (state.phase == announcedPhase) return state
+        val previous = announcedPhase
+        announcedPhase = state.phase
+        // Локальный контроллер закрывает реплику переходом LISTENING → IDLE (своего THINKING
+        // у него нет), поэтому момент «микрофон перестал слушать» объявляется именно здесь.
+        val hint = phaseHint(state.phase)
+            ?: if (previous == LocalVoicePhase.LISTENING && state.phase == LocalVoicePhase.IDLE) {
+                FINISHED_NOTICE
+            } else {
+                null
+            }
+        if (hint == null) return state
+        // Момент «микрофон открылся / перестал слушать» чувствуется рукой: смотреть на экран
+        // в этот момент человек не обязан.
+        root.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        return if (!state.notice.isNullOrBlank()) state else state.copy(notice = hint)
+    }
+
+    /** Подсказка фазы — то, что человеку нужно сделать или чего он ждёт прямо сейчас. */
+    private fun phaseHint(phase: LocalVoicePhase): String? = when (phase) {
+        LocalVoicePhase.LISTENING -> LISTENING_NOTICE
+        LocalVoicePhase.THINKING -> THINKING_NOTICE
+        LocalVoicePhase.SPEAKING -> SPEAKING_NOTICE
+        LocalVoicePhase.IDLE -> null
     }
 
     // --- проброс к контроллеру (экран не обязан знать про него) -------------------------------
@@ -236,9 +286,9 @@ class LocalVoiceButton(
      */
     private fun lookFor(phase: LocalVoicePhase): Look = when (phase) {
         LocalVoicePhase.IDLE -> Look(
-            bg = MarsTheme.SURFACE,
-            iconTint = MarsTheme.TEXT_MUTED,
-            stroke = MarsTheme.BORDER,
+            bg = MarsTheme.COMPOSER_ACTION_BG,
+            iconTint = MarsTheme.TEXT_EM,
+            stroke = MarsTheme.COMPOSER_ACTION_BORDER,
         )
 
         LocalVoicePhase.LISTENING -> Look(
@@ -265,6 +315,10 @@ class LocalVoiceButton(
      * причина, если она есть. Текст состояния не теряется — он переехал сюда.
      */
     private fun descriptionFor(state: LocalVoiceState): String {
+        val notice = state.notice?.takeIf { it.isNotBlank() }
+        // Наша собственная подсказка фазы уже говорит и состояние, и что делать: не дублируем
+        // («Слушаю…. Слушаю — говорите…» скринридер читал бы дважды).
+        if (notice != null && notice == phaseHint(state.phase)) return notice
         val base = when (state.phase) {
             LocalVoicePhase.IDLE ->
                 if (state.micPermissionGranted) {
@@ -277,8 +331,7 @@ class LocalVoiceButton(
             LocalVoicePhase.THINKING -> "Думаю…"
             LocalVoicePhase.SPEAKING -> "Говорю…"
         }
-        val notice = state.notice
-        return if (notice.isNullOrBlank()) base else base + ". " + notice
+        return if (notice == null) base else base + ". " + notice
     }
 
     private fun dp(value: Int): Int = MarsTheme.dp(context, value)
@@ -291,7 +344,7 @@ class LocalVoiceButton(
      *
      * Экран добавляет [root] с `wrap_content`, поэтому одного `layoutParams` мало: ширина
      * решалась бы содержимым (иконка 24 dp + padding 10 dp = 44 dp). `onMeasure` с жёстким
-     * размером делает ширину независимой и от текста, и от хоста — 40 dp в любом родителе.
+     * размером делает ширину независимой и от текста, и от хоста — 36 dp в любом родителе.
      */
     private class FixedCircleButton(
         context: Context,
@@ -306,7 +359,23 @@ class LocalVoiceButton(
         /** Тот же requestCode, что у контроллера: удобно сравнивать в `onRequestPermissionsResult`. */
         const val REQUEST_RECORD_AUDIO: Int = LocalVoiceController.REQUEST_RECORD_AUDIO
 
-        /** Размер кнопки: как у `sendButton` композера — один ряд, один ритм. */
-        private const val SIZE_DP = 40
+        /**
+         * Подсказки фазы для экрана: что делать человеку, а не что делает движок.
+         *
+         * Тот же язык, что у кнопки микрофона в чате: «Слушаю — говорите…» и «Запись
+         * завершена — распознаю…». В локальном чате не должно быть второго словаря состояний.
+         */
+        const val LISTENING_NOTICE = "Слушаю — говорите…"
+        const val THINKING_NOTICE = "Запись завершена — распознаю…"
+        const val SPEAKING_NOTICE = "Отвечаю вслух…"
+
+        /** Реплика закрыта и текст уже в поле ввода: микрофон больше не слушает. */
+        const val FINISHED_NOTICE = "Запись завершена — текст в поле ввода"
+
+        /**
+         * Размер кнопки: как у скрепки и `sendButton` композера — один ряд, один ритм
+         * (36 dp; размер держит и layout-параметры, и `onMeasure` вьюхи).
+         */
+        private const val SIZE_DP = 36
     }
 }

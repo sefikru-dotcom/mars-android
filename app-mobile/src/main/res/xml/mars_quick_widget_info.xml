@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    appwidget-provider виджета «Марс — Панель управления и последний чат».
+
+    minWidth/minHeight = 4x2 в dp (ячейка ~70dp минус служебные отступы лаунчера).
+    minResize* разрешают сжать панель до 4x1 (останется одна строка действий) и
+    растянуть до 4x3 — превью ответа получит третью строку воздуха.
+    updatePeriodMillis=0: виджет обновляется сам, когда приложение сообщает
+    живое состояние (MarsQuickWidgetProvider.notifyStateChanged), а не по таймеру —
+    иначе лаунчер будил бы процесс каждые 30 минут впустую.
+    previewLayout даёт системному пикеру настоящий вид карточки (Android 12+).
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_mars_quick_description"
+    android:initialLayout="@layout/widget_mars_quick"
+    android:minHeight="110dp"
+    android:minResizeHeight="56dp"
+    android:minResizeWidth="180dp"
+    android:minWidth="250dp"
+    android:previewLayout="@layout/widget_mars_quick"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

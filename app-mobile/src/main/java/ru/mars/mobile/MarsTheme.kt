@@ -58,6 +58,28 @@ object MarsTheme {
     /** Standard 20% white ripple for every interactive surface (buttons, icon buttons). */
     const val RIPPLE = 0x33ffffff.toInt()
 
+    // ---- Композер: тёмный космический ореол кнопок (паритет с WebUI `.send-btn`) ----
+    /**
+     * Ореол второстепенных кнопок композера (скрепка, микрофон): глубокое тёмно-кобальтовое
+     * стекло 72%, а не сплошная заливка. Кнопка на капсуле читается как отдельный слой над
+     * космосом, но не спорит с акцентом: акцент в композере один — звезда отправки.
+     */
+    const val COMPOSER_ACTION_BG = 0xB8121620.toInt()
+    /** Тонкая стеклянная грань второстепенных кнопок: 1dp, 15% белого. */
+    const val COMPOSER_ACTION_BORDER = 0x26FFFFFF
+    /**
+     * Глубокий тёмный ореол звезды отправки — паритет с WebUI
+     * `rgba(26, 16, 22, 0.85)`. Звезда живёт В тёмном ореоле: залитый ярко-красный круг
+     * съедал иконку и делал отправку «кнопкой-плашкой», а не главным действием капсулы.
+     */
+    const val SEND_HALO_BG = 0xD81A1018.toInt()
+    /** Деликатное рубиновое кольцо ореола звезды: 45% акцента, 1dp. */
+    const val SEND_HALO_BORDER = 0x73EF4444
+    /** Мягкое тёплое свечение самой звезды внутри тёмного ореола. */
+    const val SEND_STAR_TINT = 0xFFFCA5A5.toInt()
+    /** Ореол в фазе «останавливаю…»: тот же тёмный рубин, но плотнее и с акцентным кольцом. */
+    const val SEND_HALO_STOPPING_BG = 0xD82A1215.toInt()
+
     // ---- Стекло (паритет с app-tv) ----
     /**
      * Подложка «стеклянной» карточки: 72% непрозрачности #10141E поверх кадра.
@@ -281,6 +303,34 @@ object MarsTheme {
             val pad = dp(context, 10)
             setPadding(pad, pad, pad, pad)
         }
+    }
+
+    /**
+     * Кнопка отправки: овальный ТЁМНЫЙ ореол со звездой внутри (паритет с WebUI
+     * `.send-btn`: `rgba(26,16,22,.85)` + рубиновая грань `rgba(239,68,68,.45)`).
+     *
+     * Почему не [circleIconButton] с `bg = ACCENT`: залитый ярко-красный круг превращал
+     * главное действие капсулы в «ещё одну красную плашку», а звезда внутри него терялась.
+     * Тёмный ореол держит акцент кольцом и свечением иконки, поэтому звезда читается
+     * как звезда в космосе, а не как пиктограмма на красной бляшке.
+     *
+     * Фаза `stopping` (ход уже отменён, ответ ещё доигрывает) — тот же тёмный ореол, но
+     * плотнее ([SEND_HALO_STOPPING_BG]) и с акцентным кольцом [ACCENT]: кнопка обещает
+     * остановку, но не заливается красным целиком.
+     */
+    fun sendHaloBackground(context: Context, stopping: Boolean = false): RippleDrawable {
+        val fill = if (stopping) SEND_HALO_STOPPING_BG else SEND_HALO_BG
+        val ring = if (stopping) ACCENT else SEND_HALO_BORDER
+        val normal = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(fill)
+            setStroke(dp(context, 1), ring)
+        }
+        val mask = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(TEXT_STRONG)
+        }
+        return RippleDrawable(ColorStateList.valueOf(RIPPLE), normal, mask)
     }
 
     /**

@@ -193,6 +193,17 @@ object ChatMessageCardRenderer {
             )
         }
         card.addView(labelRow)
+        // Долгое нажатие на ШАПКЕ карточки (подпись автора, пилюля модели, час) —
+        // второй путь к шторке действий, кроме кнопки «⋮» moreBtn. Текст самого
+        // сообщения при этом не перехватывается: markdown-строки создаются с
+        // setTextIsSelectable(true) и сами показывают системное «Копировать /
+        // Выбрать всё» по долгому нажатию на слово или строку.
+        labelRow.setOnLongClickListener { view ->
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            // Индекс резолвится в момент клика: карточка переживает кадры стрима.
+            host.showMessageActions(host.messageAt(index) ?: message, index)
+            true
+        }
 
         if (message.attachments.isNotEmpty()) {
             card.addView(TextView(context).apply {
@@ -576,7 +587,9 @@ object ChatMessageCardRenderer {
         }
 
         if (message.text.isNotBlank()) {
-            // Long-press anywhere on the bubble opens the message-actions sheet.
+            // Long-press по ПУСТОМУ месту пузыря (паддинги, зазор под текстом) открывает
+            // шторку действий. Строки markdown теперь selectable и забирают долгое
+            // нажатие себе — это и есть нативное выделение строки/слова с «Копировать».
             card.setOnLongClickListener { view ->
                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                 // Резолвим в момент клика: захваченная при сборке копия устаревает за кадры стрима.

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    appwidget-provider виджета «Марс — Быстрый ввод и голос».
+
+    Полоса высотой в одну ячейку: minHeight 56dp, targetCellHeight 1.
+    По ширине живёт от 3x1 (180dp — планета, капсула, микрофон и звезда ещё
+    помещаются без обрезки текста) до 4x1; вертикальный ресайз запрещён
+    намеренно — это полоса, а не карточка, и растянутая вниз она выглядела бы
+    пустой рамкой.
+    updatePeriodMillis=0: состояние не показывается, обновлять по таймеру нечего.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_mars_compact_description"
+    android:initialLayout="@layout/widget_mars_compact"
+    android:minHeight="56dp"
+    android:minResizeWidth="180dp"
+    android:minWidth="180dp"
+    android:previewLayout="@layout/widget_mars_compact"
+    android:resizeMode="horizontal"
+    android:targetCellHeight="1"
+    android:targetCellWidth="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

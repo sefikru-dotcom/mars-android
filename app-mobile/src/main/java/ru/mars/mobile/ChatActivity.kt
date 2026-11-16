@@ -118,7 +118,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         set(value) {
             val previous = field
             field = value
-            if (previous != value) onActiveSessionChanged()
+            if (previous != value) {
+                onActiveSessionChanged()
+                // Виджет рабочего стола показывает ИМЕННО открытый диалог: смена адресата —
+                // единственная точка, где его подпись и адресат тапа обязаны обновиться сразу,
+                // иначе тап по карточке вёл бы во вчерашний чат.
+                syncWidgetState()
+            }
         }
 
     /**
@@ -460,6 +466,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         // интенте ДО восстановления, иначе restoreOpenSession нечего открывать.
         resolvePushSessionId(intent)?.let { sid -> intent?.putExtra(EXTRA_OPEN_SESSION_ID, sid) }
         restoreOpenSession(savedInstanceState)
+        // Действие виджета рабочего стола (compose / voice / new_chat) — только на ХОЛОДНОМ
+        // старте: интент переживает пересоздание экрана, и оставленный `new_chat` сработал бы
+        // повторно на повороте, стерев открытый диалог.
+        if (savedInstanceState == null) applyWidgetAction(consumeWidgetAction())
         // Кнопка «Ответить» при убитом процессе приходит в onCreate, а не в onNewIntent:
         // без этой строки первый в жизни ответ из шторки терялся бы молча.
         if (PushReplyPolicy.matchesAction(intent?.action)) intent?.let(::handlePushReply)
@@ -680,6 +690,10 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         if (requested.isNotEmpty() && requested != currentSessionId) {
             loadSessionById(requested)
         }
+        // Виджет: тап по капсуле/микрофону/звезде на уже открытом экране — то же действие,
+        // что и на холодном старте. Extra снимается сразу (consumeWidgetAction), поэтому
+        // повторная доставка интента не запустит действие второй раз.
+        applyWidgetAction(consumeWidgetAction())
     }
 
     /**
@@ -725,11 +739,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         override fun onTurnCompleted() {
             finishRecoveredTurn(speakFinalAnswer = true)
+            // Восстановленный ход завершён: последний ответ агента — новый текст виджета.
+            syncWidgetState()
         }
 
         /** Серверная ошибка хода уже в транскрипте (onStreamEvent → uiState.fail()). */
         override fun onTurnEndedInError() {
             finishRecoveredTurn(speakFinalAnswer = false)
+            syncWidgetState()
         }
 
         /** Стрим исчез серверно (404/истёкший журнал): placeholder снимается, история перезагружается. */
@@ -759,6 +776,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             updateControls()
             updateNetworkBanner()
             flushOfflineQueue()
+            // Провал восстановления — тоже терминальное состояние хода: виджет не должен
+            // показывать превью, которого на экране уже нет.
+            syncWidgetState()
         }
     }
 

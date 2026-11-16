@@ -280,7 +280,7 @@ class SplashActivity : ComponentActivity() {
         // прочитан — ждать нижнюю границу показа (MIN_VISIBLE_MS) незачем.
         // Человек выбрал экран тапом по уведомлению, и заставка для него сейчас
         // только задержка: переходим сразу, без фейда.
-        if (pushSessionId != null && hasCredential && targetReady) {
+        if (hasPushTarget() && hasCredential && targetReady) {
             leaveForPush()
             return
         }
@@ -355,6 +355,12 @@ class SplashActivity : ComponentActivity() {
     /**
      * Открывает целевой экран по [SplashRoute]; повторный вызов игнорируется.
      *
+     * Ветка [SplashRoute.Destination.CHAT] неоднородна: тап по пуш-уведомлению
+     * ([hasPushTarget]) ведёт прямо в конкретный диалог ([ChatActivity] с
+     * [ChatActivity.EXTRA_OPEN_SESSION_ID]), а обычный запуск приложения — на
+     * страницу «Диалоги» ([ChatSessionsActivity]), чтобы человек начинал с
+     * выбора диалога, а не с пустого «Нового чата».
+     *
      * Перекрёстный фейд задаётся явно: без него система берёт дефолтную
      * анимацию перехода темы (на HyperOS — «всплытие» с затемнением), и стык
      * двух брендовых экранов читается как рывок.
@@ -364,13 +370,25 @@ class SplashActivity : ComponentActivity() {
         if (navigated) return
         navigated = true
         val target = when (SplashRoute.destinationFor(hasCredential)) {
-            SplashRoute.Destination.CHAT -> ChatActivity::class.java
+            // Тап по пуш-уведомлению ведёт сразу в конкретный диалог; обычный запуск
+            // приложения открывает страницу «Диалоги» ([ChatSessionsActivity]), а не
+            // пустой «Новый чат» — владелец начинает работу с выбора диалога.
+            SplashRoute.Destination.CHAT ->
+                if (hasPushTarget()) ChatActivity::class.java else ChatSessionsActivity::class.java
             SplashRoute.Destination.LOGIN -> MainActivity::class.java
         }
         startActivity(targetIntent(target))
         overridePendingTransition(R.anim.mars_fade_in, R.anim.mars_fade_out)
         finish()
     }
+
+    /**
+     * Есть ли адресат push-тапа: известная сессия из data-payload либо наше действие
+     * «Ответить». Обе ветки означают, что человек уже выбрал диалог уведомлением, и
+     * маршрут обязан идти в [ChatActivity], а не в список диалогов.
+     */
+    private fun hasPushTarget(): Boolean =
+        pushSessionId != null || PushReplyPolicy.matchesAction(intent?.action)
 
     /**
      * Целевой Intent с перенесённым контекстом запуска.

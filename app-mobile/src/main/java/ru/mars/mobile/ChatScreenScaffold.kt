@@ -208,10 +208,14 @@ object ChatScreenScaffold {
         val reasoningBtn: Button,
         val activityModeBtn: Button,
         val workspaceBtn: Button,
+        /** Кольцо заполнения контекста: вход в окно контекста в кнопке-капсуле внизу. */
         val contextRing: ContextRingView,
-        /** Строка контекста (кольцо + подпись с токенами и порогом); скрыта без замера. */
+        /**
+         * Легаси-полоса контекста под шапкой: GONE и нулевая высота (пункт 5 владельца).
+         * Поле сохранено ради проводки Activity; на экране полосы больше нет.
+         */
         val contextRow: LinearLayout,
-        /** Подпись «25% · 50.0k/200.0k · сжатие при 160.0k · 80%» (текст — из политики). */
+        /** Подпись «25% · 50.0k/200.0k · сжатие при 160.0k · 80%» в капсуле (текст — из политики). */
         val contextCaption: TextView,
         val usageIndicator: TextView,
         val toolsetsChip: Button,
@@ -329,14 +333,15 @@ object ChatScreenScaffold {
 
         root.addView(header)
 
-        // Строка контекста — ПОД шапкой и постоянно, а не в композере и не только на
-        // время хода. Собрана здесь, добавлена в root после баннера сети (порядок
-        // addView ниже), чтобы стоять вторым элементом экрана: сразу под шапкой.
-        // Кольцо скрывается без замера, подпись — нет (см. ContextBudgetPolicy).
+        // Кольцо контекста — вход в окно контекста и живёт в кнопке-капсуле ВНИЗУ
+        // композера (панель composerBottomBar). Создаётся здесь, чтобы подпись и кольцо
+        // собирались в одном месте, а добавляется в капсулу ниже. Кольцо видно ВСЕГДА
+        // (без замера — нейтральный 0%), иначе вместе с ним пропадал бы и вход в окно.
         val contextRing = ContextRingView(context).apply {
-            visibility = View.GONE
             setOnClickListener { host.showContextUsageDetails() }
         }
+        // Подпись контекста — краткая метка рядом с кольцом в той же капсуле:
+        // «25% · 50.0k/200.0k · сжатие при 160.0k · 80%» (текст решает ContextBudgetPolicy).
         val contextCaption = TextView(context).apply {
             textSize = 10f
             setTextColor(MarsTheme.TEXT_MUTED_ON_GLASS)
@@ -344,22 +349,20 @@ object ChatScreenScaffold {
             ellipsize = android.text.TextUtils.TruncateAt.END
             includeFontPadding = false
             gravity = Gravity.CENTER_VERTICAL
+            maxWidth = dp(150)
             setOnClickListener { host.showContextUsageDetails() }
         }
-        // Панель под шапкой: вуаль-плашка, чтобы подпись лежала на кадре читаемо
-        // (на лимбе голый текст даёт 2.25:1 — вдвое ниже порога AA).
+        // Полоса контекста ПОД ШАПКОЙ больше не показывается (пункт 5 владельца):
+        // переменная остаётся ради совместимости проводки Activity, но на экране её нет —
+        // GONE и нулевая высота. Всё, что она показывала, переехало в окно контекста внизу.
         val contextRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(3), dp(10), dp(3))
             background = MarsTheme.glassSurface(context, radiusDp = 10)
+            visibility = View.GONE
             setOnClickListener { host.showContextUsageDetails() }
         }
-        contextRow.addView(contextRing, LinearLayout.LayoutParams(dp(20), dp(20)))
-        contextRow.addView(
-            contextCaption,
-            LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) },
-        )
 
         // Баннер сетевого статуса: видимость/текст/тон решает чистая NetworkBannerPolicy,
         // хост лишь мапит тон на токены MarsTheme (полоса под хедером, над мини-плеером).
@@ -373,8 +376,9 @@ object ChatScreenScaffold {
         }
         root.addView(networkBanner, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
-        // Строка контекста: второй элемент экрана, сразу под шапкой (постоянно видима).
-        root.addView(contextRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        // Скрытая полоса контекста: остаётся в дереве (поля Activity живы), но высота 0
+        // и GONE — под шапкой её больше нет.
+        root.addView(contextRow, LinearLayout.LayoutParams(-1, 0))
 
         // Полоса мини-плеера
         val miniPlayerBox = LinearLayout(context).apply {
@@ -565,10 +569,13 @@ object ChatScreenScaffold {
         )
         root.addView(transcriptFrame, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        // Быстрые подсказки / чипы
+        // Быстрые подсказки / чипы. Полоса скрыта: над полем ввода остаётся ОДНА строка
+        // (smartChipsRow) с тремя баблами WebUI — иначе получалась свалка из двух рядов.
+        // Контейнер и обработчики сохранены: это часть каркаса (Scaffold.quickChipsScroll).
         val quickChipsScroll = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
             setPadding(0, dp(6), 0, dp(6))
+            visibility = View.GONE
         }
         val quickBox = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         val quickPrompts = listOf(
@@ -740,10 +747,14 @@ object ChatScreenScaffold {
         liveRunPlate.addView(liveRunDetail)
         root.addView(liveRunPlate, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
-        // Двухуровневая стеклянная капсула композера (паритет с WebUI)
+        // Двухуровневая стеклянная капсула композера (паритет с WebUI).
+        // Отступы капсулы намеренно ровные и достаточные: скругление капсулы — 22dp, поэтому
+        // текст обязан начинаться дальше внутреннего контура угла (иначе первые и последние
+        // символы строки наезжали на рамку), а у самого поля есть собственная подложка radius 14.
         val composer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setPadding(dp(12), dp(10), dp(12), dp(8))
+            clipToPadding = false
             background = MarsTheme.composerCapsule(context)
         }
 
@@ -791,14 +802,29 @@ object ChatScreenScaffold {
         composerQuoteView.addView(quoteCancelBtn, LinearLayout.LayoutParams(dp(24), dp(24)))
         composer.addView(composerQuoteView, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
 
-        // Поле ввода: многострочное, чистое, отзывчивое
+        // Поле ввода: многострочное, чистое, отзывчивое.
+        // У поля СВОЯ подложка (radius 14) внутри капсулы (radius 22): текст живёт в ровном
+        // прямоугольнике со скруглением 14 и симметричным отступом 14/10, поэтому ни символы,
+        // ни курсор, ни выносные элементы высоких глифов не подходят к скруглённым бортам
+        // капсулы — при 1–5 строках ввод физически не может вылезти за рамку плашки.
         val input = EditText(context).apply {
             hint = ComposerLayoutPresenter.HINT
             setTextColor(MarsTheme.TEXT_STRONG)
             setHintTextColor(MarsTheme.TEXT_MUTED)
             textSize = 15f
-            background = null
-            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = MarsTheme.card(
+                context,
+                Color.argb(110, 10, 14, 22),
+                radiusDp = 14,
+                strokeColor = MarsTheme.BORDER_SUBTLE,
+            )
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            // Текст прижат к верхнему левому углу: капсула растёт вниз, а не «центрирует»
+            // первую строку по мере набора.
+            gravity = Gravity.TOP or Gravity.START
+            // Высота одной строки гарантирована даже до первой раскладки: пустое поле не
+            // схлопывается в полоску и не прыгает при появлении первой буквы.
+            minHeight = dp(42)
             // Флаги и геометрия — из [ComposerInputTypePolicy] (чистая JVM-политика с тестами).
             // Порядок критичен (ловушка TextView): setSingleLine(false) внутри себя вызывает
             // setMaxLines(Integer.MAX_VALUE), поэтому предел строк ставится ПОСЛЕДНИМ — иначе
@@ -810,12 +836,18 @@ object ChatScreenScaffold {
             // длинный текст листается в поле, не растягивая композер.
             setHorizontallyScrolling(false)
             isVerticalScrollBarEnabled = false
-            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля. Держит капсулу
-            // в рамках даже если платформа проигнорирует maxLines (не наезжает на нижнюю панель).
-            includeFontPadding = false
+            // Font padding включён: при выключенном высокие глифы («Й», «Щ», «д», «у») и
+            // курсор подрезались сверху и снизу — верхние и нижние выносные элементы
+            // упирались в границу поля.
+            includeFontPadding = true
+            // Ровный межстрочный ритм: 1.05 множителя + 2dp добавки на строку.
+            setLineSpacing(dp(2).toFloat(), 1.05f)
+            // Пиксельный потолок высоты: пять строк + вертикальные отступы поля (10 + 10).
+            // Держит капсулу в рамках даже если платформа проигнорирует maxLines
+            // (не наезжает на нижнюю панель кнопок).
             maxHeight = ComposerInputTypePolicy.maxHeightPx(
                 lineHeightPx = paint.fontMetricsInt.let { it.descent - it.ascent },
-                verticalPaddingPx = dp(4) + dp(4),
+                verticalPaddingPx = dp(10) + dp(10),
             )
             imeOptions = ComposerInputTypePolicy.IME_OPTIONS
             setOnEditorActionListener { _, action, _ ->
@@ -836,16 +868,22 @@ object ChatScreenScaffold {
         }
         composer.addView(input, LinearLayout.LayoutParams(-1, -2))
 
-        // Нижний уровень: чипы сессии слева + кнопки действий справа
+        // Нижний уровень капсулы: слева одна кнопка «Контекст» (кольцо + подпись),
+        // справа — только необходимое: скрепка, голос, звезда отправки.
         val composerBottomBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, 0)
+            // Ровный воздух между подложкой поля ввода и рядом кнопок: 6dp — один ритм с шагом
+            // между самими кнопками, поэтому панель не «прилипает» к рамке поля.
+            setPadding(0, dp(6), 0, 0)
         }
 
-        // Слева: компактные контролы модели, уровня размышлений и всегда видимого контекста.
+        // Слева: контролы модели/уровня размышлений/контекста. Экран их больше не
+        // показывает (всё второстепенное — в окне контекста), но поля ComposerViews
+        // и обработчики остаются на месте: на них смотрят update*-методы Activity.
         val chipsScroll = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
         }
         val chipsRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -963,16 +1001,43 @@ object ChatScreenScaffold {
 
         chipsScroll.addView(chipsRow)
 
-        // Расход сессии — ВНЕ горизонтального скролла чипов: внутри него пилюля уезжала за
-        // правый край на узком экране (POCO F5). Кольцо контекста живёт в своей строке выше
-        // (contextRow), где у него есть место под подпись с объёмом токенов и порогом
-        // автосжатия; чипы от переезда только выиграли 24dp ширины.
-        composerBottomBar.addView(
+        // Всё второстепенное (чипы модели/мышления/режима/воркспейса, набор инструментов,
+        // квота, расход сессии) остаётся в дереве — обработчики и поля Activity живы, — но
+        // собрано в скрытую полосу: на экране этих мелких кнопок больше нет, они разложены
+        // по полочкам в окне контекста (showContextUsageDetails).
+        val legacyControlsStrip = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }
+        legacyControlsStrip.addView(
             usageIndicator,
             LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) },
         )
+        legacyControlsStrip.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
+        composerBottomBar.addView(legacyControlsStrip, LinearLayout.LayoutParams(0, -2))
 
-        composerBottomBar.addView(chipsScroll, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) })
+        // Слева — единственная кнопка-капсула «Контекст»: кольцо заполнения + краткая
+        // подпись. Тап открывает окно контекста и параметров диалога.
+        val contextCapsule = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = MarsTheme.pill(context, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
+            setPadding(dp(8), dp(3), dp(10), dp(3))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Окно контекста и параметры диалога"
+            setOnClickListener { host.showContextUsageDetails() }
+        }
+        contextCapsule.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))
+        contextCapsule.addView(
+            contextCaption,
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
+        )
+        composerBottomBar.addView(contextCapsule, LinearLayout.LayoutParams(-2, -2))
+
+        // Воздух между кнопкой контекста и группой действий.
+        composerBottomBar.addView(View(context), LinearLayout.LayoutParams(0, dp(1), 1f))
 
         // Справа: кнопки действий (поиск, вложение, голос, озвучка, отправка/стоп)
         val actionsRow = LinearLayout(context).apply {
@@ -981,6 +1046,7 @@ object ChatScreenScaffold {
         }
 
         // Вход в поиск по диалогу: панель раскрывается над транскриптом (под статус-строкой).
+        // Кнопка скрыта с панели (вход теперь в окне контекста), обработчик сохранён.
         val searchEntryBtn = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_search,
@@ -990,31 +1056,41 @@ object ChatScreenScaffold {
             sizeDp = 34,
             strokeColor = 0
         ).apply {
+            visibility = View.GONE
             setOnClickListener { host.openTranscriptSearch() }
         }
         actionsRow.addView(searchEntryBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
+        // Единый размер и тональность трёх кнопок справа: 36dp, один шаг 6dp, один тон.
+        // Скрепка и микрофон — тёмное стекло с тонкой гранью ([MarsTheme.COMPOSER_ACTION_BG]):
+        // акцент в композере один, поэтому второстепенные действия не красятся в рубин.
         val attachBtn = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_attach,
             "Прикрепить файл",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
+            bg = MarsTheme.COMPOSER_ACTION_BG,
+            iconTint = MarsTheme.TEXT_EM,
+            sizeDp = 36,
+            strokeColor = MarsTheme.COMPOSER_ACTION_BORDER
         ).apply {
             setOnClickListener { host.chooseAttachment() }
         }
-        actionsRow.addView(attachBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+        actionsRow.addView(
+            attachBtn,
+            LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                marginStart = dp(6)
+                gravity = Gravity.CENTER_VERTICAL
+            },
+        )
 
         val voiceButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_mic,
             "Голосовой ввод, удержание — голосовой диалог",
-            bg = Color.TRANSPARENT,
-            iconTint = MarsTheme.TEXT_MUTED,
-            sizeDp = 34,
-            strokeColor = 0
+            bg = MarsTheme.COMPOSER_ACTION_BG,
+            iconTint = MarsTheme.TEXT_EM,
+            sizeDp = 36,
+            strokeColor = MarsTheme.COMPOSER_ACTION_BORDER
         ).apply {
             setOnClickListener { host.startVoiceInput() }
             // Долгое нажатие — hands-free диалог: тап остаётся одиночной репликой, а удержание
@@ -1029,8 +1105,15 @@ object ChatScreenScaffold {
                 true
             }
         }
-        actionsRow.addView(voiceButton, LinearLayout.LayoutParams(dp(34), dp(34)))
+        actionsRow.addView(
+            voiceButton,
+            LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                marginStart = dp(6)
+                gravity = Gravity.CENTER_VERTICAL
+            },
+        )
 
+        // Озвучка: кнопка скрыта с панели (вход — окно контекста), обработчики сохранены.
         val volumeButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_volume,
@@ -1040,6 +1123,7 @@ object ChatScreenScaffold {
             sizeDp = 34,
             strokeColor = 0
         ).apply {
+            visibility = View.GONE
             setOnClickListener { host.speakLastMessage() }
             // Явное действие пользователя: долгое нажатие переключает режим «читать ответы
             // вслух» (persisted). Автоматически режим никогда не включается.
@@ -1056,14 +1140,18 @@ object ChatScreenScaffold {
         }
         actionsRow.addView(volumeButton, LinearLayout.LayoutParams(dp(34), dp(34)))
 
+        // Кнопка отправки — фирменная звезда Марса (ic_send) в ТЁМНОМ ореоле, 36dp: тот же
+        // размер и шаг, что у скрепки и микрофона, но собственный тон — глубокий рубиново-
+        // космический ореол с деликатным кольцом. Заливки [MarsTheme.ACCENT] здесь больше нет:
+        // акцент держат кольцо ореола и свечение звезды, а не красная бляшка.
         val sendButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_send,
             "Отправить",
-            bg = MarsTheme.ACCENT,
-            iconTint = MarsTheme.TEXT_STRONG,
+            bg = MarsTheme.SEND_HALO_BG,
+            iconTint = MarsTheme.SEND_STAR_TINT,
             sizeDp = 36,
-            strokeColor = 0
+            strokeColor = MarsTheme.SEND_HALO_BORDER
         ).apply {
             setOnClickListener {
                 if (host.isTyping()) {
@@ -1073,7 +1161,13 @@ object ChatScreenScaffold {
                 }
             }
         }
-        actionsRow.addView(sendButton, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(2) })
+        actionsRow.addView(
+            sendButton,
+            LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                marginStart = dp(6)
+                gravity = Gravity.CENTER_VERTICAL
+            },
+        )
 
         composerBottomBar.addView(actionsRow, LinearLayout.LayoutParams(-2, -2))
         composer.addView(composerBottomBar, LinearLayout.LayoutParams(-1, -2))

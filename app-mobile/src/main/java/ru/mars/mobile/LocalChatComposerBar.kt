@@ -84,7 +84,10 @@ internal class LocalChatComposerBar(
         capsule.addView(
             voiceRoot,
             0,
-            android.widget.LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(4) },
+            android.widget.LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)).apply {
+                marginEnd = dp(BUTTON_STEP_DP)
+                gravity = Gravity.CENTER_VERTICAL
+            },
         )
     }
 
@@ -187,8 +190,11 @@ internal class LocalChatComposerBar(
             setHintTextColor(MarsTheme.TEXT_MUTED)
             setTextColor(MarsTheme.TEXT)
             textSize = 15f
+            // Подложки нет: поле лежит прямо в стеклянной капсуле, но отступы симметричные
+            // 12/10 — первые и последние символы строки не подходят к скруглённым бортам.
             background = null
-            setPadding(dp(10), dp(9), dp(10), dp(9))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            gravity = Gravity.CENTER_VERTICAL
             minLines = 1
             maxLines = 5
             inputType = InputType.TYPE_CLASS_TEXT or
@@ -213,39 +219,48 @@ internal class LocalChatComposerBar(
         }
         // Скрепка — слева от поля ввода, внутри капсулы: прикрепление относится к
         // набираемому сообщению, а отдельная строка под композером отнимала бы ленту.
-        // 40dp — тот же размер, что у кнопки отправки: капсула остаётся ровной по высоте.
+        // 36dp и тёмный ореол — тот же размер и тон, что у кнопки голоса: три кнопки ряда
+        // (голос, скрепка, звезда) стоят одним ритмом.
         val attachButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_attach,
             "Прикрепить файл или картинку",
-            bg = MarsTheme.SURFACE_SUBTLE,
+            bg = MarsTheme.COMPOSER_ACTION_BG,
             iconTint = MarsTheme.TEXT_EM,
-            sizeDp = 40,
-            strokeColor = MarsTheme.BORDER,
+            sizeDp = BUTTON_SIZE_DP,
+            strokeColor = MarsTheme.COMPOSER_ACTION_BORDER,
         ).apply {
             setOnClickListener { onAttach() }
         }
         capsule.addView(
             attachButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(4) },
+            LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)).apply {
+                marginEnd = dp(BUTTON_STEP_DP)
+                gravity = Gravity.CENTER_VERTICAL
+            },
         )
 
         capsule.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
 
+        // Звезда отправки — в тёмном ореоле, а не в залитом красном круге: паритет с
+        // серверным композером ([MarsTheme.sendHaloBackground]).
         sendButton = MarsTheme.circleIconButton(
             context,
             R.drawable.ic_send,
             "Отправить",
-            bg = MarsTheme.ACCENT,
-            iconTint = MarsTheme.TEXT_STRONG,
-            sizeDp = 40,
-            strokeColor = 0,
+            bg = MarsTheme.SEND_HALO_BG,
+            iconTint = MarsTheme.SEND_STAR_TINT,
+            sizeDp = BUTTON_SIZE_DP,
+            strokeColor = MarsTheme.SEND_HALO_BORDER,
         ).apply {
             setOnClickListener { onPrimaryAction() }
         }
         capsule.addView(
             sendButton,
-            LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(6) },
+            LinearLayout.LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP)).apply {
+                marginStart = dp(BUTTON_STEP_DP)
+                gravity = Gravity.CENTER_VERTICAL
+            },
         )
         root.addView(capsule, LinearLayout.LayoutParams(-1, -2))
     }
@@ -278,6 +293,9 @@ internal class LocalChatComposerBar(
                 )
             )
             sendButton.imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
+            // Ореол перекрашивается вместе с иконкой и только на переходе фазы: в ответе —
+            // плотный рубин с акцентным кольцом, в покое — глубокий тёмный ореол звезды.
+            sendButton.background = MarsTheme.sendHaloBackground(context, stopping = streaming)
             // Подпись — по действию клика, а не по иконке: «Стоп» во время ответа.
             sendButton.contentDescription = if (streaming) "Остановить ответ" else "Отправить"
         }
@@ -434,5 +452,14 @@ internal class LocalChatComposerBar(
          * без предела «12.4k / 1M» съедала бы половину, а полосе оставалась точка.
          */
         const val MAX_LABEL_WIDTH_DP = 96
+
+        /**
+         * Единый размер всех трёх кнопок ряда (голос, скрепка, звезда отправки) — 36dp,
+         * как в серверном композере: один ряд, один ритм, одна тап-цель.
+         */
+        const val BUTTON_SIZE_DP = 36
+
+        /** Единый шаг между кнопками ряда: 6dp — ровный воздух без «слипания» кругов. */
+        const val BUTTON_STEP_DP = 6
     }
 }
