@@ -32,6 +32,13 @@ import android.widget.TextView
  * Рисует снимок [VoiceModeState] (переводит его в текст и цвет) и отдаёт нажатия хосту.
  * Ни движков, ни разрешений, ни собственного состояния: закрыл — всё осталось как было.
  *
+ * ## Фон — настоящая заставка, а не нарисованные пятна
+ * Первым слоем корня лежит [MarsSpaceBackgroundView] во весь экран в режиме голосового орба:
+ * глубокий космос, FBM-туманность, звёзды, кометы и рэлеевская корона считаются тем же
+ * GPU-шейдером, что и на заставке приложения, и пульсируют неоном фазы в такт речи
+ * ([setLevel] → `uVoiceLevel`). Планета в центре — фотореалистичный Марс из [VoiceModeOrbView];
+ * её гало концентрично диску, поэтому шар стоит ровно по центру композиции.
+ *
  * [VoiceModeActivity] остаётся в дереве как самостоятельный экран для случая, когда
  * голос нужен без диалога (например, с плитки быстрых действий). Этот класс от неё
  * независим: логика подписей живёт в [VoiceModePresenter] и у них общая.
@@ -198,16 +205,43 @@ internal class VoiceModeOverlay(activity: Activity) {
     /** Последний снимок: нужен кнопке, чтобы понять, что делать при нажатии. */
     private var lastState: VoiceModeState = VoiceModeState()
 
+    /** Неон текущей фазы: один цвет на орб и на 3D-фон (см. [VoiceNeonPalette]). */
+    private var neon: Int = VoiceNeonPalette.IDLE
+
+    /** Последняя амплитуда речи 0..1: её же получает фон при смене фазы. */
+    private var level: Float = 0f
+
     /**
-     * Корень слоя. Непрозрачный фон [MarsTheme.BG]: сквозь него видна была бы лента
-     * диалога, и «полный экран» превратился бы в подкрашенную копию чата.
+     * Корень слоя.
+     *
+     * Фон больше не глухая серая панель [MarsTheme.GLASS_PANEL]: первым слоем лежит настоящая
+     * 3D-заставка приложения ([MarsSpaceBackgroundView]) во весь экран, включённая в режим
+     * голосового орба. Именно она рисует глубокий космос, FBM-туманность, звёзды, кометы и
+     * рэлеевскую корону — и пульсирует неоном фазы в такт речи. Цвет корня — только запасной
+     * кадр на случай, если GL-поверхность ещё не поднялась.
      */
     val root: FrameLayout = FrameLayout(context).apply {
-        setBackgroundColor(MarsTheme.GLASS_PANEL)
+        setBackgroundColor(MarsSpaceShaderPolicy.COLOR_VOID_TOP)
         visibility = View.GONE
         isClickable = true
         // Фон перехватывает тапы: иначе нажатие мимо кнопки проваливалось бы в чат.
         setOnClickListener { }
+    }
+
+    /**
+     * Живой космос заставки на весь экран разговора.
+     *
+     * Не `MarsSpaceBackgroundView.wrap(...)`: слой — это уже `FrameLayout` поверх чужого экрана,
+     * и оборачивать его второй раз значило бы держать две GL-поверхности. Здесь заставка — просто
+     * первый ребёнок корня, поэтому весь её газ, звёзды и неон оказываются ПОЗАДИ планеты и
+     * капсул, а не внутри квадрата орба.
+     */
+    private val spaceBg = MarsSpaceBackgroundView(context).apply {
+        isClickable = false
+        isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        // Маленькая планета на горизонте уступает место настоящему Марсу в центре.
+        setVoiceOrbMode(true)
     }
 
     init {
@@ -229,38 +263,58 @@ internal class VoiceModeOverlay(activity: Activity) {
         }
         column.addView(
             orb,
-            LinearLayout.LayoutParams(dp(ORB_DP), dp(ORB_DP)).apply { topMargin = dp(24) },
+            LinearLayout.LayoutParams(dp(ORB_DP), dp(ORB_DP)),
         )
         column.addView(phaseLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(20)
+            topMargin = dp(18)
         })
         column.addView(hintLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(8)
-        })
-        column.addView(userLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(20)
-        })
-        column.addView(assistantLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(8)
+            topMargin = dp(6)
         })
 
         buttons.addView(
             primaryButton,
-            LinearLayout.LayoutParams(MATCH_PARENT, dp(PRIMARY_HEIGHT_DP)).apply { topMargin = dp(28) },
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(PRIMARY_HEIGHT_DP)).apply { topMargin = dp(24) },
         )
         buttons.addView(
             retryButton,
             LinearLayout.LayoutParams(MATCH_PARENT, dp(SECONDARY_HEIGHT_DP)).apply { topMargin = dp(10) },
         )
         buttons.visibility = View.GONE
-        column.addView(buttons, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // Колонка прижата к низу: орб в верхней половине, кнопка под большим пальцем.
-        root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT).apply {
-            gravity = Gravity.BOTTOM
-            bottomMargin = dp(32)
+        /*
+         * Компоновка из трёх независимых слоёв, а не из одной колонки с Gravity.BOTTOM.
+         *
+         * Раньше орб, подпись фазы, реплики и кнопки жили в одном LinearLayout, прижатом к низу:
+         * стоило появиться строке userLine/assistantLine, как весь блок вырастал вверх и планета
+         * уезжала. Теперь орб с подписью — отдельный слой со Gravity.CENTER (он стоит ровно по
+         * центру экрана и не двигается, что бы ни появлялось ниже), а реплики и кнопки — свой
+         * слой у нижней кромки, под большим пальцем.
+         */
+        val bottomBlock = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        bottomBlock.addView(userLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(12)
+        })
+        bottomBlock.addView(assistantLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(8)
+        })
+        bottomBlock.addView(buttons, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // Фон — первым ребёнком: заставка обязана оказаться под планетой и капсулами.
+        root.addView(spaceBg, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.CENTER
             leftMargin = dp(24)
             rightMargin = dp(24)
+        })
+        root.addView(bottomBlock, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.BOTTOM
+            bottomMargin = dp(24)
+            leftMargin = dp(20)
+            rightMargin = dp(20)
         })
         // Исходное состояние — «выключен»: до первого показа слоя направление ещё
         // не выбрано, и подпись не должна обещать перевод, которого нет.
@@ -367,6 +421,9 @@ internal class VoiceModeOverlay(activity: Activity) {
         phaseLabel.text = screen.phaseLabel
         phaseLabel.setTextColor(toneColor(screen.tone))
         orb.render(screen.tone, pulses = state.orbPulses)
+        // Тот же неон уходит в 3D-фон: корона планеты и туманность вспыхивают одним цветом.
+        neon = VoiceNeonPalette.of(screen.tone)
+        spaceBg.setVoiceState(level, neon)
 
         showText(hintLabel, screen.hint)
         showText(userLine, screen.userLine)
@@ -382,8 +439,20 @@ internal class VoiceModeOverlay(activity: Activity) {
         retryButton.visibility = if (screen.showRetry) View.VISIBLE else View.GONE
     }
 
-    /** Амплитуда микрофона 0..1: орб «дышит» по речи. */
-    fun setLevel(level: Float) = orb.setLevel(level)
+    /**
+     * Амплитуда микрофона 0..1: и орб, и 3D-туманность заставки дышат по речи.
+     *
+     * Один вход — два потребителя, и оба получают одно и то же число: корона планеты и неоновая
+     * туманность вокруг неё обязаны вспыхивать синхронно, иначе экран выглядит как два
+     * независимых индикатора.
+     */
+    fun setLevel(level: Float) {
+        val next = MarsSpaceShaderPolicy.voiceLevel(level)
+        if (next == this.level) return
+        this.level = next
+        orb.setLevel(next)
+        spaceBg.setVoiceState(next, neon)
+    }
 
     /** Экран ушёл в фон: кадры останавливаются, состояние слоя сохраняется. */
     fun onPause() = orb.render(VoiceModeTone.IDLE, pulses = false)
@@ -451,7 +520,14 @@ internal class VoiceModeOverlay(activity: Activity) {
         /** Описание для скринридера: что произойдёт по нажатию. */
         const val DIRECTION_OFF_DESCRIPTION = "Перевод выключен. Нажмите, чтобы включить"
 
-        const val ORB_DP = 232
+        /**
+         * Размер квадрата орба.
+         *
+         * Было 232 dp при `PLANET_RATIO = 0.49` — сам шар получался 113 dp, меньше трети ширины
+         * экрана, и владелец справедливо просил «сделать планету чуть больше». 300 dp вместе с
+         * `PLANET_RATIO = 0.66` даёт диск ~194 dp: планета, а не значок.
+         */
+        const val ORB_DP = 300
         const val PRIMARY_HEIGHT_DP = 56
         const val SECONDARY_HEIGHT_DP = 48
 

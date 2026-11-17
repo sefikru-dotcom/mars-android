@@ -40,7 +40,7 @@ class SpeechVoiceProfileSelectorTest {
         assertEquals("natural-svetlana", current.id)
         assertEquals("edge", current.engine)
         assertEquals("ru-RU-SvetlanaNeural", current.voice)
-        assertEquals("+10%", current.rate)
+        assertEquals("+8%", current.rate)
     }
 
     @Test
@@ -48,7 +48,7 @@ class SpeechVoiceProfileSelectorTest {
         val candidates = selector().candidates()
 
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry", "local-irina"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "local-irina"),
             candidates.map { it.id },
         )
         assertEquals("piper", candidates.last().engine)
@@ -60,13 +60,13 @@ class SpeechVoiceProfileSelectorTest {
         val selector = selector(localVoice = SpeechVoiceProfileSelector.LocalVoiceAvailability.ABSENT)
 
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava"),
             selector.candidates().map { it.id },
         )
 
         selector.setLocalVoiceInstalled(true)
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry", "local-irina"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "local-irina"),
             selector.candidates().map { it.id },
         )
     }
@@ -82,7 +82,7 @@ class SpeechVoiceProfileSelectorTest {
             selector.localVoiceAvailability,
         )
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry", "local-irina"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "local-irina"),
             selector.candidates().map { it.id },
         )
 
@@ -111,7 +111,7 @@ class SpeechVoiceProfileSelectorTest {
         // Даже после истечения паузы отсутствующий голос не предлагается: это факт, не таймаут.
         now += 10_000_000L
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava"),
             selector.candidates().map { it.id },
         )
     }
@@ -205,6 +205,7 @@ class SpeechVoiceProfileSelectorTest {
         val selector = selector()
         selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("http_404", 404))
         selector.onUnavailable(ServerTtsVoices.NATURAL_DMITRY, ServerTtsResult.Unavailable("http_404", 404))
+        selector.onUnavailable(ServerTtsVoices.NATURAL_AVA, ServerTtsResult.Unavailable("http_404", 404))
         selector.onUnavailable(ServerTtsVoices.LOCAL_IRINA, ServerTtsResult.Unavailable("http_404", 404))
 
         assertTrue(selector.candidates().isEmpty())

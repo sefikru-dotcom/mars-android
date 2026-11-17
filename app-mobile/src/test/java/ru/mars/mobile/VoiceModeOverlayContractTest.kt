@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * Слой голосового режима: то, что можно проверить без телефона.
@@ -61,5 +62,89 @@ class VoiceModeOverlayContractTest {
             assertTrue(action.name.isNotBlank())
         }
         assertEquals(4, VoiceModeAction.entries.size)
+    }
+
+    // ── Компоновка и настоящий космос (Волна 20) ────────────────────────────────────────
+
+    @Test
+    fun `орб стоит по центру и не прыгает от появления реплик`() {
+        val src = source(OVERLAY)
+        // Крупная планета: было 232 dp при PLANET_RATIO 0.49 (шар 113 dp).
+        assertTrue("ORB_DP обязан вырасти до 300", src.contains("const val ORB_DP = 300"))
+        // Орб с подписью — отдельный слой со Gravity.CENTER, а не колонка, прижатая к низу.
+        assertTrue(
+            "орб обязан центрироваться, а не прижиматься к низу",
+            src.contains("gravity = Gravity.CENTER"),
+        )
+        assertFalse(
+            "колонка больше не растягивается на весь экран и не прижимается к низу",
+            src.contains("root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)"),
+        )
+        // Реплики и кнопки — отдельный нижний блок.
+        assertTrue(src.contains("val bottomBlock = LinearLayout(context)"))
+        assertTrue(src.contains("root.addView(bottomBlock"))
+    }
+
+    @Test
+    fun `фоном слоя служит настоящая 3D-заставка в режиме голосового орба`() {
+        val src = source(OVERLAY)
+        // Глухая серая панель ушла: на ней самодельные пятна читались как «наляпано поверх чата».
+        assertFalse(
+            "корень не должен красить себя стеклянной панелью",
+            src.contains("setBackgroundColor(MarsTheme.GLASS_PANEL)"),
+        )
+        assertTrue(src.contains("private val spaceBg = MarsSpaceBackgroundView(context)"))
+        assertTrue("заставка обязана быть в режиме голосового орба", src.contains("setVoiceOrbMode(true)"))
+        // Фон — ПЕРВЫЙ ребёнок корня: иначе он перекрыл бы планету и капсулы.
+        val backgroundIndex = src.indexOf("root.addView(spaceBg")
+        val orbIndex = src.indexOf("root.addView(column")
+        assertTrue("фон должен добавляться раньше контента", backgroundIndex in 0 until orbIndex)
+    }
+
+    @Test
+    fun `громкость речи уходит и в орб, и в неон заставки`() {
+        val src = source(OVERLAY)
+        // Один вход — два потребителя: корона планеты и туманность вспыхивают синхронно.
+        assertTrue(src.contains("orb.setLevel(next)"))
+        assertTrue(src.contains("spaceBg.setVoiceState(next, neon)"))
+        // Смена фазы перекрашивает и фон: неон берётся из общей палитры.
+        assertTrue(src.contains("spaceBg.setVoiceState(level, neon)"))
+        assertTrue(src.contains("neon = VoiceNeonPalette.of(screen.tone)"))
+        // Уровень зажимается политикой, а не «как пришло».
+        assertTrue(src.contains("MarsSpaceShaderPolicy.voiceLevel(level)"))
+    }
+
+    @Test
+    fun `заставка получает 60 кадров и гаснет вместе со слоем`() {
+        val bg = source("src/main/java/ru/mars/mobile/MarsSpaceBackgroundView.kt")
+        // Голосовой режим — такая же живая сцена, как скролл: неон обязан идти каждый vsync.
+        assertTrue(bg.contains("val fast = scrolling || voiceOrbMode"))
+        // Спрятанный слой не должен крутить GL-поток под лентой чата.
+        assertTrue(bg.contains("override fun onVisibilityChanged"))
+        assertTrue(bg.contains("if (isShown && windowVisible) resumeRendering() else pauseRendering()"))
+        // Uniform-переменные выставляются на каждый кадр.
+        assertTrue(bg.contains("\"uVoiceLevel\""))
+        assertTrue(bg.contains("\"uVoiceNeon\""))
+        assertTrue(bg.contains("\"uVoiceOrbMode\""))
+        // Canvas-фоллбэк знает про голосовое гало, а маленькую планету в нём убирает.
+        assertTrue(bg.contains("private fun drawVoiceNeon"))
+        assertTrue(bg.contains("if (!voiceOrbMode) drawMars(canvas, w, h, minDim)"))
+    }
+
+    /** Исходник от текущего каталога вверх: тест может бежать из модуля и из корня репозитория. */
+    private fun source(relative: String): String {
+        var dir: File? = File(".").absoluteFile
+        while (dir != null) {
+            val candidate = File(dir, relative)
+            if (candidate.isFile) return candidate.readText()
+            val nested = File(dir, "app-mobile/$relative")
+            if (nested.isFile) return nested.readText()
+            dir = dir.parentFile
+        }
+        throw AssertionError("Не найден исходник: $relative")
+    }
+
+    private companion object {
+        const val OVERLAY = "src/main/java/ru/mars/mobile/VoiceModeOverlay.kt"
     }
 }

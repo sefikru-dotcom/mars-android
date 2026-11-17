@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
-import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RadialGradient
@@ -37,8 +36,10 @@ import kotlin.math.sin
  * Статичная фотография не отвечает на вопрос «слышит ли он меня». Поэтому планета обёрнута в
  * атмосферу, повторяющую слои шейдера [MarsSpaceBackgroundView] и собранную из тех же красок
  * [MarsSpaceShaderPolicy]:
- * 1. **Внешняя корона** — широкое радиальное гало, смещённое к источнику света (свет на
- *    текстуре стоит слева-сверху), поэтому ореол не «наклеен по центру», а освещён неравномерно.
+ * 1. **Внешняя корона** — широкое радиальное гало, строго концентричное диску. Раньше оно было
+ *    сдвинуто влево-вверх «к источнику света», и вместе с тёмной правой-нижней стороной текстуры
+ *    это давало сильную оптическую иллюзию, что шар съехал из центра — теперь свет и сфера делят
+ *    один центр, а направление света несут серп и дымка, а не смещённое гало.
  * 2. **Внутренняя горячая корона** — узкое кольцо у лимба: два слоя дают глубину, которой не
  *    бывает у одного градиента.
  * 3. **Атмосферные акустические волны** — мягкие широкие полосы, расходящиеся от лимба наружу;
@@ -48,7 +49,17 @@ import kotlin.math.sin
  *    масштаба, затемнение лимба (limb darkening — реальный эффект сферической атмосферы) и
  *    слабая подсветка ночной стороны, чтобы тёмное полушарие читалось как шар, а не как вырез.
  * 5. **Серп света** — три дуги разной толщины и яркости по освещённому лимбу (широкая тусклая =
- *    рассеяние, узкая яркая = кромка атмосферы) плюс тонкая холодная кромка на ночной стороне.
+ *    рассеяние, узкая яркая = кромка атмосферы).
+ * 6. **Fresnel-контур 360°** — неоновое свечение лимба и тонкая линия по всему периметру: ночная
+ *    сторона текстуры почти чёрная (`RGB ≈ 4, 2, 2`), и без собственного света правый-нижний край
+ *    шара сливался с космосом, из-за чего планета читалась подрезанной, а не круглой.
+ *
+ * ## Чего здесь больше нет
+ * Своих «туманностей»: четыре плоских `RadialGradient`-круга (рубин, янтарь, слива, неоновая
+ * вуаль) рисовались внутри квадрата вьюхи поверх глухого серого фона — на экране это выглядело
+ * наляпанными поверх чата цветными пятнами. Настоящий глубокий космос, FBM-туманность, звёзды,
+ * кометы и рэлеевская корона считает шейдер [MarsSpaceBackgroundView], который лежит первым
+ * слоем всего экрана разговора и пульсирует неоном фазы в такт голосу.
  *
  * Цвет и энергия слоёв — по фазе: `IDLE` благородный тёмно-рубиновый, `LISTENING` живой алый,
  * `THINKING` тёплый янтарно-солнечный, `SPEAKING` плазменно-голубой. Сама планета при этом
@@ -85,7 +96,7 @@ class VoiceModeOrbView @JvmOverloads constructor(
 
     // --- кисти: созданы один раз, onDraw их только читает -----------------------------------
 
-    /** Внешняя корона: широкое гало, смещённое к источнику света. */
+    /** Внешняя корона: широкое гало, строго концентричное диску планеты. */
     private val haloOuterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     /** Внутренняя горячая корона: узкое кольцо у самого лимба. */
@@ -95,18 +106,17 @@ class VoiceModeOrbView @JvmOverloads constructor(
     private val coronaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     /**
-     * Фон орба: глубокий обсидиановый космос и газовые карманы туманности — те же слои, что
-     * считает шейдер [MarsSpaceBackgroundView], только радиальными градиентами. Нужны, чтобы
-     * голосовой режим не висел «шариком в пустоте»: во время разговора этот фон пульсирует
-     * неоном фазы вместе с короной.
+     * Неоновое свечение лимба по всему периметру — аналог формулы `pow(1.0 - mu, 3.2)` из
+     * [MarsSpaceShaderPolicy]: широкий тусклый штрих поверх тонкого контура.
+     *
+     * Слой существует потому, что ночная сторона текстуры почти чёрная (`RGB ≈ 4, 2, 2`) и без
+     * собственного света правый-нижний край шара сливался с космосом — планета читалась
+     * подрезанной справа, а не круглой.
      */
-    private val voidPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val nebulaRubyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val nebulaAmberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val nebulaPlumPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-
-    /** Неоновая вуаль фазы позади планеты: главный источник «пульсации в момент разговора». */
-    private val neonVeilPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val limbGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
 
     /** Диск планеты: текстура из заставки через [BitmapShader]. */
     private val planetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -166,7 +176,6 @@ class VoiceModeOrbView @JvmOverloads constructor(
     /** Габариты дуг лимба и дымки: те же `RectF` на каждом кадре. */
     private val crescentBounds = RectF()
     private val hazeBounds = RectF()
-    private val rimBounds = RectF()
 
     private var centerX = 0f
     private var centerY = 0f
@@ -374,12 +383,6 @@ class VoiceModeOrbView @JvmOverloads constructor(
             centerX + planetR * HAZE_RATIO,
             centerY + planetR * HAZE_RATIO,
         )
-        rimBounds.set(
-            centerX - planetR * NIGHT_RIM_RATIO,
-            centerY - planetR * NIGHT_RIM_RATIO,
-            centerX + planetR * NIGHT_RIM_RATIO,
-            centerY + planetR * NIGHT_RIM_RATIO,
-        )
         // Градиенты привязаны к центру и радиусу, поэтому пересобираются здесь, а не на кадр.
         buildShaders()
     }
@@ -391,19 +394,15 @@ class VoiceModeOrbView @JvmOverloads constructor(
      * где гаснет насыщенность, и ореол читается как размытый круг. Пять стопов держат цвет до
      * середины и мягко отпускают его к краю, поэтому свечение выглядит светом.
      *
-     * Источник света на текстуре стоит слева-сверху, и корона смещена туда же: симметричное гало
-     * вокруг неравномерно освещённой планеты сразу выдаёт «наклейку».
+     * Гало строго концентрично планете ([HALO_SHIFT_X]/[HALO_SHIFT_Y] — нули): сдвинутое
+     * влево-вверх свечение вместе с тёмной правой-нижней стороной текстуры давало сильную
+     * оптическую иллюзию, что шар съехал из центра. Теперь свет и сфера делят один центр.
      */
     private fun buildShaders() {
         if (radius <= 0f || planetR <= 0f) {
             haloOuterPaint.shader = null
             haloInnerPaint.shader = null
             coronaPaint.shader = null
-            voidPaint.shader = null
-            nebulaRubyPaint.shader = null
-            nebulaAmberPaint.shader = null
-            nebulaPlumPaint.shader = null
-            neonVeilPaint.shader = null
             shadePaint.shader = null
             fallbackPaint.shader = null
             return
@@ -411,84 +410,21 @@ class VoiceModeOrbView @JvmOverloads constructor(
         val lightX = centerX - planetR * LIGHT_DX
         val lightY = centerY - planetR * LIGHT_DY
 
-        // Фон: тот же обсидиан, что у заставки, — от почти чёрного верха к ржавому низу.
-        voidPaint.shader = LinearGradient(
-            centerX,
-            centerY - haloR,
-            centerX,
-            centerY + haloR,
-            intArrayOf(
-                MarsSpaceShaderPolicy.COLOR_VOID_TOP,
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_VOID_BOTTOM, 0xE6),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_VOID_BOTTOM, 0x00),
-            ),
-            floatArrayOf(0f, 0.72f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-        // Газовые карманы туманности: рубин, янтарь и слива — ровно палитра шейдера. Радиусы
-        // подобраны так, чтобы каждый гас ДО края вьюхи (никакого квадрата вокруг орба).
-        nebulaRubyPaint.shader = RadialGradient(
-            centerX - haloR * 0.30f,
-            centerY - haloR * 0.42f,
-            haloR * 0.92f,
-            intArrayOf(
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_RUBY, 0x5C),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_RUBY, 0x2A),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_RUBY, 0x00),
-            ),
-            floatArrayOf(0f, 0.52f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-        nebulaAmberPaint.shader = RadialGradient(
-            centerX + haloR * 0.38f,
-            centerY + haloR * 0.34f,
-            haloR * 0.86f,
-            intArrayOf(
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_AMBER, 0x4A),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_AMBER, 0x1F),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_AMBER, 0x00),
-            ),
-            floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-        nebulaPlumPaint.shader = RadialGradient(
-            centerX + haloR * 0.10f,
-            centerY + haloR * 0.58f,
-            haloR * 0.80f,
-            intArrayOf(
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_PLUM, 0x3D),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_PLUM, 0x18),
-                MarsGradients.withAlpha(MarsSpaceShaderPolicy.COLOR_NEBULA_PLUM, 0x00),
-            ),
-            floatArrayOf(0f, 0.58f, 1f),
-            Shader.TileMode.CLAMP,
-        )
-        // Неоновая вуаль фазы: тот же цвет, что у короны, но разлитый по всему фону.
-        neonVeilPaint.shader = RadialGradient(
-            centerX - haloR * 0.08f,
-            centerY - haloR * 0.10f,
-            haloR * 1.02f,
-            intArrayOf(
-                MarsGradients.withAlpha(neon, 0x30),
-                MarsGradients.withAlpha(neon, 0x1E),
-                MarsGradients.withAlpha(neon, 0x08),
-                MarsGradients.withAlpha(neon, 0x00),
-            ),
-            floatArrayOf(0f, 0.38f, 0.70f, 1f),
-            Shader.TileMode.CLAMP,
-        )
+        // Внешнее гало: пик ровно на кромке диска (0.66 радиуса гало при PLANET_RATIO 0.66) и
+        // мягкий спад наружу. Раньше пик стоял в центре и прятался под планетой — вокруг крупного
+        // шара оставался бы лишь тусклый ободок.
         haloOuterPaint.shader = RadialGradient(
             centerX - planetR * HALO_SHIFT_X,
             centerY - planetR * HALO_SHIFT_Y,
             haloR,
             intArrayOf(
-                MarsGradients.withAlpha(neon, 0x4D),
+                MarsGradients.withAlpha(neon, 0x26),
                 MarsGradients.withAlpha(neon, 0x40),
-                MarsGradients.withAlpha(neon, 0x21),
-                MarsGradients.withAlpha(neon, 0x0A),
+                MarsGradients.withAlpha(neon, 0x4D),
+                MarsGradients.withAlpha(neon, 0x16),
                 MarsGradients.withAlpha(neon, 0x00),
             ),
-            floatArrayOf(0f, 0.28f, 0.55f, 0.80f, 1f),
+            floatArrayOf(0f, 0.52f, PLANET_RATIO, 0.86f, 1f),
             Shader.TileMode.CLAMP,
         )
         // Внутренняя корона: прозрачная в центре, чтобы не мылить диск, и плотная у лимба.
@@ -506,7 +442,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
             floatArrayOf(0f, 0.50f, 0.60f, 0.78f, 1f),
             Shader.TileMode.CLAMP,
         )
-        // Атмосферное кольцо: полоса на 78–100% радиуса — ровно над лимбом планеты.
+        // Атмосферное кольцо: полоса на 70–100% радиуса — ровно над лимбом планеты. Широкая и
+        // плотная, чтобы контур читался по ВСЕМУ периметру, включая почти чёрный ночной лимб.
         coronaPaint.shader = RadialGradient(
             centerX,
             centerY,
@@ -514,11 +451,11 @@ class VoiceModeOrbView @JvmOverloads constructor(
             intArrayOf(
                 MarsGradients.withAlpha(neon, 0x00),
                 MarsGradients.withAlpha(neon, 0x00),
-                MarsGradients.withAlpha(neon, 0x66),
-                MarsGradients.withAlpha(neon, 0x33),
+                MarsGradients.withAlpha(neon, 0x7A),
+                MarsGradients.withAlpha(neon, 0x40),
                 MarsGradients.withAlpha(neon, 0x00),
             ),
-            floatArrayOf(0f, 0.78f, 0.88f, 0.95f, 1f),
+            floatArrayOf(0f, 0.70f, 0.84f, 0.94f, 1f),
             Shader.TileMode.CLAMP,
         )
         // Limb darkening: к краю диск темнеет — это и есть объём сферы.
@@ -551,6 +488,10 @@ class VoiceModeOrbView @JvmOverloads constructor(
         wavePaint.color = neon
         hazePaint.color = neon
         crescentPaint.color = neon
+        // Неоновая кромка лимба — сам неон фазы; благородный контур — тёплый свет атмосферы
+        // заставки, чтобы ночная сторона читалась как сфера, а не как вырез в космосе.
+        limbGlowPaint.color = neon
+        nightRimPaint.color = blendColors(neon, MarsSpaceShaderPolicy.COLOR_ATMOSPHERE_CORE, NIGHT_RIM_WARMTH)
         // Планета остаётся Марсом во всех фазах: цвет несёт атмосфера, а не поверхность.
         val energy = energyFor(tone)
         haloEnergy = energy[0]
@@ -571,12 +512,7 @@ class VoiceModeOrbView @JvmOverloads constructor(
      * с большей энергией. Одинаковый оттенок в двух состояниях читался бы как «ничего не
      * изменилось».
      */
-    private fun neonFor(tone: VoiceModeTone): Int = when (tone) {
-        VoiceModeTone.IDLE -> NEON_IDLE
-        VoiceModeTone.LISTENING -> NEON_LISTENING
-        VoiceModeTone.THINKING -> NEON_THINKING
-        VoiceModeTone.SPEAKING -> NEON_SPEAKING
-    }
+    private fun neonFor(tone: VoiceModeTone): Int = VoiceNeonPalette.of(tone)
 
     /**
      * Энергия слоёв: `[гало, кольцо, лимб, волны]`.
@@ -636,17 +572,15 @@ class VoiceModeOrbView @JvmOverloads constructor(
         canvas.restoreToCount(saved)
     }
 
-    /** Слои 1–2: пульсирующий неоновый фон туманности (в стиле Квартала), внешняя корона и горячее кольцо у лимба. */
+    /**
+     * Слои 1–2: внешняя корона и горячее кольцо у лимба.
+     *
+     * Никаких собственных «туманностей» здесь больше нет: газ, звёзды и кометы считает настоящий
+     * шейдер [MarsSpaceBackgroundView] на весь экран (в режиме `setVoiceOrbMode(true)` он ещё и
+     * пульсирует неоном фазы). Внутри вьюхи остаётся только то, что принадлежит планете —
+     * атмосферное гало, концентричное диску.
+     */
     private fun drawHalo(canvas: Canvas, breath: Float, voice: Float) {
-        nebulaRubyPaint.alpha = alphaOf(0.55f + 0.35f * breath + 0.25f * voice)
-        canvas.drawCircle(centerX, centerY, haloR, nebulaRubyPaint)
-        nebulaAmberPaint.alpha = alphaOf(0.45f + 0.30f * breath + 0.25f * voice)
-        canvas.drawCircle(centerX, centerY, haloR, nebulaAmberPaint)
-        nebulaPlumPaint.alpha = alphaOf(0.50f + 0.25f * breath + 0.20f * voice)
-        canvas.drawCircle(centerX, centerY, haloR, nebulaPlumPaint)
-        neonVeilPaint.alpha = alphaOf(haloEnergy * (0.65f + 0.45f * breath) + 0.45f * voice)
-        canvas.drawCircle(centerX, centerY, haloR, neonVeilPaint)
-
         haloOuterPaint.alpha = alphaOf(haloEnergy * (0.70f + 0.55f * breath) + HALO_VOICE * voice)
         canvas.drawCircle(centerX, centerY, haloR, haloOuterPaint)
 
@@ -716,13 +650,25 @@ class VoiceModeOrbView @JvmOverloads constructor(
     /**
      * Слой 5: атмосфера лимба.
      *
-     * Четыре прохода снизу вверх: кольцо-корона, дымка внутри освещённого лимба, серп света
-     * (широкий тусклый -> узкий яркий) и холодная кромка на ночной стороне. Толщина и яркость
-     * дышат вместе с речью: на громком слове кромка вспыхивает, в тишине остаётся тлеющей.
+     * Пять проходов снизу вверх: кольцо-корона (360°), неоновое свечение лимба (360°), тонкий
+     * контур по всему периметру, дымка и серп на освещённой стороне. Полный круг у первых трёх —
+     * принципиален: ночная сторона текстуры почти чёрная, и без собственного света правый-нижний
+     * край шара сливался с космосом, из-за чего сфера читалась подрезанной и «съехавшей».
+     * Толщина и яркость дышат вместе с речью: на громком слове кромка вспыхивает.
      */
     private fun drawAtmosphere(canvas: Canvas, breath: Float, voice: Float) {
-        coronaPaint.alpha = alphaOf(coronaEnergy * (0.85f + 0.25f * breath) + CORONA_VOICE * voice)
+        coronaPaint.alpha = alphaOf(coronaEnergy * (0.92f + 0.28f * breath) + CORONA_VOICE * voice)
         canvas.drawCircle(centerX, centerY, planetR * CORONA_SPAN, coronaPaint)
+
+        // Fresnel-свечение лимба: широкий тусклый штрих — тот же pow(1 - mu, 3.2) шейдера.
+        limbGlowPaint.strokeWidth = planetR * LIMB_GLOW_WIDTH
+        limbGlowPaint.alpha = alphaOf(LIMB_GLOW_BASE + LIMB_GLOW_VOICE * voice)
+        canvas.drawCircle(centerX, centerY, planetR * LIMB_GLOW_RATIO, limbGlowPaint)
+
+        // Благородный контур: тонкая линия, которая держит круглым даже почти чёрный ночной лимб.
+        nightRimPaint.strokeWidth = baseStroke * NIGHT_RIM_STROKE
+        nightRimPaint.alpha = alphaOf(NIGHT_RIM_ALPHA + NIGHT_RIM_VOICE * voice)
+        canvas.drawCircle(centerX, centerY, planetR * NIGHT_RIM_RATIO, nightRimPaint)
 
         hazePaint.strokeWidth = planetR * HAZE_WIDTH
         hazePaint.alpha = alphaOf(limbEnergy * HAZE_BASE + HAZE_VOICE * voice)
@@ -742,15 +688,25 @@ class VoiceModeOrbView @JvmOverloads constructor(
                 crescentPaint,
             )
         }
-
-        // Ночная кромка: атмосфера ловит скользящий свет и на тёмной стороне.
-        nightRimPaint.strokeWidth = baseStroke * NIGHT_RIM_STROKE
-        nightRimPaint.alpha = alphaOf(NIGHT_RIM_ALPHA + NIGHT_RIM_VOICE * voice)
-        canvas.drawArc(rimBounds, 0f, 360f, false, nightRimPaint)
     }
 
     /** Альфа 0..1 в байты канала без риска выйти за границу: `Paint.alpha` ждёт 0..255. */
     private fun alphaOf(value: Float): Int = (value.coerceIn(0f, 1f) * 255f).toInt()
+
+    /**
+     * Смешать два непрозрачных цвета: `t = 0` — [from], `t = 1` — [to].
+     *
+     * Своя функция, а не общая утилита: вызывается ровно один раз на смену фазы (не на кадр),
+     * поэтому аллокаций в цикле перерисовки не добавляет, а зависимость от чужого API не нужна.
+     */
+    private fun blendColors(from: Int, to: Int, t: Float): Int {
+        val k = t.coerceIn(0f, 1f)
+        val a = ((to ushr 24) and 0xFF).toFloat() * k + ((from ushr 24) and 0xFF).toFloat() * (1f - k)
+        val r = ((to ushr 16) and 0xFF).toFloat() * k + ((from ushr 16) and 0xFF).toFloat() * (1f - k)
+        val g = ((to ushr 8) and 0xFF).toFloat() * k + ((from ushr 8) and 0xFF).toFloat() * (1f - k)
+        val b = (to and 0xFF).toFloat() * k + (from and 0xFF).toFloat() * (1f - k)
+        return (a.toInt() shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
+    }
 
     // --- жизненный цикл дыхания ---------------------------------------------------------------
 
@@ -853,8 +809,13 @@ class VoiceModeOrbView @JvmOverloads constructor(
         /** Корона занимает 98% меньшей стороны: габарит вьюхи — это «воздух» вокруг света. */
         const val HALO_FILL = 0.98f
 
-        /** Радиус диска планеты от радиуса короны: 49% — планета, а не «шарик в рамке». */
-        const val PLANET_RATIO = 0.49f
+        /**
+         * Радиус диска планеты от радиуса короны: 66% — почти в два раза крупнее прежних 49%.
+         *
+         * При `ORB_DP = 300` (см. [VoiceModeOverlay]) это даёт диск ~194 dp вместо ~113 dp:
+         * Марс наконец занимает экран как планета, а не как значок в рамке.
+         */
+        const val PLANET_RATIO = 0.66f
 
         const val TWO_PI = 6.2831855f
 
@@ -888,22 +849,13 @@ class VoiceModeOrbView @JvmOverloads constructor(
 
         // --- неон фаз -----------------------------------------------------------------------
 
-        /** Покой: благородный тёмно-рубиновый Марс. */
-        val NEON_IDLE = 0xFFC41E3A.toInt()
-
-        /** Слушаю: живой алый — микрофон открыт, человек говорит. */
-        val NEON_LISTENING = 0xFFFF3D4F.toInt()
-
-        /** Думаю: золотисто-янтарная солнечная корона. */
-        val NEON_THINKING = 0xFFFFC24D.toInt()
-
-        /** Говорю: неоново-лазурная плазма вокруг рубинового Марса. */
-        val NEON_SPEAKING = 0xFF4CC8FF.toInt()
+        /** Покой: благородный тёмно-рубиновый Марс (палитра общая с фоном, см. [VoiceNeonPalette]). */
+        val NEON_IDLE = VoiceNeonPalette.IDLE
 
         /** Слабый тёплый подсвет ночной стороны (альфа уже в цвете). */
         val NIGHT_FILL = 0x143C1814
 
-        /** Холодная кромка ночного лимба. */
+        /** Холодная кромка ночного лимба (стартовый цвет; рабочее значение считает [applyTone]). */
         val NIGHT_RIM = 0xFF8C5A5A.toInt()
 
         // --- энергия фаз: [гало, кольцо, лимб, волны] ---------------------------------------
@@ -921,13 +873,18 @@ class VoiceModeOrbView @JvmOverloads constructor(
         /** Внутренняя горячая корона: узкое кольцо у лимба. */
         const val INNER_SPAN = 1.55f
 
-        /** Смещение гало к источнику света (слева-сверху). */
-        const val HALO_SHIFT_X = 0.14f
-        const val HALO_SHIFT_Y = 0.18f
+        /** Смещение гало к источнику света: нули — гало обязано быть концентрично диску. */
+        const val HALO_SHIFT_X = 0f
+        const val HALO_SHIFT_Y = 0f
 
-        /** Смещение источника света для внутренней короны. */
-        const val LIGHT_DX = 0.06f
-        const val LIGHT_DY = 0.08f
+        /**
+         * Смещение источника света для внутренней короны.
+         *
+         * Сведено к долям процента радиуса: свет на текстуре и так падает слева-сверху, а любой
+         * заметный сдвиг внутреннего кольца снова сбивал бы оптический центр сферы.
+         */
+        const val LIGHT_DX = 0.02f
+        const val LIGHT_DY = 0.03f
 
         const val HALO_VOICE = 0.20f
         const val INNER_VOICE = 0.22f
@@ -952,9 +909,14 @@ class VoiceModeOrbView @JvmOverloads constructor(
 
         const val WAVE_RINGS = 3
 
-        /** Волна рождается на 1.04 радиуса планеты и уходит к краю короны. */
+        /**
+         * Волна рождается на 1.04 радиуса планеты и уходит к краю короны.
+         *
+         * Размах подобран под крупную планету (`PLANET_RATIO = 0.66`): 1.04 + 0.46 = 1.50 радиуса
+         * диска — это ровно край гало, поэтому волна гаснет сама, а не обрывается о границу вьюхи.
+         */
         const val WAVE_START = 1.04f
-        const val WAVE_SPAN = 0.95f
+        const val WAVE_SPAN = 0.46f
 
         const val WAVE_BASE_ALPHA = 0.30f
         const val WAVE_VOICE_ALPHA = 0.42f
@@ -993,9 +955,66 @@ class VoiceModeOrbView @JvmOverloads constructor(
         const val LIGHT_CENTER = 198f
 
         /** Холодная кромка ночной стороны. */
-        const val NIGHT_RIM_RATIO = 1.002f
-        const val NIGHT_RIM_STROKE = 0.9f
-        const val NIGHT_RIM_ALPHA = 0.10f
-        const val NIGHT_RIM_VOICE = 0.06f
+        const val NIGHT_RIM_RATIO = 1.004f
+
+        /**
+         * Толщина контура ночного лимба в `dp`.
+         *
+         * Было 0.9 — линия тоньше пикселя на mdpi, и на тёмной стороне она пропадала совсем.
+         */
+        const val NIGHT_RIM_STROKE = 1.6f
+
+        /** Яркость контура: теперь он виден по всему периметру, а не только угадывается. */
+        const val NIGHT_RIM_ALPHA = 0.34f
+        const val NIGHT_RIM_VOICE = 0.20f
+
+        /** Сколько тёплого света атмосферы подмешано в контур (0 — чистый неон фазы). */
+        const val NIGHT_RIM_WARMTH = 0.55f
+
+        // --- Fresnel-свечение лимба ---------------------------------------------------------
+
+        /** Ширина свечения в долях радиуса планеты: широкая и мягкая, как рассеяние в воздухе. */
+        const val LIMB_GLOW_WIDTH = 0.085f
+
+        /** Кольцо свечения идёт ровно по кромке диска. */
+        const val LIMB_GLOW_RATIO = 1.010f
+
+        /** Базовая яркость свечения и добавка от голоса. */
+        const val LIMB_GLOW_BASE = 0.16f
+        const val LIMB_GLOW_VOICE = 0.26f
+    }
+}
+
+/**
+ * Неоновая палитра фаз голосового режима — один цвет на всю сцену.
+ *
+ * Зачем отдельный объект: тот же оттенок нужен и короне планеты ([VoiceModeOrbView]), и
+ * неоновой 3D-туманности фона ([MarsSpaceBackgroundView.setVoiceState] → uniform `uVoiceNeon`).
+ * Пока палитра жила приватной константой вьюхи, фон и шар приходилось красить «примерно тем же
+ * цветом» — и на экране это читалось как две несвязанные картинки. Теперь источник правды один.
+ *
+ * Объект не зависит от `android.*`, поэтому палитра проверяется обычным JVM-тестом
+ * ([VoiceModeOrbViewContractTest]).
+ */
+internal object VoiceNeonPalette {
+
+    /** Покой: благородный тёмно-рубиновый Марс. */
+    val IDLE = 0xFFC41E3A.toInt()
+
+    /** Слушаю: живой алый — микрофон открыт, человек говорит. */
+    val LISTENING = 0xFFFF3D4F.toInt()
+
+    /** Думаю: золотисто-янтарная солнечная корона. */
+    val THINKING = 0xFFFFC24D.toInt()
+
+    /** Говорю: неоново-лазурная плазма вокруг рубинового Марса. */
+    val SPEAKING = 0xFF4CC8FF.toInt()
+
+    /** Цвет фазы: ровно один на каждую роль, без «похожих» пар. */
+    fun of(tone: VoiceModeTone): Int = when (tone) {
+        VoiceModeTone.IDLE -> IDLE
+        VoiceModeTone.LISTENING -> LISTENING
+        VoiceModeTone.THINKING -> THINKING
+        VoiceModeTone.SPEAKING -> SPEAKING
     }
 }

@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import ru.mars.mobile.ChatActivity
 import ru.mars.mobile.ChatSessionsActivity
+import ru.mars.mobile.LocalChatActivity
 import ru.mars.mobile.R
 import ru.mars.mobile.VoiceModeActivity
 
@@ -27,7 +28,7 @@ import ru.mars.mobile.VoiceModeActivity
  *
  * **Действия.** Нижняя панель — четыре тапа, каждый доводит до нужного экрана без единого
  * промежуточного шага: капсула ввода (клавиатура), микрофон (сразу диктовка), живой голос
- * (VoiceModeActivity) и звезда (новый чистый чат).
+ * (локальный чат сразу в разговоре) и звезда (новый чистый чат).
  *
  * Почему PendingIntent.getActivity, а не broadcast: действие виджета — это НАВИГАЦИЯ.
  * Broadcast-приёмник в своём процессе пришлось бы поднимать приложение, ждать инициализации
@@ -208,7 +209,7 @@ class MarsQuickWidgetProvider : AppWidgetProvider() {
                 MarsWidgetIntents.activityPending(
                     context,
                     REQUEST_VOICE_MODE,
-                    MarsWidgetIntents.voiceModeIntent(context),
+                    MarsWidgetIntents.voiceModeIntent(context, state.sessionId),
                 ),
             )
             views.setOnClickPendingIntent(
@@ -266,9 +267,25 @@ internal object MarsWidgetIntents {
                     Intent.FLAG_ACTIVITY_SINGLE_TOP,
             )
 
-    /** Полноэкранный живой голос (орб и одна кнопка). */
-    fun voiceModeIntent(context: Context): Intent =
-        VoiceModeActivity.intentFor(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /**
+     * Полноэкранный живой голос: последний диалог сразу в разговоре.
+     *
+     * Ведёт в [LocalChatActivity], а не в [VoiceModeActivity]: витрина без движков не включает
+     * микрофон, и тап «живой голос» с домашнего экрана заканчивался пустым орбом. Флаг
+     * [VoiceModeActivity.EXTRA_OPEN_VOICE_MODE] заставляет чат открыть разговор сразу.
+     *
+     * Флаги как у остальных тапов виджета: NEW_TASK обязателен (старт не из Activity), а
+     * CLEAR_TOP|SINGLE_TOP — чтобы уже открытый чат получил `onNewIntent` и включил разговор,
+     * а не открылся второй копией поверх первого.
+     */
+    fun voiceModeIntent(context: Context, sessionId: String? = null): Intent =
+        LocalChatActivity.newIntent(context, sessionId)
+            .putExtra(VoiceModeActivity.EXTRA_OPEN_VOICE_MODE, true)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
 
     /**
      * PendingIntent тапа. FLAG_IMMUTABLE обязателен с Android 12 (иначе SecurityException

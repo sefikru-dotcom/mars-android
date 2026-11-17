@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.repository.EdgeNeuralTtsClient
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsVoices
@@ -264,6 +265,8 @@ class ServerTtsSpeechEngineTest {
         val client = RepositoryServerTtsClient(
             baseUrl = "https://marscore.ru",
             credentialProvider = { null },
+            // Прямой сокет отключён: тест про серверный маршрут, а не про сеть.
+            directEdgeClient = null,
             transport = ServerTtsTransport { _, _, _ ->
                 transportCalls++
                 ServerTtsResult.Audio(byteArrayOf(9), "audio/mpeg")
@@ -291,6 +294,7 @@ class ServerTtsSpeechEngineTest {
         val client = RepositoryServerTtsClient(
             baseUrl = "https://marscore.ru",
             credentialProvider = { credential },
+            directEdgeClient = null,
             transport = ServerTtsTransport { url, _, request ->
                 seenUrl = url
                 seenText = request.text
@@ -309,7 +313,7 @@ class ServerTtsSpeechEngineTest {
         // Подтверждённый контракт: естественный голос запрашивается явно, а не «по умолчанию».
         assertEquals("edge", seenEngine)
         assertEquals("ru-RU-SvetlanaNeural", seenVoice)
-        assertEquals("+10%", seenRate)
+        assertEquals("+8%", seenRate)
         assertEquals("natural-svetlana", client.lastProfileId)
     }
 
@@ -336,12 +340,19 @@ class ServerTtsSpeechEngineTest {
     /** Мост с записывающим транспортом: единственное место, где видно ушедший профиль. */
     private fun bridge(
         selector: SpeechVoiceProfileSelector = SpeechVoiceProfileSelector(),
+        sleeper: suspend (Long) -> Unit = {},
         transport: ServerTtsTransport,
     ) = RepositoryServerTtsClient(
         baseUrl = "https://marscore.ru",
         credentialProvider = { credential },
         selector = selector,
+        // Прямой сокет выключен: эти тесты проверяют СЕРВЕРНУЮ цепочку профилей, а не сеть.
+        // Без этого каждый тест открывал бы настоящий WebSocket к Microsoft.
+        directEdgeClient = null,
         transport = transport,
+        // Пауза лимитера в тестах не ждётся: проверяется решение «подождать и повторить»,
+        // а не длительность ожидания.
+        sleeper = sleeper,
     )
 
     @Test
@@ -361,7 +372,7 @@ class ServerTtsSpeechEngineTest {
         assertTrue("503 по естественному голосу не должен съедать фразу", result is ServerTtsResult.Audio)
         // Оба сетевых голоса (Светлана, Дмитрий) живут на одном движке edge: если он не
         // установлен, отказ получают оба, и фразу подхватывает локальный piper.
-        assertEquals(listOf("edge", "edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "edge", "piper"), engines)
         assertEquals("local-irina", client.lastProfileId)
     }
 
@@ -399,7 +410,7 @@ class ServerTtsSpeechEngineTest {
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
         assertTrue("таймаут не должен съедать фразу", result is ServerTtsResult.Audio)
-        assertEquals(listOf("edge", "edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "edge", "piper"), engines)
     }
 
     @Test
@@ -416,13 +427,13 @@ class ServerTtsSpeechEngineTest {
 
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
-        assertEquals("цепочка должна быть пройдена целиком", listOf("edge", "edge", "piper"), engines)
+        assertEquals("цепочка должна быть пройдена целиком", listOf("edge", "edge", "edge", "piper"), engines)
         assertTrue("исчерпанная цепочка — это ошибка, а не пустой ответ", result is ServerTtsResult.Unavailable)
         assertEquals("profiles_exhausted", (result as ServerTtsResult.Unavailable).reason)
     }
 
     @Test
-    fun `rate limit is not a reason to switch the voice`() {
+    fun `rate limit is retried once and never switches the voice`() {
         val engines = mutableListOf<String?>()
         val client = bridge { _, _, request ->
             engines += request.engine
@@ -431,8 +442,31 @@ class ServerTtsSpeechEngineTest {
 
         val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
-        assertEquals("лимитер общий для всех голосов — второй запрос бесполезен", listOf("edge"), engines)
+        // Один повтор после паузы лимитера — и всё: третий запрос только добил бы лимитер,
+        // а другой голос не помог бы (лимитер общий на клиента).
+        assertEquals("edge", engines.distinct().single())
+        assertEquals(2, engines.size)
         assertEquals("rate_limited", (result as ServerTtsResult.Unavailable).reason)
+    }
+
+    @Test
+    fun `a second attempt after the limiter window returns the audio`() {
+        val attempts = mutableListOf<Int>()
+        val client = bridge { _, _, _ ->
+            attempts += attempts.size
+            if (attempts.size == 1) {
+                // Первый ответ — лимитер с просьбой подождать 700 мс.
+                ServerTtsResult.Unavailable("rate_limited", 429, retryAfterMs = 700L)
+            } else {
+                ServerTtsResult.Audio(byteArrayOf(4, 2), "audio/mpeg")
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("второй запрос после паузы обязан дать звук", result is ServerTtsResult.Audio)
+        assertEquals(2, attempts.size)
+        assertEquals("natural-svetlana", client.lastProfileId)
     }
 
     @Test
@@ -471,7 +505,7 @@ class ServerTtsSpeechEngineTest {
         }
 
         kotlinx.coroutines.runBlocking { client.synthesize("раз") }
-        assertEquals(listOf("edge", "edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "edge", "piper"), engines)
 
         // Тот же экран, следующий ответ: естественный голос на паузе — сразу локальный, без 503.
         engines.clear()
@@ -501,7 +535,12 @@ class ServerTtsSpeechEngineTest {
 
         // Причина каждого шага видна снаружи: «голос сменился» без причины необъяснимо.
         assertEquals(
-            listOf("natural-svetlana" to 503, "natural-dmitry" to 503, "local-irina" to 400),
+            listOf(
+                "natural-svetlana" to 503,
+                "natural-dmitry" to 503,
+                "natural-ava" to 503,
+                "local-irina" to 400,
+            ),
             client.lastAttempts.map { it.profileId to it.httpCode },
         )
     }
@@ -525,6 +564,7 @@ class ServerTtsSpeechEngineTest {
         selector = selector,
         prosodyProvider = prosodyProvider,
         prosody = prosody,
+        directEdgeClient = null,
         transport = transport,
     )
 
@@ -606,7 +646,12 @@ class ServerTtsSpeechEngineTest {
 
         // Светлана первая и ровно один раз: остальные профили идут хвостом.
         assertEquals(
-            listOf("ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru_RU-irina-medium"),
+            listOf(
+                "ru-RU-SvetlanaNeural",
+                "ru-RU-DmitryNeural",
+                "en-US-AvaMultilingualNeural",
+                "ru_RU-irina-medium",
+            ),
             ids,
         )
         assertEquals(ids.size, ids.distinct().size)
@@ -630,7 +675,7 @@ class ServerTtsSpeechEngineTest {
 
         // Все профили отказали: оба edge-голоса понижены на 45 с, piper — на 10 минут.
         val first = kotlinx.coroutines.runBlocking { client.synthesize("раз") }
-        assertEquals(listOf("edge", "edge", "piper"), engines)
+        assertEquals(listOf("edge", "edge", "edge", "piper"), engines)
         assertEquals("profiles_exhausted", (first as ServerTtsResult.Unavailable).reason)
 
         // Человек выбрал Ирину руками: паузы сняты, и после её отказа сетевые голоса снова
@@ -639,7 +684,7 @@ class ServerTtsSpeechEngineTest {
         engines.clear()
         kotlinx.coroutines.runBlocking { client.synthesize("два") }
 
-        assertEquals(listOf("piper", "edge", "edge"), engines)
+        assertEquals(listOf("piper", "edge", "edge", "edge"), engines)
     }
 
     @Test
@@ -775,5 +820,169 @@ class ServerTtsSpeechEngineTest {
         // Запасной движок — платформенный TTS, серверного канала нет: прежний порядок.
         assertEquals(listOf("привет"), offline.spoken)
         assertTrue(system.spoken.isEmpty())
+    }
+
+    // --- Прямой нейросетевой сокет идёт ПЕРВЫМ ------------------------------------------
+    //
+    // Требование Волны 20: звук не должен зависеть от серверного `/api/tts` (его лимитер
+    // 2 с и просроченный токен превращали все «нейро»-голоса в один системный робот).
+    // Проверяется наблюдаемое: какой голос реально запрошен у сокета и что вернулось.
+
+    /** Подмена прямого сокета: запоминает запрос и отвечает заданным исходом. */
+    private class FakeEdge(
+        private var result: ServerTtsResult = ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg"),
+    ) : EdgeNeuralTtsClient() {
+        val calls = mutableListOf<Triple<String, String?, String?>>()
+
+        override suspend fun synthesize(
+            text: String,
+            voice: String,
+            rate: String?,
+            pitch: String?,
+        ): ServerTtsResult {
+            calls += Triple(voice, rate, pitch)
+            return result
+        }
+
+        fun setResult(next: ServerTtsResult) {
+            result = next
+        }
+    }
+
+    /** Мост с прямым сокетом и (опционально) серверным транспортом. */
+    private fun bridgeWithEdge(
+        edge: EdgeNeuralTtsClient?,
+        credential: ConsumedDeviceCredential? = this.credential,
+        prosody: VoiceProsody? = null,
+        transport: ServerTtsTransport = ServerTtsTransport { _, _, _ ->
+            ServerTtsResult.Unavailable("server_error", 503)
+        },
+    ) = RepositoryServerTtsClient(
+        baseUrl = "https://marscore.ru",
+        credentialProvider = { credential },
+        prosody = prosody,
+        directEdgeClient = edge,
+        transport = transport,
+    )
+
+    @Test
+    fun `direct socket speaks without any device credential`() {
+        val edge = FakeEdge()
+        var transportCalls = 0
+        val client = bridgeWithEdge(
+            edge = edge,
+            credential = null,
+            transport = ServerTtsTransport { _, _, _ ->
+                transportCalls++
+                ServerTtsResult.Unavailable("unauthorized", 401)
+            },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("привет") }
+
+        assertTrue("без токена звук обязан прийти из сокета", result is ServerTtsResult.Audio)
+        assertEquals(0, transportCalls)
+        assertEquals(listOf(Triple("ru-RU-SvetlanaNeural", "+8%", "+0Hz")), edge.calls)
+        assertEquals("natural-svetlana", client.lastProfileId)
+    }
+
+    @Test
+    fun `direct socket uses the chosen voice and the person tempo`() {
+        val edge = FakeEdge()
+        val client = bridgeWithEdge(
+            edge = edge,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.NATURAL_AVA.id, speed = 1.15f),
+        )
+
+        kotlinx.coroutines.runBlocking { client.synthesize("hello") }
+
+        // Темп человека перебивает темп профиля: 1.15× обязан звучать как +15%, а не +5%.
+        assertEquals(listOf(Triple("en-US-AvaMultilingualNeural", "+15%", "+0Hz")), edge.calls)
+        assertEquals("natural-ava", client.lastProfileId)
+    }
+
+    @Test
+    fun `direct failure falls through to the server chain`() {
+        val edge = FakeEdge(ServerTtsResult.Unavailable(EdgeNeuralTtsClient.REASON_TRANSPORT))
+        val voices = mutableListOf<String?>()
+        val client = bridgeWithEdge(
+            edge = edge,
+            transport = ServerTtsTransport { _, _, request ->
+                voices += request.voice
+                ServerTtsResult.Audio(byteArrayOf(2), "audio/mpeg")
+            },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("привет") }
+
+        assertTrue("сокет упал — сервер обязан подхватить фразу", result is ServerTtsResult.Audio)
+        assertEquals(listOf("ru-RU-SvetlanaNeural"), voices)
+        assertEquals(1, edge.calls.size)
+    }
+
+    @Test
+    fun `direct failure without a credential is an explicit unavailable`() {
+        val edge = FakeEdge(ServerTtsResult.Unavailable(EdgeNeuralTtsClient.REASON_TRANSPORT))
+        val client = bridgeWithEdge(edge = edge, credential = null)
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("привет") }
+
+        assertTrue(result is ServerTtsResult.Unavailable)
+        assertEquals(
+            "unauthorized",
+            (result as ServerTtsResult.Unavailable).reason,
+        )
+    }
+
+    @Test
+    fun `local voice never opens the socket`() {
+        val edge = FakeEdge()
+        var transportCalls = 0
+        val client = bridgeWithEdge(
+            edge = edge,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id),
+            transport = ServerTtsTransport { _, _, _ ->
+                transportCalls++
+                ServerTtsResult.Audio(byteArrayOf(3), "audio/wav")
+            },
+        )
+
+        kotlinx.coroutines.runBlocking { client.synthesize("привет") }
+
+        // piper — не edge-движок: сокет Microsoft для него бессмысленен.
+        assertTrue("локальный голос не должен идти в Bing", edge.calls.isEmpty())
+        assertEquals(1, transportCalls)
+    }
+
+    @Test
+    fun `ava rejected by the server allowlist falls to the next web voice`() {
+        val edge = FakeEdge(ServerTtsResult.Unavailable(EdgeNeuralTtsClient.REASON_TRANSPORT))
+        val voices = mutableListOf<String?>()
+        val client = RepositoryServerTtsClient(
+            baseUrl = "https://marscore.ru",
+            credentialProvider = { credential },
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.NATURAL_AVA.id),
+            directEdgeClient = edge,
+            transport = ServerTtsTransport { _, _, request ->
+                voices += request.voice
+                // Серверный allowlist знает только Светлану и Дмитрия: Ava получает 400.
+                if (request.voice == "en-US-AvaMultilingualNeural") {
+                    ServerTtsResult.Unavailable("http_400", 400)
+                } else {
+                    ServerTtsResult.Audio(byteArrayOf(4), "audio/mpeg")
+                }
+            },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("привет") }
+
+        assertTrue("400 по Аве не должен съедать фразу", result is ServerTtsResult.Audio)
+        // Выбранная Ава — первой (и в сокете, и на сервере), затем следующий живой голос.
+        assertEquals("en-US-AvaMultilingualNeural", edge.calls.single().first)
+        assertEquals(
+            listOf("en-US-AvaMultilingualNeural", "ru-RU-SvetlanaNeural"),
+            voices,
+        )
+        assertEquals("natural-svetlana", client.lastProfileId)
     }
 }

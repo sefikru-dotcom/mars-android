@@ -42,15 +42,33 @@ class ServerTtsVoiceContractTest {
     @Test
     fun `natural svetlana is first in the voice dialog policy`() {
         assertEquals(
-            listOf("natural-svetlana", "natural-dmitry", "local-irina"),
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "local-irina"),
             ServerTtsVoices.VOICE_DIALOG.map { it.id },
         )
         val natural = ServerTtsVoices.VOICE_DIALOG.first()
         assertTrue("естественный голос обязан быть помечен natural", natural.natural)
         assertEquals("edge", natural.engine)
         assertEquals("ru-RU-SvetlanaNeural", natural.voice)
-        assertEquals("+10%", natural.rate)
+        assertEquals("+8%", natural.rate)
+        assertEquals("+0Hz", natural.pitch)
         assertTrue("edge требует сети", natural.needsNetwork)
+    }
+
+    @Test
+    fun `natural ava is the third distinct web voice`() {
+        val ava = ServerTtsVoices.byId("natural-ava")!!
+
+        assertEquals("edge", ava.engine)
+        assertEquals("en-US-AvaMultilingualNeural", ava.voice)
+        assertEquals("+5%", ava.rate)
+        assertTrue(ava.natural)
+        assertTrue(ava.needsNetwork)
+        // Четвёртый профиль — локальный резерв, поэтому сетевых голосов ровно три.
+        assertEquals(3, ServerTtsVoices.VOICE_DIALOG.count { it.needsNetwork })
+        assertEquals(
+            ServerTtsVoices.VOICE_DIALOG.map { it.voice }.distinct().size,
+            ServerTtsVoices.VOICE_DIALOG.size,
+        )
     }
 
     @Test
@@ -91,7 +109,7 @@ class ServerTtsVoiceContractTest {
         val body = ServerTtsContract.buildBody(request)
 
         assertEquals(
-            "{\"text\":\"привет\",\"engine\":\"edge\",\"voice\":\"ru-RU-SvetlanaNeural\",\"rate\":\"+10%\"}",
+            "{\"text\":\"привет\",\"engine\":\"edge\",\"voice\":\"ru-RU-SvetlanaNeural\",\"rate\":\"+8%\",\"pitch\":\"+0Hz\"}",
             body,
         )
     }

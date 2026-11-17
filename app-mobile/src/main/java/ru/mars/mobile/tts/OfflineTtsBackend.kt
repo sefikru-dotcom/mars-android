@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.VoiceNormalizer
+import ru.mars.mobile.domain.util.SpeechContentFilter
 import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
@@ -95,6 +97,17 @@ class OfflineTtsBackend(
     private val lock = Any()
 
     /**
+     * Чистка текста перед синтезом: [SpeechContentFilter] снимает markdown/отступы/
+     * псевдографику, [VoiceNormalizer] читает числа, проценты и единицы словами.
+     *
+     * Оба класса без состояния — по экземпляру на бэкенд, чтобы не собирать Regex-наборы на
+     * каждую реплику.
+     */
+    private val filter = SpeechContentFilter()
+
+    private val normalizer = VoiceNormalizer()
+
+    /**
      * Текущий темп. Изменяемое поле, а не только параметр конструктора: человек меняет
      * скорость посреди диалога, а движок создаётся ОДИН раз на сессию (подготовка
      * модели — секунды). Пересоздавать его ради «1.15×» значило бы заново читать
@@ -174,7 +187,7 @@ class OfflineTtsBackend(
     }
 
     override fun speak(text: String): Boolean {
-        val body = text.trim()
+        val body = spokenBody(text)
         if (body.isEmpty()) return false
         val current = synchronized(lock) {
             if (released) return false
@@ -296,6 +309,34 @@ class OfflineTtsBackend(
         )
         // assetManager не передаём: модель лежит на диске (newFromFile), а не в assets.
         return OfflineTts(config = config)
+    }
+
+    /**
+     * Текст, который реально услышит человек: espeak-ng фронтенд piper не прощает разметки.
+     *
+     * Зачем чистить ЗДЕСЬ, а не только в вызывающем коде: у бэкенда несколько входов
+     * ([ru.mars.mobile.LocalVoiceTts], сервис уведомлений, прямые вызовы порта), и каждый
+     * новый однажды забудет фильтр. Тогда `**важно**` читается как «звёздочка звёздочка»,
+     * `│` даёт щелчок, а `—` — либо слово «тире», либо рваную паузу посреди фразы.
+     *
+     * Порядок: сначала markdown и структура ([SpeechContentFilter.stripForSpeech]), потом
+     * числа словами ([VoiceNormalizer.normalize]) — иначе «1. пункт» превратился бы в
+     * «один точка пункт» ещё до снятия маркера списка.
+     *
+     * @return произносимая строка; пустая — говорить нечего (только разметка/эмодзи).
+     */
+    private fun spokenBody(text: String): String {
+        val stripped = runCatching { filter.stripForSpeech(text) }.getOrDefault(text)
+        if (stripped.isBlank()) return ""
+        val normalized = runCatching { normalizer.normalize(stripped) }.getOrDefault(stripped)
+        var body = if (normalized.isBlank()) stripped else normalized
+        // Страховка для текста, пришедшего в обход фильтра. Тире — в запятую-паузу: espeak-ng
+        // читает «—» словом «тире» либо проглатывает его вместе с паузой.
+        body = PIPER_DASH.replace(body, ", ")
+        body = PIPER_NOISE.replace(body, " ")
+        body = INNER_SPACES.replace(body, " ")
+        body = SPACE_BEFORE_PUNCT.replace(body, "$1")
+        return body.trim()
     }
 
     /** Тело реплики: синтез кусками в очередь + отдельный поток-фидер в `AudioTrack`. */
@@ -597,8 +638,16 @@ class OfflineTtsBackend(
         /** 2 потока: синтез VITS на 1 потоке не успевает за реальным временем на слабых SoC. */
         private const val NUM_THREADS = 2
 
-        /** Пауза между предложениями в синтезе (доля от естественной). */
-        private const val SILENCE_SCALE = 0.2f
+        /**
+         * Пауза между предложениями в синтезе (доля от естественной).
+         *
+         * Волна 20: было 0.2 — пауза сжималась в ПЯТЬ раз, и Ирина тараторила без дыхания,
+         * сваливая предложения в кашу («звучит максимально убого»). 0.65 — почти
+         * естественная человеческая пауза: между предложениями слышно вдох, но ответ не
+         * растягивается. Управляет только тишиной ВНУТРИ реплики; между кусками нарезки
+         * паузу задаёт [ru.mars.mobile.voice.SpeechChunker].
+         */
+        private const val SILENCE_SCALE = 0.65f
 
         /** Границы темпа: ниже 0.5 речь тянется неразборчиво, выше 2.0 — «бурундук». */
         private const val MIN_SPEED = 0.5f
@@ -639,5 +688,24 @@ class OfflineTtsBackend(
         /** Коды возврата колбэка `generateWithCallback`: 0 — продолжать, иначе — стоп. */
         private const val CONTINUE = 0
         private const val STOP = 1
+
+        /**
+         * Тире (длинное и среднее) — в запятую-паузу. espeak-ng читает `—` словом «тире»
+         * либо проглатывает вместе с паузой; запятая — та же пауза без произносимого символа.
+         */
+        private val PIPER_DASH = Regex("""\s*[—–]\s*""")
+
+        /**
+         * Символы, которые espeak-ng произносит по имени или на которых «затыкается»:
+         * markdown-разметка, кавычки, скобки, обратный слэш. К этому шагу текст уже
+         * нормализован, поэтому такие символы — только мусор от разметки.
+         */
+        private val PIPER_NOISE = Regex("""[<>\[\]{}()«»"„“”*_`#>|~\\]+""")
+
+        /** Пробелы/табы/неразрывные пробелы — в один пробел. */
+        private val INNER_SPACES = Regex("""[ \t\u00A0]+""")
+
+        /** «слово ,» — пробел перед знаком препинания не нужен. */
+        private val SPACE_BEFORE_PUNCT = Regex("""\s+([,.;:!?…])""")
     }
 }

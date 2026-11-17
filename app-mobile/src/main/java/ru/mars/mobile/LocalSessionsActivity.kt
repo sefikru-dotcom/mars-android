@@ -142,8 +142,10 @@ class LocalSessionsActivity : ComponentActivity() {
      * 360dp-экране не влезают, и раньше правый край уезжал за границу. Прокрутка
      * честнее обрезки — видно, что кнопок три.
      *
-     * «Разговор» ведёт в [VoiceModeActivity] — тот же полноэкранный орб, что и в чате:
-     * начать говорить можно, не открывая диалог.
+     * «Разговор» открывает ПОСЛЕДНИЙ диалог сразу в полноэкранном голосовом режиме
+     * ([VoiceModeActivity.chatIntentFor] → `LocalChatActivity` + `open_voice_mode`).
+     * Раньше здесь открывался сам `VoiceModeActivity` — витрина без движков: орб рисовался,
+     * а микрофон не включался, и «голос работает только изнутри чата» было правдой.
      */
     private fun actionsRow(): View {
         val row = LinearLayout(this).apply {
@@ -155,9 +157,7 @@ class LocalSessionsActivity : ComponentActivity() {
             LinearLayout.LayoutParams(-2, -2),
         )
         row.addView(
-            MarsDialog.quietButton(this, "Разговор", R.drawable.ic_mic) {
-                startActivity(VoiceModeActivity.intentFor(this@LocalSessionsActivity))
-            },
+            MarsDialog.quietButton(this, "Разговор", R.drawable.ic_mic) { openVoiceChat() },
             LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
         )
         row.addView(
@@ -615,6 +615,27 @@ class LocalSessionsActivity : ComponentActivity() {
 
     private fun openChat(sessionId: String?) {
         startActivity(LocalChatActivity.newIntent(this, sessionId))
+    }
+
+    /**
+     * «Разговор»: чат последнего диалога (или новый) сразу в полноэкранном голосовом режиме.
+     *
+     * Почему последний диалог, а не пустой экран: человек, стоящий в списке истории, хочет
+     * продолжить разговор, а не начинать с нуля. Пустая история — новый диалог, и это тот же
+     * путь: флаг `open_voice_mode` открывает орб и включает микрофон в обоих случаях.
+     *
+     * Каталог читается на IO: `sessions()` разбирает метаданные файлов, и делать это на главном
+     * потоке ради одного id — подвисание на пустом месте. Экран мог закрыться, пока читали
+     * диск, поэтому после `withContext` проверяется `isFinishing`.
+     */
+    private fun openVoiceChat() {
+        lifecycleScope.launch {
+            val sessionId = withContext(Dispatchers.IO) {
+                runCatching { store.sessions().firstOrNull()?.id }.getOrNull()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            startActivity(VoiceModeActivity.chatIntentFor(this@LocalSessionsActivity, sessionId))
+        }
     }
 
     private fun openProviderSettings() {

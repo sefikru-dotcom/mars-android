@@ -86,24 +86,31 @@ class VoiceProsodyPolicyTest {
     }
 
     @Test
-    fun `два сетевых голоса различаются подписью, а не флагом natural`() {
+    fun `четыре голоса различаются подписью, а не флагом natural`() {
         val options = VoiceProsodyPolicy.options()
 
-        // Оба профиля помечены natural (оба — голоса веба), поэтому подпись обязана
+        // Все сетевые профили помечены natural (все — нейро-голоса), поэтому подпись обязана
         // различаться по id: иначе «Дмитрий» показался бы человеку Светланой.
         assertEquals(
             listOf(
                 ServerTtsVoices.NATURAL_SVETLANA.id,
                 ServerTtsVoices.NATURAL_DMITRY.id,
+                ServerTtsVoices.NATURAL_AVA.id,
                 ServerTtsVoices.LOCAL_IRINA.id,
             ),
             options.map { it.id },
         )
         assertEquals("Светлана", options[0].label)
-        assertEquals("Естественный голос веба, нужна сеть", options[0].hint)
+        assertEquals("Женский нейросетевой голос, живая интонация", options[0].hint)
         assertEquals("Дмитрий", options[1].label)
-        assertEquals("Мужской голос веба, нужна сеть", options[1].hint)
-        assertEquals("Ирина", options[2].label)
+        assertEquals("Мужской нейросетевой голос, глубокий тембр", options[1].hint)
+        assertEquals("Ава (ChatGPT)", options[2].label)
+        assertEquals("Тёплый мультиязычный нейро-голос (RU / EN)", options[2].hint)
+        assertEquals("Ирина (офлайн)", options[3].label)
+        assertEquals("Локальный голос на телефоне, работает без сети", options[3].hint)
+        // Ни одной повторяющейся подписи: владелец жаловался, что «Светлана» и «как в вебе» —
+        // один и тот же голос двумя строками.
+        assertEquals(options.size, options.map { it.label }.distinct().size)
     }
 
     @Test
@@ -124,12 +131,34 @@ class VoiceProsodyPolicyTest {
     @Test
     fun `выбор голоса по неизвестному id даёт null, а не первый из списка`() {
         assertNull(VoiceProsodyPolicy.selected(VoiceProsody(voiceId = "удалённый-голос")))
-        assertNull(VoiceProsodyPolicy.selected(VoiceProsody()))
         assertEquals(
             ServerTtsVoices.NATURAL_SVETLANA.id,
             VoiceProsodyPolicy.selected(
                 VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id),
             )?.id,
+        )
+    }
+
+    @Test
+    fun `невыбранный голос подсвечивает Светлану, а не пустоту`() {
+        // «Как в вебе» и «Светлана» — ОДИН голос: отдельной строки-дубля больше нет, поэтому
+        // `voiceId == null` обязан подсвечивать Светлану, иначе шторка не показывает выбор.
+        val selected = VoiceProsodyPolicy.selected(VoiceProsody())
+
+        assertEquals(ServerTtsVoices.NATURAL_SVETLANA.id, selected?.id)
+        assertEquals("Светлана", selected?.label)
+        assertEquals("Светлана", VoiceProsodyPolicy.voiceLabel(VoiceProsody()))
+    }
+
+    @Test
+    fun `выбор Авы и Ирины доезжает до профиля`() {
+        assertEquals(
+            "Ава (ChatGPT)",
+            VoiceProsodyPolicy.selected(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_AVA.id))?.label,
+        )
+        assertEquals(
+            "Ирина (офлайн)",
+            VoiceProsodyPolicy.selected(VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id))?.label,
         )
     }
 

@@ -3,8 +3,10 @@ package ru.mars.mobile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.repository.EdgeNeuralTtsClient
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
@@ -237,6 +239,15 @@ class ServerTtsSpeechEngine(
  * piper — только резерв. Понижение профиля идёт по фактическому ответу `api/tts`, а
  * `429`/`401` профиль НЕ понижают (это лимитер и токен, а не отсутствие голоса).
  *
+ * Порядок одной реплики:
+ * 1. прямой WebSocket ([EdgeNeuralTtsClient]) выбранным голосом — ДАЖЕ без credential:
+ *    Microsoft не спрашивает наш токен, и именно этот путь снимает 2-секундный лимитер
+ *    сервера, из-за которого «Светлана», «Дмитрий» и «как в вебе» звучали одним системным
+ *    голосом Android (жалоба владельца «дмитрий, светлана — один и тот же голос»);
+ * 2. если сокет не дал аудио (провайдер блокирует Bing, DRM-отказ, таймаут) — серверный
+ *    `/api/tts` тем же голосом, с ОДНИМ повтором после `429`;
+ * 3. дальше — цепочка профилей (Дмитрий → Ава → Ирина) по фактическому ответу сервера.
+ *
  * Одна реплика перебирает ЦЕПОЧКУ профилей, а не один профиль. Раньше здесь стоял
  * `selector.current()` и один запрос: любой отказ по голосу (`503` «Edge TTS engine not
  * installed», `400` invalid voice, таймаут) выбрасывал фразу на системный Android TTS,
@@ -285,9 +296,30 @@ class RepositoryServerTtsClient(
      */
     @Volatile
     private var prosody: VoiceProsody? = null,
+    /**
+     * Прямой нейросетевой синтез Edge (WebSocket, без сервера Марса).
+     *
+     * Почему он ПЕРВЫЙ, а не запасной: серверный `/api/tts` держит лимитер 2 с на клиента
+     * и буферизует ответ целиком, из-за чего вторая фраза подряд получала `429` и уходила
+     * в системный Android TTS — все «нейро»-голоса звучали одним роботом. Прямой сокет
+     * лимитера не имеет и начинает звук за ~0.4 с. Токен устройства при этом НЕ нужен:
+     * Microsoft не требует нашей авторизации, поэтому голос работает даже с просроченным
+     * credential.
+     *
+     * `null` — прямой путь отключён (тесты контракта и сценарии без сети): тогда работает
+     * только серверная цепочка.
+     */
+    private val directEdgeClient: EdgeNeuralTtsClient? = EdgeNeuralTtsClient(),
     private val transport: ServerTtsTransport = ServerTtsTransport { url, credential, request ->
         ServerTtsRepository().synthesize(url, credential, request)
     },
+    /**
+     * Ожидание перед повтором после `429`.
+     *
+     * Подменяется в тестах: настоящие 0.5–2.5 с сделали бы проверку ретрая медленной, а
+     * логика («подождать и повторить РОВНО один раз») от длительности не зависит.
+     */
+    private val sleeper: suspend (Long) -> Unit = { millis -> delay(millis) },
 ) : ServerTtsClient {
 
     /** Исход попытки одним профилем — только метаданные, без текста реплики. */
@@ -303,28 +335,53 @@ class RepositoryServerTtsClient(
         private set
 
     override suspend fun synthesize(text: String): ServerTtsResult {
-        val credential = credentialProvider() ?: return ServerTtsResult.Unavailable("unauthorized")
+        val explicitChoice = chosenProfile()
+        val chosen = explicitChoice ?: ServerTtsVoices.NATURAL_SVETLANA
+        val attempts = ArrayList<Attempt>(ServerTtsVoices.VOICE_DIALOG.size + 1)
+
+        // 1) Прямой WebSocket к Microsoft: без credential и без серверного лимитера.
+        val direct = directAttempt(text, chosen)
+        if (direct is ServerTtsResult.Audio) {
+            attempts += Attempt(chosen.id, null, null)
+            lastProfileId = chosen.id
+            lastAttempts = attempts
+            selector?.onAudio(chosen)
+            return direct
+        }
+        // Отказ прямого пути НЕ понижает профиль: недоступность Bing — свойство сети, а не
+        // голоса, и серверный маршрут тем же голосом ещё может ответить.
+        (direct as? ServerTtsResult.Unavailable)?.let {
+            attempts += Attempt(chosen.id, it.reason, it.httpCode)
+        }
+
+        val credential = credentialProvider()
         val selector = this.selector
+        if (credential == null) {
+            // Прямой путь не дал звука, а сервер без токена не отвечает: это приглашение
+            // к системному TTS, а не запрос без авторизации.
+            lastProfileId = if (direct == null) null else chosen.id
+            lastAttempts = attempts
+            return ServerTtsResult.Unavailable(REASON_UNAUTHORIZED)
+        }
         // Старое поведение «пусть сервер выберет сам» — только для контрактных тестов.
         if (selector == null) {
-            lastProfileId = null
-            lastAttempts = emptyList()
+            lastProfileId = if (direct == null) null else chosen.id
+            lastAttempts = attempts
             return request(text, credential, null)
         }
-        val candidates = chain(selector.candidates(), chosenProfile())
+        val candidates = chain(selector.candidates(), explicitChoice)
         if (candidates.isEmpty()) {
             // Все профили на паузе. Запрос БЕЗ профиля здесь запрещён: сервер подставит
             // свой дефолт (piper/dmitri) и приложение заговорит чужим голосом молча.
             // Честнее явный отказ — вызывающий слой уйдёт на системный TTS.
-            lastProfileId = null
-            lastAttempts = emptyList()
+            lastProfileId = if (direct == null) null else chosen.id
+            lastAttempts = attempts
             return ServerTtsResult.Unavailable(PROFILES_COOLING)
         }
-        val attempts = ArrayList<Attempt>(candidates.size)
         var last: ServerTtsResult.Unavailable? = null
         for (profile in candidates) {
             lastProfileId = profile.id
-            when (val result = request(text, credential, profile)) {
+            when (val result = requestWithRateLimitRetry(text, credential, profile)) {
                 is ServerTtsResult.Audio -> {
                     attempts += Attempt(profile.id, null, null)
                     lastAttempts = attempts
@@ -346,13 +403,59 @@ class RepositoryServerTtsClient(
         // Цепочка исчерпана: явная ошибка с последней причиной, а не тишина. Движок
         // увидит Unavailable и озвучит системным TTS — это видимая деградация, не молчание.
         // Повтор на уровне очереди это не отменяет: на реплику по-прежнему уходит не больше
-        // запросов, чем профилей в политике (Светлана → Дмитрий → Ирина), и каждый следующий
-        // идёт ДРУГИМ голосом — то есть с новым шансом на звук.
+        // запросов, чем профилей в политике (Светлана → Дмитрий → Ава → Ирина), и каждый
+        // следующий идёт ДРУГИМ голосом — то есть с новым шансом на звук.
         return ServerTtsResult.Unavailable(
             reason = PROFILES_EXHAUSTED,
             httpCode = last?.httpCode,
             retryAfterMs = last?.retryAfterMs,
         )
+    }
+
+    /**
+     * Прямой синтез выбранным голосом через [EdgeNeuralTtsClient].
+     *
+     * @return `null` — прямой путь неприменим (клиента нет, профиль не edge-движка);
+     *   иначе фактический исход, включая отказ: вызывающий обязан попробовать сервер.
+     */
+    private suspend fun directAttempt(
+        text: String,
+        profile: ServerTtsVoiceProfile,
+    ): ServerTtsResult? {
+        val client = directEdgeClient ?: return null
+        if (profile.engine != ENGINE_EDGE) return null
+        val effective = prosodyProvider?.invoke() ?: prosody
+        val rate = effective?.serverRate() ?: profile.rate
+        val pitch = effective?.serverPitch() ?: profile.pitch
+        return try {
+            client.synthesize(text, profile.voice, rate, pitch)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // Порт обязан не бросать; страховка — тот же серверный фолбэк.
+            ServerTtsResult.Unavailable(EdgeNeuralTtsClient.REASON_TRANSPORT)
+        }
+    }
+
+    /**
+     * Один запрос профилем с ОДНИМ повтором после `429`.
+     *
+     * Лимитер `/api/tts` — 2 секунды на клиента, а очередь фраз отправляет следующую
+     * реплику, пока играет предыдущая. Без ожидания вторая фраза подряд гарантированно
+     * получала `429` и уходила в системный Android TTS — так «нейро»-голоса и звучали
+     * роботом. Повтор ровно один: два подряд ожидания уже превратили бы речь в паузу.
+     */
+    private suspend fun requestWithRateLimitRetry(
+        text: String,
+        credential: ConsumedDeviceCredential,
+        profile: ServerTtsVoiceProfile,
+    ): ServerTtsResult {
+        val first = request(text, credential, profile)
+        if (first !is ServerTtsResult.Unavailable || first.reason != REASON_RATE_LIMITED) return first
+        val wait = (first.retryAfterMs ?: DEFAULT_RATE_LIMIT_WAIT_MS)
+            .coerceIn(MIN_RATE_LIMIT_WAIT_MS, MAX_RATE_LIMIT_WAIT_MS)
+        sleeper(wait)
+        return request(text, credential, profile)
     }
 
     /**
@@ -445,5 +548,24 @@ class RepositoryServerTtsClient(
 
         /** Все профили на паузе после отказов — запрос не отправлялся. */
         const val PROFILES_COOLING: String = "profiles_cooling"
+
+        /** Нет device-credential и прямой сокет не дал звука — приглашение к фолбэку. */
+        const val REASON_UNAUTHORIZED: String = "unauthorized"
+
+        /** Лимитер `/api/tts` (2 с на клиента) — единственная причина повтора запроса. */
+        const val REASON_RATE_LIMITED: String = "rate_limited"
+
+        /** Движок, у которого есть прямой WebSocket-путь (остальные идут на сервер). */
+        const val ENGINE_EDGE: String = "edge"
+
+        /** Пауза повтора, если сервер не прислал `Retry-After`: окно лимитера — 2 с. */
+        const val DEFAULT_RATE_LIMIT_WAIT_MS: Long = 2_000L
+
+        /** Нижняя граница паузы: мгновенный повтор просто снова попадёт в лимитер. */
+        const val MIN_RATE_LIMIT_WAIT_MS: Long = 500L
+
+        /** Верхняя граница паузы: дольше ждать нельзя — речь превратится в тишину. */
+        const val MAX_RATE_LIMIT_WAIT_MS: Long = 2_500L
     }
+
 }

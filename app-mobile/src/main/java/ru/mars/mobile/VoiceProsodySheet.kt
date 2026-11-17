@@ -74,7 +74,8 @@ internal object VoiceProsodySheet {
          * обновили бы два из трёх состояний.
          */
         fun refresh() {
-            rows.forEach { row -> style(activity, row, chosen = row.voiceId == draft.voiceId) }
+            val chosenId = VoiceProsodyPolicy.selected(draft)?.id
+            rows.forEach { row -> style(activity, row, chosen = row.voiceId == chosenId) }
             speedValue?.text = draft.speedLabel()
             speedHint?.text = VoiceProsodyPolicy.speedHint(draft.speed)
             slower?.let { button ->
@@ -140,24 +141,6 @@ internal object VoiceProsodySheet {
                 )
                 rows += row
             }
-
-            // Путь назад к «как в вебе»: сброс — такой же выбор, как и голос.
-            val reset = optionRow(
-                activity,
-                voiceId = null,
-                label = VoiceProsodyPolicy.DEFAULT_VOICE_LABEL,
-                hint = VoiceProsodyPolicy.DEFAULT_VOICE_HINT,
-            ) {
-                draft = draft.withVoice(null)
-                refresh()
-            }
-            root.addView(
-                reset.root,
-                LinearLayout.LayoutParams(MATCH, WRAP).apply {
-                    topMargin = MarsTheme.dp(activity, ROW_GAP_DP)
-                },
-            )
-            rows += reset
 
             root.addView(
                 MarsDialog.caption(activity, VoiceProsodyPolicy.SPEED_CAPTION),

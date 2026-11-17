@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import ru.mars.mobile.asr.ModelDownloader
 import ru.mars.mobile.service.MarsVoiceService
 import ru.mars.mobile.voice.MicCaptureWatchdog
 import java.util.Locale
@@ -55,10 +56,19 @@ import java.util.Locale
  *
  * ## Два канала распознавания
  * Основной — офлайн-движок sherpa-onnx ([StreamingAsrEnginePort]): приватно, без сети, с живым
- * партиалом. Пока его модель (23 МиБ) качается или не встала, реплика открывается системным
- * `android.speech.SpeechRecognizer` ([startPlatformSpeechRecognizer]) — мгновенно, вместо
- * пятнадцати секунд молчания. Если порт движка передан в конструктор ([asrEngine]), резерв
- * выключен: путь ровно один, и он проверяемый.
+ * партиалом. Системный `android.speech.SpeechRecognizer` ([startPlatformSpeechRecognizer])
+ * остаётся резервом ровно для одного случая: офлайн-модели НЕТ на диске. Если файлы модели уже
+ * скачаны, резерв выключен даже при неготовом движке — биндинг к сервису Google стоит 600–900 мс
+ * и съедает первое слово, тогда как загрузка ONNX с прогретым предбуфером микрофона не теряет
+ * ничего. Если порт движка передан в конструктор ([asrEngine]), резерв выключен тоже: путь ровно
+ * один, и он проверяемый.
+ *
+ * ## Первое слово
+ * Две причины, по которым оно раньше пропадало, закрыты в двух местах:
+ * - холодное окно фич нативной модели — подушка тишины в [ru.mars.mobile.asr.SherpaAsrBackend];
+ * - задержка загрузки движка — [PreRollAudioBuffer]: микрофон открывается СРАЗУ, PCM копится в
+ *   кольцевом предбуфере, а в момент готовности движка уходит в стрим перед живыми байтами
+ *   ([startCapture]).
  *
  * ## Чего здесь нет
  * Whisper-путь (`POST /api/transcribe`) не подключён: локальный чат ходит к провайдеру напрямую
@@ -114,6 +124,32 @@ class LocalVoiceController(
 
     private var loading = false
     private var pendingStart = false
+
+    /**
+     * Кольцевой предбуфер микрофона: PCM, записанный ПОКА движок грузил модель.
+     *
+     * Зачем. `StreamingStt` принимает звук только внутри открытой реплики, а реплику нельзя
+     * открыть до готовности офлайн-модели (23 МиБ ONNX читаются 0.3–1.5 с). Раньше эти
+     * миллисекунды просто пропадали — вместе с первым словом человека, который начал говорить
+     * сразу, как увидел орб. Теперь микрофон открывается сразу, а накопленное уходит в стрим
+     * перед живыми байтами.
+     */
+    private var preRoll: PreRollAudioBuffer? = null
+
+    /**
+     * Захват уже отдаёт PCM напрямую в движок (реплика открыта). `false` — микрофон открыт
+     * только ради предбуфера, пока грузится модель.
+     */
+    private var streamingToEngine = false
+
+    /**
+     * Замок перехода «предбуфер → движок».
+     *
+     * Держится и вокруг записи в предбуфер, и вокруг самого перехода: чанк, пришедший ровно
+     * в момент старта реплики, обязан встать в стрим ПОСЛЕ накопленного, иначе первые слова
+     * прозвучали бы в обратном порядке и распознавание получило бы кашу.
+     */
+    private val pcmLock = Any()
 
     /** Реплика уже отдана хосту: второй `Final` (endpoint + ручной стоп) не должен её дублировать. */
     private var handledUtterance = false
@@ -349,11 +385,13 @@ class LocalVoiceController(
             return
         }
         if (!wrapper.isReady) {
-            // Модель (23 МиБ) может докачиваться: микрофон откроем, когда движок реально готов,
-            // иначе первые секунды речи уйдут в никуда.
+            // Модель (23 МиБ) может докачиваться. Микрофон открываем СРАЗУ и копим PCM в
+            // предбуфере: человек начинает говорить в первую же секунду, и это первое слово
+            // раньше пропадало целиком (см. [preRoll]).
             pendingStart = true
             emit(state.copy(notice = PREPARING))
             loadEngine(wrapper)
+            startPreRollCapture()
             return
         }
         startCapture(wrapper)
@@ -692,6 +730,9 @@ class LocalVoiceController(
         cancelContinuousRestart()
         stopSpeechEnvelope()
         if (state.phase == LocalVoicePhase.LISTENING) cancelListening()
+        // Микрофон мог быть открыт ради предбуфера (модель ещё грузится): в фоне он не нужен,
+        // а накопленное всё равно уже не «начало фразы».
+        abandonPreRoll()
         if (MarsVoiceService.conversationActive) return
         stopSpeaking()
     }
@@ -795,6 +836,9 @@ class LocalVoiceController(
                 if (!released) {
                     if (!loaded) {
                         pendingStart = false
+                        // Микрофон мог быть открыт ради предбуфера — движка нет, значит и речи
+                        // не будет: закрываем, а не держим открытым «в никуда».
+                        abandonPreRoll()
                         // Офлайн-модель не встала, но системный распознаватель есть: канал
                         // живой, и пугать человеком нечем.
                         if (warmUp && platformRecognizerAvailable()) {
@@ -806,7 +850,15 @@ class LocalVoiceController(
                         emit(state.copy(asrAvailable = true, notice = null))
                         if (pendingStart) {
                             pendingStart = false
-                            if (hasPermission()) startCapture(wrapper) else startListening()
+                            // Экран ушёл в фон, пока грузилась модель: микрофон в кармане — не
+                            // разговор, предбуфер выбрасываем.
+                            if (paused) {
+                                abandonPreRoll()
+                            } else if (hasPermission()) {
+                                startCapture(wrapper)
+                            } else {
+                                startListening()
+                            }
                         }
                     }
                 }
@@ -830,16 +882,32 @@ class LocalVoiceController(
     /**
      * Можно ли открыть реплику системным распознавателем прямо сейчас.
      *
-     * Ровно те два условия, при которых резерв уместен: офлайн-движка нет ИЛИ он ещё не готов,
-     * и порт НЕ передан извне. Порт из конструктора (`asrEngine`) — единственный путь для тестов
-     * и повторного использования: подменять его системным сервисом значило бы менять поведение
-     * проверяемого кода на телефоне и в JVM по-разному.
+     * Ровно те условия, при которых резерв уместен: офлайн-движка нет ИЛИ он ещё не готов,
+     * офлайн-модели на диске НЕТ, и порт НЕ передан извне. Порт из конструктора (`asrEngine`) —
+     * единственный путь для тестов и повторного использования: подменять его системным сервисом
+     * значило бы менять поведение проверяемого кода на телефоне и в JVM по-разному.
+     *
+     * Проверка «модель уже на диске» здесь ключевая. Системный `SpeechRecognizer` биндится к
+     * сервису Google 600–900 мс и начинает отдавать звук только после `onReadyForSpeech` — за
+     * это время человек уже сказал первое слово, и оно не возвращается. Если модель скачана,
+     * ждать её загрузки (с предбуфером микрофона!) дешевле, чем терять начало фразы.
      */
     private fun platformFallbackAllowed(wrapper: StreamingStt?): Boolean {
         if (asrEngine != null) return false
         if (wrapper != null && wrapper.isReady) return false
+        if (asrModelInstalled()) return false
         return platformRecognizerAvailable()
     }
+
+    /**
+     * Офлайн-модель ASR уже лежит на диске (проверка пяти файлов, без сети).
+     *
+     * Именно «на диске», а не «движок готов»: движок поднимается секунды, а файлы — это факт,
+     * который решает, стоит ли уходить на медленный системный распознаватель.
+     */
+    private fun asrModelInstalled(): Boolean =
+        runCatching { ModelDownloader.forApp(activity.applicationContext).isAvailable() }
+            .getOrDefault(false)
 
     /**
      * Мгновенный резерв: системный `android.speech.SpeechRecognizer` на главном потоке.
@@ -1021,44 +1089,125 @@ class LocalVoiceController(
         return true
     }
 
-    /** Микрофон + сырой PCM в движок. Маршрут захвата — дефолт [AndroidAudioSourceFactory]. */
+    /**
+     * Поток чтения микрофона: пока движок грузится — в предбуфер, после — прямо в распознаватель.
+     *
+     * Решение «куда» принимается под [pcmLock] вместе с переходом ([startCapture]): иначе чанк,
+     * пришедший ровно в момент старта реплики, попал бы в стрим раньше накопленного предбуфера,
+     * и первые слова встали бы в обратном порядке.
+     */
+    private val rawPcmListener = HandsFreeCapture.RawPcmListener { pcm, length ->
+        // Первый же буфер — доказательство, что сторожу микрофона нечего спасать.
+        micWatchdog.onAudioChunk()
+        publishMicLevel(pcm, length)
+        synchronized(pcmLock) {
+            val buffer = preRoll
+            if (!streamingToEngine && buffer != null) {
+                buffer.append(pcm, length)
+            } else {
+                stt?.acceptPcm(pcm, length)
+            }
+        }
+    }
+
+    /**
+     * Открыть микрофон ДО готовности движка и копить PCM в предбуфере.
+     *
+     * Зачем не ждать загрузки: человек, увидев орб, говорит сразу, а ONNX читаются 0.3–1.5 с.
+     * Раньше эта речь пропадала целиком — вместе с первым словом. Теперь микрофон уже открыт, и
+     * в момент готовности движка накопленное уйдёт в стрим первым.
+     *
+     * Фаза LISTENING здесь НЕ ставится: распознавателя ещё нет, и «Слушаю» было бы ложью.
+     * Человек видит [PREPARING], а нажатие микрофона в это время ничего не ломает —
+     * [startListening] видит живой захват и не открывает второй.
+     */
+    private fun startPreRollCapture() {
+        if (released) return
+        if (capture?.isCapturing == true) return
+        if (blockedByBackgroundConversation()) return
+        tts?.stopByUser()
+        stopSpeechEnvelope()
+        handledUtterance = false
+        voiceTurn = false
+        val buffer = preRoll ?: PreRollAudioBuffer().also { preRoll = it }
+        buffer.clear()
+        streamingToEngine = false
+        val fresh = HandsFreeCapture()
+        val started = runCatching { fresh.start(captureListener, rawPcmListener) }.getOrDefault(false)
+        if (!started) {
+            // Микрофон не открылся: движок всё равно грузится, и [startCapture] попробует снова
+            // (тогда провал будет честно показан как [MIC_UNAVAILABLE]).
+            preRoll = null
+            return
+        }
+        capture = fresh
+        armMicWatchdog(false)
+    }
+
+    /**
+     * Выбросить предбуфер и закрыть микрофон, если он был открыт только ради него.
+     *
+     * Нужно там, где реплика отменяется до готовности движка: уход с экрана, провал загрузки
+     * модели. Открытый «в никуда» микрофон — это зелёный индикатор, который врёт.
+     */
+    private fun abandonPreRoll() {
+        val buffer = preRoll ?: return
+        buffer.clear()
+        if (!streamingToEngine) closeCapture()
+    }
+
+    /**
+     * Микрофон + сырой PCM в движок. Маршрут захвата — дефолт [AndroidAudioSourceFactory].
+     *
+     * Порядок здесь не косметический:
+     * 1. `startUtterance()` ДО первого байта с микрофона — иначе [StreamingStt] выбросит
+     *    буферы, пришедшие вне реплики, а это и есть начало фразы;
+     * 2. предбуфер отдаётся ДО живых байтов (под [pcmLock]) — иначе первое слово встало бы в
+     *    очередь стрима после второй фразы;
+     * 3. если захват уже открыт ради предбуфера, он НЕ переоткрывается: новый `AudioRecord`
+     *    потерял бы всё, что человек успел сказать, пока грузилась модель.
+     */
     private fun startCapture(wrapper: StreamingStt, restarted: Boolean = false) {
         if (released) return
+        // Отложенный автостарт после загрузки модели идёт мимо [startListening] — проверяем и здесь,
+        // иначе сервис, поднявшийся за время загрузки, потерял бы микрофон.
+        if (blockedByBackgroundConversation()) {
+            abandonPreRoll()
+            return
+        }
+        val buffering = capture?.isCapturing == true && !streamingToEngine
         // Живой захват не переоткрываем (второй `AudioRecord` отобрал бы звук у первого), но и
         // не выходим молча: перед новым захватом прошлый ОБЯЗАН быть освобождён — иначе тап
         // выглядит мёртвым, а `handledUtterance` не сбрасывается.
-        if (capture?.isCapturing == true) closeCapture()
-        // Отложенный автостарт после загрузки модели идёт мимо [startListening] — проверяем и здесь,
-        // иначе сервис, поднявшийся за время загрузки, потерял бы микрофон.
-        if (blockedByBackgroundConversation()) return
+        if (capture?.isCapturing == true && !buffering) closeCapture()
         // Явное нажатие микрофона — это и есть перебивание: доказательств речи не требуется.
         tts?.stopByUser()
         // Дальше громкость придёт из настоящего PCM: синтетическая огибающая больше не нужна.
         stopSpeechEnvelope()
-        val fresh = HandsFreeCapture()
         // Реплика открывается ДО первого чтения: иначе первые буферы микрофона придут вне
         // реплики и [StreamingStt] их отбросит (а это начало фразы). Здесь же снимаются флаги
         // прошлого цикла: новая реплика — новый `Final`, и ответ прошлого хода уже не озвучивается.
         handledUtterance = false
         voiceTurn = false
         wrapper.startUtterance()
-        val started = runCatching {
-            fresh.start(
-                captureListener,
-                HandsFreeCapture.RawPcmListener { pcm, length ->
-                    // Первый же буфер — доказательство, что сторожу микрофона нечего спасать.
-                    micWatchdog.onAudioChunk()
-                    publishMicLevel(pcm, length)
-                    wrapper.acceptPcm(pcm, length)
-                },
-            )
-        }.getOrDefault(false)
-        if (!started) {
-            runCatching { wrapper.cancelUtterance() }
-            emit(state.copy(notice = MIC_UNAVAILABLE))
-            return
+        // Накопленное за время загрузки модели уходит в стрим первым, и только потом флаг
+        // переключает поток чтения на прямой путь — под тем же замком, чтобы порядок не поехал.
+        synchronized(pcmLock) {
+            val buffered = preRoll?.drain()
+            if (buffered != null && buffered.isNotEmpty()) wrapper.acceptPcm(buffered, buffered.size)
+            streamingToEngine = true
         }
-        capture = fresh
+        if (!buffering) {
+            val fresh = HandsFreeCapture()
+            val started = runCatching { fresh.start(captureListener, rawPcmListener) }.getOrDefault(false)
+            if (!started) {
+                closeCapture()
+                runCatching { wrapper.cancelUtterance() }
+                emit(state.copy(notice = MIC_UNAVAILABLE))
+                return
+            }
+            capture = fresh
+        }
         emit(state.copy(phase = LocalVoicePhase.LISTENING, partial = "", notice = null))
         // Захват открылся — но это ещё не значит, что из него идёт звук (см. [MicCaptureWatchdog]).
         armMicWatchdog(restarted)
@@ -1068,6 +1217,12 @@ class LocalVoiceController(
         // Сторож живёт только рядом с живым захватом: без этого он «сдавался» бы уже после
         // закрытия микрофона и показывал человеку ложное «микрофон не отвечает».
         main.removeCallbacks(watchdogTick)
+        synchronized(pcmLock) {
+            // Предбуфер живёт только вместе с захватом: после закрытия его содержимое — уже
+            // не «начало фразы», а мусор прошлой реплики.
+            preRoll?.clear()
+            streamingToEngine = false
+        }
         val current = capture ?: return
         capture = null
         runCatching { current.cancel() }

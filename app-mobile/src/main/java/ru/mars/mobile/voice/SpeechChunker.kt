@@ -39,8 +39,29 @@ object SpeechChunker {
      */
     const val FIRST_CLAUSE_MIN_CHARS: Int = 60
 
+    /**
+     * Жёсткий потолок ПЕРВОГО куска (волна 20: было 160).
+     *
+     * Зачем потолок, если есть клауз: модель регулярно пишет первое предложение на 300–500
+     * символов («Сейчас я проверил все три сервера, посмотрел логи, перезапустил сервис и
+     * вижу, что …»). Резать строго по клаузу значило бы отдать в синтез пол-абзаца и
+     * молчать, пока он синтезируется, — ровно та «большая задержка перед началом» из
+     * жалобы. 120 символов ≈ 2–3 с речи: синтез такого куска укладывается в 300–500 мс,
+     * то есть первый звук слышен почти мгновенно.
+     */
+    const val FIRST_MAX_CHARS: Int = 120
+
+    /**
+     * Жёсткий потолок последующих пачек (волна 20: было 320).
+     *
+     * Между кусками слышна микропауза (создание `AudioTrack`, старт синтеза), поэтому пачка
+     * не должна быть слишком короткой; но и длинная пачка (320+) синтезируется дольше, чем
+     * звучит предыдущая, и очередь пустеет — на слух это «задумался посреди ответа».
+     */
+    const val REST_MAX_CHARS: Int = 220
+
     /** Размер последующих пачек: компромисс «реже паузы между кусками» ↔ «короче запрос синтеза». */
-    const val BATCH_CHARS: Int = 300
+    const val BATCH_CHARS: Int = REST_MAX_CHARS
 
     /**
      * Знаки, на которых кончается клауз.
@@ -104,33 +125,86 @@ object SpeechChunker {
         return chunks
     }
 
-    /** Граница первого куска: клауз, а если его нет — [FIRST_CLAUSE_MIN_CHARS] символов. */
+    /**
+     * Порезать ГОТОВЫЙ текст на куски для синтеза (путь «Озвучить» на карточке сообщения).
+     *
+     * Отличие от потокового [nextChunk]: текст уже целиком в руках, ждать дельт не нужно, но
+     * первое слово обязано звучать мгновенно. Поэтому первый кусок — самый короткий
+     * (клауз в пределах [FIRST_MAX_CHARS], иначе слово-граница), а остальное режется
+     * пачками по [REST_MAX_CHARS] с приоритетом конца предложения.
+     *
+     * Раньше `LocalVoiceTts.speak` отдавал весь текст ОДНИМ куском: сообщение на 800–2500
+     * символов синтезировалось 10–20 секунд в полной тишине. Это и была жалоба «долго
+     * анализирует сообщение из чата, большая задержка перед началом».
+     *
+     * @return куски в порядке произнесения; пустой список — говорить нечего.
+     */
+    fun split(text: String): List<String> {
+        val body = text.trim()
+        if (body.isEmpty()) return emptyList()
+        // Первый кусок — как в потоке. Короткий текст без клаузы (например «Привет») не
+        // набирает FIRST_CLAUSE_MIN_CHARS, и nextChunk вернёт null: тогда отдаём всё целиком.
+        val head = nextChunk(body, first = true) ?: return flush(body)
+        val chunks = ArrayList<String>()
+        chunks += head.text
+        chunks += flush(head.rest)
+        return chunks
+    }
+
+    /** Граница первого куска: клауз в окне [FIRST_MAX_CHARS], иначе слово-граница. */
     private fun firstCut(buffer: String, from: Int): Int {
-        val mark = clauseMarkAt(buffer, from)
+        val available = buffer.length - from
+        // Клауз ищем ТОЛЬКО в окне: длинное первое предложение не должно откладывать звук.
+        val mark = clauseMarkAt(buffer, from, from + minOf(available, FIRST_MAX_CHARS))
         if (mark > 0) return mark
-        // Клаузы нет (модель пишет одним длинным предложением): ждём порог, но режем по границе
-        // слова внутри него — «половина слова» звучит хуже паузы.
-        if (buffer.length - from < FIRST_CLAUSE_MIN_CHARS) return -1
+        // Клаузы нет (модель пишет одним длинным предложением): ждём порог FIRST_CLAUSE_MIN_CHARS
+        // и режем по границе слова внутри него — «половина слова» звучит хуже паузы.
+        if (available < FIRST_CLAUSE_MIN_CHARS) return -1
         val limit = from + FIRST_CLAUSE_MIN_CHARS
         return lastBoundary(buffer, from, limit) ?: limit
     }
 
-    /** Граница пачки: ровно [BATCH_CHARS] (или конец потока), но по слову/препинанию. */
+    /** Граница пачки: не больше [BATCH_CHARS] (или конец потока), по предложению или слову. */
     private fun batchCut(buffer: String, from: Int, endOfStream: Boolean): Int {
         val available = buffer.length - from
         if (!endOfStream && available < BATCH_CHARS) return -1
         if (available <= BATCH_CHARS) return buffer.length
         val limit = from + BATCH_CHARS
+        // Приоритет — концу предложения: пауза между кусками тогда совпадает с паузой,
+        // которую человек и так делает. Слишком короткий «огрызок предложения» не берём.
+        val sentence = lastSentenceEnd(buffer, from + BATCH_CHARS / 2, limit)
+        if (sentence > 0) return sentence
         return lastBoundary(buffer, from, limit) ?: limit
     }
 
     /**
      * Индекс ЗА первым знаком клаузы, начиная с `from + 1` (сам первый символ не считается:
      * клауз из одного знака препинания говорить нечего). `-1` — клаузы нет.
+     *
+     * @param until докуда искать (не включая): первый кусок ищет клауз только в своём окне,
+     *   иначе длинное предложение отодвигало бы первый звук.
      */
-    private fun clauseMarkAt(buffer: String, from: Int): Int {
-        for (index in (from + 1) until buffer.length) {
+    private fun clauseMarkAt(buffer: String, from: Int, until: Int = buffer.length): Int {
+        val limit = minOf(until, buffer.length)
+        for (index in (from + 1) until limit) {
             if (!isClauseMarkAt(buffer, index)) continue
+            return index + 1
+        }
+        return -1
+    }
+
+    /**
+     * Индекс ЗА последним концом предложения в окне `[from, until)`; `-1` — концов нет.
+     *
+     * Нужен только пачкам: закончить кусок на точке естественнее, чем посреди фразы.
+     * Точка внутри числа (`1.5`) концом предложения не считается.
+     */
+    private fun lastSentenceEnd(buffer: String, from: Int, until: Int): Int {
+        val limit = minOf(until, buffer.length)
+        for (index in (limit - 1) downTo from) {
+            val char = buffer[index]
+            if (char != '.' && char != '!' && char != '?' && char != '…') continue
+            if (char == '.' && index > 0 && buffer[index - 1].isDigit()) continue
             return index + 1
         }
         return -1

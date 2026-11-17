@@ -20,7 +20,10 @@ package ru.mars.mobile
  * - аббревиатуры — из словаря [DEFAULT_ABBREVIATIONS] (HTTP, SSH, API, URL, CPU, RAM,
  *   GB/МБ/ГБ, IP, VPN, APK, TTS, STT и соседние);
  * - ссылки и пути — «ссылка» и «путь», хэши пропускаются, эмодзи и markdown-символы
- *   удаляются.
+ *   удаляются;
+ * - пунктуация приводится к произносимой форме: тире (`—`, `–`, « - ») становится
+ *   запятой-паузой, сдвоенные знаки (`..`, `,.`, `,,`) схлопываются, висящая в начале
+ *   фразы пунктуация снимается. Без этого синтезатор «затыкался» на каждом таком месте.
  *
  * Класс чистый JVM и без состояния: один экземпляр можно держать на всё приложение.
  *
@@ -267,14 +270,29 @@ class VoiceNormalizer(
 
     // --- финальная чистка ----------------------------------------------------------------------
 
-    /** Пробелы и пунктуация после замен: без « ,» и двойных запятых. */
+    /**
+     * Пробелы и пунктуация после замен: без « ,», двойных запятых и сдвоенных точек.
+     *
+     * Волна 20: сюда добавлена чистка САМОЙ пунктуации, а не только пробелов вокруг неё.
+     * Причина — жалоба «тупит на знаках препинания»: текст ответа после подстановок
+     * сохранял `..`, `,.`, `— —` и висящее тире, и синтезатор на каждом таком месте либо
+     * замолкал, либо произносил знак. Тире переводится в запятую-паузу: пауза та же, а
+     * произносимого символа нет.
+     */
     private fun cleanup(text: String): String {
         var out = text.replace(WHITESPACE, " ")
+        out = DASH_TO_PAUSE.replace(out, ", ")
+        out = SPACED_HYPHEN.replace(out, ", ")
         out = out.replace(Regex("""\s+([,.;:!?…)])"""), "$1")
         out = out.replace(Regex("""\(\s+"""), "(")
         out = out.replace(Regex("""\s+\)"""), ")")
         out = out.replace(Regex("""([,;:])\s*(?=[,;:])"""), "$1")
         out = out.replace(Regex("""([,;:])(?=[^\s,;:])"""), "$1 ")
+        out = SEPARATOR_BEFORE_DOT.replace(out, ".")
+        out = REPEATED_DOTS.replace(out, ".")
+        out = DUPLICATE_SEPARATOR.replace(out, "$1")
+        out = SPACE_BEFORE_PUNCT.replace(out, "$1")
+        out = LEADING_PUNCT.replace(out, "")
         out = out.replace(Regex("""\s+"""), " ")
         return out.trim()
     }
@@ -384,5 +402,25 @@ class VoiceNormalizer(
         private val LONE_SLASH = Regex("""[/\\]+""")
         private val MARKDOWN_SYMBOLS = Regex("""[*_`#>|~\\]+""")
         private val WHITESPACE = Regex("""\s+""")
+
+        /** Тире (длинное/среднее) — в запятую-паузу: сам символ синтезатор читает криво. */
+        private val DASH_TO_PAUSE = Regex("""\s*[—–]\s*""")
+
+        /** Дефис, окружённый пробелами, — это тире, а не часть слова: «слово - слово». */
+        private val SPACED_HYPHEN = Regex("""\s+--?\s+""")
+
+        /** «,.», «:.», «;.» — знак перед точкой лишний. */
+        private val SEPARATOR_BEFORE_DOT = Regex("""[,;:]\s*\.+""")
+
+        /** «..», «...» — одна точка: движок на второй замолкает. */
+        private val REPEATED_DOTS = Regex("""\.{2,}""")
+
+        /** «,,», «: ,» — один знак. */
+        private val DUPLICATE_SEPARATOR = Regex("""([,;:])\s*[,;:]+""")
+
+        private val SPACE_BEFORE_PUNCT = Regex("""\s+([,.;:!?…])""")
+
+        /** Висящая пунктуация в начале фразы — не речь. */
+        private val LEADING_PUNCT = Regex("""^[\s,;:.!?…]+""")
     }
 }

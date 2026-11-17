@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import ru.mars.mobile.domain.util.SpeechContentFilter
 import ru.mars.mobile.tts.OfflineTtsPort
 import ru.mars.mobile.voice.SpeechChunker
 
@@ -41,11 +42,14 @@ import ru.mars.mobile.voice.SpeechChunker
  *   останавливает озвучку. На динамике без AEC одного текста мало, на наушниках хватает
  *   длительности — это уже внутри гейта, здесь дублировать нельзя.
  *
- * ## Ранний старт речи ([beginStream]/[appendStream]/[endStream])
- * [speak] читает ответ ОДНОЙ репликой — так локальный чат и живёт: хост отдаёт готовый текст.
- * Чтобы первое слово звучало на секунды раньше, есть потоковый вход: хост кормит дельты, а
+ * ## Ранний старт речи ([beginStream]/[appendStream]/[endStream] и [speak])
+ * [speak] получает готовый ответ целиком, но отдаёт его в синтез НЕ одним куском: текст
+ * очищается ([SpeechContentFilter] + [VoiceNormalizer]) и режется
+ * [ru.mars.mobile.voice.SpeechChunker] так, чтобы первый кусок был коротким (до 120 символов) —
+ * звук начинается за ~0.4 с вместо десяти секунд тишины на длинном сообщении.
+ * Для потокового ответа есть отдельный вход: хост кормит дельты, а
  * [ru.mars.mobile.voice.SpeechChunker] режет первый кусок по клаузу (запятая/точка/двоеточие/
- * тире/перевод строки), следующие — пачками ~300 символов по границе слова. Куски уходят в
+ * тире/перевод строки), следующие — пачками ~220 символов по границе слова. Куски уходят в
  * синтез по очереди: пока движок говорит текущий, следующий ждёт в очереди, а фаза SPEAKING
  * между кусками НЕ гаснет (иначе кнопка мигала бы «Говорю → Голос» на каждой пачке).
  * Эталон эха в гейте растёт вместе с ответом ([BargeInGate.onAssistantTextUpdated]), поэтому
@@ -88,6 +92,17 @@ class LocalVoiceTts(
 ) {
 
     private val appContext: Context = context.applicationContext
+
+    /**
+     * Чистка текста перед синтезом: markdown/отступы/пунктуация ([SpeechContentFilter]) и
+     * числа/единицы ([VoiceNormalizer]).
+     *
+     * Оба класса без состояния и чистые (JVM), поэтому держим по одному экземпляру на объект:
+     * создание Regex-наборов на каждый ответ было бы лишней работой на главном потоке.
+     */
+    private val filter = SpeechContentFilter()
+
+    private val normalizer = VoiceNormalizer()
 
     /** Своя область только если её не дали: чужую (lifecycle) освобождать нельзя. */
     private val ownedScope: CoroutineScope? =
@@ -195,12 +210,65 @@ class LocalVoiceTts(
     val available: Boolean get() = lastAvailable && output.engineAvailable
 
     /**
-     * Озвучить [text] (целиком, одной репликой).
+     * Озвучить [text] (готовый ответ целиком).
+     *
+     * ## Почему текст режется, а не уходит одной репликой (волна 20)
+     * Раньше весь ответ уходил в синтез ОДНИМ куском (`pending.addLast(Piece(body))`). Для
+     * сообщения из чата на 800–2500 символов это значило 10–20 секунд полной тишины перед
+     * первым звуком — ровно жалоба «долго анализирует сообщение из чата, большая задержка
+     * перед началом» (кнопка «Озвучить» на карточке сообщения идёт именно сюда).
+     *
+     * Теперь текст сначала очищается ([SpeechContentFilter.stripForSpeech] — markdown,
+     * отступы, псевдографика, сдвоенная пунктуация; затем [VoiceNormalizer] — числа,
+     * проценты, единицы, аббревиатуры), а потом режется [SpeechChunker.split] на куски:
+     * ПЕРВЫЙ — короткий (клауз до 120 символов, ≈ 300–500 мс синтеза), поэтому звук
+     * начинается почти мгновенно, остальные ждут в [pending] и стартуют без паузы, как
+     * только движок освободится.
+     *
+     * Порядок чистки важен: сначала markdown, потом числа. Иначе «1. `foo`» превратилось бы
+     * в «один точка …» до снятия разметки, а маркер списка — в произнесённое «тире».
      *
      * @return `true` — реплика принята (серверная попытка запущена либо её принял системный
      *   движок); `false` — звука не будет: пустой текст, нечего читать после фильтрации или
      *   движки уже мертвы.
      */
+    fun speak(text: String?): Boolean {
+        if (released) return false
+        val body = text?.trim().orEmpty()
+        if (body.isEmpty()) return false
+        // Новая реплика не наследует нарезку предыдущей: буфер и очередь прошлого ответа в мусор.
+        resetStream()
+        // Старый звук убирается СТРОГО до нового и с подтверждением тишины (см. [cutCurrent]):
+        // иначе стоп-флаг движка глушит первое слово новой реплики.
+        cutCurrent()
+        val pieces = speechPieces(body)
+        if (pieces.isEmpty()) {
+            // Читать нечего (только разметка/эмодзи): гасим состояние так же, как это делает
+            // NOTHING_TO_SPEAK в [speakPieceNow], иначе «говорит» осталось бы висеть.
+            gate.onAnswerFinished()
+            finishSpeaking()
+            return false
+        }
+        pieces.forEachIndexed { index, piece ->
+            pending.addLast(Piece(piece, first = index == 0))
+        }
+        return pump()
+    }
+
+    /**
+     * Текст для движка: markdown → числа → куски.
+     *
+     * Любой шаг может отказать (экзотический вход), поэтому падение чистки не должно стоить
+     * человеку озвучки: при ошибке берётся предыдущий результат, в худшем случае — исходник.
+     */
+    private fun speechPieces(body: String): List<String> {
+        val stripped = runCatching { filter.stripForSpeech(body) }.getOrDefault(body)
+        if (stripped.isBlank()) return emptyList()
+        val normalized = runCatching { normalizer.normalize(stripped) }.getOrDefault(stripped)
+        val speakable = if (normalized.isBlank()) stripped else normalized
+        return SpeechChunker.split(speakable)
+    }
+
     /**
      * Применить темп и голос к движку.
      *
@@ -220,19 +288,6 @@ class LocalVoiceTts(
         // Серверный движок держит темп у себя в запросе: он получает значение отдельно,
         // потому что обёртка [PreferOfflineEngine] не обязана знать про `api/tts`.
         runCatching { serverClientProsody?.setProsody(value) }
-    }
-
-    fun speak(text: String?): Boolean {
-        if (released) return false
-        val body = text?.trim().orEmpty()
-        if (body.isEmpty()) return false
-        // Новая реплика не наследует нарезку предыдущей: буфер и очередь прошлого ответа в мусор.
-        resetStream()
-        // Старый звук убирается СТРОГО до нового и с подтверждением тишины (см. [cutCurrent]):
-        // иначе стоп-флаг движка глушит первое слово новой реплики.
-        cutCurrent()
-        pending.addLast(Piece(body, first = true))
-        return pump()
     }
 
     /**

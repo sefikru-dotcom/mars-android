@@ -30,7 +30,14 @@ import android.widget.TextView
  * композере. Второй набор движков на втором экране означал бы два открытых микрофона,
  * два TTS-сервиса и гонку за аудиофокус: на практике — «эхо» и «микрофон занят».
  * Поэтому экран только РИСУЕТ снимок [VoiceModeState] и отдаёт четыре нажатия через
- * [Callbacks]; [callbacks] необязательны, и без них экран спокойно рисует состояние.
+ * [Callbacks].
+ *
+ * ## Почему без хозяина канала экран перенаправляет в чат
+ * Ровно на этом и ломался «Разговор» из списка диалогов и из виджета: экран открывался
+ * без [callbacks], то есть без единого движка, — орб дышал, кнопки нажимались, микрофон
+ * не включался. Поэтому запуск без хозяина сразу переадресуется в [LocalChatActivity]
+ * с флагом [EXTRA_OPEN_VOICE_MODE] ([chatIntentFor]), а сам экран закрывается: разговор
+ * начинается там, где для него есть канал.
  *
  * ## Почему `android.app.Activity`, а не `ComponentActivity`
  * Экрану не нужны `ViewModel`, `OnBackPressedDispatcher` и `registerForActivityResult`:
@@ -40,18 +47,12 @@ import android.widget.TextView
  * будет признаком, что он забрал чужую работу.
  *
  * ## Шов интеграции
+ * Живой разговор открывается не этим экраном, а флагом намерения:
  * ```kotlin
- * val voiceMode = VoiceModeActivity.intentFor(this, transcript = true)
- * startActivity(voiceMode)
- * // после старта:
- * modeActivity.callbacks = object : VoiceModeActivity.Callbacks {
- *     override fun onMicTap() = voice.toggle()          // существующий LocalVoiceController
- *     override fun onStopSpeech() = voice.stopSpeaking()
- *     override fun onClose() = Unit
- *     override fun onRetry() = retryLastTurn()
- * }
- * modeActivity.render(VoiceModeState.from(voice.state()))
+ * startActivity(VoiceModeActivity.chatIntentFor(context, sessionId))  // LocalChatActivity + open_voice_mode
  * ```
+ * [intentFor] остаётся для хоста, который держит голосовой канал сам и выставляет [callbacks]
+ * до создания экрана; без хозяина запуск уходит в чат (см. выше).
  * В манифест нужна одна строка: `<activity android:name=".VoiceModeActivity" />`.
  */
 class VoiceModeActivity : Activity() {
@@ -59,6 +60,15 @@ class VoiceModeActivity : Activity() {
     companion object {
         /** Показывать ли текст реплик. По умолчанию выключен: разговор — на слух. */
         const val EXTRA_TRANSCRIPT: String = "transcript"
+
+        /**
+         * Ключ намерения «открыть экран сразу в полноэкранном разговоре».
+         *
+         * Читает [LocalChatActivity]: там живёт настоящий голосовой канал, и только он умеет
+         * включить микрофон, распознавание и синтез. Значение обязано совпадать с
+         * `LocalChatActivity.EXTRA_OPEN_VOICE_MODE` — это один и тот же контракт намерения.
+         */
+        const val EXTRA_OPEN_VOICE_MODE: String = "open_voice_mode"
 
         /**
          * Намерение на открытие режима.
@@ -69,6 +79,20 @@ class VoiceModeActivity : Activity() {
          */
         fun intentFor(context: Context, transcript: Boolean = false): Intent =
             Intent(context, VoiceModeActivity::class.java).putExtra(EXTRA_TRANSCRIPT, transcript)
+
+        /**
+         * Намерение «сразу разговаривать»: ведёт в [LocalChatActivity] с флагом
+         * [EXTRA_OPEN_VOICE_MODE].
+         *
+         * Зачем не [intentFor]: этот экран — только разметка, у него нет ни микрофона, ни
+         * распознавателя, ни синтеза. Раньше кнопка «Разговор» в списке диалогов и виджет
+         * открывали именно его, и человек попадал на пустую витрину: орб рисуется, кнопки
+         * нажимаются, разговора нет. Единственный владелец голосового канала — чат.
+         *
+         * @param sessionId последний диалог; `null` — новый.
+         */
+        fun chatIntentFor(context: Context, sessionId: String? = null): Intent =
+            LocalChatActivity.newIntent(context, sessionId).putExtra(EXTRA_OPEN_VOICE_MODE, true)
 
         /** Габарит орба: на 232 dp «дыхание» видно с расстояния вытянутой руки. */
         private const val ORB_DP = 232
@@ -130,11 +154,23 @@ class VoiceModeActivity : Activity() {
     /** Разметка построена. До этого [render] только копит снимок. */
     private var viewsReady = false
 
+    /** Перенаправление в чат уже сделано: второй раз не стартуем вторую копию экрана. */
+    private var redirected = false
+
     /** Состояние кнопки в прошлом кадре: фон пересобирается только при смене. */
     private var lastPrimaryEnabled: Boolean? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Без хозяина канала этот экран — пустая витрина: он не открывает микрофон, не создаёт
+        // распознаватель и не заводит синтез (см. KDoc класса). Так его и открывали кнопка
+        // «Разговор» в списке диалогов и виджет — человек видел орб, жал микрофон и не получал
+        // разговора. Поэтому вход без хозяина сразу ведёт туда, где голосовой канал живёт
+        // по-настоящему: в [LocalChatActivity] с флагом [EXTRA_OPEN_VOICE_MODE].
+        if (callbacks == null) {
+            openRealVoiceMode()
+            return
+        }
         transcriptEnabled = intent.getBooleanExtra(EXTRA_TRANSCRIPT, false)
         setContentView(buildScreen())
         viewsReady = true
@@ -378,6 +414,11 @@ class VoiceModeActivity : Activity() {
      * второй копией этого правила.
      */
     private fun dispatchPrimary() {
+        // Хозяина канала нет: тап по микрофону обязан начать разговор, а не промолчать.
+        if (callbacks == null) {
+            openRealVoiceMode()
+            return
+        }
         when (screen?.action) {
             VoiceModeAction.START, VoiceModeAction.FINISH -> callbacks?.onMicTap()
             VoiceModeAction.STOP -> callbacks?.onStopSpeech()
@@ -388,6 +429,20 @@ class VoiceModeActivity : Activity() {
     /** Свернуть: сначала сообщаем хозяину (он глушит звук), потом закрываемся сами. */
     private fun close() {
         callbacks?.onClose()
+        finish()
+    }
+
+    /**
+     * Уйти туда, где голосовой канал живёт по-настоящему: [LocalChatActivity] с флагом
+     * [EXTRA_OPEN_VOICE_MODE].
+     *
+     * `finish()` вызывается ВСЕГДА, даже если старт чата не удался: иначе поверх прежнего экрана
+     * осталась бы пустая витрина, и человек вернулся бы в тупик.
+     */
+    private fun openRealVoiceMode() {
+        if (redirected) return
+        redirected = true
+        runCatching { startActivity(chatIntentFor(this)) }
         finish()
     }
 

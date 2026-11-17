@@ -83,7 +83,7 @@ object VoiceProsodyPolicy {
      */
     const val DEFAULT_VOICE_LABEL: String = "Как в вебе"
 
-    const val DEFAULT_VOICE_HINT: String = "Голос выберет сервер — тот же, что в веб-версии"
+    const val DEFAULT_VOICE_HINT: String = "Светлана — тот же голос, что в веб-версии"
 
     /**
      * Фраза для «Проверить».
@@ -96,7 +96,7 @@ object VoiceProsodyPolicy {
     private const val EPSILON: Float = 0.001f
 
     /**
-     * Список голосов: сначала естественный (edge), затем резерв (piper).
+     * Список голосов: три нейро-голоса Edge, затем локальный резерв Ирина.
      *
      * Порядок наследуется от [ServerTtsVoices.VOICE_DIALOG] и не пересортировывается:
      * «естественный первым» — это и есть политика голоса, а не удобство отрисовки.
@@ -107,11 +107,17 @@ object VoiceProsodyPolicy {
     fun options(): List<VoiceOption> = ServerTtsVoices.VOICE_DIALOG.map { profile -> option(profile) }
 
     /**
-     * Выбранный вариант по сохранённому темпу; `null` — «как в вебе».
+     * Выбранный вариант по сохранённому темпу; `null` — только если списка нет.
+     *
+     * `voiceId == null` («как в вебе») больше НЕ даёт `null`, а подсвечивает
+     * [ServerTtsVoices.NATURAL_SVETLANA]: именно её голос сервер и подставлял, поэтому
+     * отдельная строка «Как в вебе» рядом со «Светланой» читалась как ДВА разных голоса,
+     * которые звучат одинаково (жалоба владельца: «светлана и как в вебе — один и тот же
+     * голос»). Один голос — одна строка.
      *
      * Сравнение только по [VoiceProsody.voiceId], а не по всему объекту: темп и высота
      * меняются отдельно от голоса, и выбор «Светлана, 1.3×» обязан подсвечивать Светлану.
-     * Неизвестный `voiceId` (голос убрали с сервера, настройка приехала из старой версии)
+     * Неизвестный `voiceId` (голос убрали из сборки, настройка приехала из старой версии)
      * даёт `null`, а не «первый из списка»: подсветить чужой голос значило бы соврать о
      * текущем состоянии, и человек услышал бы не то, что видит.
      */
@@ -119,7 +125,9 @@ object VoiceProsodyPolicy {
         prosody: VoiceProsody,
         options: List<VoiceOption> = VoiceProsodyPolicy.options(),
     ): VoiceOption? {
-        val id = prosody.voiceId ?: return null
+        val id = prosody.voiceId ?: return options.firstOrNull {
+            it.id == ServerTtsVoices.NATURAL_SVETLANA.id
+        }
         return options.firstOrNull { it.id == id }
     }
 
@@ -190,13 +198,19 @@ object VoiceProsodyPolicy {
      * имя: показать не то имя лучше, чем показать несуществующее.
      */
     private fun option(profile: ServerTtsVoiceProfile): VoiceOption {
-        val (label, hint) = when {
-            profile.id == ServerTtsVoices.NATURAL_DMITRY.id ->
-                "Дмитрий" to "Мужской голос веба, нужна сеть"
-            profile.natural -> "Светлана" to "Естественный голос веба, нужна сеть"
-            profile.isLocal -> "Ирина" to "Локальный голос, работает без сети"
+        val (label, hint) = when (profile.id) {
+            ServerTtsVoices.NATURAL_SVETLANA.id ->
+                "Светлана" to "Женский нейросетевой голос, живая интонация"
+            ServerTtsVoices.NATURAL_DMITRY.id ->
+                "Дмитрий" to "Мужской нейросетевой голос, глубокий тембр"
+            ServerTtsVoices.NATURAL_AVA.id ->
+                "Ава (ChatGPT)" to "Тёплый мультиязычный нейро-голос (RU / EN)"
+            ServerTtsVoices.LOCAL_IRINA.id ->
+                "Ирина (офлайн)" to "Локальный голос на телефоне, работает без сети"
+            // Неизвестный профиль: имя голоса движка честнее выдуманного имени.
             else -> profile.voice to ""
         }
+
         return VoiceOption(
             id = profile.id,
             label = label,

@@ -16,6 +16,9 @@ import kotlin.math.tanh
  *  - чистые функции кадрового ритма ([targetFps], [frameIntervalMs], [shouldDrawFrame]);
  *  - инерционный параллакс скролла ([scrollTarget], [smoothScroll], [isScrolling]);
  *  - решение «анимировать ли вообще» ([shouldAnimate]) — reduce motion и энергосбережение;
+ *  - голосовое гало экрана разговора: `uVoiceLevel` (амплитуда речи 0..1), `uVoiceNeon` (неон
+ *    фазы) и `uVoiceOrbMode` (режим голосового орба, в нём маленькая планета на горизонте
+ *    уступает место настоящему Марсу в центре). Сила пульса — [voiceLevel], цвет — [neonChannel];
  *  - палитра Марса и разрешение рендера, общие для GPU-шейдера и Canvas-фоллбэка.
  *
  * Картинка (паритет с эталоном Квартала, `public/chat-bg.js`, `_CS_FRAG_300`):
@@ -223,6 +226,27 @@ object MarsSpaceShaderPolicy {
         return scale.coerceIn(MIN_RENDER_SCALE, 1f)
     }
 
+    /**
+     * Уровень голоса для uniform `uVoiceLevel`: зажат в 0..1, `NaN` (битое деление в анализаторе)
+     * превращается в 0, а не в неоновую вспышку на весь экран.
+     */
+    fun voiceLevel(raw: Float): Float = if (raw.isFinite()) raw.coerceIn(0f, 1f) else 0f
+
+    /**
+     * Режим голосового орба как uniform `uVoiceOrbMode`: 1.0 или 0.0.
+     *
+     * Шейдер сравнивает значение с 0.5 (`step`), поэтому режим — это именно число, а не флаг:
+     * GLSL не знает булевых uniform-переменных.
+     */
+    fun voiceOrbUniform(enabled: Boolean): Float = if (enabled) 1f else 0f
+
+    /**
+     * Канал неона 0..1 из ARGB — компонент вектора `uVoiceNeon`.
+     *
+     * @param shift 16 — красный, 8 — зелёный, 0 — синий.
+     */
+    fun neonChannel(argb: Int, shift: Int): Float = ((argb ushr shift) and 0xFF) / 255f
+
     // ── GLSL: вершинные шейдеры ────────────────────────────────────────────────────────
 
     /**
@@ -360,6 +384,13 @@ void main(){
   vec2 uv = (frag - 0.5 * uRes) / minDim;
   float t = uTime * 0.18;
 
+  // Voice orb mode: this same nebula becomes the acoustic halo of the voice screen.
+  // voiceMode hides the small horizon planet, voiceLevel drives the neon pulse of the gas.
+  float voiceMode = step(0.5, uVoiceOrbMode);
+  float voiceLevel = clamp(uVoiceLevel, 0.0, 1.0);
+  float voiceGate = max(voiceMode, voiceLevel);
+  float r2 = dot(uv, uv);
+
   // Deep space void: obsidian with a faint rust glow toward the horizon.
   float horiz = clamp(0.55 - uv.y, 0.0, 1.0);
   vec3 col = mix(vec3(0.004, 0.006, 0.014), vec3(0.024, 0.009, 0.012), horiz * horiz);
@@ -419,7 +450,20 @@ void main(){
   // Dust absorption plus the forward-scattered rim of the gas.
   float rimLight = pow(clamp(f - dustLane * 0.45, 0.0, 1.0), 2.2) * env * 0.35;
   neb = neb * (0.32 + 0.68 * transmittance) + mix(cRuby, cAmber, r.y) * rimLight * 0.35;
+
+  // Voice orb: the very same gas clouds (n1..n3) and the central Rayleigh corona breathe with
+  // the neon of the current phase, so the halo around the planet is the shader's own light,
+  // not a hand-drawn blob on top of it.
+  float n1 = smoothstep(0.40, 0.96, f) * env;
+  float n2 = smoothstep(0.48, 0.98, r.x) * (band + pocket1 * 0.55);
+  float n3 = smoothstep(0.50, 0.99, r.y) * (band + pocket2 * 0.55);
+  float radialGlow = exp(-r2 * 2.60) + 0.55 * exp(-r2 * 0.90);
+  float voicePulse = (0.28 + 0.95 * voiceLevel);
+  neb *= 1.0 + voiceGate * voicePulse * 0.45;
+
   col += neb;
+  col += uVoiceNeon * (n1 * 0.65 + n2 * 0.45 + n3 * 0.30 + radialGlow * 0.85)
+         * voicePulse * voiceGate * 0.55;
 
   // Four depth layers of rotating stars with twinkle and cross flares.
   float sFar  = starLayer(skyFar,  38.0, 1.1, 0.16, uTime);
@@ -441,14 +485,19 @@ void main(){
   col += cometStreak(cuv, 0.41, uTime * 0.85 + 11.0) * 0.70;
 
   // Mars on the horizon, back-lit: dark night side, ruby crescent on the limb.
+  // In voice orb mode the small horizon planet steps aside: the orb view draws the real Mars.
+  // Its distance is pushed far away, so the disk, the halo and the crescent all fade to nothing
+  // without a second branch (and the pixel cost of the relief FBM is skipped entirely).
+  float planetVis = 1.0 - voiceMode;
   vec2 pCenter = vec2(0.41, 0.24 + uScroll * 0.036);
   float pRad = 0.24;
   vec2 dp = uv - pCenter;
-  float pDist = length(dp);
+  float pDist = length(dp) + (1.0 - planetVis) * 8.0;
   vec2 sunDir = normalize(vec2(-0.76, -0.65));
   float sunAlign = clamp(dot(dp / max(pDist, 0.0001), sunDir), 0.0, 1.0);
   // Warm Rayleigh halo of the dusty Martian atmosphere, only on the lit side.
   float atmoGlow = exp(-max(pDist - pRad, 0.0) * 26.0) * smoothstep(pRad * 0.72, pRad * 1.30, pDist);
+  atmoGlow *= planetVis;
   float crescent = pow(sunAlign, 2.5);
   col += vec3(0.92, 0.28, 0.14) * atmoGlow * crescent * 0.40;
   col += vec3(1.00, 0.45, 0.22) * atmoGlow * pow(crescent, 3.0) * 0.30;
@@ -471,7 +520,7 @@ void main(){
     float storm = smoothstep(0.55, 0.92, fbm3(nrm * 3.10 + vec3(uTime * 0.020, 0.0, uTime * 0.011))) * pow(ndl, 1.20);
     pLit += vec3(0.86, 0.42, 0.18) * storm * 0.30;
     vec3 pCol = pDark + pLit + vec3(0.96, 0.36, 0.18) * rim * 0.72;
-    float edgeAa = smoothstep(pRad, pRad - 0.004, pDist);
+    float edgeAa = smoothstep(pRad, pRad - 0.004, pDist) * planetVis;
     col = mix(col, pCol, edgeAa);
   }
 
@@ -489,6 +538,9 @@ precision highp float;
 uniform vec2 uRes;
 uniform float uTime;
 uniform float uScroll;
+uniform float uVoiceLevel;
+uniform vec3 uVoiceNeon;
+uniform float uVoiceOrbMode;
 out vec4 fragColor;
 """ + GLSL_FRAGMENT_BODY + """
   fragColor = vec4(col, 1.0);
@@ -508,6 +560,9 @@ precision mediump float;
 uniform vec2 uRes;
 uniform float uTime;
 uniform float uScroll;
+uniform float uVoiceLevel;
+uniform vec3 uVoiceNeon;
+uniform float uVoiceOrbMode;
 """ + GLSL_FRAGMENT_BODY + """
   gl_FragColor = vec4(col, 1.0);
 }

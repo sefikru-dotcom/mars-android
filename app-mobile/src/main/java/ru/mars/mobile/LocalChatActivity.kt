@@ -85,6 +85,9 @@ class LocalChatActivity : ComponentActivity() {
         /** Идентификатор диалога в Intent; отсутствует — новый диалог. */
         const val EXTRA_SESSION_ID = "local_session_id"
 
+        /** Намерение сразу открыть полноэкранный голосовой разговор при входе на экран. */
+        const val EXTRA_OPEN_VOICE_MODE = VoiceModeActivity.EXTRA_OPEN_VOICE_MODE
+
         /** Сколько ждать полный ответ на голосовую реплику, прежде чем сдаться. */
         private const val ANSWER_TIMEOUT_MS = 120_000L
 
@@ -409,6 +412,31 @@ class LocalChatActivity : ComponentActivity() {
             presenter.state.collect { state -> render(state) }
         }
         updateNotice()
+        // Если чат открыт кнопкой «Разговор» из списка диалогов или из виджета —
+        // прогреваем ASR и сразу разворачиваем полноэкранный голосовой орб.
+        if (::voice.isInitialized) {
+            voice.controller.warmUpAsrInBackground()
+        }
+        consumeVoiceModeIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent != null) {
+            setIntent(intent)
+            consumeVoiceModeIntent(intent)
+        }
+    }
+
+    private fun consumeVoiceModeIntent(incoming: Intent?) {
+        if (incoming?.getBooleanExtra(EXTRA_OPEN_VOICE_MODE, false) == true) {
+            incoming.removeExtra(EXTRA_OPEN_VOICE_MODE)
+            scaffold.root.post {
+                if (!isFinishing && !isDestroyed) {
+                    openVoiceMode()
+                }
+            }
+        }
     }
 
     /**

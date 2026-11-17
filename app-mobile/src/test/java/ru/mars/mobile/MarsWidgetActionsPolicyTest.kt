@@ -396,7 +396,9 @@ class MarsWidgetActionsPolicyTest {
         assertTrue("блок диалога открывает ИМЕННО его сессию",
             quickProvider.contains("EXTRA_OPEN_SESSION_ID"))
         assertTrue(quickProvider.contains("ChatSessionsActivity"))
-        assertTrue(quickProvider.contains("VoiceModeActivity.intentFor"))
+        assertTrue("живой голос открывает разговор сразу, а не пустую витрину",
+            quickProvider.contains("LocalChatActivity") &&
+                quickProvider.contains("EXTRA_OPEN_VOICE_MODE"))
         assertTrue("действие передаётся extra, а не угадывается по классу экрана",
             quickProvider.contains("MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION"))
         // PendingIntent'ы обязаны быть неизменяемыми: Android 12 иначе бросает исключение.

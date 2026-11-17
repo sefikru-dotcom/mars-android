@@ -15,7 +15,7 @@ package ru.mars.network.repository
  * [needsNetwork] — профиль требует сети (edge-tts). Локальный профиль работает и без неё.
  *
  * Контракт проверен живьём (см. `.mars/voice-upgrade/research/REPORT.md`):
- * `engine=edge, voice=ru-RU-SvetlanaNeural, rate=+10%` → `200 audio/mpeg`, TTFB ≈ 1.7 с;
+ * `engine=edge, voice=ru-RU-SvetlanaNeural, rate=+8%` → `200 audio/mpeg`, TTFB ≈ 1.7 с;
  * `engine=piper, voice=ru_RU-irina-medium` → `200 audio/wav`, TTFB ≈ 0.22 с.
  */
 data class ServerTtsVoiceProfile(
@@ -55,7 +55,7 @@ data class ServerTtsVoiceProfile(
 object ServerTtsVoices {
 
     /**
-     * Естественный голос веба: edge-tts, `ru-RU-SvetlanaNeural`, темп +10 %.
+     * Естественный голос веба: edge-tts, `ru-RU-SvetlanaNeural`, темп +8 %.
      *
      * Живой замер: `200`, mp3, TTFB ≈ 1.7 с (2.5 с без ускорения). На боевом сервере
      * Марса `edge-tts` установлен и синтез этим голосом отвечает аудио (проверено живым
@@ -73,7 +73,8 @@ object ServerTtsVoices {
         id = "natural-svetlana",
         engine = "edge",
         voice = "ru-RU-SvetlanaNeural",
-        rate = "+10%",
+        rate = "+8%",
+        pitch = "+0Hz",
         natural = true,
         needsNetwork = true,
     )
@@ -94,6 +95,29 @@ object ServerTtsVoices {
         engine = "edge",
         voice = "ru-RU-DmitryNeural",
         rate = "+5%",
+        pitch = "+0Hz",
+        natural = true,
+        needsNetwork = true,
+    )
+
+    /**
+     * Тёплый мультиязычный нейро-голос в стиле ChatGPT: `en-US-AvaMultilingualNeural`.
+     *
+     * Зачем третий сетевой голос: Светлана и Дмитрий — «дикторы», ровная новостная подача.
+     * Ava читает свободно и по-русски, и по-английски, с живой разговорной интонацией —
+     * это третий РАЗНЫЙ голос, а не перекраска двух первых.
+     *
+     * Ограничение сервера: в allowlist `/api/tts` только `ru-RU-SvetlanaNeural` и
+     * `ru-RU-DmitryNeural`, поэтому серверный маршрут отвечает `400` на Ava. Именно для
+     * этого голоса прямой WebSocket ([EdgeNeuralTtsClient]) — основной путь: Microsoft
+     * отдаёт Ava без allowlist, и голос звучит с телефона напрямую.
+     */
+    val NATURAL_AVA: ServerTtsVoiceProfile = ServerTtsVoiceProfile(
+        id = "natural-ava",
+        engine = "edge",
+        voice = "en-US-AvaMultilingualNeural",
+        rate = "+5%",
+        pitch = "+0Hz",
         natural = true,
         needsNetwork = true,
     )
@@ -118,13 +142,18 @@ object ServerTtsVoices {
     )
 
     /**
-     * Политика голосового диалога: Светлана, Дмитрий, локальный резерв Ирина.
+     * Политика голосового диалога: Светлана, Дмитрий, Ава, локальный резерв Ирина.
      *
      * `first()` обязан оставаться Светланой: это голос веба по умолчанию, и понижение
      * профиля в селекторе голоса отсчитывается именно от него.
+     *
+     * Четыре РАЗНЫХ голоса — требование владельца: раньше «Как в вебе», «Светлана» и
+     * «Дмитрий» звучали одним системным голосом Android, потому что серверный синтез
+     * падал (`429`/`401`) и движок молча уходил в фолбэк. Дубля «Как в вебе» больше нет:
+     * `voiceId = null` подсвечивает Светлану ([VoiceProsodyPolicy.selected]).
      */
     val VOICE_DIALOG: List<ServerTtsVoiceProfile> =
-        listOf(NATURAL_SVETLANA, NATURAL_DMITRY, LOCAL_IRINA)
+        listOf(NATURAL_SVETLANA, NATURAL_DMITRY, NATURAL_AVA, LOCAL_IRINA)
 
     /** Профиль по [id] или null (для настроек и миграции сохранённого выбора). */
     fun byId(id: String?): ServerTtsVoiceProfile? =
