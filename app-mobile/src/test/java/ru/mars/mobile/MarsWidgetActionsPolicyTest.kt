@@ -66,6 +66,9 @@ class MarsWidgetActionsPolicyTest {
     private val compactProvider by lazy {
         source("src/main/java/ru/mars/mobile/widget/MarsCompactWidgetProvider.kt")
     }
+    private val policy by lazy {
+        source("src/main/java/ru/mars/mobile/widget/MarsWidgetActionsPolicy.kt")
+    }
 
     // --- 1. Контракт действия -------------------------------------------------------------
 
@@ -183,6 +186,86 @@ class MarsWidgetActionsPolicyTest {
         assertEquals("22:13", MarsWidgetActionsPolicy.updatedLabel(1_700_000_000_000L, TimeZone.getTimeZone("GMT")))
     }
 
+    // --- 2b. Пилюля модели и режим (волна 21) ---------------------------------------------
+
+    @Test
+    fun `model label - provider path collapses to the model name`() {
+        // Провайдеры отдают модель путём: в пилюле нужен последний сегмент, иначе
+        // «google/gemini-3.8-…» не сообщает человеку ничего.
+        assertEquals("gemini-3.8-flash", MarsWidgetActionsPolicy.modelLabel("google/gemini-3.8-flash"))
+        assertEquals("claude-haiku-5.5", MarsWidgetActionsPolicy.modelLabel("anthropic/claude-haiku-5.5"))
+        // Имя без пути не трогается, регистр сохраняется.
+        assertEquals("Claude Haiku 5.5", MarsWidgetActionsPolicy.modelLabel("  Claude Haiku 5.5  "))
+    }
+
+    @Test
+    fun `model label - underscores survive, markdown cleanup does not apply`() {
+        // Мягкая чистка: `_`, `*`, `#` легальны в именах моделей, и markdown-фильтр
+        // превратил бы qwen2_5 в «qwen2 5» — модель, которой не существует.
+        assertEquals("qwen2_5-coder", MarsWidgetActionsPolicy.modelLabel("qwen2_5-coder"))
+        assertEquals("gpt-4o-mini*", MarsWidgetActionsPolicy.modelLabel("openai/gpt-4o-mini*"))
+    }
+
+    @Test
+    fun `model label - blank falls back to the mode, not to an empty pill`() {
+        assertEquals("Марс ИИ", MarsWidgetActionsPolicy.modelLabel(null))
+        assertEquals("Марс ИИ", MarsWidgetActionsPolicy.modelLabel("   "))
+        assertEquals("Марс ИИ", MarsWidgetActionsPolicy.modelLabel("google/"))
+        assertEquals("Локально", MarsWidgetActionsPolicy.modelLabel(null, isLocal = true))
+        assertEquals("Локально", MarsWidgetActionsPolicy.modelLabel(" ", isLocal = true))
+        // Константы — часть контракта с разметкой (initialLayout до первого обновления).
+        assertEquals("Марс ИИ", MarsWidgetActionsPolicy.DEFAULT_MODEL_LABEL)
+        assertEquals("Локально", MarsWidgetActionsPolicy.LOCAL_MODEL_LABEL)
+        assertEquals(22, MarsWidgetActionsPolicy.MAX_MODEL_CHARS)
+    }
+
+    @Test
+    fun `model label - long names are cut to the pill width`() {
+        val long = "meta-llama/llama-3.1-405b-instruct"
+        val cut = MarsWidgetActionsPolicy.modelLabel(long)
+        assertTrue("пилюля не должна расширяться под имя модели", cut.length <= MarsWidgetActionsPolicy.MAX_MODEL_CHARS)
+        assertTrue("обрезка обязана быть видимой", cut.endsWith("…"))
+        assertTrue(cut.startsWith("llama-3.1"))
+        // Ровно в предел — не режем вовсе.
+        val exact = "а".repeat(MarsWidgetActionsPolicy.MAX_MODEL_CHARS)
+        assertEquals(exact, MarsWidgetActionsPolicy.modelLabel(exact))
+    }
+
+    @Test
+    fun `state - model and mode travel with the card, old four-argument calls keep defaults`() {
+        val local = MarsWidgetActionsPolicy.state(
+            sessionId = "local-7",
+            rawTitle = "Локальный диалог",
+            rawSnippet = "Ответ прямого провайдера",
+            rawModel = "google/gemini-3.8-flash",
+            isLocal = true,
+        )
+        assertEquals("gemini-3.8-flash", local.modelLabel)
+        assertTrue("режим обязан доехать до виджета: от него зависит адрес тапа", local.isLocal)
+
+        // Совместимость: старый вызов (4 аргумента) не ломается и даёт серверный дефолт.
+        val legacy = MarsWidgetActionsPolicy.state(
+            sessionId = "s-1",
+            rawTitle = "Серверный диалог",
+            rawSnippet = "Ответ сервера",
+            updatedAt = 1L,
+        )
+        assertEquals(MarsWidgetActionsPolicy.DEFAULT_MODEL_LABEL, legacy.modelLabel)
+        assertFalse(legacy.isLocal)
+        assertEquals(1L, legacy.updatedAt)
+
+        // Дефолтный конструктор состояния тоже остался валидным.
+        assertEquals(MarsWidgetActionsPolicy.DEFAULT_MODEL_LABEL, MarsWidgetActionsPolicy.MarsWidgetState().modelLabel)
+    }
+
+    @Test
+    fun `state keys - model and mode slots are fixed strings`() {
+        assertEquals("model_label", MarsWidgetActionsPolicy.KEY_MODEL_LABEL)
+        assertEquals("is_local", MarsWidgetActionsPolicy.KEY_IS_LOCAL)
+        assertTrue("политика обязана объявлять ключи модели и режима", policy.contains("const val KEY_MODEL_LABEL"))
+        assertTrue(policy.contains("const val KEY_IS_LOCAL"))
+    }
+
     // --- 3. Регистрация в манифесте и ресурсы виджетов ------------------------------------
 
     @Test
@@ -221,19 +304,64 @@ class MarsWidgetActionsPolicyTest {
     }
 
     @Test
-    fun `widget info - panel is resizable 4x1 to 4x3 and never wakes the process on a timer`() {
+    fun `widget info - panel is resizable 4x2 to 4x3 and never wakes the process on a timer`() {
         assertTrue(quickInfo.contains("android:initialLayout=\"@layout/widget_mars_quick\""))
         assertTrue("превью в пикере — настоящая карточка, а не серая заглушка",
             quickInfo.contains("android:previewLayout=\"@layout/widget_mars_quick\""))
         assertTrue("панель масштабируется по обеим осям",
             quickInfo.contains("android:resizeMode=\"horizontal|vertical\""))
-        assertTrue("4x2 по умолчанию", quickInfo.contains("android:targetCellWidth=\"4\"") &&
-            quickInfo.contains("android:targetCellHeight=\"2\""))
-        assertTrue("4x1 как минимальная высота", quickInfo.contains("android:minResizeHeight=\"56dp\""))
+        assertTrue("4 колонки по умолчанию", quickInfo.contains("android:targetCellWidth=\"4\""))
         assertTrue("обновление только по состоянию, не по таймеру",
             quickInfo.contains("android:updatePeriodMillis=\"0\""))
         assertTrue(quickInfo.contains("android:widgetCategory=\"home_screen\""))
         assertTrue(quickInfo.contains("@string/widget_mars_quick_description"))
+    }
+
+    /**
+     * Регрессия «нижней полосы не видно».
+     *
+     * Панель заявлялась как 4x2 (minHeight 110dp), а разметка требует ~154dp: четыре
+     * строки просто не влезали, и последняя — «Быстрые инструменты» — уезжала за границу
+     * окна хоста. Хост выбирает число ячеек формулой `70*n - 30`, поэтому объявленная
+     * высота обязана соответствовать числу ячеек И вмещать неподвижные строки разметки.
+     */
+    @Test
+    fun `widget info - declared height matches the cell count and fits the fixed rows`() {
+        val minHeight = Regex("android:minHeight=\"(\\d+)dp\"").find(quickInfo)!!.groupValues[1].toInt()
+        val cells = Regex("android:targetCellHeight=\"(\\d+)\"").find(quickInfo)!!.groupValues[1].toInt()
+        assertEquals(
+            "хост выделяет ячейки по формуле 70*n-30: объявленная высота обязана ей соответствовать",
+            70 * cells - 30,
+            minHeight,
+        )
+
+        fun height(id: String): Int =
+            Regex("@\\+id/$id[^>]*android:layout_height=\"(\\d+)dp\"")
+                .find(quickLayout)!!.groupValues[1].toInt()
+
+        val padding = Regex("android:paddingTop=\"(\\d+)dp\"").find(quickLayout)!!.groupValues[1].toInt() * 2
+        val header = height("widget_mars_model_badge")
+        val composer = height("widget_mars_input")
+        val chips = height("widget_mars_chip_local")
+        // Неподвижные строки: паддинги + шапка + линия (1dp + отступы 2+2) + композер +
+        // пилюли + отступ блока диалога. Всё, что осталось, забирает превью ответа.
+        val fixed = padding + header + 5 + composer + chips + 3
+        val stateMinimum = 16 + 13 // имя диалога 13sp + одна строка превью 11sp
+        assertTrue(
+            "minHeight=${minHeight}dp не вмещает неподвижные строки ($fixed dp) и минимум " +
+                "блока диалога ($stateMinimum dp) — нижняя полоса будет обрезана",
+            minHeight >= fixed + stateMinimum,
+        )
+
+        // Дефицит высоты обязан съедать превью, а не кнопки действий.
+        val dialog = quickLayout.substringAfter("@+id/widget_mars_dialog").substringBefore(">")
+        assertTrue(
+            "блок диалога обязан быть гибким (0dp + layout_weight), иначе при сжатии " +
+                "за границу уезжает нижняя полоса",
+            dialog.contains("android:layout_height=\"0dp\"") && dialog.contains("android:layout_weight=\"1\""),
+        )
+        val minResize = Regex("android:minResizeHeight=\"(\\d+)dp\"").find(quickInfo)!!.groupValues[1].toInt()
+        assertTrue("панель обязана сжиматься ниже своей высоты по умолчанию", minResize < minHeight)
     }
 
     @Test
@@ -264,7 +392,10 @@ class MarsWidgetActionsPolicyTest {
         }
         assertTrue("@drawable/ic_mars", quickLayout.contains("@drawable/ic_mars"))
         assertTrue("@drawable/ic_mic", quickLayout.contains("@drawable/ic_mic"))
-        assertTrue("@drawable/ic_nav_local", quickLayout.contains("@drawable/ic_nav_local"))
+        // Кнопка «живой голос» — динамик, а не облако «Локально»: облако уже занято
+        // пилюлей режима в нижней полосе, и один значок на два разных смысла читался
+        // как «это тоже про локальный провайдер».
+        assertTrue("@drawable/ic_volume", quickLayout.contains("@drawable/ic_volume"))
         assertTrue("@drawable/ic_send", quickLayout.contains("@drawable/ic_send"))
         assertTrue("фон карточки", quickLayout.contains("@drawable/widget_mars_bg"))
         assertTrue("капсула ввода", quickLayout.contains("@drawable/widget_mars_input_pill"))
@@ -288,6 +419,95 @@ class MarsWidgetActionsPolicyTest {
         assertTrue(compactLayout.contains("@drawable/widget_mars_bg"))
         assertTrue(compactLayout.contains("@drawable/widget_mars_input_pill"))
         assertTrue(compactLayout.contains("@drawable/widget_mars_star_btn"))
+    }
+
+    // --- 3b. Волна 21: пилюля модели и полоса быстрых инструментов ------------------------
+
+    @Test
+    fun `layouts - header carries the model badge on a glass chip`() {
+        assertTrue("в шапке нет пилюли модели", quickLayout.contains("@+id/widget_mars_model_badge"))
+        val badge = quickLayout.substringAfter("@+id/widget_mars_model_badge").substringBefore("/>")
+        assertTrue("пилюля модели — тот же стеклянный чип, что и нижняя полоса",
+            badge.contains("@drawable/widget_mars_chip_bg"))
+        assertTrue("текст пилюли 10sp: она не должна спорить с брендом", badge.contains("android:textSize=\"10sp\""))
+        assertTrue("цвет текста пилюли — основной стеклянный тон", badge.contains("@color/mars_text_em"))
+        assertTrue("пилюля не растягивается под длинное имя модели", badge.contains("android:maxWidth"))
+        assertTrue("до первого обновления состояния видна подпись режима",
+            quickLayout.contains("@string/widget_mars_model_default"))
+        assertTrue("шапка обязана показывать время последнего обновления",
+            quickLayout.contains("@+id/widget_mars_updated"))
+        assertTrue(quickLayout.contains("@+id/widget_mars_brand"))
+        assertTrue(quickLayout.contains("@+id/widget_mars_planet"))
+    }
+
+    @Test
+    fun `layouts - four quick tool chips share the row evenly`() {
+        listOf(
+            "@+id/widget_mars_chip_local",
+            "@+id/widget_mars_chip_tasks",
+            "@+id/widget_mars_chip_memory",
+            "@+id/widget_mars_chip_music",
+        ).forEach { id ->
+            assertTrue("в нижней полосе нет $id", quickLayout.contains(id))
+        }
+        // Шесть стеклянных пилюль: бейдж модели и «Диалоги» в шапке + четыре инструмента.
+        assertEquals(
+            "все пилюли обязаны быть одним элементом языка",
+            6,
+            Regex("@drawable/widget_mars_chip_bg").findAll(quickLayout).count(),
+        )
+        // Чипы — ровные «таблетки» одной высоты (28dp), иначе строка выглядит рваной.
+        assertEquals(
+            4,
+            Regex("android:layout_height=\"28dp\"").findAll(quickLayout).count(),
+        )
+        val chips = quickLayout.substringAfter("@+id/widget_mars_chip_local")
+        assertEquals(
+            "четыре чипа делят строку поровну",
+            4,
+            Regex("android:layout_weight=\"1\"").findAll(chips).count(),
+        )
+        assertEquals(
+            "текст чипов — 10.5sp",
+            4,
+            Regex("android:textSize=\"10.5sp\"").findAll(chips).count(),
+        )
+        assertTrue("текст чипов — стеклянный основной тон",
+            chips.contains("@color/mars_text_em"))
+        assertTrue("пилюли не переносят текст в две строки", chips.contains("android:maxLines=\"1\""))
+    }
+
+    @Test
+    fun `layouts - compact strip gains the live voice mode button`() {
+        assertTrue(
+            "с полосы 4x1 обязателен вход в живой разговор Орба",
+            compactLayout.contains("@+id/widget_compact_voice_mode"),
+        )
+        val voiceButton = compactLayout.substringAfter("@+id/widget_compact_voice_mode").substringBefore("/>")
+        assertTrue("кнопка обязана быть тап-целью с ореолом",
+            voiceButton.contains("@drawable/widget_mars_action_btn"))
+        assertTrue("подпись для доступности — из ресурсов",
+            voiceButton.contains("@string/widget_mars_action_voice_mode"))
+        assertTrue("иконка динамика существует в проекте", voiceButton.contains("@drawable/ic_volume"))
+    }
+
+    @Test
+    fun `resources - chip pill and tool strings exist and match the policy defaults`() {
+        assertTrue("нет нового drawable пилюли", exists("src/main/res/drawable/widget_mars_chip_bg.xml"))
+        listOf(
+            "widget_mars_model_default",
+            "widget_mars_model_local",
+            "widget_mars_chip_local",
+            "widget_mars_chip_tasks",
+            "widget_mars_chip_memory",
+            "widget_mars_chip_music",
+        ).forEach { name ->
+            assertTrue("в strings.xml нет $name", strings.contains("name=\"$name\""))
+        }
+        // Дефолт пилюли в ресурсах обязан совпадать с политикой: разметка показывает его
+        // до первого обновления состояния, и расхождение выглядело бы как «мигание».
+        assertTrue(strings.contains(">${MarsWidgetActionsPolicy.DEFAULT_MODEL_LABEL}<"))
+        assertTrue(strings.contains(">${MarsWidgetActionsPolicy.LOCAL_MODEL_LABEL}<"))
     }
 
     @Test
@@ -419,5 +639,121 @@ class MarsWidgetActionsPolicyTest {
         assertTrue(compactProvider.contains("MarsWidgetActionsPolicy.ACTION_VOICE"))
         assertTrue(compactProvider.contains("MarsWidgetActionsPolicy.ACTION_NEW_CHAT"))
         assertTrue("планета ведёт в список диалогов", compactProvider.contains("sessionListIntent"))
+    }
+
+    /**
+     * Полоса не показывает состояние, но МАРШРУТИЗИРУЕТ тапы по нему: адрес (локальный или
+     * серверный чат) и id последнего диалога зашиты в её PendingIntent'ы при сборке.
+     *
+     * Пока полосу перерисовывал только APPWIDGET_UPDATE (добавление, перезагрузка, обновление
+     * пакета), после смены режима или logout её тапы открывали прошлую сессию — то есть
+     * «нажимаю на полосу, а там чужой диалог». Поэтому одно обновление состояния обязано
+     * перерисовывать ОБА виджета.
+     */
+    @Test
+    fun `wiring - one state update refreshes both widgets so the strip cannot keep stale routing`() {
+        val update = quickProvider
+            .substringAfter("fun updateAllWidgets(context: Context) {")
+            .substringBefore("fun readState(")
+        assertTrue("панель обязана перерисовываться",
+            update.contains("ComponentName(context, MarsQuickWidgetProvider::class.java)"))
+        assertTrue("полоса обязана перерисовываться вместе с панелью",
+            update.contains("ComponentName(context, MarsCompactWidgetProvider::class.java)"))
+        assertTrue("полоса собирается из того же снимка состояния, без второго чтения prefs",
+            update.contains("MarsCompactWidgetProvider.buildRemoteViews(context, state)"))
+        assertTrue("снимок состояния читается один раз на обновление",
+            Regex("val state = readState\\(context\\)").containsMatchIn(update))
+        // Полоса обязана принимать состояние параметром: иначе общий обновление читало бы
+        // prefs дважды и могло собрать панель и полосу из разных снимков.
+        assertTrue("полоса собирается из переданного состояния",
+            compactProvider.contains("state: MarsWidgetActionsPolicy.MarsWidgetState ="))
+        assertTrue("тело сборки RemoteViews не читает prefs само: состояние приходит параметром",
+            !compactProvider.substringAfter("): RemoteViews {").substringBefore("val localMode")
+                .contains("readState("))
+    }
+
+    // --- 5. Волна 21: железная маршрутизация и быстрые инструменты ------------------------
+
+    @Test
+    fun `wiring - publishState and updateAllWidgets keep old calls and accept the model`() {
+        val publish = quickProvider.substringAfter("fun publishState(").substringBefore("fun notifyStateChanged(")
+        assertTrue("пилюля модели — необязательный параметр: старые вызовы обязаны компилироваться",
+            publish.contains("modelLabel: String? = null"))
+        assertTrue("признак локального режима — тоже необязательный", publish.contains("isLocal: Boolean = false"))
+        assertTrue("модель пишется в состояние", publish.contains("MarsWidgetActionsPolicy.KEY_MODEL_LABEL"))
+        assertTrue("режим пишется в состояние", publish.contains("MarsWidgetActionsPolicy.KEY_IS_LOCAL"))
+        assertTrue("имя модели нормализует политика, а не вызывающая сторона",
+            publish.contains("MarsWidgetActionsPolicy.modelLabel("))
+
+        val update = quickProvider.substringAfter("fun updateAllWidgets(").substringBefore("fun updateAllWidgets(context: Context)")
+        assertTrue(update.contains("modelLabel: String? = null"))
+        assertTrue(update.contains("isLocal: Boolean = false"))
+
+        val read = quickProvider.substringAfter("fun readState(").substringBefore("fun buildRemoteViews(")
+        assertTrue("состояние читается вместе с моделью", read.contains("KEY_MODEL_LABEL"))
+        assertTrue("состояние читается вместе с режимом", read.contains("KEY_IS_LOCAL"))
+    }
+
+    @Test
+    fun `wiring - tap routing picks the local chat when the server has no credential`() {
+        assertTrue("решение «куда вести тап» обязано быть одной функцией",
+            quickProvider.contains("fun activeChatIntent("))
+        assertTrue("маршрут по состоянию: локальный диалог открывается в локальном чате",
+            quickProvider.contains("fun prefersLocal("))
+        assertTrue("признак локального режима — из состояния виджета",
+            quickProvider.contains("if (state.isLocal) return true"))
+        assertTrue("без серверного credential серверный экран увёл бы на пароль",
+            quickProvider.contains("AndroidKeyStoreCredentialStore"))
+        assertTrue("наличие прямого провайдера проверяется по активному профилю",
+            quickProvider.contains("LocalProviderPrefsStore(context).state().active"))
+        assertTrue("локальный чат получает и сессию, и действие",
+            quickProvider.contains("fun localChatIntent(") &&
+                quickProvider.contains("LocalChatActivity.newIntent(context, sessionId)"))
+        assertTrue("базовый chatIntent остаётся для совместимости и тестов",
+            quickProvider.contains("fun chatIntent(context: Context, action: String?)"))
+        assertTrue("новый чат не тащит старую сессию",
+            quickProvider.contains("action != MarsWidgetActionsPolicy.ACTION_NEW_CHAT"))
+        // Все тапы панели обязаны идти через маршрутизацию, а не напрямую в ChatActivity.
+        assertFalse(
+            "compose/voice/new_chat не должны открывать серверный экран в обход маршрута",
+            quickProvider.substringAfter("fun buildRemoteViews(")
+                .contains("MarsWidgetIntents.chatIntent(context, MarsWidgetActionsPolicy."),
+        )
+    }
+
+    @Test
+    fun `wiring - quick tools have direct intents to their own screens`() {
+        assertTrue("задачи открываются напрямую", quickProvider.contains("fun tasksIntent(") &&
+            quickProvider.contains("TodosActivity::class.java"))
+        assertTrue("память выбирает экран по режиму", quickProvider.contains("fun memoryIntent(") &&
+            quickProvider.contains("LocalMemoryActivity.newIntent(context)") &&
+            quickProvider.contains("MemoryActivity::class.java"))
+        assertTrue("музыка открывается напрямую", quickProvider.contains("fun musicIntent(") &&
+            quickProvider.contains("MusicActivity::class.java"))
+        // Флаги навигации: без NEW_TASK старт с домашнего экрана падает на Android 10+.
+        listOf("tasksIntent", "memoryIntent", "musicIntent").forEach { name ->
+            val body = quickProvider.substringAfter("fun $name(").substringBefore("fun ").take(600)
+            assertTrue("$name обязан ставить NAV_FLAGS", body.contains(".addFlags(NAV_FLAGS)"))
+        }
+        assertTrue("чипы панели привязаны к своим requestCode",
+            listOf("REQUEST_CHIP_LOCAL", "REQUEST_CHIP_TASKS", "REQUEST_CHIP_MEMORY", "REQUEST_CHIP_MUSIC")
+                .all { quickProvider.contains(it) })
+        assertTrue("бейдж модели — отдельная тап-цель", quickProvider.contains("REQUEST_MODEL_BADGE"))
+        assertTrue("нижняя полоса собирается в RemoteViews",
+            quickProvider.contains("R.id.widget_mars_chip_local") &&
+                quickProvider.contains("R.id.widget_mars_chip_tasks") &&
+                quickProvider.contains("R.id.widget_mars_chip_memory") &&
+                quickProvider.contains("R.id.widget_mars_chip_music") &&
+                quickProvider.contains("R.id.widget_mars_model_badge"))
+    }
+
+    @Test
+    fun `wiring - compact strip voice mode goes straight to the orb`() {
+        assertTrue(compactProvider.contains("R.id.widget_compact_voice_mode"))
+        assertTrue(compactProvider.contains("REQUEST_VOICE_MODE"))
+        assertTrue("живой разговор открывается тем же интентом, что и на панели",
+            compactProvider.contains("MarsWidgetIntents.voiceModeIntent("))
+        assertTrue("полоса тоже маршрутизирует тапы по режиму, а не всегда в серверный чат",
+            compactProvider.contains("activeChatIntent("))
     }
 }

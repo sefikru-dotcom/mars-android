@@ -2,21 +2,26 @@
 <!--
     Виджет «Марс — Быстрый ввод и голос» (компактная полоса 3x1 / 4x1).
 
-    Одна строка, четыре зоны — весь путь «спросить Марса» без открытия приложения:
+    Одна строка, пять зон — весь путь «спросить Марса» без открытия приложения:
       * планета слева — список диалогов (ChatSessionsActivity);
       * капсула «Спросить Марс…» — открывает чат и сразу поднимает клавиатуру;
       * микрофон — открывает чат и сразу включает диктовку;
+      * динамик — живой голосовой режим Орба: полноэкранный разговор сразу,
+        без промежуточного экрана чата (пятая кнопка волны 21);
       * звезда в тёмном рубиновом ореоле — новый чистый диалог.
 
-    Высота 56dp: на домашнем экране это ровно одна ячейка, а внутренние 36dp
-    оставляют тап-цель заметно выше минимальных 48dp по площади (36dp кнопка
-    плюс 8dp паддинга карточки со всех сторон).
+    Высота 56dp: на домашнем экране это ровно одна ячейка. Кнопки 32dp с паддингом
+    8dp по краям карточки дают тап-цель выше минимальных 48dp по площади, а капсула
+    ввода забирает всё оставшееся место (layout_weight=1) — на 4x1 это ~90dp текста,
+    на минимальных 3x1 капсула ужимается и обрезает подсказку многоточием, но ни одна
+    кнопка не уезжает за границу.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_compact_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_mars_bg"
+    android:baselineAligned="false"
     android:gravity="center_vertical"
     android:orientation="horizontal"
     android:paddingStart="10dp"
@@ -50,24 +55,37 @@
 
     <ImageButton
         android:id="@+id/widget_compact_mic"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:layout_marginStart="8dp"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginStart="6dp"
         android:background="@drawable/widget_mars_action_btn"
         android:contentDescription="@string/widget_mars_action_voice"
-        android:padding="8dp"
+        android:padding="7dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_mic"
         android:tint="@color/mars_text_em" />
 
+    <!-- Живой разговор с Орбом: тап открывает полноэкранный голосовой режим сразу. -->
+    <ImageButton
+        android:id="@+id/widget_compact_voice_mode"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginStart="4dp"
+        android:background="@drawable/widget_mars_action_btn"
+        android:contentDescription="@string/widget_mars_action_voice_mode"
+        android:padding="7dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_volume"
+        android:tint="@color/mars_text_em" />
+
     <ImageButton
         android:id="@+id/widget_compact_star"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:layout_marginStart="6dp"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginStart="4dp"
         android:background="@drawable/widget_mars_star_btn"
         android:contentDescription="@string/widget_mars_action_new_chat"
-        android:padding="8dp"
+        android:padding="7dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_send"
         android:tint="@color/mars_accent_text" />

@@ -78,6 +78,19 @@
     <string name="widget_mars_action_voice">Голос</string>
     <string name="widget_mars_action_voice_mode">Живой голос</string>
     <string name="widget_mars_action_new_chat">Новый чат</string>
+    <!--
+      Пилюля модели/режима в шапке (волна 21). Дефолты совпадают с
+      MarsWidgetActionsPolicy.DEFAULT_MODEL_LABEL / LOCAL_MODEL_LABEL: разметка
+      показывает их до первого обновления состояния, и расхождение дало бы «мигание»
+      подписи при добавлении виджета.
+    -->
+    <string name="widget_mars_model_default">Марс ИИ</string>
+    <string name="widget_mars_model_local">Локально</string>
+    <!-- Нижняя полоса быстрых инструментов: четыре раздела в один тап. -->
+    <string name="widget_mars_chip_local">Локально</string>
+    <string name="widget_mars_chip_tasks">Задачи</string>
+    <string name="widget_mars_chip_memory">Память</string>
+    <string name="widget_mars_chip_music">Музыка</string>
     <!-- Дефолты состояния: совпадают с MarsWidgetActionsPolicy.DEFAULT_* (контрактный тест). -->
     <string name="widget_mars_state_default_title">Готов к работе</string>
     <string name="widget_mars_state_default_snippet">Нажмите, чтобы продолжить диалог или задать вопрос</string>

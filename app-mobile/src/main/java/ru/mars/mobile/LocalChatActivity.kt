@@ -36,8 +36,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import ru.mars.mobile.localtools.LocalDeviceTool
 import ru.mars.mobile.service.MarsVoiceService
-import ru.mars.mobile.tts.OfflineTtsBackend
 import ru.mars.mobile.tts.OfflineTtsPort
+import ru.mars.mobile.tts.OfflineVoice
+import ru.mars.mobile.widget.MarsQuickWidgetProvider
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy.WidgetAction
 import ru.mars.network.local.AttachmentKind
 import ru.mars.network.local.LocalAttachment
 import ru.mars.network.local.MemoryStore
@@ -418,14 +421,85 @@ class LocalChatActivity : ComponentActivity() {
             voice.controller.warmUpAsrInBackground()
         }
         consumeVoiceModeIntent(intent)
+        if (savedInstanceState == null) {
+            applyWidgetAction(consumeWidgetAction(intent))
+        }
+        syncWidgetState()
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         if (intent != null) {
             setIntent(intent)
+            intent.getStringExtra(EXTRA_SESSION_ID)?.takeIf { it.isNotBlank() && it != session?.id }?.let { id ->
+                session = sessionStore.session(id)
+                    ?: LocalSession(id, LocalSessionStore.DEFAULT_TITLE, System.currentTimeMillis())
+                subtitle.text = session?.title.orEmpty()
+                presenter.restore(
+                    messages = sessionStore.messages(id),
+                    usage = sessionStore.meta(id)?.toLocalUsage(),
+                )
+            }
             consumeVoiceModeIntent(intent)
+            applyWidgetAction(consumeWidgetAction(intent))
+            syncWidgetState()
         }
+    }
+
+    private fun consumeWidgetAction(incoming: Intent?): String? {
+        val action = incoming?.getStringExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION) ?: return null
+        incoming.removeExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION)
+        return action
+    }
+
+    private fun applyWidgetAction(rawAction: String?) {
+        when (MarsWidgetActionsPolicy.actionFor(rawAction)) {
+            WidgetAction.NEW_CHAT -> {
+                if (presenter.state.value.streaming) stopTurn()
+                session = null
+                subtitle.text = ""
+                presenter.restore(emptyList(), null)
+                composer.input.setText("")
+                clearAttachments()
+                focusLocalComposerFromWidget()
+            }
+            WidgetAction.COMPOSE -> focusLocalComposerFromWidget()
+            WidgetAction.VOICE -> {
+                scaffold.root.post {
+                    if (!isFinishing && !isDestroyed && ::voice.isInitialized) {
+                        voice.controller.startListening()
+                    }
+                }
+            }
+            WidgetAction.NONE -> Unit
+        }
+    }
+
+    private fun focusLocalComposerFromWidget() {
+        if (!::composer.isInitialized) return
+        composer.input.requestFocus()
+        composer.input.post {
+            if (isFinishing || isDestroyed) return@post
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager ?: return@post
+            imm.showSoftInput(composer.input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun syncWidgetState() {
+        if (isFinishing || isDestroyed || !::presenter.isInitialized || !::providerStore.isInitialized) return
+        val state = presenter.state.value
+        val activeModel = state.model?.takeIf { it.isNotBlank() }
+            ?: providerStore.state().active?.model
+        val lastAssistant = state.items.lastOrNull { it.role == LocalRole.ASSISTANT && it.tool == null }?.text
+        val title = session?.title?.takeIf { it.isNotBlank() }
+        MarsQuickWidgetProvider.publishState(
+            context = this,
+            sessionId = session?.id,
+            sessionTitle = title,
+            lastSnippet = lastAssistant,
+            modelLabel = activeModel,
+            isLocal = true,
+        )
     }
 
     private fun consumeVoiceModeIntent(incoming: Intent?) {
@@ -470,6 +544,8 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        // Сохраняем актуальное состояние локального диалога на виджет рабочего стола.
+        syncWidgetState()
         // Экран ушёл в фон — озвучка не должна продолжать говорить из кармана.
         if (::voiceOutput.isInitialized) voiceOutput.onPause()
         // Микрофон закрываем сразу: запись из кармана — это расход батареи и утечка звука.
@@ -496,11 +572,12 @@ class LocalChatActivity : ComponentActivity() {
         memoryNoticeHide?.let { scaffold.root.removeCallbacks(it) }
         memoryNoticeHide = null
         if (::voice.isInitialized) voice.release()
-        // Офлайн-синтез держит нативный движок и AudioTrack: без release() они
-        // переживут экран и продолжат занимать память с аудио-фокусом. Но пока идёт
-        // фоновый разговор, этот же порт нужен сервису: release() убил бы его озвучку
-        // (и именно так «уход из приложения» ломал разговор). Тогда порт отпускает сервис.
-        if (!MarsVoiceService.conversationActive) runCatching { ttsWarmup.release() }
+        // Офлайн-синтез здесь БОЛЬШЕ НЕ освобождается: он общий на процесс ([OfflineVoice]),
+        // и `release()` из экрана гасил бы нативный движок, которым в этот момент может
+        // говорить серверный чат или фоновый сервис (подтверждённый дефект «ушёл с экрана —
+        // разговор замолчал»). Речь этого экрана уже остановлена [LocalVoiceButton.release] и
+        // [voiceOutput.onDestroy] ниже; движок живёт до конца процесса либо до явного
+        // [OfflineVoice.release] по нехватке памяти/выходу из аккаунта.
         if (::voiceOutput.isInitialized) voiceOutput.onDestroy()
         super.onDestroy()
     }
@@ -526,36 +603,25 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     /**
-     * Офлайн-синтез для фонового голоса.
+     * Офлайн-синтез для фонового голоса — ЕДИНЫЙ на процесс ([OfflineVoice]).
      *
-     * Подготовка (скачивание 21 МиБ) стартует при открытии чата в фоне — не в момент
-     * «слушай», иначе человек ждёт вслух. `OfflineTtsWarmup` зовёт `prepare()` ровно один
-     * раз за процесс и защищает от двойного скачивания. Прогресс — в статусную строку.
+     * Раньше связка «модель + бэкенд + прогрев» собиралась прямо здесь, поэтому второй
+     * владелец офлайн-голоса (серверный чат, который теперь тоже падает в Piper) получил бы
+     * ВТОРОЙ нативный движок со своим `AudioTrack`: два голоса одновременно и двойное
+     * скачивание модели. Теперь экран только просит общий экземпляр.
      *
-     * Собирается здесь, а не через `forApp`, ради одного параметра: `onSpeakingChanged`
-     * бэкенда. Это единственный сигнал «реплика дочитана», и без него фоновый сервис
-     * навсегда оставался в фазе SPEAKING (движок его не получал). Сигнал идёт в
+     * Прогрев (скачивание 21 МиБ) стартует при открытии чата в фоне — не в момент «слушай»,
+     * иначе человек ждёт вслух. `OfflineTtsWarmup` зовёт `prepare()` ровно один раз за
+     * процесс и защищает от двойного скачивания. Прогресс — в статусную строку.
+     *
+     * `onSpeakingChanged` бэкенда — единственный сигнал «реплика дочитана»: без него фоновый
+     * сервис навсегда оставался в фазе SPEAKING. Он ставится в [OfflineVoice] и идёт в
      * [OfflineVoiceSignal], откуда его слушает [LocalVoiceEngine].
      */
-    private val ttsWarmup by lazy {
-        val relay = ru.mars.mobile.tts.ProgressRelay()
-        val model = ru.mars.mobile.tts.OfflineTtsModel.forApp(this) { downloaded, total ->
-            relay.emit(downloaded, total)
-        }
-        val port = OfflineTtsBackend(
-            this,
-            model = model,
-            onSpeakingChanged = { speaking -> OfflineVoiceSignal.publish(speaking) },
-        )
-        ru.mars.mobile.tts.OfflineTtsWarmup(
-            port = port,
-            model = model,
-            diagnostics = ru.mars.mobile.tts.AndroidWarmUpDiagnostics(this),
-            relay = relay,
-        )
-    }
+    private val ttsWarmup: ru.mars.mobile.tts.OfflineTtsWarmup
+        get() = OfflineVoice.warmup(this)
 
-    private fun offlineTts(): OfflineTtsPort? = runCatching { ttsWarmup.port }.getOrNull()
+    private fun offlineTts(): OfflineTtsPort? = OfflineVoice.port(this)
 
     /**
      * Прогрев, запущенный с экрана. Один на экран: повторное «Озвучить» не должно ставить
@@ -812,9 +878,32 @@ class LocalChatActivity : ComponentActivity() {
                 credentialProvider = { runCatching { credentialStore.read() }.getOrNull() },
                 selector = SpeechVoiceProfileSelector(),
                 prosodyProvider = { voiceProsody },
+                // Платный голос — РЕАЛЬНЫЙ синтез провайдера по асинхронному контракту:
+                // `POST /api/media/generate` → поллинг задачи → скачивание. Синхронный
+                // `/v1/audio/speech` возвращал обрезанные фрагменты (3 из 10 вызовов), поэтому
+                // в боевой проводке его нет.
+                //
+                // Адрес и ключ — у НАСТРОЕННОГО профиля PlusVibe, а не у активного: в этом
+                // чате активным может быть любой OpenAI-совместимый провайдер (Yeta, прокси),
+                // и ключ PlusVibe на его хост уходить не должен. Нет профиля — клиент честно
+                // отвечает «недоступно» (`no_plusvibe_profile`), а не ищет адрес наугад.
+                paidClient = PlusVibeTtsAccess(providerStore).client(),
+                // Платный голос не прозвучал, и фразу прочитал нейро-резерв: молчаливая
+                // подмена запрещена — человек видит, почему услышал не «Алису».
+                onPaidUnavailable = { reason ->
+                    presenter.setNotice(VoiceSubstitutionNotice.paidUnavailable(reason))
+                    scaffold.statusLine.setText(VoiceSubstitutionNotice.PAID_UNAVAILABLE_SHORT)
+                },
             ),
             // Офлайн-Piper для автоозвучки: без него ответ читает системный робот.
             offlineTts = { offlineTts() },
+            // Подмена голоса обязана быть видимой: полный текст — в плашку-уведомление,
+            // короткая форма — в узкую строку статуса (она живёт до следующего события и не
+            // должна выдавливать подсказку фазы).
+            onVoiceSubstituted = { substitution ->
+                presenter.setNotice(VoiceSubstitutionNotice.text(substitution))
+                scaffold.statusLine.setText(VoiceSubstitutionNotice.shortText(substitution))
+            },
         )
         // Голос живёт внутри капсулы композера, слева от поля ввода — как в серверном чате.
         // Отдельной строкой под композером кнопка отнимала место у ленты и была неудобна.
@@ -1241,259 +1330,54 @@ class LocalChatActivity : ComponentActivity() {
     }
 
     /**
-     * Единое окно «Контекст и параметры» локального чата.
+     * Вход в окно «Контекст и параметры» локального чата.
      *
-     * Раньше все настройки висели семью мелкими чипами в одной строке под шапкой и
-     * сплющивали друг друга до нечитаемости. Теперь вход один — пилюля контекста в
-     * композере, — а внутри стеклянного [MarsDialog] всё разложено по трём полочкам, как
-     * в серверном чате (`ChatActivity.showContextUsageDetails`):
+     * Раскладка окна живёт в [LocalChatSettingsSheet], состав строк — в
+     * [LocalChatSettingsPolicy], а здесь остаётся ровно то, что знает только экран:
+     * снимок состояния презентера и прежние обработчики. Пока вёрстка была приватным
+     * методом на полторы сотни строк, её нельзя было ни проверить, ни переиспользовать
+     * (та же раскладка нужна серверному чату, `ChatActivity.showContextUsageDetails`),
+     * а подписи успевали разойтись с фактом: строка «Голос и темп речи (Piper офлайн)»
+     * с подписью про готовность локального голоса пережила и переход на шесть голосов,
+     * и облачный основной голос.
      *
-     * 1. окно контекста и расход диалога (полоса заполнения + точные цифры токенов);
-     * 2. модель, мышление и параметры генерации (строки-карточки, тап открывает пикер);
-     * 3. голос, память и фоновый слух.
-     *
-     * Ничего не пересчитывается здесь заново: проценты и текст разбивки берутся из
-     * [LocalContextPolicy], действия — прежние методы экрана. Окно только раскладывает.
+     * Значения читаются один раз, до показа: окно одноразовое и не подписывается на
+     * презентер, поэтому посреди открытой шторки цифры не «прыгают». Сохранение настроек
+     * остаётся в обработчиках экрана — окно ничего не пишет и второго писателя не заводит.
      */
     private fun showLocalContextAndSettingsSheet() {
         val state = presenter.state.value
-        val windowTokens = state.context?.windowTokens
-        val percent = state.context?.takeIf { it.visible }?.percent
-        val level = state.context?.takeIf { it.visible }?.level
-        var dialog: android.app.Dialog? = null
-
-        fun closeWindow() {
-            dialog?.dismiss()
-        }
-
-        /** Заголовок полочки: маленькие капс-буквы акцентом, как в шторках серверного чата. */
-        fun sectionTitle(title: String): View = TextView(this).apply {
-            text = title
-            textSize = 10f
-            setTextColor(MarsTheme.ACCENT_TEXT)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            letterSpacing = 0.08f
-            includeFontPadding = false
-            setPadding(0, dp(16), 0, dp(8))
-        }
-
-        /** Строка «подпись слева — значение справа» внутри карточки. */
-        fun statRow(title: String, value: String): View = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(
-                TextView(this@LocalChatActivity).apply {
-                    text = title
-                    textSize = 12.5f
-                    setTextColor(MarsTheme.TEXT_MUTED)
-                    includeFontPadding = false
+        LocalChatSettingsSheet.show(
+            activity = this,
+            content = LocalChatSettingsSheet.Content(
+                usage = state.usage,
+                windowTokens = state.context?.windowTokens,
+                model = state.model,
+                supportsReasoning = state.supportsReasoning,
+                // Подпись уровня даёт каталог ([LocalChatModelPicker]); у модели без
+                // reasoning_controls её нет, и политика покажет честное «не поддерживается».
+                reasoningLabel = if (state.supportsReasoning) {
+                    LocalChatModelPicker.label(state.reasoningEffort)
+                } else {
+                    null
                 },
-                LinearLayout.LayoutParams(0, -2, 1f),
-            )
-            addView(
-                TextView(this@LocalChatActivity).apply {
-                    text = value
-                    textSize = 12.5f
-                    setTextColor(MarsTheme.TEXT_STRONG)
-                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                    gravity = Gravity.END
-                    includeFontPadding = false
-                },
-                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) },
-            )
-        }
-
-        /**
-         * Кликабельная стеклянная строка-карточка параметра: слева название, справа
-         * текущее значение, на краю шеврон. Тап закрывает окно и открывает пикер —
-         * второй слой поверх шторки читался бы как «ничего не произошло».
-         */
-        fun controlRow(title: String, value: String, onClick: () -> Unit): View =
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = MarsTheme.card(
-                    this@LocalChatActivity,
-                    MarsTheme.SURFACE_SUBTLE,
-                    radiusDp = 12,
-                    strokeColor = MarsTheme.BORDER_SUBTLE,
-                )
-                setPadding(dp(14), dp(11), dp(12), dp(11))
-                isClickable = true
-                isFocusable = true
-                contentDescription = "$title: $value"
-                setOnClickListener { onClick() }
-                addView(
-                    TextView(this@LocalChatActivity).apply {
-                        text = title
-                        textSize = 12.5f
-                        setTextColor(MarsTheme.TEXT)
-                        maxLines = 2
-                        includeFontPadding = false
-                    },
-                    LinearLayout.LayoutParams(0, -2, 1f),
-                )
-                addView(
-                    TextView(this@LocalChatActivity).apply {
-                        text = value
-                        textSize = 12f
-                        setTextColor(MarsTheme.ACCENT_TEXT)
-                        maxLines = 2
-                        ellipsize = TextUtils.TruncateAt.END
-                        gravity = Gravity.END
-                        maxWidth = dp(176)
-                        includeFontPadding = false
-                    },
-                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) },
-                )
-                addView(
-                    android.widget.ImageView(this@LocalChatActivity).apply {
-                        setImageDrawable(
-                            ContextCompat.getDrawable(this@LocalChatActivity, R.drawable.ic_arrow_forward),
-                        )
-                        imageTintList =
-                            android.content.res.ColorStateList.valueOf(MarsTheme.TEXT_MUTED)
-                    },
-                    LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginStart = dp(8) },
-                )
-            }
-
-        // --- Полочка 1: окно контекста и расход ---------------------------------------
-        // Цвет полосы — тот же порог, что у пилюли в композере: одна цифра не может
-        // быть зелёной внизу и красной в окне.
-        val tone = when (level) {
-            LocalContextLevel.CRITICAL -> MarsTheme.STATUS_ERROR
-            LocalContextLevel.WARNING -> MarsTheme.STATUS_WARNING
-            else -> MarsTheme.STATUS_ONLINE
-        }
-        val fillBar = ContextFillBarView(this).apply { render(percent, tone) }
-        val contextCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = MarsTheme.glassSurface(this@LocalChatActivity, radiusDp = 14)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            addView(statRow("Заполнение контекста", percent?.let { "$it%" } ?: "не измерено"))
-            addView(
-                fillBar,
-                LinearLayout.LayoutParams(-1, dp(ContextFillBarView.BAR_HEIGHT_DP))
-                    .apply { topMargin = dp(8) },
-            )
-            addView(
-                TextView(this@LocalChatActivity).apply {
-                    // Текст политики: сколько занято из окна, сколько ушло на запрос и
-                    // ответ и где пороги. Экран не считает это второй раз.
-                    text = LocalContextPolicy.detailsText(state.usage, windowTokens)
-                    textSize = 12f
-                    setTextColor(MarsTheme.TEXT_EM)
-                    setLineSpacing(dp(2).toFloat(), 1f)
-                },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) },
-            )
-        }
-
-        // --- Полочка 2: модель, мышление и генерация ----------------------------------
-        val modelRow = controlRow(
-            "Модель провайдера",
-            state.model?.takeIf { it.isNotBlank() } ?: "Не выбрана",
-        ) {
-            closeWindow()
-            chooseModel()
-        }
-        val reasoningRow = controlRow(
-            "Уровень размышлений (Reasoning)",
-            if (state.supportsReasoning) {
-                LocalChatModelPicker.label(state.reasoningEffort)
-            } else {
-                "Не поддерживается моделью"
-            },
-        ) {
-            // У модели без reasoning_controls строки-пикера нет: мёртвый тап хуже
-            // честной подписи «не поддерживается».
-            if (state.supportsReasoning) {
-                closeWindow()
-                chooseReasoning()
-            }
-        }
-        val samplingRow = controlRow(
-            "Параметры сэмплинга (Temp, Top-P, Лимит)",
-            if (state.turnSettingsCustom) "Настроены вручную *" else "По умолчанию",
-        ) {
-            closeWindow()
-            openTurnSettings()
-        }
-
-        // --- Полочка 3: голос, память и фоновый слух -----------------------------------
-        val voiceModeRow = controlRow(
-            "Полноэкранный голосовой разговор",
-            "Живой диалог с орбом и перебиванием",
-        ) {
-            closeWindow()
-            openVoiceMode()
-        }
-        val prosodyValue = voiceProsody.speedLabel() + " · " +
-            if (hasOfflineVoice()) "Голос Ирины готов (22 кГц)" else "Подготовка / системный резерв"
-        val prosodyRow = controlRow("Голос и темп речи (Piper офлайн)", prosodyValue) {
-            closeWindow()
-            openVoiceProsody()
-        }
-        val wakeRow = controlRow(
-            "Фоновый слух („Марс, слушай“)",
-            if (wakeArmed) "Включено — слушает в фоне" else "Выключено",
-        ) {
-            // Окно закрываем до переключения: включение может запросить разрешение на
-            // микрофон, и системный диалог поверх шторки выглядел бы зависанием.
-            closeWindow()
-            toggleWakeService()
-        }
-        val memoryRow = controlRow(
-            "Память владельца и факты",
-            "Профиль и долгосрочная память на телефоне",
-        ) {
-            closeWindow()
-            startActivity(LocalMemoryActivity.newIntent(this@LocalChatActivity))
-        }
-
-        dialog = MarsDialog.show(this) { root ->
-            root.addView(MarsDialog.header(this, "Контекст и параметры", null))
-
-            root.addView(sectionTitle("ОКНО КОНТЕКСТА И РАСХОД"))
-            root.addView(contextCard, LinearLayout.LayoutParams(-1, -2))
-            root.addView(
-                MarsDialog.primaryButton(this, "Новый диалог") {
-                    closeWindow()
-                    startNewLocalChat()
-                },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) },
-            )
-            root.addView(
-                MarsDialog.secondaryButton(this, "Настройки провайдера / API-ключ") {
-                    closeWindow()
-                    openSettings()
-                },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) },
-            )
-
-            root.addView(sectionTitle("МОДЕЛЬ, МЫШЛЕНИЕ И ГЕНЕРАЦИЯ"))
-            listOf(modelRow, reasoningRow, samplingRow).forEachIndexed { index, row ->
-                root.addView(
-                    row,
-                    LinearLayout.LayoutParams(-1, -2).apply { if (index > 0) topMargin = dp(8) },
-                )
-            }
-
-            root.addView(sectionTitle("ГОЛОС, ПАМЯТЬ И ФОНОВЫЙ СЛУХ"))
-            listOf(voiceModeRow, prosodyRow, wakeRow, memoryRow).forEachIndexed { index, row ->
-                root.addView(
-                    row,
-                    LinearLayout.LayoutParams(-1, -2).apply { if (index > 0) topMargin = dp(8) },
-                )
-            }
-
-            root.addView(
-                MarsDialog.quietButton(this, "Закрыть") { closeWindow() },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) },
-            )
-            emptyList()
-        }
+                turnSettingsCustom = state.turnSettingsCustom,
+                prosody = voiceProsody,
+                offlineVoiceReady = hasOfflineVoice(),
+                wakeArmed = wakeArmed,
+            ),
+            callbacks = LocalChatSettingsSheet.Callbacks(
+                onNewDialog = ::startNewLocalChat,
+                onProviderSettings = ::openSettings,
+                onModel = ::chooseModel,
+                onReasoning = ::chooseReasoning,
+                onSampling = ::openTurnSettings,
+                onVoiceMode = ::openVoiceMode,
+                onProsody = ::openVoiceProsody,
+                onWakeService = ::toggleWakeService,
+                onMemory = { startActivity(LocalMemoryActivity.newIntent(this)) },
+            ),
+        )
     }
 
     /**
@@ -1606,6 +1490,7 @@ class LocalChatActivity : ComponentActivity() {
             }
             voiceStreaming = false
             voiceSpokenChars = 0
+            syncWidgetState()
         }
         wasStreaming = state.streaming
 
@@ -2669,7 +2554,10 @@ class LocalChatActivity : ComponentActivity() {
             // `OfflineTtsPort.speak` НЕ блокирующий: он ставит реплику в свой поток
             // синтеза и сразу возвращает «принято/отказ» (см. KDoc порта), поэтому
             // главный поток здесь не висит и прятать вызов в Dispatchers.Default не нужно.
-            val accepted = runCatching { ttsWarmup.port.speak(body) }.getOrDefault(false)
+            // Порт берётся у процесса ([OfflineVoice]), а не у своей копии: второй движок
+            // означал бы два `AudioTrack` и два голоса одновременно.
+            val accepted = runCatching { OfflineVoice.port(this)?.speak(body) == true }
+                .getOrDefault(false)
             if (accepted) {
                 // Системный голос мог звучать с прошлого нажатия — иначе два голоса разом.
                 if (::voiceOutput.isInitialized) runCatching { voiceOutput.stopSpeaking() }
@@ -2678,7 +2566,7 @@ class LocalChatActivity : ComponentActivity() {
             }
             // Порт отказал (реплика пустая после trim, движок освобождён) — это не «не
             // готов»: честно уходим на запасной путь ниже.
-        } else if (ttsWarmup.lastFailure == null) {
+        } else if (OfflineVoice.lastFailure(this) == null) {
             // 2. Готовности нет, но и отказа ещё не было: модель качается/движок поднимается.
             Toast.makeText(this, "Готовлю голос, попробуйте ещё раз", Toast.LENGTH_SHORT).show()
             prepareOfflineVoiceInBackground()
@@ -2698,14 +2586,17 @@ class LocalChatActivity : ComponentActivity() {
      */
     private fun speakWithSystemVoice(body: String) {
         // Офлайн мог уже начать фразу — иначе два голоса наложатся друг на друга.
-        runCatching { ttsWarmup.port.stop() }
+        runCatching { OfflineVoice.port(this)?.stop() }
         if (!hasTtsService()) {
             Toast.makeText(this, "Озвучка недоступна на этом устройстве", Toast.LENGTH_SHORT).show()
             return
         }
         ensureVoiceOutput()
+        // Один тост, а не два: второй заменил бы первый в очереди, и объяснение подмены
+        // исчезло бы ровно в тот момент, когда оно нужнее всего. Когда звучит системный
+        // голос, сообщением становится именно объявление подмены.
         val message = when (voiceOutput.speakNow(body)) {
-            VoiceOutputController.SpeakOutcome.SPOKEN -> "Озвучиваю"
+            VoiceOutputController.SpeakOutcome.SPOKEN -> VoiceSubstitutionNotice.SYSTEM_RESERVE
             VoiceOutputController.SpeakOutcome.NOTHING_TO_SPEAK -> "Нечего озвучивать"
             VoiceOutputController.SpeakOutcome.ENGINE_UNAVAILABLE ->
                 "Озвучка недоступна на этом устройстве"

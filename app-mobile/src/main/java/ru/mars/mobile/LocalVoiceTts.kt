@@ -13,25 +13,38 @@ import ru.mars.mobile.tts.OfflineTtsPort
 import ru.mars.mobile.voice.SpeechChunker
 
 /**
- * Озвучка ответа локального чата: серверный синтез, если он дан, и системный TTS как
- * обязательный резерв. Перебивание решает существующий [BargeInGate], маршрут вывода —
+ * Озвучка ответа локального чата: облако основное, локальная модель Piper — единственный
+ * резерв, системный TTS — только там, где модели нет вовсе, и всегда с объявлением подмены.
+ * Перебивание решает существующий [BargeInGate], маршрут вывода —
  * существующие [AudioRoutePolicy]/[AndroidAudioRouteMonitor], захват — [AudioCapturePolicy].
  *
  * ## Что здесь переиспользовано, а что нового
  * Нового — только проводка. Синтез и воспроизведение уже есть:
- * - [ServerTtsSpeechEngine] — серверный путь с прозрачным фолбэком на системный TTS;
+ * - [ServerTtsSpeechEngine] — серверный путь; цель деградации задаётся снаружи и здесь
+ *   указывает на локальную модель, а не на платформу (см. ниже);
  * - [AndroidServerTtsPlayback] — проигрывание серверных байтов (Media3, `USAGE_ASSISTANT`);
- * - [AndroidSpeechEngine] — платформенный `TextToSpeech` (и он же фолбэк);
+ * - [AndroidSpeechEngine] — платформенный `TextToSpeech` (последний резерв, не подмена);
+ * - [OfflineTtsSpeechEngine] — локальный Piper: единственный офлайн-резерв;
  * - [VoiceOutputController] — политика «что и когда говорить» + [ru.mars.mobile.domain.util.SpeechContentFilter]
  *   (markdown, код и ссылки не читаются вслух);
  * - [BargeInGate] — единственная политика «человек действительно перебил, а не мы услышали
  *   собственный динамик».
  *
+ * ## Политика голоса (подтверждённый дефект прошлых волн)
+ * Когда серверный клиент отказывал (`401`, `429`, таймаут), фраза молча уходила в
+ * платформенный `TextToSpeech` — человек, выбравший «Светлану», слышал робота Android, хотя
+ * живая модель Piper лежала на диске. Теперь цепочка такая:
+ * 1. выбран сетевой голос → облако; отказ облака → Piper (а не платформа);
+ * 2. выбран локальный голос → Piper; если модель не поднялась → облако, о подмене сообщается;
+ * 3. системный TTS звучит только когда Piper не подключён вовсе, и такое событие уходит
+ *    хосту через [onVoiceSubstituted] — незаметной подмены голоса больше нет.
+ *
  * ## Почему серверный клиент необязателен
  * Локальный чат ходит к провайдеру напрямую и не имеет device-credential сервера Марса,
- * поэтому [serverTts] по умолчанию `null`: тогда работает только системный TTS. Если
- * координатор даст [ServerTtsClient] (например, `RepositoryServerTtsClient` с базовым URL и
- * провайдером credential), серверный канал включается сам — правок в этом классе не нужно.
+ * поэтому [serverTts] по умолчанию `null`: тогда голосом распоряжается [offline] (локальная
+ * модель), а платформа — лишь крайний случай. Если координатор даст [ServerTtsClient]
+ * (например, `RepositoryServerTtsClient` с базовым URL и провайдером credential), серверный
+ * канал включается сам — правок в этом классе не нужно.
  *
  * ## Перебивание
  * Два разных пути, и они не смешиваются:
@@ -45,13 +58,22 @@ import ru.mars.mobile.voice.SpeechChunker
  * ## Ранний старт речи ([beginStream]/[appendStream]/[endStream] и [speak])
  * [speak] получает готовый ответ целиком, но отдаёт его в синтез НЕ одним куском: текст
  * очищается ([SpeechContentFilter] + [VoiceNormalizer]) и режется
- * [ru.mars.mobile.voice.SpeechChunker] так, чтобы первый кусок был коротким (до 120 символов) —
+ * [ru.mars.mobile.voice.SpeechChunker] так, чтобы первый кусок был коротким (до 110 символов) —
  * звук начинается за ~0.4 с вместо десяти секунд тишины на длинном сообщении.
  * Для потокового ответа есть отдельный вход: хост кормит дельты, а
- * [ru.mars.mobile.voice.SpeechChunker] режет первый кусок по клаузу (запятая/точка/двоеточие/
- * тире/перевод строки), следующие — пачками ~220 символов по границе слова. Куски уходят в
- * синтез по очереди: пока движок говорит текущий, следующий ждёт в очереди, а фаза SPEAKING
- * между кусками НЕ гаснет (иначе кнопка мигала бы «Говорю → Голос» на каждой пачке).
+ * [ru.mars.mobile.voice.SpeechChunker] режет первый кусок по КОНЦУ ПРЕДЛОЖЕНИЯ (точка,
+ * вопросительный, восклицательный, двоеточие, точка с запятой, многоточие, перевод строки),
+ * следующие — пачками ~160 символов по границе слова, причём законченное предложение от 45
+ * символов уходит в синтез сразу. Куски уходят в синтез по очереди: пока движок говорит
+ * текущий, следующий ждёт в очереди, а фаза SPEAKING между кусками НЕ гаснет (иначе кнопка
+ * мигала бы «Говорю → Голос» на каждой пачке).
+ *
+ * ## Предсинтез следующего куска ([prefetchNext])
+ * Пока движок говорит кусок N, куски N+1 и N+2 уже уходят в [VoiceOutputController.prefetch]:
+ * сетевой синтез (или прогрев Piper) идёт ПОД звук, а не после него. Раньше следующий кусок
+ * отправлялся в синтез только из [onEngineSilent] — то есть когда предыдущий отзвучал и
+ * наступила тишина; на медленном канале это давало паузу 5–10 секунд ровно после первой
+ * запятой.
  * Эталон эха в гейте растёт вместе с ответом ([BargeInGate.onAssistantTextUpdated]), поэтому
  * перебивание продолжает отличать наш динамик от человека и на потоковой озвучке.
  *
@@ -67,7 +89,9 @@ import ru.mars.mobile.voice.SpeechChunker
  *
  * @param context любой контекст (хранится `applicationContext`);
  * @param scope область для фонового серверного синтеза; `null` — своя, освобождается в [release];
- * @param serverTts источник серверного аудио; `null` — только системный TTS;
+ * @param serverTts источник серверного аудио; `null` — облачного канала нет, говорит Piper;
+ * @param offline локальная модель Piper: единственный резерв. `null` — модели на устройстве
+ *   нет, и тогда (и только тогда) платформенный TTS становится резервом с объявлением подмены;
  * @param route текущий маршрут вывода (наушники/динамик) — нужен гейту, чтобы выбрать порог;
  * @param aecActive реально ли включён аппаратный AEC на текущей сессии захвата;
  * @param nowMs часы (мс) — подменяются в тестах;
@@ -75,6 +99,8 @@ import ru.mars.mobile.voice.SpeechChunker
  * @param onSpeakingChanged «звук пошёл / звук кончился» для хоста (фаза SPEAKING);
  * @param onAvailableChanged озвучка стала недоступна (или снова доступна) — хост гасит кнопку;
  * @param onBargeIn подтверждённое перебивание (диагностика/логика хоста), необязательно.
+ * @param onVoiceSubstituted прозвучал не выбранный голос, а резерв (локальная модель или
+ *   платформа). Хост обязан показать это человеку: молчаливая подмена — дефект, а не резерв.
  */
 class LocalVoiceTts(
     context: Context,
@@ -89,6 +115,16 @@ class LocalVoiceTts(
     private val onSpeakingChanged: (Boolean) -> Unit = {},
     private val onAvailableChanged: (Boolean) -> Unit = {},
     private val onBargeIn: ((BargeInDecision.Trigger) -> Unit)? = null,
+    private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
+    /**
+     * Владеет ли этот объект офлайн-портом.
+     *
+     * `false` (боевая проводка) — порт принадлежит процессу
+     * ([ru.mars.mobile.tts.OfflineVoice]): экран, закрываясь, гасит свою речь, но не нативный
+     * движок, которым может говорить второй чат или фоновый сервис. `true` (по умолчанию) —
+     * прежнее поведение: освобождать при [release], что верно для собственного порта.
+     */
+    private val ownsOfflinePort: Boolean = true,
 ) {
 
     private val appContext: Context = context.applicationContext
@@ -139,8 +175,10 @@ class LocalVoiceTts(
     private val system: AndroidSpeechEngine = AndroidSpeechEngine(
         context = appContext,
         onInitFinished = { available ->
-            // Без серверного канала отказ системного TTS = озвучки нет вовсе.
-            if (serverTts == null) publishAvailable(available)
+            // Отказ платформенного TTS — это «озвучки нет» только когда нет НИ облака, НИ
+            // локальной модели. С Piper или серверным каналом живой голос есть, и гасить
+            // кнопку из-за мёртвой платформы значило бы отключить работающую озвучку.
+            if (serverTts == null && offline == null) publishAvailable(available)
         },
         onSpeechFinished = { onEngineSilent() },
     )
@@ -153,36 +191,71 @@ class LocalVoiceTts(
             AndroidServerTtsPlayback(appContext, onFinished = { onEngineSilent() })
         }
 
-    /** Один движок для контроллера: офлайн (Piper) → серверный → системный. */
+    /**
+     * Один движок для контроллера: облако (выбранный голос) → Piper → платформа только там,
+     * где модели нет.
+     *
+     * Ключевая деталь проводки — цель деградации серверного движка. Раньше ею был [system], и
+     * любой отказ облака превращал «Светлану» в робота Android, хотя модель Piper лежала на
+     * диске. Теперь цель — Piper, а платформа остаётся целью только при `offline == null`
+     * (модели на устройстве нет), и в этом случае подмена объявляется человеку.
+     */
     private val engine: VoiceOutputController.SpeechEngine = run {
         val client = serverTts
         val player = playback
-        val fallback = if (client != null && player != null) {
-            ServerTtsSpeechEngine(
-                fallback = system,
-                client = client,
-                playback = player,
-                scope = workScope,
-                // Серверное аудио зазвучало: канал рабочий, кнопку можно вернуть в строй.
-                onServerAudioAvailable = { publishAvailable(true) },
-            )
-        } else {
-            system
-        }
-        // Офлайн-Piper первым: голос владельца жаловался именно на робота.
-        val piper = offline?.let { port ->
+        // Локальная модель строится ПЕРВОЙ: она и резерв облака, и голос для локального выбора.
+        // Двух разных экземпляров быть не должно — иначе один держал бы AudioTrack, а второй
+        // ждал тишины от первого.
+        val piper: VoiceOutputController.SpeechEngine? = offline?.let { port ->
             OfflineTtsSpeechEngine(
                 context = appContext,
                 port = port,
                 onSpeakingChanged = { speaking: Boolean ->
                     if (speaking) setSpeaking(true) else onEngineSilent()
                 },
+                // Общий порт процесса не освобождаем: им говорит и второй чат, и сервис.
+                releasePort = ownsOfflinePort,
             )
         }
-        if (piper != null) {
-            PreferOfflineEngine(offline = piper, fallback = fallback)
+        val cloudReserve: VoiceOutputController.SpeechEngine = piper ?: system
+        val cloud = if (client != null && player != null) {
+            ServerTtsSpeechEngine(
+                fallback = cloudReserve,
+                client = client,
+                playback = player,
+                scope = workScope,
+                // Серверное аудио зазвучало: канал рабочий, кнопку можно вернуть в строй.
+                onServerAudioAvailable = { publishAvailable(true) },
+                fallbackChannel = if (piper != null) VoiceChannel.OFFLINE else VoiceChannel.SYSTEM,
+                // Piper не звучит, пока модель не скачана: последний резерв — платформа.
+                // Без него первая же фраза на новом устройстве пропадала бы молча.
+                lastResort = if (piper != null) system else null,
+                onVoiceSubstituted = ::announceSubstitution,
+                // Ни облако, ни резерв не дали звука: очередь обязана закрыть фазу «говорю»,
+                // иначе кнопка и микрофон останутся заблокированными до конца хода.
+                onSilent = { onEngineSilent() },
+            )
         } else {
-            fallback
+            null
+        }
+        when {
+            // Полная цепочка: выбор голоса (облако ↔ Piper) и резерв облака — одна модель.
+            piper != null && cloud != null ->
+                PreferOfflineEngine(
+                    offline = piper,
+                    fallback = cloud,
+                    onVoiceSubstituted = ::announceSubstitution,
+                )
+            // Облачного канала нет: выбор «модель или платформа» решает обёртка, и о подмене
+            // она сообщает сама.
+            piper != null ->
+                PreferOfflineEngine(
+                    offline = piper,
+                    fallback = system,
+                    onVoiceSubstituted = ::announceSubstitution,
+                )
+            cloud != null -> cloud
+            else -> system
         }
     }
 
@@ -206,7 +279,14 @@ class LocalVoiceTts(
      */
     val isSpeaking: Boolean get() = speaking
 
-    /** Есть ли чем озвучивать: системный движок жив или серверный канал ещё не отказал. */
+    /**
+     * Есть ли чем озвучивать.
+     *
+     * `false` — не «платформа молчит», а «молчат ВСЕ каналы сразу»: локальная модель не
+     * подключена, сетевой канал отказал, платформенный TTS не поднялся. Раньше отказ
+     * платформы гасил кнопку даже при живой модели Piper — это и было тихое отключение
+     * работающей озвучки.
+     */
     val available: Boolean get() = lastAvailable && output.engineAvailable
 
     /**
@@ -221,7 +301,7 @@ class LocalVoiceTts(
      * Теперь текст сначала очищается ([SpeechContentFilter.stripForSpeech] — markdown,
      * отступы, псевдографика, сдвоенная пунктуация; затем [VoiceNormalizer] — числа,
      * проценты, единицы, аббревиатуры), а потом режется [SpeechChunker.split] на куски:
-     * ПЕРВЫЙ — короткий (клауз до 120 символов, ≈ 300–500 мс синтеза), поэтому звук
+     * ПЕРВЫЙ — короткий (предложение до 110 символов, ≈ 300–500 мс синтеза), поэтому звук
      * начинается почти мгновенно, остальные ждут в [pending] и стартуют без паузы, как
      * только движок освободится.
      *
@@ -252,7 +332,12 @@ class LocalVoiceTts(
         pieces.forEachIndexed { index, piece ->
             pending.addLast(Piece(piece, first = index == 0))
         }
-        return pump()
+        firstPieceQueued = pieces.isNotEmpty()
+        val started = pump()
+        // Пока звучит первый кусок, остальные уже синтезируются в фоне: следующий стартует
+        // без сетевой паузы.
+        prefetchNext()
+        return started
     }
 
     /**
@@ -267,6 +352,24 @@ class LocalVoiceTts(
         val normalized = runCatching { normalizer.normalize(stripped) }.getOrDefault(stripped)
         val speakable = if (normalized.isBlank()) stripped else normalized
         return SpeechChunker.split(speakable)
+    }
+
+    /**
+     * Очистить ОДИН кусок потока так же, как очищается готовый ответ в [speechPieces].
+     *
+     * Зачем отдельный метод: кусок, попавший в [pending], уходит и в синтез, и в предсинтез
+     * ([prefetchNext]) — оба обязаны получить ОДИН и тот же текст. Если чистить только на
+     * выходе в движок, предсинтез прогревал бы другой текст, и кэш движка не совпал бы ни
+     * разу: пауза между кусками осталась бы прежней, а работа предсинтеза — впустую.
+     *
+     * Пустая строка — кусок целиком состоял из markdown/кода/эмодзи: в очередь его не кладём,
+     * иначе движок получил бы пустую реплику и колбэк «кончилось» вне очереди.
+     */
+    private fun speakableChunk(text: String): String {
+        val stripped = runCatching { filter.stripForSpeech(text) }.getOrDefault(text)
+        if (stripped.isBlank()) return ""
+        val normalized = runCatching { normalizer.normalize(stripped) }.getOrDefault(stripped)
+        return if (normalized.isBlank()) stripped.trim() else normalized.trim()
     }
 
     /**
@@ -310,9 +413,12 @@ class LocalVoiceTts(
     /**
      * Отдать очередную дельту текста ответа.
      *
-     * Нарезка ([ru.mars.mobile.voice.SpeechChunker]) решает сама: первый кусок — по клаузу,
-     * следующие — пачками ~300 символов по границе слова. Куски не теряются: пока движок
-     * говорит, они ждут в очереди и стартуют сразу после конца предыдущего.
+     * Нарезка ([ru.mars.mobile.voice.SpeechChunker]) решает сама: первый кусок — по концу
+     * предложения, следующие — пачками ~160 символов по границе слова (законченное
+     * предложение от 45 символов отдаётся сразу). Куски не теряются: пока движок говорит, они
+     * ждут в очереди и стартуют сразу после конца предыдущего, а очистка
+     * ([SpeechContentFilter] + [VoiceNormalizer]) делается ЗДЕСЬ — в очередь попадает ровно
+     * тот текст, который получит и синтез, и предсинтез.
      *
      * @return `true` — в синтез ушёл (или встал в очередь) хотя бы один кусок; `false` —
      *   накопили, но говорить пока нечего, либо поток не начат.
@@ -326,11 +432,16 @@ class LocalVoiceTts(
             val chunk = SpeechChunker.nextChunk(chunkBuffer, first = chunksSaid == 0) ?: break
             chunkBuffer = chunk.rest
             chunksSaid++
-            pending.addLast(Piece(chunk.text, first = chunksSaid == 1))
+            val speakable = speakableChunk(chunk.text)
+            if (speakable.isEmpty()) continue
+            pending.addLast(Piece(speakable, first = !firstPieceQueued))
+            firstPieceQueued = true
             emitted = true
         }
         if (!emitted) return false
         pump()
+        // Куски в очереди появились — греем следующие, пока звучит текущий.
+        prefetchNext()
         return true
     }
 
@@ -349,9 +460,14 @@ class LocalVoiceTts(
         streamOpen = false
         tail.forEach { text ->
             chunksSaid++
-            pending.addLast(Piece(text, first = chunksSaid == 1))
+            val speakable = speakableChunk(text)
+            if (speakable.isEmpty()) return@forEach
+            pending.addLast(Piece(speakable, first = !firstPieceQueued))
+            firstPieceQueued = true
         }
-        return pump() || pending.isNotEmpty() || engineBusy
+        val accepted = pump() || pending.isNotEmpty() || engineBusy
+        prefetchNext()
+        return accepted
     }
 
     /** Немедленная тишина (новый ход, уход с экрана, конец диалога). */
@@ -394,6 +510,15 @@ class LocalVoiceTts(
     /** Сколько кусков текущего ответа уже отдано: по нему решается «это первый кусок?». */
     private var chunksSaid: Int = 0
 
+    /**
+     * Первый кусок ответа уже в очереди (или уже звучит).
+     *
+     * Отдельный флаг, а не `chunksSaid == 1`: нарезка может выдать кусок, который после чистки
+     * оказался пустым (блок кода, разметка), и тогда первый ЗВУЧАЩИЙ кусок должен всё равно
+     * считаться первым — иначе гейт не получил бы эталон эха и перебивание сломалось бы.
+     */
+    private var firstPieceQueued: Boolean = false
+
     /** Поток ответа открыт (ждём ещё текст): между кусками «говорит» не выключаем. */
     private var streamOpen: Boolean = false
 
@@ -413,6 +538,7 @@ class LocalVoiceTts(
     private fun resetStream() {
         chunkBuffer = ""
         chunksSaid = 0
+        firstPieceQueued = false
         streamOpen = false
         pending.clear()
     }
@@ -448,6 +574,9 @@ class LocalVoiceTts(
             VoiceOutputController.SpeakOutcome.SPOKEN -> {
                 engineBusy = true
                 setSpeaking(true)
+                // Кусок зазвучал — очередь на синтез можно греть прямо сейчас: следующий
+                // стартует уже готовым, без сетевой паузы после этого.
+                prefetchNext()
                 true
             }
 
@@ -471,6 +600,33 @@ class LocalVoiceTts(
                 publishAvailable(false)
                 false
             }
+        }
+    }
+
+    /**
+     * Предсинтез первых кусков очереди, пока движок занят текущим.
+     *
+     * ## Зачем это вообще
+     * Движок синтезирует по одной реплике, и раньше кусок N+1 уходил в синтез только из
+     * [onEngineSilent] — когда N уже отзвучал и наступила полная тишина. Сетевой запрос
+     * (Edge/сервер, а при таймауте ещё и резерв) занимал секунды, и человек слышал паузу
+     * 5–10 секунд сразу после первой запятой. Теперь следующий кусок греется ПОД звук.
+     *
+     * ## Почему два куска, а не один
+     * Пока синтезируется N+1, движок ещё говорит N; когда N кончится, N+1 уже готов, и можно
+     * начинать греть N+2 — иначе пауза вернулась бы уже через кусок. Больше двух греть вредно:
+     * при перебивании ([stop]) вся эта работа выбрасывается, а длинная очередь запросов
+     * занимает канал.
+     *
+     * Безопасность: метод ничего не бросает наружу (предсинтез — оптимизация), не трогает
+     * очередь и не меняет состояние озвучки. Вызывается только когда движок занят — иначе
+     * греть нечего, следующий кусок и так уйдёт в синтез немедленно из [pump].
+     */
+    private fun prefetchNext() {
+        if (!engineBusy || pending.isEmpty()) return
+        // Первые 1–2 куска: именно они зазвучат следующими.
+        pending.take(2).forEach { piece ->
+            runCatching { output.prefetch(piece.text) }
         }
     }
 
@@ -606,6 +762,19 @@ class LocalVoiceTts(
         if (lastAvailable == value) return
         lastAvailable = value
         runCatching { onAvailableChanged(value) }
+    }
+
+    /**
+     * Реплику произнёс резерв, а не выбранный голос — сообщаем хосту.
+     *
+     * Событие одно на реплику и приходит из того движка, который реально деградировал
+     * ([PreferOfflineEngine] — при отказе облака или модели, [ServerTtsSpeechEngine] — при
+     * отказе внутри сетевого канала). Хост решает, как это показать; молча проглотить
+     * событие он уже не может, потому что это единственный канал правды о подмене.
+     */
+    private fun announceSubstitution(substitution: VoiceSubstitution) {
+        if (released) return
+        runCatching { onVoiceSubstituted(substitution) }
     }
 
     private companion object {

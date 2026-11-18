@@ -10,11 +10,14 @@ import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import ru.mars.mobile.PcmWavWriter
 import ru.mars.mobile.VoiceNormalizer
 import ru.mars.mobile.domain.util.SpeechContentFilter
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
@@ -22,6 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 
 /**
  * Офлайн-синтез русской речи на sherpa-onnx (Piper/VITS `ru_RU-irina-medium` float32, 22 050 Гц,
@@ -250,6 +254,99 @@ class OfflineTtsBackend(
     fun setSpeed(value: Float) {
         if (value.isNaN()) return
         speed = value.coerceIn(MIN_SPEED, MAX_SPEED)
+    }
+
+    /**
+     * Синтез одной фразы в готовый WAV — резерв потоковой озвучки серверного чата.
+     *
+     * ## Почему на том же потоке, что и [speak]
+     * `OfflineTts` не потокобезопасен: два `generate*` одновременно — падение в native, а не
+     * исключение. Поэтому работа ставится в ТОТ ЖЕ однопоточный [worker], что и реплики
+     * [speak]: фразы идут строго одна за другой, без мьютексов и без окна, где два синтеза
+     * конкурируют за один нативный объект.
+     *
+     * ## Отмена
+     * Отмена корутины-вызывающего не обрывает native (у `generate` нет внешнего прерывания),
+     * поэтому она двухступенчатая: `invokeOnCancellation` поднимает флаг, а колбэк синтеза
+     * видит его и возвращает [STOP] — native прекращает генерацию на ближайшем предложении.
+     * Плюс к этому результат уже никому не нужен: `isActive` не даёт возобновить мёртвую
+     * корутину. Без флага отменённая фраза занимала бы поток синтеза до конца, и следующая
+     * реплика ждала бы звук, который выбрасывается.
+     *
+     * ## Отказы
+     * Наружу не бросает: движок не поднят, пустой произносимый текст, исключение native —
+     * всё это `null`. Исключение — [kotlinx.coroutines.CancellationException], она
+     * пробрасывается: это отмена вызывающего, а не отказ синтеза.
+     *
+     * @return WAV (PCM16 моно, частота модели) либо `null`, если звука не будет.
+     */
+    override suspend fun synthesizeToWav(text: String): ByteArray? {
+        val body = spokenBody(text)
+        if (body.isEmpty()) return null
+        val current = synchronized(lock) {
+            if (released) return null
+            engine
+        } ?: return null
+        val cancelled = AtomicBoolean(false)
+        return suspendCancellableCoroutine<ByteArray?> { continuation ->
+            continuation.invokeOnCancellation { cancelled.set(true) }
+            val task = Runnable {
+                // Освобождение могло встать в очередь раньше нас: трогать нативный объект
+                // после `release()` нельзя (это падение процесса, а не исключение).
+                val alive = synchronized(lock) { !released && engine === current }
+                val wav = if (!alive) {
+                    null
+                } else {
+                    try {
+                        generateWav(current, body, cancelled)
+                    } catch (t: Throwable) {
+                        log("offline wav synthesis failed: ${t.message}")
+                        null
+                    }
+                }
+                if (continuation.isActive) continuation.resume(wav)
+            }
+            try {
+                worker.execute(task)
+            } catch (rejected: RejectedExecutionException) {
+                // Бэкенд уже освобождён: потока синтеза нет, звука не будет.
+                log("offline wav synthesis skipped: worker is gone")
+                if (continuation.isActive) continuation.resume(null)
+            }
+        }
+    }
+
+    /**
+     * Сгенерировать WAV целиком в памяти. Вызывается ТОЛЬКО с потока [worker].
+     *
+     * `generateWithCallback` (а не `generate`) выбран ради отмены: колбэк получает кусок
+     * после каждого предложения и может вернуть [STOP], прекратив генерацию остатка.
+     * `maxNumSentences = 1` в конфиге значит «кусок на предложение» — пауз в речи это не
+     * добавляет, зато даёт точки, где отмена срабатывает быстро.
+     */
+    private fun generateWav(engine: OfflineTts, body: String, cancelled: AtomicBoolean): ByteArray? {
+        val pcm = ByteArrayOutputStream()
+        var samples = 0
+        engine.generateWithCallback(
+            body,
+            resolveSpeaker(engine),
+            speed,
+            SynthesisCallback(
+                object : SynthesisCallback.Handler {
+                    override fun onSamples(chunk: FloatArray): Int {
+                        if (cancelled.get()) return STOP
+                        if (chunk.isEmpty()) return CONTINUE
+                        val encoded = toPcm16(chunk)
+                        pcm.write(encoded, 0, encoded.size)
+                        samples += chunk.size
+                        return CONTINUE
+                    }
+                },
+            ),
+        )
+        if (cancelled.get() || samples == 0) return null
+        val rate = if (sampleRate > 0) sampleRate else OfflineTtsManifest.SAMPLE_RATE
+        return PcmWavWriter.encode(pcm.toByteArray(), rate, 1)
     }
 
     override fun release() {

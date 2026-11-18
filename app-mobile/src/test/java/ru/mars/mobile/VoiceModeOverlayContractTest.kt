@@ -121,7 +121,11 @@ class VoiceModeOverlayContractTest {
         assertTrue(bg.contains("val fast = scrolling || voiceOrbMode"))
         // Спрятанный слой не должен крутить GL-поток под лентой чата.
         assertTrue(bg.contains("override fun onVisibilityChanged"))
-        assertTrue(bg.contains("if (isShown && windowVisible) resumeRendering() else pauseRendering()"))
+        // Одно условие «можно рисовать» на все входы: attached + окно + видимость предков.
+        // Раньше `switchToCanvasFallback` проверял только `attached && windowVisible` и запускал
+        // Canvas-цикл на спрятанном слое.
+        assertTrue(bg.contains("attached && windowVisible && isShown && !hostPaused"))
+        assertTrue(bg.contains("if (shouldRender()) resumeRendering() else pauseRendering()"))
         // Uniform-переменные выставляются на каждый кадр.
         assertTrue(bg.contains("\"uVoiceLevel\""))
         assertTrue(bg.contains("\"uVoiceNeon\""))
@@ -129,6 +133,90 @@ class VoiceModeOverlayContractTest {
         // Canvas-фоллбэк знает про голосовое гало, а маленькую планету в нём убирает.
         assertTrue(bg.contains("private fun drawVoiceNeon"))
         assertTrue(bg.contains("if (!voiceOrbMode) drawMars(canvas, w, h, minDim)"))
+    }
+
+    @Test
+    fun `громкость фона сглаживается по кадрам, а не подаётся ступенькой`() {
+        val bg = source("src/main/java/ru/mars/mobile/MarsSpaceBackgroundView.kt")
+        // Контроллер присылает уровень 10–16 раз в секунду. Пока эти числа шли в uniform напрямую,
+        // неоновая туманность вспыхивала ступенькой каждые 60–100 мс — при 60 кадрах это рывки,
+        // и тем заметнее, что корона планеты в это же время шла плавно.
+        assertTrue("цель сглаживания — отдельное поле", bg.contains("private var voiceLevelTarget"))
+        assertTrue("кадр обязан двигать амплитуду", bg.contains("advanceVoiceLevel(dt)"))
+        assertTrue(
+            "сглаживание — то же, что у орба",
+            bg.contains("OrbMotionPolicy.smoothLevel(voiceLevel, voiceLevelTarget, dt)"),
+        )
+        // Ступенька не должна вернуться: `setVoiceState` не пишет громкость в рендерер напрямую.
+        assertFalse(
+            "громкость не должна подаваться в uniform напрямую из setVoiceState",
+            bg.contains("renderer.voiceLevel = nextLevel"),
+        )
+        // Единственная точка, где сглаженное значение расходится по потребителям.
+        assertTrue(bg.contains("private fun setVoiceLevel(value: Float)"))
+    }
+
+    @Test
+    fun `статичный кадр фона доносит новые uniform и не собирает градиент на каждый кадр`() {
+        val bg = source("src/main/java/ru/mars/mobile/MarsSpaceBackgroundView.kt")
+        // Без кадров (reduce motion, скрытый слой) новые uniform'ы донести некому: нужен один
+        // статичный кадр, иначе фон навсегда остался бы на цвете прошлой фазы.
+        assertTrue(bg.contains("private fun requestVoiceFrame()"))
+        assertTrue(bg.contains("drawStaticFrame()"))
+        // Неоновая корона фоллбэка кэшируется, пульс идёт через Paint.alpha: RadialGradient на
+        // каждом кадре — это шейдер, собранный 60 раз в секунду.
+        assertTrue(bg.contains("private var neonShader: RadialGradient?"))
+        assertTrue(bg.contains("neonPaint.alpha = (alpha * 255f).toInt().coerceIn(0, 255)"))
+    }
+
+    @Test
+    fun `пауза слоя останавливает движение, но не перекрашивает орб`() {
+        val src = source(OVERLAY)
+        // Было `orb.render(IDLE, pulses = false)` в onPause: пауза перекрашивала орб в покой, и на
+        // возврате он вспыхивал из рубинового IDLE в цвет текущей фазы.
+        assertFalse(
+            "пауза не должна подменять фазу",
+            src.contains("fun onPause() = orb.render(VoiceModeTone.IDLE, pulses = false)"),
+        )
+        assertTrue(src.contains("orb.pauseMotion()"))
+        assertTrue(src.contains("orb.resumeMotion()"))
+        assertTrue(src.contains("spaceBg.pauseMotion()"))
+        assertTrue(src.contains("spaceBg.resumeMotion()"))
+    }
+
+    @Test
+    fun `подпись фазы больше не красится статусными цветами`() {
+        val src = source(OVERLAY)
+        // Зелёный «онлайн», жёлтое «предупреждение» и голубое «инфо» на тёплом Марсе читались
+        // как три разных приложения в одной строке.
+        for (status in listOf("STATUS_ONLINE", "STATUS_WARNING", "STATUS_INFO")) {
+            for (tone in listOf("LISTENING", "THINKING", "SPEAKING")) {
+                assertFalse(
+                    "тон $tone не должен брать резкий статусный $status",
+                    src.contains("VoiceModeTone.$tone -> MarsTheme.$status"),
+                )
+            }
+        }
+        assertTrue(src.contains("VoiceModeTone.IDLE -> MarsTheme.TEXT_MUTED"))
+        assertTrue(
+            "подпись активной фазы — неон фазы, приглушённый к текстовому",
+            src.contains("VoiceNeonPalette.lerpColor(VoiceNeonPalette.of(tone), MarsTheme.TEXT, TONE_TEXT_MIX)"),
+        )
+        assertTrue(src.contains("const val TONE_TEXT_MIX = 0.55f"))
+    }
+
+    @Test
+    fun `неон фона перетекает между фазами плавно`() {
+        val bg = source("src/main/java/ru/mars/mobile/MarsSpaceBackgroundView.kt")
+        // Цель и текущее значение — разные поля: иначе `uVoiceNeon` переключался бы за один кадр.
+        assertTrue(bg.contains("private var targetNeonR"))
+        assertTrue(bg.contains("private var targetNeonG"))
+        assertTrue(bg.contains("private var targetNeonB"))
+        assertTrue(bg.contains("private var targetNeonColor"))
+        assertTrue("шаг перехода — общая экспонента палитры", bg.contains("VoiceNeonPalette.stepFactor(dt)"))
+        assertTrue("кадр обязан двигать переход", bg.contains("advanceVoiceNeon(dt)"))
+        // Без кадров (reduce motion / скрытый слой) цвет ставится сразу.
+        assertTrue(bg.contains("snapVoiceNeon()"))
     }
 
     /** Исходник от текущего каталога вверх: тест может бежать из модуля и из корня репозитория. */

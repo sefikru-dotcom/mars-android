@@ -369,12 +369,20 @@ internal class VoiceModeOverlay(activity: Activity) {
         }
         root.visibility = View.VISIBLE
         isShowing = true
+        // Слой мог быть показан сразу после паузы активности: снимаем паузу ДО первого кадра,
+        // иначе орб и фон остались бы стоять, пока хост не позовёт onResume.
+        orb.resumeMotion()
+        spaceBg.resumeMotion()
         render(lastState)
         val channel = LocalVoiceController.active()
         channel?.continuousConversation = true
         // Живая громкость речи → неоновая пульсация планеты: подписка на время показа слоя,
         // потому что в чате этот колбэк никто не слушает, а кадры орба там не нужны.
         channel?.onAudioLevel = { level -> setLevel(level) }
+        // Фаза меняется не только от кадров ленты. «Стоп» гасит озвучку в контроллере, а лента
+        // в этот момент уже не меняется — без этой подписки орб оставался бы в «Говорю…» с
+        // кнопкой «Стоп» поверх тишины, то есть кнопка выглядела бы нерабочей.
+        channel?.onStateObserver = { next -> if (isShowing) renderPhase(next) }
         // Модель распознавания (23 МиБ) греется именно здесь: человек уже выбрал голосовой
         // режим, и ждать загрузку на первом слове он не должен.
         channel?.warmUpAsrInBackground()
@@ -399,10 +407,13 @@ internal class VoiceModeOverlay(activity: Activity) {
         channel?.continuousConversation = false
         // Слой скрыт — подписка на громкость снимается: орба на экране нет, кадры не нужны.
         channel?.onAudioLevel = null
+        // Наблюдатель фазы тоже снимается: скрытый слой не должен перерисовываться (и держать
+        // ссылку на своё View-дерево) после закрытия разговора.
+        channel?.onStateObserver = null
         setLevel(0f)
-        if (channel != null && channel.state().phase == LocalVoicePhase.LISTENING) {
-            channel.cancelListening()
-        }
+        // Гасим захват в любой фазе, а не только в LISTENING: при голосовом перебивании
+        // микрофон открыт и в SPEAKING, и «свернул разговор» не должен оставить его слушать.
+        if (channel != null) channel.cancelListening()
     }
 
     /** Крестик: сначала сообщаем хосту (он может остановить речь), потом прячемся. */
@@ -440,6 +451,23 @@ internal class VoiceModeOverlay(activity: Activity) {
     }
 
     /**
+     * Смена фазы канала — без ожидания кадра хоста.
+     *
+     * Хост перерисовывает слой на каждое изменение ЛЕНТЫ (дельты стрима), но не на каждое
+     * изменение фазы. Нажатие «Стоп» — ровно тот случай, когда лента уже стоит, а звук и
+     * подпись обязаны измениться тем же кадром: иначе орб продолжает говорить «Говорю…» с
+     * живой кнопкой «Стоп», и человек нажимает её второй раз, считая, что не сработало.
+     *
+     * Строки диалога сохраняются из последнего снимка хоста: контроллер о них не знает (он
+     * отдаёт только партиал), а подменять показанный ответ пустой строкой значило бы «мигать»
+     * транскриптом на каждой смене фазы.
+     */
+    private fun renderPhase(next: LocalVoiceState) {
+        val userLine = next.partial.ifBlank { lastState.userLine }
+        render(lastState.copy(phase = next.phase, notice = next.notice, userLine = userLine))
+    }
+
+    /**
      * Амплитуда микрофона 0..1: и орб, и 3D-туманность заставки дышат по речи.
      *
      * Один вход — два потребителя, и оба получают одно и то же число: корона планеты и неоновая
@@ -454,21 +482,40 @@ internal class VoiceModeOverlay(activity: Activity) {
         spaceBg.setVoiceState(next, neon)
     }
 
-    /** Экран ушёл в фон: кадры останавливаются, состояние слоя сохраняется. */
-    fun onPause() = orb.render(VoiceModeTone.IDLE, pulses = false)
+    /**
+     * Экран ушёл в фон: кадры останавливаются, состояние слоя сохраняется.
+     *
+     * Раньше здесь стоял `orb.render(IDLE, pulses = false)`, то есть пауза ещё и ПЕРЕКРАШИВАЛА
+     * орб в покой: на возврате снимок применялся заново, и орб вспыхивал из рубинового `IDLE` в
+     * цвет текущей фазы — хотя человек всего лишь свернул и развернул приложение. Теперь пауза
+     * останавливает движение, не трогая фазу: [VoiceModeOrbView.pauseMotion] не меняет ни тон, ни
+     * цели, и переход продолжается с того же места.
+     */
+    fun onPause() {
+        orb.pauseMotion()
+        spaceBg.pauseMotion()
+    }
 
     /** Экран вернулся: снимок применяется заново (орб снова дышит, если есть фаза). */
-    fun onResume() = render(lastState)
+    fun onResume() {
+        spaceBg.resumeMotion()
+        orb.resumeMotion()
+        render(lastState)
+    }
 
     /**
-     * Цвет фазы. Роли взяты из палитры статусов, потому что отдельной роли «слушаю» нет:
-     * зелёный — канал открыт, предупреждение — ждём модель, инфо — говорит.
+     * Цвет подписи фазы.
+     *
+     * Раньше здесь стояли статусные роли ([MarsTheme.STATUS_ONLINE] зелёный, `STATUS_WARNING`
+     * жёлтый, [MarsTheme.STATUS_INFO] голубой): на тёплом Марсе подпись «Говорю» светилась
+     * холодным голубым и спорила с планетой — тот же резкий разнобой, что был в палитре орба.
+     * Теперь подпись берёт неон фазы и приглушает его к текстовому цвету на 55%: она меняется
+     * вместе с короной, остаётся читаемой на стекле и не выпадает из гаммы. Покой — приглушённый
+     * текст: в покое сообщать нечего, и цветной акцент там был бы шумом.
      */
     private fun toneColor(tone: VoiceModeTone): Int = when (tone) {
         VoiceModeTone.IDLE -> MarsTheme.TEXT_MUTED
-        VoiceModeTone.LISTENING -> MarsTheme.STATUS_ONLINE
-        VoiceModeTone.THINKING -> MarsTheme.STATUS_WARNING
-        VoiceModeTone.SPEAKING -> MarsTheme.STATUS_INFO
+        else -> VoiceNeonPalette.lerpColor(VoiceNeonPalette.of(tone), MarsTheme.TEXT, TONE_TEXT_MIX)
     }
 
     /** Текст либо прячется целиком: пустая строка держала бы высоту и рвала ритм. */
@@ -543,5 +590,13 @@ internal class VoiceModeOverlay(activity: Activity) {
         /** Орб теперь нажимается: скринридер обязан сказать, что именно он делает. */
         const val ORB_DESCRIPTION = "Планета Марс. Нажмите, чтобы говорить или остановить ответ"
         const val RETRY_LABEL = "Повторить"
+
+        /**
+         * Сколько текстового цвета подмешано в неон подписи фазы.
+         *
+         * 0.55 — подпись остаётся узнаваемо «своей» по фазе, но уходит из чистого неона в
+         * приглушённый пастельный тон: чистый неон на стекле читался как подсветка, а не как текст.
+         */
+        const val TONE_TEXT_MIX = 0.55f
     }
 }

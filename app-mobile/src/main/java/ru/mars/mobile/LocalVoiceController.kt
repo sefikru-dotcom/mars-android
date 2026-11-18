@@ -54,6 +54,29 @@ import java.util.Locale
  * [CONTINUOUS_RESTART_DELAY_MS]. Это единственное место, где захват живёт дольше одной реплики,
  * и включается он только явным входом в голосовой режим.
  *
+ * ## Два способа перебить ответ — и они не смешиваются
+ * - **жест**: тап по микрофону или орбу зовёт [stopSpeaking] — звук гаснет немедленно,
+ *   доказательств не требуется. Намерение «молчи» ([AnswerSpeechGate]) держится до конца ЭТОГО
+ *   ответа: иначе следующая дельта потоковой озвучки включала бы звук обратно, и кнопка «Стоп»
+ *   выглядела бы сломанной;
+ * - **голос**: пока звучит ОТВЕТ, микрофон открывается/остаётся открытым ([armBargeInMic]), а
+ *   подтверждает перебивание [BargeInGate] по длительности речи (и по тексту, если он есть).
+ *
+ * ## Где акустического перебивания нет и почему
+ * Дуплекса на динамике не будет: микрофон слышит собственную озвучку, и «человек говорит 900 мс»
+ * там ничего не доказывает. Поэтому [BargeInMicPolicy] требует одновременно трёх вещей:
+ * - **доказанный** маршрут в наушники ([ActiveOutput]), а не «в списке доступных есть гарнитура»:
+ *   воткнутая гарнитура не значит, что звук идёт в неё. Нет доказательства — автоперебивание
+ *   выключено, и это штатное состояние, а не деградация;
+ * - что звучит именно ОТВЕТ ([SpeechPurpose]): заглушка «Секунду, думаю.» и предпросмотр
+ *   («Озвучить» у сообщения) микрофон не открывают — перебивать там нечего, а захваченное ими
+ *   уходило бы в чат новым вопросом;
+ * - что экран на переднем плане и микрофон не занят фоновым сервисом.
+ * Захват, открытый ради предбуфера ([MicMode.PRE_ROLL]), микрофоном перебивания не считается: он
+ * копит звук для реплики человека, и ответ Марса, записанный в него, стал бы её началом. Сторож
+ * микрофона ([MicCaptureWatchdog]) к захвату перебивания не применяется вовсе: тишина там — норма
+ * (человек слушает), а не мёртвый `AudioRecord`.
+ *
  * ## Два канала распознавания
  * Основной — офлайн-движок sherpa-onnx ([StreamingAsrEnginePort]): приватно, без сети, с живым
  * партиалом. Системный `android.speech.SpeechRecognizer` ([startPlatformSpeechRecognizer])
@@ -96,6 +119,24 @@ class LocalVoiceController(
      */
     private val offlineTts: (() -> ru.mars.mobile.tts.OfflineTtsPort?)? = null,
     private val speakAnswers: Boolean = true,
+    /**
+     * Акустическое перебивание: микрофон остаётся/открывается, пока Марс говорит.
+     *
+     * Решение «можно ли» принимает [BargeInMicPolicy], и одного этого флага мало: нужен ещё
+     * ДОКАЗАННЫЙ активный маршрут в наушники ([ActiveOutput]), речь именно ответа ([SpeechPurpose])
+     * и передний план экрана. Поэтому `true` по умолчанию безопасно: оно ничего не включает там,
+     * где перебивание нельзя доказать, и не включает дуплекс на динамике.
+     */
+    private val bargeInDuringSpeech: Boolean = true,
+    /**
+     * Реплику произнёс не выбранный голос, а резерв ([VoiceSubstitution]).
+     *
+     * Событие уходит хосту, а не глотается здесь: подмена голоса — не ошибка, но и не
+     * секрет. Без этой проводки человек, выбравший «Алису», слышал робота Android и не знал,
+     * почему (подтверждённый дефект: колбэк был объявлен в [LocalVoiceTts], но хост его не
+     * передавал). Экран показывает текст из [VoiceSubstitutionNotice].
+     */
+    private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
 ) {
 
     private val main = Handler(Looper.getMainLooper())
@@ -139,7 +180,11 @@ class LocalVoiceController(
     /**
      * Захват уже отдаёт PCM напрямую в движок (реплика открыта). `false` — микрофон открыт
      * только ради предбуфера, пока грузится модель.
+     *
+     * `@Volatile`, потому что это единственный признак, отличающий рабочий захват от предбуфера:
+     * по нему [micMode] решает, можно ли считать открытый микрофон микрофоном перебивания.
      */
+    @Volatile
     private var streamingToEngine = false
 
     /**
@@ -163,6 +208,65 @@ class LocalVoiceController(
      * [finishWith], снимается первым же [onAnswerCompleted], поэтому не переживает свой ход.
      */
     private var voiceTurn = false
+
+    /**
+     * Намерение человека «молчи» на ТЕКУЩИЙ ответ (см. [AnswerSpeechGate]).
+     *
+     * Отдельно от [stopSpeaking]: стоп звука зовут и внутренние пути (новый ход, уход экрана,
+     * закрытие режима), и они НЕ означают «человек попросил тишины». Слить эти два случая в
+     * один флаг значило бы глушить озвучку каждого следующего ответа после любого `onPause`.
+     */
+    private val speechGate = AnswerSpeechGate()
+
+    /**
+     * Захват открыт НАМЕРЕННО во время озвучки — для перебивания голосом.
+     *
+     * Отличается от «микрофон открыт» принципиально: такой захват нельзя закрывать в
+     * [closeMicForAssistantSpeech] (там закрытие защищает от эха, а на наушниках эха нет и
+     * закрытие убивало бы ровно ту реплику, которой человек перебивает).
+     */
+    private var bargeInMicOpen = false
+
+    /**
+     * Захват открыт ИМЕННО ради перебивания, а не человеком ради реплики.
+     *
+     * Нужен на конце озвучки: микрофон, который подняли только для доказательств перебивания, а
+     * человек так и не заговорил, обязан закрыться. Иначе после ответа он оставался бы слушать —
+     * в обычном чате это нарушает «одна реплика на одно нажатие», а первая же случайная фраза
+     * уходила бы в чат вопросом.
+     */
+    private var bargeInOwnedCapture = false
+
+    /**
+     * Политика перебивания текущего ответа ([BargeInGate]) — та же, что решает судьбу озвучки.
+     *
+     * Контроллер держит ссылку не ради дублирования решений: [BargeInGate.acceptedCount] — это
+     * единственный признак «озвучка замолчала потому, что человек перебил», доступный ВНУТРИ
+     * колбэка «звук кончился». Счётчик растёт до остановки звука, а результат `offerSpeech`
+     * возвращается уже после этого колбэка, поэтому по нему решение принималось бы на шаг позже —
+     * и захват перебивания закрывался бы вместе с речью человека.
+     */
+    private val bargeInGate = BargeInGate()
+
+    /**
+     * Что именно звучит сейчас: ответ, заглушка или предпросмотр ([SpeechPurpose]).
+     *
+     * Ставится ровно перед тем вызовом, который запускает речь, и снимается на её конце. Без него
+     * [armBargeInMic] не отличал ответ от «Секунду, думаю.» и от пункта «Озвучить» — и открывал
+     * микрофон там, где перебивать нечего, а записанное уходило в чат новым вопросом.
+     */
+    private var speechPurpose: SpeechPurpose = SpeechPurpose.NONE
+
+    /**
+     * Второй наблюдатель состояния — для полноэкранного слоя ([VoiceModeOverlay]).
+     *
+     * Зачем отдельный канал, если есть `onState` в конструкторе. `onState` принадлежит хосту
+     * (кнопка композера + строка статуса) и не перерисовывает слой: слой обновлялся только из
+     * `LocalChatActivity.render`, то есть на изменение ЛЕНТЫ. Нажатие «Стоп» ленту не меняет —
+     * орб оставался в «Говорю…» с живой кнопкой «Стоп», хотя звук уже заглушён. Это и выглядело
+     * как «кнопка стоп не работает».
+     */
+    var onStateObserver: ((LocalVoiceState) -> Unit)? = null
 
     private var released = false
 
@@ -472,7 +576,11 @@ class LocalVoiceController(
      */
     fun onTurnStarted() {
         if (released) return
-        stopSpeaking()
+        // Новый ход снимает «молчи»: стоп относился к прошлому ответу, а не к диалогу.
+        speechGate.onNewTurn()
+        // Внутренняя тишина, а не [stopSpeaking]: новый ход — не просьба человека замолчать,
+        // иначе первый же `send()` глушил бы озвучку своего же ответа.
+        silenceSpeech()
         // Новый ход — новые подсказки: «Секунду, думаю» звучит не чаще раза за ход.
         cancelThinkingHint()
         hintSpoken = false
@@ -498,7 +606,7 @@ class LocalVoiceController(
      */
     fun onAnswerStarted(): Boolean {
         if (released) return false
-        if (!speakAnswers || !voiceTurn) return false
+        if (!speechGate.canSpeak(speakAnswers, voiceTurn)) return false
         val voice = ensureTts() ?: return false
         if (!voice.available) return false
         // Ответ будет озвучен — значит микрофон обязан быть закрыт ДО первого слова. Захват,
@@ -506,6 +614,9 @@ class LocalVoiceController(
         closeMicForAssistantSpeech()
         cancelThinkingHint()
         streamedTurn = false
+        // Что звучит — ответ, а не заглушка и не предпросмотр: только на это [armBargeInMic]
+        // имеет право открыть микрофон для перебивания.
+        speechPurpose = SpeechPurpose.ANSWER
         return runCatching { voice.beginStream() }.getOrDefault(false)
     }
 
@@ -521,13 +632,16 @@ class LocalVoiceController(
      */
     fun onAnswerDelta(delta: String?): Boolean {
         if (released) return false
-        if (!speakAnswers || !voiceTurn) return false
+        if (!speechGate.canSpeak(speakAnswers, voiceTurn)) return false
         if (delta.isNullOrEmpty()) return false
         val voice = tts ?: return false
         // Первый же кусок означает «сейчас зазвучит речь»: открытый микрофон надо закрыть до него,
         // иначе ранний старт озвучки сам себя запишет.
         closeMicForAssistantSpeech()
         cancelThinkingHint()
+        // Дельты приходят только на ответ — но помечаем явно: от этой метки зависит, можно ли
+        // держать микрофон открытым во время речи.
+        speechPurpose = SpeechPurpose.ANSWER
         // Первый же принятый кусок отменяет подсказку: текст появился — заглушка не нужна.
         val accepted = runCatching { voice.appendStream(delta) }.getOrDefault(false)
         // Отданный кусок означает, что первые символы уже говорятся — вторую дозу текста
@@ -580,6 +694,15 @@ class LocalVoiceController(
         // больше не может договорить вместо ответа, и автостарт микрофона разрешён.
         answerPending = false
         cancelThinkingHint()
+        // Человек заглушил этот ответ кнопкой «Стоп». Читать его целиком сейчас нельзя — это и
+        // есть дефект «нажал стоп, а он всё равно заговорил»: ответ дочитывался с начала.
+        // Намерение живёт один ответ, поэтому здесь же снимается.
+        if (speechGate.mutedByUser) {
+            speechGate.onNewTurn()
+            streamedTurn = false
+            returnToRest()
+            return
+        }
         // Поток уже говорил этот ответ: дозвучиваем хвост и НЕ читаем текст заново.
         if (streamedTurn) {
             streamedTurn = false
@@ -593,7 +716,7 @@ class LocalVoiceController(
             }
             return
         }
-        if (!speakAnswers || !fromVoice || body.isEmpty()) {
+        if (!speechGate.canSpeak(speakAnswers, fromVoice) || body.isEmpty()) {
             // Открытый микрофон не трогаем: иначе фаза стала бы IDLE при живом захвате, и
             // следующий тап «закончить» не нашёл бы, что закрывать.
             if (state.phase != LocalVoicePhase.LISTENING) {
@@ -611,6 +734,8 @@ class LocalVoiceController(
             scheduleContinuousListening()
             return
         }
+        // Это ответ текущего голосового хода — единственная речь, которую можно перебить голосом.
+        speechPurpose = SpeechPurpose.ANSWER
         val accepted = runCatching { voice.speak(body) }.getOrDefault(false)
         if (accepted) {
             emit(state.copy(phase = LocalVoicePhase.SPEAKING, partial = "", ttsAvailable = true, notice = null))
@@ -634,8 +759,19 @@ class LocalVoiceController(
         if (released) return
         cancelThinkingHint()
         answerPending = false
+        // Ответ был заглушён человеком: хвоста нет и читать его заново нельзя. Но диалог обязан
+        // продолжиться — иначе после «Стоп» микрофон не открылся бы до следующего тапа, и стоп
+        // превращался бы в «выключить разговор».
+        if (speechGate.mutedByUser) {
+            speechGate.onNewTurn()
+            streamedTurn = false
+            returnToRest()
+            return
+        }
         if (!streamedTurn) return
         streamedTurn = false
+        // Хвост ответа — тоже ответ: перебивать его голосом можно на тех же условиях.
+        speechPurpose = SpeechPurpose.ANSWER
         val tail = tts?.let { runCatching { it.endStream() }.getOrDefault(false) } ?: false
         if (tail && state.phase != LocalVoicePhase.SPEAKING) {
             emit(state.copy(phase = LocalVoicePhase.SPEAKING, partial = "", ttsAvailable = true))
@@ -666,6 +802,8 @@ class LocalVoiceController(
         if (released) return
         val body = text?.trim().orEmpty()
         if (body.isEmpty()) return
+        // Явная просьба «прочитай» сильнее прошлого «молчи»: человек сам нажал кнопку.
+        speechGate.onNewTurn()
         val voice = ensureTts()
         if (voice == null || !voice.available) {
             emit(state.copy(ttsAvailable = false, notice = TTS_UNAVAILABLE))
@@ -673,14 +811,42 @@ class LocalVoiceController(
         }
         // Речь с динамика в открытый микрофон попадать не должна — ни при каком пути к озвучке.
         closeMicForAssistantSpeech()
+        // Это ПРЕДПРОСМОТР сообщения, а не ответ на вопрос: перебивать его голосом нечего, и
+        // микрофон под него не открывается ([BargeInMicPolicy]).
+        speechPurpose = SpeechPurpose.PREVIEW
         if (runCatching { voice.speak(body) }.getOrDefault(false)) {
             emit(state.copy(phase = LocalVoicePhase.SPEAKING, ttsAvailable = true, notice = null))
         }
     }
 
-    /** Немедленная тишина (перебивание жестом или конец диалога). */
+    /**
+     * Немедленная тишина по воле человека: кнопка «Стоп» на орбе, тап по микрофону во время
+     * ответа, кнопка композера.
+     *
+     * Отличие от [silenceSpeech] — намерение. Здесь человек просит тишины, и она держится до
+     * конца ЭТОГО ответа: иначе следующий же кусок потоковой озвучки включал бы звук обратно, и
+     * кнопка выглядела бы сломанной (звук пропадал на полсекунды и возвращался).
+     *
+     * Микрофон при этом не закрывается, если он уже открыт: «стоп» — это «замолчи и слушай
+     * меня», а не «выключи разговор».
+     */
     fun stopSpeaking() {
+        speechGate.onUserStop()
+        silenceSpeech()
+        returnToRest()
+    }
+
+    /**
+     * Тишина без изменения намерения: новый ход, уход экрана в фон, закрытие режима.
+     *
+     * Не трогает [AnswerSpeechGate]: эти пути не значат «человек попросил молчания», и если бы
+     * они взводили флаг, озвучка пропала бы до конца жизни контроллера.
+     */
+    private fun silenceSpeech() {
         val wasSpeaking = tts?.isSpeaking == true || state.phase == LocalVoicePhase.SPEAKING
+        // Речь гасится своими руками — «что звучало» больше не актуально; следующий путь к
+        // озвучке выставит метку сам.
+        speechPurpose = SpeechPurpose.NONE
         tts?.stopByUser()
         stopSpeechEnvelope()
         publishLevel(0f)
@@ -688,6 +854,26 @@ class LocalVoiceController(
         // отсчитывается от него, а не от последнего слова.
         if (wasSpeaking) lastSpeechEndedAtMs = watchdogClock()
         if (state.phase == LocalVoicePhase.SPEAKING) emit(state.copy(phase = LocalVoicePhase.IDLE))
+    }
+
+    /**
+     * Вернуть канал в «готов слушать»: открытый захват остаётся слушать, закрытый — открывается
+     * сам в непрерывном разговоре.
+     *
+     * Нужен там, где звук кончился не по концу речи (стоп человека, конец заглушённого ответа,
+     * конец озвучки): фаза обязана отражать ФАКТИЧЕСКОЕ состояние микрофона, иначе орб пишет
+     * «Нажмите, чтобы говорить», пока микрофон уже слушает.
+     */
+    private fun returnToRest() {
+        if (released) return
+        if (capture?.isCapturing == true) {
+            if (state.phase != LocalVoicePhase.LISTENING) {
+                emit(state.copy(phase = LocalVoicePhase.LISTENING, partial = "", notice = null))
+            }
+            return
+        }
+        if (state.phase == LocalVoicePhase.SPEAKING) emit(state.copy(phase = LocalVoicePhase.IDLE))
+        scheduleContinuousListening()
     }
 
     /** Пересчитать доступность: разрешение могли выдать или отозвать в настройках. */
@@ -729,12 +915,16 @@ class LocalVoiceController(
         // Автостарт следующей реплики в фоне не нужен: микрофон в кармане — это не разговор.
         cancelContinuousRestart()
         stopSpeechEnvelope()
-        if (state.phase == LocalVoicePhase.LISTENING) cancelListening()
+        // Гасим захват в ЛЮБОЙ фазе: при перебивании он открыт и в SPEAKING, а `onPause` —
+        // это «экран ушёл в фон», где микрофон не должен работать ни под какой подписью.
+        cancelListening()
         // Микрофон мог быть открыт ради предбуфера (модель ещё грузится): в фоне он не нужен,
         // а накопленное всё равно уже не «начало фразы».
         abandonPreRoll()
         if (MarsVoiceService.conversationActive) return
-        stopSpeaking()
+        // Уход экрана — не просьба молчать: флаг «стоп» здесь не взводится, иначе вернувшись
+        // человек не услышал бы ни одного ответа до перезапуска экрана.
+        silenceSpeech()
     }
 
     /**
@@ -774,6 +964,9 @@ class LocalVoiceController(
         released = true
         if (activeController === this) activeController = null
         continuousConversation = false
+        // Наблюдатель слоя держит ссылку на View-дерево экрана: после освобождения контроллера
+        // он не должен вызываться ни разу.
+        onStateObserver = null
         main.removeCallbacks(watchdogTick)
         main.removeCallbacks(thinkingHint)
         main.removeCallbacks(continuousRestart)
@@ -1175,7 +1368,9 @@ class LocalVoiceController(
             abandonPreRoll()
             return
         }
-        val buffering = capture?.isCapturing == true && !streamingToEngine
+        // Предбуфер или рабочий захват — решает [micMode], а не «захват открыт»: различие между
+        // ними и есть то место, где терялось начало фразы.
+        val buffering = micMode() == MicMode.PRE_ROLL
         // Живой захват не переоткрываем (второй `AudioRecord` отобрал бы звук у первого), но и
         // не выходим молча: перед новым захватом прошлый ОБЯЗАН быть освобождён — иначе тап
         // выглядит мёртвым, а `handledUtterance` не сбрасывается.
@@ -1184,23 +1379,28 @@ class LocalVoiceController(
         tts?.stopByUser()
         // Дальше громкость придёт из настоящего PCM: синтетическая огибающая больше не нужна.
         stopSpeechEnvelope()
-        // Реплика открывается ДО первого чтения: иначе первые буферы микрофона придут вне
-        // реплики и [StreamingStt] их отбросит (а это начало фразы). Здесь же снимаются флаги
-        // прошлого цикла: новая реплика — новый `Final`, и ответ прошлого хода уже не озвучивается.
-        handledUtterance = false
-        voiceTurn = false
-        wrapper.startUtterance()
-        // Накопленное за время загрузки модели уходит в стрим первым, и только потом флаг
-        // переключает поток чтения на прямой путь — под тем же замком, чтобы порядок не поехал.
-        synchronized(pcmLock) {
-            val buffered = preRoll?.drain()
-            if (buffered != null && buffered.isNotEmpty()) wrapper.acceptPcm(buffered, buffered.size)
-            streamingToEngine = true
-        }
+        /*
+         * Микрофон открывается ДО реплики, а не после.
+         *
+         * `AudioRecord` (с AEC/NS/AGC — их включает [AudioCapturePolicy]) стартует 100–300 мс:
+         * `create()` + `startRecording()` на аппаратном тракте не мгновенные. Пока порядок был
+         * «startUtterance → открыть микрофон», всё, что человек сказал в это окно, физически не
+         * записывалось — терялось начало фразы (жалоба «пропускает первое слово»). Теперь
+         * запись стартует первой, а звук этого окна копится в [PreRollAudioBuffer] и уходит в
+         * стрим ПЕРЕД живыми байтами: порядок держит [pcmLock], поэтому первый чанк не может
+         * обогнать накопленное.
+         */
         if (!buffering) {
+            val buffer = preRoll ?: PreRollAudioBuffer().also { preRoll = it }
+            // Предбуфер принадлежит НОВОЙ реплике: мусор прошлой (в том числе хвост эха) не
+            // должен стать её началом.
+            buffer.clear()
+            synchronized(pcmLock) { streamingToEngine = false }
             val fresh = HandsFreeCapture()
             val started = runCatching { fresh.start(captureListener, rawPcmListener) }.getOrDefault(false)
             if (!started) {
+                // Микрофон не открылся: снимаем всё, что успели подготовить, иначе следующий
+                // `startCapture` увидит «полуоткрытое» состояние и промолчит.
                 closeCapture()
                 runCatching { wrapper.cancelUtterance() }
                 emit(state.copy(notice = MIC_UNAVAILABLE))
@@ -1208,15 +1408,46 @@ class LocalVoiceController(
             }
             capture = fresh
         }
+        // Здесь же снимаются флаги прошлого цикла: новая реплика — новый `Final`, и ответ
+        // прошлого хода уже не озвучивается.
+        handledUtterance = false
+        voiceTurn = false
+        // Реплика открывается под тем же замком, что и переход на прямой путь: буферы, пришедшие
+        // за время старта микрофона, встают в стрим первыми, а живые — сразу за ними.
+        synchronized(pcmLock) {
+            wrapper.startUtterance()
+            val buffered = preRoll?.drain()
+            if (buffered != null && buffered.isNotEmpty()) wrapper.acceptPcm(buffered, buffered.size)
+            streamingToEngine = true
+        }
         emit(state.copy(phase = LocalVoicePhase.LISTENING, partial = "", notice = null))
         // Захват открылся — но это ещё не значит, что из него идёт звук (см. [MicCaptureWatchdog]).
         armMicWatchdog(restarted)
+    }
+
+    /**
+     * Что сейчас делает микрофон — одна точка правды вместо `capture?.isCapturing` в каждом месте.
+     *
+     * Различие [MicMode.PRE_ROLL] и [MicMode.STREAMING] — не косметика. Предбуфер копит звук для
+     * реплики человека и ещё не отдаёт его движку; приняв его за рабочий захват, [armBargeInMic]
+     * объявлял микрофоном перебивания микрофон, который записывал ответ Марса в НАЧАЛО будущей
+     * фразы человека — и эта фраза уходила в чат вместе с озвучкой.
+     */
+    private fun micMode(): MicMode = when {
+        capture?.isCapturing != true -> MicMode.CLOSED
+        streamingToEngine -> MicMode.STREAMING
+        else -> MicMode.PRE_ROLL
     }
 
     private fun closeCapture() {
         // Сторож живёт только рядом с живым захватом: без этого он «сдавался» бы уже после
         // закрытия микрофона и показывал человеку ложное «микрофон не отвечает».
         main.removeCallbacks(watchdogTick)
+        // Захват закрыт — перебивания больше нет: следующий ответ снова закроет микрофон
+        // штатным путём (иначе флаг навсегда отключал бы защиту от эха).
+        bargeInMicOpen = false
+        // Захвата нет — нет и его владельца: флаг относится ровно к этому захвату, а не к ответу.
+        bargeInOwnedCapture = false
         synchronized(pcmLock) {
             // Предбуфер живёт только вместе с захватом: после закрытия его содержимое — уже
             // не «начало фразы», а мусор прошлой реплики.
@@ -1228,6 +1459,19 @@ class LocalVoiceController(
         runCatching { current.cancel() }
         // Захват закрыт — источник громкости иссяк: орб не должен застыть на последнем слове.
         publishLevel(0f)
+    }
+
+    /**
+     * Закрыть захват, поднятый ради перебивания, вместе с недописанной репликой.
+     *
+     * Отдельно от [closeCapture], потому что здесь реплика в движке НЕ должна дожить до `Final`:
+     * человек ничего не сказал (иначе перебивание подтвердилось бы), а случайный `Final` из шума
+     * ушёл бы в чат новым вопросом. `handledUtterance` закрывает и поздний ответ движка.
+     */
+    private fun closeBargeInCapture() {
+        closeCapture()
+        runCatching { stt?.cancelUtterance() }
+        handledUtterance = true
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1320,6 +1564,10 @@ class LocalVoiceController(
     private val watchdogTick = object : Runnable {
         override fun run() {
             if (released || capture?.isCapturing != true) return
+            // Захват перебивания сторожем не управляется: тишина в нём — норма, а не мёртвый
+            // `AudioRecord`. Взведённый ранее сторож (например, от предбуфера) не имеет права
+            // трогать захват, который сейчас доказывает перебивание.
+            if (bargeInMicOpen) return
             when (micWatchdog.tick(watchdogClock())) {
                 MicCaptureWatchdog.Decision.WAIT -> {
                     // Звук уже пошёл — таймер больше не нужен, микрофон здоров.
@@ -1343,6 +1591,9 @@ class LocalVoiceController(
      */
     private fun restartCapture() {
         if (released || micRestartPending) return
+        // Захват перебивания не перезапускается: он существует ради доказательств речи, а его
+        // переоткрытие посреди ответа означало бы закрытый микрофон и потерянную попытку перебить.
+        if (bargeInMicOpen) return
         val wrapper = stt
         if (wrapper == null) {
             failMicWatchdog()
@@ -1370,7 +1621,13 @@ class LocalVoiceController(
     private fun failMicWatchdog() {
         micWatchdog.reset()
         main.removeCallbacks(watchdogTick)
+        // Сторож не имеет права гасить фазу озвучки. «Из захвата не пришло буферов» во время
+        // ответа означает не мёртвый микрофон, а тишину в комнате; прежнее «сдался» переводило
+        // SPEAKING в IDLE с сообщением «Микрофон не отвечает» прямо под звучащий ответ — орб
+        // показывал «Нажмите, чтобы говорить», а кнопка «Стоп» исчезала.
+        val speaking = bargeInMicOpen || state.phase == LocalVoicePhase.SPEAKING
         closeCapture()
+        if (speaking) return
         runCatching { stt?.cancelUtterance() }
         handledUtterance = true
         emit(
@@ -1396,8 +1653,9 @@ class LocalVoiceController(
         }
         // Ход начат голосом: его ответ — единственный кандидат на озвучку ([onAnswerCompleted]).
         voiceTurn = true
-        // Ответ ещё впереди: заглушка «Секунду, думаю.» может зазвучать, но микрофон до ответа
-        // открывать нельзя ([scheduleContinuousListening]).
+        // Новая реплика — новый ход: «молчи» от прошлого ответа здесь уже не действует, иначе
+        // после одного «Стоп» человек не услышал бы ни одного следующего ответа.
+        speechGate.onNewTurn()
         answerPending = true
         // Новая голосовая реплика — новый ход: заглушка снова разрешена, старое состояние
         // потоковой озвучки не наследуется.
@@ -1409,6 +1667,11 @@ class LocalVoiceController(
         // начать заново. Кнопка при этом остаётся живой ([LocalVoiceButton.render]), поэтому
         // перебить ожидание новым вопросом по-прежнему можно одним тапом.
         emit(state.copy(phase = LocalVoicePhase.THINKING, partial = clean, notice = null))
+        // Перебивание голосом: реплика человека уже распознана — звучащий ответ пора заглушить,
+        // иначе Марс продолжит говорить поверх нового вопроса. Порядок важен: сначала новая фаза,
+        // потом тишина, иначе орб мигнул бы IDLE перед THINKING. Жест-перебивание делает то же
+        // через [stopSpeaking], но там взводится и «молчи».
+        if (tts?.isSpeaking == true) silenceSpeech()
         runCatching { onTranscript(clean) }
     }
 
@@ -1423,6 +1686,10 @@ class LocalVoiceController(
 
         override fun onPartial(text: String) = post {
             if (state.phase == LocalVoicePhase.LISTENING) emit(state.copy(partial = text))
+            // Перебивание: живой текст — доказательство речи человека, и [BargeInGate] умеет
+            // отличать его от эха по тексту ответа. Отдаём ТОЛЬКО когда микрофон открыт
+            // намеренно во время озвучки: в остальных фазах эти слова и так станут репликой.
+            if (bargeInMicOpen && text.isNotBlank()) tts?.offerSpeech(0L, text)
         }
 
         override fun onFinal(text: String) = post { finishWith(text) }
@@ -1436,14 +1703,30 @@ class LocalVoiceController(
      * Колбэки захвата (поток чтения микрофона).
      *
      * `onSpeechProgress` — единственный поток «сколько человек реально говорил»; он и partial
-     * ASR уходят в [LocalVoiceTts.offerSpeech], где решение принимает [BargeInGate]. В локальном
-     * чате микрофон закрыт, пока звучит ответ, поэтому путь акустического перебивания — задел на
-     * случай, если координатор оставит захват открытым; сейчас работает жестовое перебивание.
+     * ASR уходят в [LocalVoiceTts.offerSpeech], где решение принимает [BargeInGate].
+     *
+     * Микрофон во время ответа закрыт на динамике (эхо) и открыт на наушниках
+     * ([BargeInMicPolicy], [armBargeInMic]) — то есть тик приходит только там, где перебивание
+     * можно доказать. Жест-перебивание (тап по микрофону/орбу) работает независимо от этого и
+     * не требует доказательств вовсе.
      */
     private val captureListener = object : HandsFreeCapture.Listener {
         override fun onSpeechStarted() = Unit
 
-        override fun onSpeechProgress(voicedMs: Long) = post { tts?.offerSpeech(voicedMs) }
+        override fun onSpeechProgress(voicedMs: Long) = post {
+            // Маршрут мог смениться посреди ответа (вынули наушники) или перестать быть
+            // доказанным: тогда захват больше не безопасен — закрываем его, и перебивание в этом
+            // ответе снова становится жестом. Лучше потерять перебивание, чем услышать
+            // собственную озвучку и отправить её в чат новым вопросом.
+            if (bargeInMicOpen) {
+                val active = routes?.activeOutput() ?: ActiveOutput.UNKNOWN
+                if (!active.isConfirmedHeadphones) {
+                    closeBargeInCapture()
+                    return@post
+                }
+            }
+            tts?.offerSpeech(voicedMs)
+        }
 
         /** Сегменты whisper-пути не нужны: движок режет реплику сам по endpoint. */
         override fun onSegment(recording: Recording) = Unit
@@ -1469,7 +1752,9 @@ class LocalVoiceController(
         // [LocalVoiceTts.available] → `onAvailableChanged` → `ttsAvailable`. До готовности речь
         // буферизуется внутри `AndroidSpeechEngine` и звучит сразу после инициализации.
         // Маршрут вывода нужен гейту: на наушниках хватает длительности речи, на динамике — нет.
-        // Решение о маршруте принимает существующий [AudioRoutePolicy] внутри монитора.
+        // Решение о маршруте принимает существующий [AudioRoutePolicy] внутри монитора, а здесь
+        // берётся ДОКАЗАННЫЙ активный выход ([ActiveOutput]): тот же маршрут, на котором
+        // [armBargeInMic] решает «открывать ли микрофон», обязан видеть и гейт.
         val monitor = routes ?: runCatching {
             AndroidAudioRouteMonitor(activity.applicationContext).also { it.start() }
         }.getOrNull()
@@ -1479,10 +1764,18 @@ class LocalVoiceController(
             scope = scope,
             serverTts = serverTts,
             offline = offlineTts?.invoke(),
-            route = { monitor?.route ?: AudioRoute.UNKNOWN },
+            // Гейт оценивает пороги по тому же маршруту, по которому решается судьба микрофона.
+            route = { monitor?.activeOutput()?.route ?: AudioRoute.UNKNOWN },
+            // Свой гейт, а не умолчание: контроллер читает его счётчик, когда озвучка замолчала
+            // (см. [bargeInGate]) — иначе захват перебивания закрывался бы вместе с речью человека.
+            gate = bargeInGate,
             aecActive = { capture?.echoCanceled == true },
             onSpeakingChanged = { speaking -> post { onTtsSpeakingChanged(speaking) } },
             onAvailableChanged = { available -> post { emit(state.copy(ttsAvailable = available)) } },
+            // Подмена голоса обязана дойти до человека: раньше событие умирало здесь.
+            onVoiceSubstituted = { substitution -> post { onVoiceSubstituted(substitution) } },
+            // Порт офлайн-синтеза принадлежит процессу (OfflineVoice): экран его не освобождает.
+            ownsOfflinePort = false,
         )
 
         // Темп, выбранный ДО первого звука: применяется сразу, как только движок
@@ -1499,31 +1792,50 @@ class LocalVoiceController(
             // Заговорил снова (вторая половина ответа после паузы) — отложенный автостарт
             // микрофона отменяется: иначе он открылся бы посреди речи Марса.
             cancelContinuousRestart()
-            // Микрофон физически не может слушать динамик Марса: закрываем ЛЮБОЙ активный захват,
-            // в том числе открытый в фазе LISTENING. Иначе ответ уходил в ASR и возвращался в чат
-            // как новый вопрос — Марс отвечал сам себе.
-            closeMicForAssistantSpeech()
-            // Микрофон закрыт на время озвучки, поэтому громкость «речи» синтетическая:
-            // орб должен дышать вместе с голосом, а не застывать.
-            startSpeechEnvelope()
-            // Фаза — SPEAKING, даже если до этого было LISTENING: захват уже закрыт выше, значит
-            // «Слушаю» больше не правда, а следующий тап обязан глушить звук, а не искать
-            // несуществующую реплику.
+            // Микрофон: на доказанных наушниках — открываем для перебивания, на динамике, на
+            // недоказанном маршруте, на заглушке и на предпросмотре — закрываем. Решение целиком
+            // в [BargeInMicPolicy]; здесь только последствия.
+            if (!armBargeInMic()) {
+                closeMicForAssistantSpeech()
+                // Микрофон закрыт на время озвучки, поэтому громкость «речи» синтетическая:
+                // орб должен дышать вместе с голосом, а не застывать.
+                startSpeechEnvelope()
+            } else {
+                // Захват открыт: уровень придёт из настоящего PCM микрофона, синтетическая
+                // огибающая только спорила бы с ним.
+                stopSpeechEnvelope()
+            }
+            // Фаза — SPEAKING, даже если до этого было LISTENING: следующий тап обязан глушить
+            // звук, а не искать несуществующую реплику.
             if (state.phase != LocalVoicePhase.SPEAKING) {
                 emit(state.copy(phase = LocalVoicePhase.SPEAKING, ttsAvailable = true))
             }
         } else {
+            // Речь кончилась — метка «что звучало» больше не действует.
+            speechPurpose = SpeechPurpose.NONE
             stopSpeechEnvelope()
             // Точка отсчёта паузы перед автостартом микрофона: хвост `AudioTrack` и реверберация
             // комнаты уже позади, но им нужно ещё [CONTINUOUS_RESTART_DELAY_MS].
             lastSpeechEndedAtMs = watchdogClock()
-            if (state.phase == LocalVoicePhase.SPEAKING) {
-                emit(state.copy(phase = LocalVoicePhase.IDLE))
+            // Захват, поднятый ТОЛЬКО ради перебивания, закрывается здесь: человек так и не
+            // заговорил, и микрофон не имеет права остаться слушать после ответа. В обычном чате
+            // это нарушало бы «одна реплика на одно нажатие», а первая же случайная фраза уходила
+            // бы в чат вопросом. Не закрывается он в двух случаях: человек уже перебил (его речь
+            // ещё не кончилась) и человек нажал «Стоп» (это «замолчи и слушай меня»).
+            if (BargeInMicPolicy.closeOwnedCaptureOnSpeechEnd(
+                    captureOpen = bargeInMicOpen,
+                    owned = bargeInOwnedCapture,
+                    // Счётчик гейта, а не результат `offerSpeech`: к этому моменту он уже верен,
+                    // а результат ещё не возвращён (см. [bargeInGate]).
+                    accepted = bargeInGate.acceptedCount > 0,
+                    userStopped = speechGate.mutedByUser,
+                )
+            ) {
+                closeBargeInCapture()
             }
-            // Непрерывный разговор: Марс договорил — микрофон открывается сам. Решение принимает
-            // [scheduleContinuousListening]: пока ответ не отдан в синтез, пока идёт потоковая
-            // озвучка или пока движок реально говорит, таймер не ставится.
-            scheduleContinuousListening()
+            // Конец озвучки: если захват уже открыт (перебивание), фаза обязана стать LISTENING,
+            // иначе орб показывал бы «Нажмите, чтобы говорить» над работающим микрофоном.
+            returnToRest()
         }
     }
 
@@ -1541,6 +1853,10 @@ class LocalVoiceController(
      * @return `true` — микрофон был открыт и закрыт сейчас (фаза LISTENING снята).
      */
     private fun closeMicForAssistantSpeech(): Boolean {
+        // Захват открыт НАМЕРЕННО для перебивания: на наушниках эха нет, а закрытие здесь
+        // убивало бы ровно ту реплику, которой человек перебивает (её же закрывает
+        // `onAnswerDelta` на каждой дельте). См. [BargeInMicPolicy].
+        if (bargeInMicOpen) return false
         val wasListening = platformListening || capture?.isCapturing == true
         if (platformListening) {
             platformListening = false
@@ -1555,6 +1871,100 @@ class LocalVoiceController(
         if (state.phase == LocalVoicePhase.LISTENING) {
             emit(state.copy(phase = LocalVoicePhase.IDLE, partial = "", notice = null))
         }
+        return true
+    }
+
+    /**
+     * Открыть микрофон НА время озвучки — чтобы человек мог перебить голосом.
+     *
+     * ## Зачем отдельный метод, а не [startCapture]
+     * [startCapture] — это новый ХОД: он снимает `voiceTurn`, сбрасывает `handledUtterance`,
+     * глушит синтез (`tts.stopByUser()`) и ставит фазу LISTENING. Здесь нужно обратное: ответ
+     * уже звучит и принадлежит текущему ходу, а микрофон открывается только как источник
+     * доказательств перебивания. Поэтому флаги хода не трогаются, фаза остаётся SPEAKING, а
+     * синтез продолжает говорить — до [BargeInGate.Trigger] или до кнопки «Стоп».
+     *
+     * ## Что даёт открытый захват
+     * [HandsFreeCapture.Listener.onSpeechProgress] начинает тикать, а partial'ы ASR уходят в
+     * [LocalVoiceTts.offerSpeech]. Политика [BargeInGate] на наушниках принимает по
+     * длительности речи, поэтому перебивание срабатывает через ~200 мс, а не в конце фразы.
+     *
+     * ## Чего этот метод не обещает
+     * Это НЕ дуплекс. На динамике и на любом НЕДОКАЗАННОМ маршруте он не открывает ничего
+     * ([BargeInMicPolicy]): если платформа не назвала активный выход ([ActiveOutput]), автоперебивание
+     * выключено, а не «включено наполовину». На доказанных наушниках гарантия «Марс не услышит сам
+     * себя» держится на том, что звук уходит в наушники. Живой приёмки на устройстве у этого пути
+     * ещё не было.
+     *
+     * Микрофон открывается только под РЕЧЬ ОТВЕТА ([SpeechPurpose.ANSWER]): заглушка и предпросмотр
+     * сообщения захват не поднимают.
+     *
+     * @return `true` — захват открыт (или уже был открыт) для перебивания.
+     */
+    private fun armBargeInMic(): Boolean {
+        if (released) return false
+        // Маршрут — ДОКАЗАННЫЙ активный выход, а не список доступных устройств: воткнутая
+        // гарнитура ещё не значит, что ответ звучит в неё.
+        val active = routes?.activeOutput() ?: ActiveOutput.UNKNOWN
+        val mode = micMode()
+        val allowed = BargeInMicPolicy.keepMicDuringSpeech(
+            enabled = bargeInDuringSpeech,
+            route = active.route,
+            routeConfirmed = active.confirmed,
+            purpose = speechPurpose,
+            paused = paused,
+            released = released,
+            backgroundServiceListening = MarsVoiceService.conversationActive,
+            micMode = mode,
+        )
+        if (!allowed) {
+            // Захват, поднятый ради перебивания, обязан закрыться здесь же: иначе флаг «микрофон
+            // открыт намеренно» запретил бы [closeMicForAssistantSpeech] убрать его, и ответ Марса
+            // попал бы в захват. Флаги снимаются ДО возврата — решение о закрытии принимает
+            // вызывающий, для которого этот ответ теперь обычная озвучка.
+            bargeInMicOpen = false
+            bargeInOwnedCapture = false
+            return false
+        }
+        // Захват уже отдаёт звук в движок (человек заговорил до старта озвучки или перебивание
+        // вооружено раньше) — второй `AudioRecord` отобрал бы у него звук. Владельца не меняем:
+        // повторный вход (пауза между фразами) не должен «забыть», что захват наш.
+        if (mode == MicMode.STREAMING) {
+            bargeInMicOpen = true
+            return true
+        }
+        if (platformListening) return false
+        val wrapper = stt ?: return false
+        // Движок не готов — открывать микрофон некуда: PCM всё равно некуда отдавать, а
+        // «Слушаю…» без распознавания было бы ложью. Перебивание остаётся жестом.
+        if (!wrapper.isReady) return false
+        val fresh = HandsFreeCapture()
+        val buffer = preRoll ?: PreRollAudioBuffer().also { preRoll = it }
+        buffer.clear()
+        synchronized(pcmLock) { streamingToEngine = false }
+        if (!runCatching { fresh.start(captureListener, rawPcmListener) }.getOrDefault(false)) {
+            preRoll = null
+            return false
+        }
+        capture = fresh
+        // Помечаем ДО создания реплики: partial, пришедший из предбуфера, уже должен считаться
+        // доказательством перебивания, а не эхом.
+        bargeInMicOpen = true
+        bargeInOwnedCapture = true
+        // Порядок тот же, что в [startCapture]: реплика открывается под замком, накопленное
+        // уходит в стрим первым, и только потом поток чтения переключается на прямой путь.
+        synchronized(pcmLock) {
+            wrapper.startUtterance()
+            val buffered = buffer.drain()
+            if (buffered.isNotEmpty()) wrapper.acceptPcm(buffered, buffered.size)
+            streamingToEngine = true
+        }
+        handledUtterance = false
+        // Сторож микрофона здесь НЕ взводится, и это не упущение. Тишина в захвате перебивания —
+        // норма: человек слушает ответ. Прежний сторож через три секунды объявлял микрофон
+        // мёртвым, перезапускал захват (закрывая его посреди ответа) и в итоге переводил SPEAKING
+        // в IDLE с сообщением «Микрофон не отвечает» — прямо под звучащий ответ, убирая кнопку
+        // «Стоп». Отсутствие перебивания дешевле, чем разрушенная фаза озвучки.
         return true
     }
 
@@ -1589,6 +1999,9 @@ class LocalVoiceController(
         }
         val voice = ensureTts() ?: return@Runnable
         if (!voice.available) return@Runnable
+        // Заглушка — не ответ: микрофон под неё не открывается, иначе ASR получал бы в реплику
+        // саму подсказку, а «Секунду, думаю.» стала бы вопросом человека.
+        speechPurpose = SpeechPurpose.HINT
         if (runCatching { voice.speak(THINKING_HINT_TEXT) }.getOrDefault(false)) hintSpoken = true
     }
 
@@ -1614,6 +2027,10 @@ class LocalVoiceController(
         if (released) return
         state = next
         runCatching { onState(next) }
+        // Второй наблюдатель — полноэкранный слой. Отдельный вызов, а не часть `onState`:
+        // хост рисует по снимку свою строку статуса и не обязан знать про слой, а слой обязан
+        // узнать о смене фазы, даже если лента не менялась (нажатие «Стоп»).
+        runCatching { onStateObserver?.invoke(next) }
     }
 
     /** Колбэк движка/захвата может прийти с потока чтения: состояние меняем только на главном. */
@@ -1772,4 +2189,178 @@ internal object ContinuousListenPolicy {
         // Часы ушли назад (не должно быть на монотонных часах) — ждём полную паузу, а не ноль.
         return (delayMs - elapsed).coerceIn(0L, delayMs)
     }
+}
+
+/**
+ * Разрешение озвучивать текущий ответ — и «залипший стоп», и «залипшая тишина» одинаково
+ * ломают диалог.
+ *
+ * ## Зачем отдельный объект
+ * Раньше стоп был одноразовым: `stopSpeaking()` глушил звук и переводил фазу в IDLE, но нигде
+ * не запоминалось, что человек ПОПРОСИЛ тишины. Потоковая озвучка продолжает кормить контроллер
+ * дельтами (`onAnswerDelta` → `appendStream` → `pump` → `speakPieceNow`), поэтому через полсекунды
+ * после нажатия «Стоп» Марс начинал говорить снова — со следующего куска. Снаружи это выглядело
+ * как «кнопка стоп не работает»: звук на мгновение пропадал и возвращался.
+ *
+ * Поэтому намерение человека живёт отдельным флагом, и он переживает дельты, но НЕ переживает
+ * ход: новый ход ([onNewTurn]) снова разрешает озвучку. Правило «флаг живёт один ответ» —
+ * единственное, что не даёт стоп-кнопке замолчать диалог навсегда.
+ *
+ * Объект чистый (JVM, без Android и без состояния движка), поэтому проверяется юнит-тестом:
+ * ровно здесь ошибка стоит дороже всего, а на телефоне воспроизводится секундами.
+ */
+internal class AnswerSpeechGate {
+
+    /**
+     * Человек заглушил ТЕКУЩИЙ ответ и не хочет слышать его остаток.
+     *
+     * Читается снаружи только для ветки «ответ кончился, а звука не было»: там нужно понять,
+     * почему хвост не читается, и вернуть микрофон в строй.
+     */
+    var mutedByUser: Boolean = false
+        private set
+
+    /** Человек нажал «Стоп» (орб, микрофон, кнопка композера). */
+    fun onUserStop() {
+        mutedByUser = true
+    }
+
+    /** Начался новый ход или пришла новая реплика: прошлое намерение больше не действует. */
+    fun onNewTurn() {
+        mutedByUser = false
+    }
+
+    /**
+     * Можно ли отдавать текст в синтез.
+     *
+     * @param speakAnswers озвучка включена вообще (контракт контроллера);
+     * @param voiceTurn ответ идёт на ГОЛОСОВУЮ реплику (ответ на печатный ввод не читается);
+     */
+    fun canSpeak(speakAnswers: Boolean, voiceTurn: Boolean): Boolean =
+        speakAnswers && voiceTurn && !mutedByUser
+}
+
+/**
+ * Что именно звучит из динамика/наушников.
+ *
+ * Нужен ровно для одного решения: открывать ли микрофон ради акустического перебивания. Перебивать
+ * можно только ОТВЕТ на вопрос — заглушка «Секунду, думаю.» и предпросмотр сообщения («Озвучить»)
+ * ответом не являются, и микрофон под них поднимать нельзя: записанное уходило бы в чат новым
+ * вопросом, а сама подсказка становилась бы «репликой человека».
+ */
+internal enum class SpeechPurpose {
+    /** Ничего не звучит (или речь уже кончилась). */
+    NONE,
+
+    /** Ответ на голосовую реплику — единственная речь, которую имеет смысл перебивать. */
+    ANSWER,
+
+    /** Заглушка на размышлениях модели. */
+    HINT,
+
+    /** Предпросмотр сообщения по пункту «Озвучить». */
+    PREVIEW,
+}
+
+/**
+ * Что сейчас делает микрофон.
+ *
+ * Отдельный тип вместо `capture?.isCapturing`: предбуфер и рабочий захват — РАЗНЫЕ вещи, и
+ * путаница между ними стоила начала фразы (ответ Марса, записанный в предбуфер, уходил в движок
+ * как первые слова человека).
+ */
+internal enum class MicMode {
+    /** Микрофона нет. */
+    CLOSED,
+
+    /** Микрофон открыт только ради предбуфера: движок грузится, реплика ещё не начата. */
+    PRE_ROLL,
+
+    /** Микрофон отдаёт звук в движок — реплика человека или уже открытое перебивание. */
+    STREAMING,
+}
+
+/**
+ * Можно ли держать микрофон открытым, пока Марс говорит.
+ *
+ * Это единственное условие, при котором в локальном чате вообще возможно акустическое
+ * перебивание: пока захват закрыт, [HandsFreeCapture.Listener.onSpeechProgress] не тикает,
+ * `LocalVoiceTts.offerSpeech` не вызывается, и [BargeInGate] нечего оценивать — человек может
+ * перебить только жестом.
+ *
+ * ## Почему наушники, и только доказанные
+ * На встроенном динамике микрофон слышит собственную озвучку: длительность речи там ничего не
+ * доказывает (TTS говорит ровно так же долго), а `AcousticEchoCanceler` ослабляет эхо, но не
+ * убирает его — на части устройств он включается «формально». Поэтому на динамике микрофон во
+ * время озвучки закрыт, как и раньше: лучше «не перебил», чем «Марс перебил сам себя и отправил
+ * свой ответ новым вопросом».
+ *
+ * Дальше — главное. Мало того, что маршрут «наушники»: он обязан быть ДОКАЗАН ([routeConfirmed]).
+ * Список доступных выходов содержит воткнутую гарнитуру, даже когда ответ читает динамик, поэтому
+ * прежняя проверка «в системе есть наушники» открывала микрофон на динамике. Если платформа не
+ * назвала активный выход ([ActiveOutput]), автоперебивание выключено — это штатное состояние, а
+ * не поломка, и дуплекс на динамике не обещается ни в каком случае.
+ *
+ * ## Остальные условия — тоже не формальность
+ * - [purpose] — заглушка и предпросмотр микрофон не открывают (перебивать там нечего);
+ * - [paused]/[released] — экран в фоне или уже уничтожен: микрофон в кармане не разговор;
+ * - [backgroundServiceListening] — микрофон держит фоновый [MarsVoiceService], второй `AudioRecord`
+ *   отобрал бы у него звук;
+ * - [micMode] — предбуфер ([MicMode.PRE_ROLL]) микрофоном перебивания не считается.
+ *
+ * @param enabled разрешено ли перебивание настройкой/хостом;
+ * @param route маршрут вывода на момент старта озвучки ([AudioRoute.UNKNOWN] — эхо-опасен);
+ * @param routeConfirmed доказан ли этот маршрут как АКТИВНЫЙ выход;
+ * @param purpose что звучит сейчас;
+ * @param paused экран в фоне;
+ * @param released контроллер освобождён;
+ * @param backgroundServiceListening микрофон занят фоновым разговором;
+ * @param micMode что делает микрофон прямо сейчас.
+ */
+internal object BargeInMicPolicy {
+
+    /** @return `true` — захват можно открыть (или оставить открытым) во время речи Марса. */
+    fun keepMicDuringSpeech(
+        enabled: Boolean,
+        route: AudioRoute,
+        routeConfirmed: Boolean = true,
+        purpose: SpeechPurpose = SpeechPurpose.ANSWER,
+        paused: Boolean = false,
+        released: Boolean = false,
+        backgroundServiceListening: Boolean = false,
+        micMode: MicMode = MicMode.CLOSED,
+    ): Boolean {
+        if (released || paused) return false
+        if (!enabled) return false
+        // Перебивают ответ, а не заглушку и не предпросмотр сообщения.
+        if (purpose != SpeechPurpose.ANSWER) return false
+        // Маршрут должен быть доказанно активным И вести в наушники. «В системе есть наушники» —
+        // не доказательство: ответ мог звучать из динамика.
+        if (!routeConfirmed) return false
+        if (route != AudioRoute.HEADPHONES) return false
+        if (backgroundServiceListening) return false
+        // Предбуфер копит звук для реплики человека: ответ Марса, записанный туда, стал бы её
+        // началом и ушёл бы в чат.
+        if (micMode == MicMode.PRE_ROLL) return false
+        return true
+    }
+
+    /**
+     * Пора ли закрыть захват, который поднимали ТОЛЬКО ради перебивания.
+     *
+     * Речь Марса кончилась, а человек так и не заговорил — микрофон обязан закрыться: в обычном
+     * чате он нарушал бы «одна реплика на одно нажатие», а первая же случайная фраза уходила бы в
+     * чат вопросом.
+     *
+     * @param captureOpen захват помечен как микрофон перебивания;
+     * @param owned захват открыт этим контроллером ради перебивания (а не человеком ради реплики);
+     * @param accepted перебивание подтвердилось — речь человека ещё не кончилась, закрывать нельзя;
+     * @param userStopped человек нажал «Стоп»: это «замолчи и слушай меня», микрофон остаётся.
+     */
+    fun closeOwnedCaptureOnSpeechEnd(
+        captureOpen: Boolean,
+        owned: Boolean,
+        accepted: Boolean,
+        userStopped: Boolean,
+    ): Boolean = captureOpen && owned && !accepted && !userStopped
 }

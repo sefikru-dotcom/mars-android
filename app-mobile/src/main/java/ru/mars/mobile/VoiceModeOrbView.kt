@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -61,9 +62,19 @@ import kotlin.math.sin
  * кометы и рэлеевская корона считает шейдер [MarsSpaceBackgroundView], который лежит первым
  * слоем всего экрана разговора и пульсирует неоном фазы в такт голосу.
  *
- * Цвет и энергия слоёв — по фазе: `IDLE` благородный тёмно-рубиновый, `LISTENING` живой алый,
- * `THINKING` тёплый янтарно-солнечный, `SPEAKING` плазменно-голубой. Сама планета при этом
- * остаётся Марсом: фазу несёт атмосфера, а не перекраска поверхности.
+ * Цвет и энергия слоёв — по фазе, но в одной тёплой гамме Марса: `IDLE` глубокий тёмно-рубиновый,
+ * `LISTENING` мягкий кораллово-рубиновый, `THINKING` янтарно-терракотовый, `SPEAKING` тёплый
+ * персиково-золотистый. Никакого холодного голубого в речи: раньше `SPEAKING` был кислотно-лазурным
+ * и переход с рубинового на него бил по глазам. Сама планета при этом остаётся Марсом: фазу несёт
+ * атмосфера, а не перекраска поверхности.
+ *
+ * ## Почему переход фазы занимает время
+ * Раньше смена тона была одним присваиванием: `neon = neonFor(tone)` и `buildShaders()` за 0 мс, то
+ * есть вспышкой в один кадр. Теперь у цвета и энергий есть ЦЕЛЬ ([targetNeon], [targetHaloEnergy],
+ * …), а текущие значения догоняют её экспоненциально с постоянной [VoiceNeonPalette.TRANSITION_TAU_SEC]
+ * — свет перетекает за ~1.2 с, как остывающая лампа, и цикл кадров не останавливается, пока переход
+ * не сошётся. Мгновенно применяется только то, что не может быть плавным: выключенные системой
+ * анимации и самый первый кадр, когда предыдущего цвета ещё нет.
  *
  * ## Почему в onDraw нет ни одной аллокации
  * Это экран разговора: он перерисовывается 60 раз в секунду, пока идёт реплика, и живёт на
@@ -81,8 +92,10 @@ import kotlin.math.sin
  * ## Почему Choreographer, а не `ValueAnimator` с `INFINITE`
  * Бесконечный `ValueAnimator` — самый частый способ утечки: его забывают отменить в
  * `onDetachedFromWindow`, и он держит View (а через неё Activity) вечно. Здесь цикл кадров —
- * явный [Choreographer.FrameCallback]: он ставится только пока вьюха прикреплена и фаза
- * требует движения, и снимается в [stopBreathing], которую вызывает [onDetachedFromWindow].
+ * явный [Choreographer.FrameCallback]: он ставится только пока вьюха прикреплена и фаза требует
+ * движения ЛИБО пока не сошёлся переход цвета/энергий, и снимается в [stopBreathing], которую
+ * вызывает [onDetachedFromWindow]. Переход в `IDLE` доводится до конца тем же циклом, а не
+ * обрывается на полпути.
  *
  * ## Почему доступность важнее красоты
  * При `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` (и при выключенных аниматорах, и в режиме
@@ -202,14 +215,27 @@ class VoiceModeOrbView @JvmOverloads constructor(
     /** Текущая роль цвета. Меняется только через [render]. */
     private var tone: VoiceModeTone = VoiceModeTone.IDLE
 
-    /** Неон текущей фазы (корона, волны, лимб). */
+    /** Неон текущей фазы (корона, волны, лимб). Догоняет [targetNeon] в кадре. */
     private var neon = NEON_IDLE
 
-    /** Энергия слоёв под текущую фазу: задаётся в [applyTone], читается в кадре. */
-    private var haloEnergy = 0.40f
-    private var coronaEnergy = 0.38f
-    private var limbEnergy = 0.50f
+    /** Энергия слоёв: текущие значения, которые плавно догоняют цели из [applyTone]. */
+    private var haloEnergy = 0.34f
+    private var coronaEnergy = 0.32f
+    private var limbEnergy = 0.42f
     private var waveEnergy = 0f
+
+    /**
+     * Цели перехода: цвет и энергия слоёв той фазы, которую просят показать.
+     *
+     * Отдельные поля, а не прямое присваивание в [applyTone], — в этом и весь смысл волны:
+     * смена фазы больше не происходит за один кадр, текущие значения догоняют эти цели
+     * экспоненциально (см. [advanceTransition]).
+     */
+    private var targetNeon = NEON_IDLE
+    private var targetHaloEnergy = 0.34f
+    private var targetCoronaEnergy = 0.32f
+    private var targetLimbEnergy = 0.42f
+    private var targetWaveEnergy = 0f
 
     /** Просили ли движение. Само движение дополнительно зависит от системных флагов. */
     private var pulses = false
@@ -233,17 +259,27 @@ class VoiceModeOrbView @JvmOverloads constructor(
     private var breathing = false
 
     /**
-     * Разрешено ли движение системой — посчитанное заранее.
+     * Разрешена ли анимация системой — посчитанное заранее.
      *
      * Чтение `Settings.Global` и опрос `PowerManager` идут через `ContentResolver`: это единицы
      * миллисекунд, и на каждый вызов [render] (хост может звать его десятки раз в секунду) такая
-     * проверка стала бы заметной. Поэтому решение принимается при смене фазы и при
-     * переподключении вьюхи, а не на кадр.
+     * проверка стала бы заметной. Поэтому решение принимается при смене фазы, при смене
+     * «дышать/стоять» и при переподключении вьюхи, а не на кадр.
+     *
+     * Отдельное поле, а не «разрешено ли дыхание»: [pulses] — это ПРОСЬБА хоста, а здесь — право
+     * системы. Пока эти два условия были склеены в одном флаге, выключение [pulses] (переход в
+     * `IDLE`) отбирало право и у перехода цвета, и он ставился мгновенно — та самая вспышка,
+     * которую этот класс обещает не делать.
      */
-    private var motionAllowed = false
+    private var animationsOn = false
 
-    /** Отсчёт периода: время первого кадра цикла. 0 — цикл ещё не начался. */
-    private var originNanos = 0L
+    /**
+     * Хост попросил паузу (экран ушёл в фон, см. [pauseMotion]).
+     *
+     * Нужен потому, что окно после `onPause` ещё какое-то время остаётся видимым: без этого флага
+     * кадры шли бы под чужой активностью до первого `onWindowVisibilityChanged`.
+     */
+    private var hostPaused = false
 
     /** Берётся один раз на цикл, а не на кадр: `getInstance()` — обращение к ThreadLocal. */
     private var choreographer: Choreographer? = null
@@ -252,28 +288,50 @@ class VoiceModeOrbView @JvmOverloads constructor(
      * Кадр дыхания.
      *
      * Объект-поле, а не лямбда на кадр: аллокация в цикле перерисовки недопустима (см. KDoc
-     * класса). Фаза считается от времени кадра, а не накоплением `+= dt`: накопление уплывает при
-     * пропущенных кадрах и после долгой паузы даёт рывок. Дрейф текстуры, наоборот, копится по
-     * `dt` — ему нужна непрерывность, а не привязка к периоду дыхания.
+     * класса). Фаза копится ПО ПРИРАЩЕНИЮ `dt`, а не считается от начала цикла: пока она
+     * отсчитывалась от `originNanos`, каждый останов и перезапуск цикла (каждая смена фазы,
+     * каждый конец перехода) возвращал дыхание в точку 0 — самая тёмная альфа вместо той, на
+     * которой орб остановился, и кольца акустических волн телепортировались назад. Приращение
+     * зажато сверху, поэтому после пропущенных кадров или паузы фаза сдвигается на один шаг, а не
+     * прыгает. Дрейф текстуры копится так же — ему нужна непрерывность, а не привязка к периоду.
      */
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!breathing) return
-            if (originNanos == 0L) originNanos = frameTimeNanos
-            if (lastFrameNanos == 0L) lastFrameNanos = frameTimeNanos
-            val elapsedMs = (frameTimeNanos - originNanos) / 1_000_000L
-            phase = (elapsedMs % PERIOD_MS).toFloat() / PERIOD_MS.toFloat()
-
-            // Приращение дрейфа: зажато сверху, чтобы после паузы (или подлагивания) планета
-            // не прыгала на пол-оборота за один кадр.
-            val dtSec = ((frameTimeNanos - lastFrameNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
+            // Первый кадр цикла даёт приращение 0: предыдущего времени ещё нет, и «шаг с потолка»
+            // (0.05 с) сдвинул бы фазу на целых 0.05/3 периода ровно в момент старта.
+            val previousNanos = lastFrameNanos
             lastFrameNanos = frameTimeNanos
+            val dtSec = if (previousNanos == 0L) {
+                0f
+            } else {
+                ((frameTimeNanos - previousNanos) / 1_000_000_000f)
+                    .coerceIn(0f, OrbMotionPolicy.MAX_FRAME_DT_SEC)
+            }
+
+            phase = OrbMotionPolicy.advancePhase(phase, dtSec, PERIOD_MS)
             drift += dtSec * DRIFT_RAD_PER_SEC
             if (drift > TWO_PI) drift -= TWO_PI
 
-            // Атака быстрее спада: слово начинается рывком, а затухает плавно.
-            smoothedLevel += (level - smoothedLevel) *
-                (if (level > smoothedLevel) LEVEL_ATTACK else LEVEL_RELEASE)
+            // Атака быстрее спада: слово начинается рывком, а затухает плавно. Шаг считается по
+            // реальному dt, а не «раз в кадр»: на 120 Гц прежняя формула гасила слово вдвое
+            // быстрее, чем на 60, и орб вёл себя по-разному на разных телефонах.
+            smoothedLevel = OrbMotionPolicy.smoothLevel(smoothedLevel, level, dtSec)
+
+            // Плавный переход фазы: цвет и энергии догоняют цели экспоненциально, поэтому
+            // LISTENING → SPEAKING читается как перетекание света, а не как щелчок выключателя.
+            // Шаг считается по реальному dt кадра, а не «раз в кадр»: иначе на 30 fps переход
+            // был бы вдвое медленнее, чем на 60.
+            if (needsTransition()) advanceTransition(VoiceNeonPalette.stepFactor(dtSec))
+
+            if (!needsTransition() && !pulses) {
+                // Переход доехал, а дышать больше не о чем: цикл кадров обязан остановиться сам,
+                // иначе статичный IDLE крутил бы перерисовку вечно. Фаза при этом НЕ сбрасывается:
+                // следующий запуск продолжит дыхание с этой точки.
+                stopBreathing()
+                invalidate()
+                return
+            }
 
             invalidate()
             // Переставляем кадр только если цикл всё ещё нужен: иначе после отсоединения вьюхи
@@ -298,8 +356,9 @@ class VoiceModeOrbView @JvmOverloads constructor(
     /**
      * Показать фазу.
      *
-     * @param tone роль цвета: покой/слушаю — рубин, думаю — янтарь, говорю — лазурь (те же роли,
-     *   что у [LocalVoiceButton], чтобы кнопка композера и полный экран не спорили о цвете);
+     * @param tone роль цвета: покой — тёмный рубин, слушаю — коралловый рубин, думаю — янтарь,
+     *   говорю — персиковое золото (те же роли, что у [LocalVoiceButton], чтобы кнопка композера
+     *   и полный экран не спорили о цвете);
      * @param pulses нужен ли цикл дыхания. `false` — статичный кадр, цикл кадров не заводится.
      */
     fun render(tone: VoiceModeTone, pulses: Boolean) {
@@ -307,11 +366,15 @@ class VoiceModeOrbView @JvmOverloads constructor(
         val pulsesChanged = this.pulses != pulses
         this.tone = tone
         this.pulses = pulses
-        if (pulsesChanged) motionAllowed = pulses && animationAllowed()
+        // Право на анимацию перечитывается и при смене фазы: человек мог выключить анимации, не
+        // покидая экран разговора. Чтение настроек дорого только на кадр — здесь его нет.
+        if (toneChanged || pulsesChanged) animationsOn = animationAllowed()
         if (toneChanged) {
             applyTone()
             invalidate()
         }
+        // Кадры нужны не только для дыхания: пока цвет и энергии не сошлись с целью, переход
+        // обязан доехать — в том числе переход в IDLE.
         syncBreathing()
     }
 
@@ -412,22 +475,25 @@ class VoiceModeOrbView @JvmOverloads constructor(
 
         // Внешнее гало: пик ровно на кромке диска (0.66 радиуса гало при PLANET_RATIO 0.66) и
         // мягкий спад наружу. Раньше пик стоял в центре и прятался под планетой — вокруг крупного
-        // шара оставался бы лишь тусклый ободок.
+        // шара оставался бы лишь тусклый ободок. Альфа-стопы снижены на ~18% (было
+        // 0x26/0x40/0x4D/0x16): на пике речи гало сливалось в слепящее белое кольцо.
         haloOuterPaint.shader = RadialGradient(
             centerX - planetR * HALO_SHIFT_X,
             centerY - planetR * HALO_SHIFT_Y,
             haloR,
             intArrayOf(
-                MarsGradients.withAlpha(neon, 0x26),
-                MarsGradients.withAlpha(neon, 0x40),
-                MarsGradients.withAlpha(neon, 0x4D),
-                MarsGradients.withAlpha(neon, 0x16),
+                MarsGradients.withAlpha(neon, 0x1F),
+                MarsGradients.withAlpha(neon, 0x34),
+                MarsGradients.withAlpha(neon, 0x3F),
+                MarsGradients.withAlpha(neon, 0x12),
                 MarsGradients.withAlpha(neon, 0x00),
             ),
             floatArrayOf(0f, 0.52f, PLANET_RATIO, 0.86f, 1f),
             Shader.TileMode.CLAMP,
         )
         // Внутренняя корона: прозрачная в центре, чтобы не мылить диск, и плотная у лимба.
+        // Стопы тоже приглушены (было 0x3D/0x1C): горячее кольцо у лимба давало самый резкий
+        // перепад яркости на всём кадре.
         haloInnerPaint.shader = RadialGradient(
             lightX,
             lightY,
@@ -435,8 +501,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
             intArrayOf(
                 MarsGradients.withAlpha(neon, 0x00),
                 MarsGradients.withAlpha(neon, 0x00),
-                MarsGradients.withAlpha(neon, 0x3D),
-                MarsGradients.withAlpha(neon, 0x1C),
+                MarsGradients.withAlpha(neon, 0x33),
+                MarsGradients.withAlpha(neon, 0x18),
                 MarsGradients.withAlpha(neon, 0x00),
             ),
             floatArrayOf(0f, 0.50f, 0.60f, 0.78f, 1f),
@@ -444,6 +510,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
         )
         // Атмосферное кольцо: полоса на 70–100% радиуса — ровно над лимбом планеты. Широкая и
         // плотная, чтобы контур читался по ВСЕМУ периметру, включая почти чёрный ночной лимб.
+        // Пик приглушён с 0x7A до 0x64 (и с 0x40 до 0x34): контур остаётся читаемым, но больше
+        // не «обводит» планету неоновой линией.
         coronaPaint.shader = RadialGradient(
             centerX,
             centerY,
@@ -451,8 +519,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
             intArrayOf(
                 MarsGradients.withAlpha(neon, 0x00),
                 MarsGradients.withAlpha(neon, 0x00),
-                MarsGradients.withAlpha(neon, 0x7A),
-                MarsGradients.withAlpha(neon, 0x40),
+                MarsGradients.withAlpha(neon, 0x64),
+                MarsGradients.withAlpha(neon, 0x34),
                 MarsGradients.withAlpha(neon, 0x00),
             ),
             floatArrayOf(0f, 0.70f, 0.84f, 0.94f, 1f),
@@ -482,9 +550,85 @@ class VoiceModeOrbView @JvmOverloads constructor(
         )
     }
 
-    /** Кисти и энергия слоёв под новый тон. Вызывается на смену фазы, не на кадр. */
+    /**
+     * Записать цель перехода под новый тон.
+     *
+     * Цвет и энергия здесь НЕ присваиваются напрямую: раньше именно это присваивание и делало
+     * смену фазы вспышкой за один кадр (резкий контраст «красный → голубой», на который жаловался
+     * владелец). Теперь пишутся цели, а текущие значения догоняют их в кадре ([advanceTransition]).
+     *
+     * Мгновенное применение остаётся ровно для двух случаев, где плавность невозможна или вредна:
+     * выключенные системой анимации (человек просил покой) и невидимая вьюха — спрятанный слой,
+     * фоновое окно. Догонять переход, которого никто не видит, значит крутить кадры впустую.
+     *
+     * Раньше здесь стояло `!motionAllowed || !breathing`, и второе условие было ошибкой: в момент
+     * смены фазы цикл кадров всегда ещё не запущен (его запускает следующий за [applyTone] вызов
+     * [syncBreathing]), поэтому ЛЮБАЯ смена тона ставилась мгновенно — плавным оставался только
+     * тот переход, что успел начаться раньше. Флаг `motionAllowed` к тому же смешивал просьбу
+     * хоста ([pulses]) с правом системы, так что переход `LISTENING → IDLE` (где `pulses = false`
+     * по определению) всегда был щелчком.
+     */
     private fun applyTone() {
-        neon = neonFor(tone)
+        targetNeon = neonFor(tone)
+        val energy = energyFor(tone)
+        targetHaloEnergy = energy[0]
+        targetCoronaEnergy = energy[1]
+        targetLimbEnergy = energy[2]
+        targetWaveEnergy = energy[3]
+        if (OrbMotionPolicy.shouldSnap(animationsOn, canAnimate())) snapToTargets()
+    }
+
+    /** Поставить цвет и энергии ровно в цель: статичный кадр, выключенные анимации, схождение. */
+    private fun snapToTargets() {
+        neon = targetNeon
+        haloEnergy = targetHaloEnergy
+        coronaEnergy = targetCoronaEnergy
+        limbEnergy = targetLimbEnergy
+        waveEnergy = targetWaveEnergy
+        paintWithNeon()
+    }
+
+    /**
+     * Один шаг перехода: приблизить текущие значения к целям на долю [k].
+     *
+     * `k` приходит из [VoiceNeonPalette.stepFactor] — это экспонента от `dt`, поэтому переход
+     * занимает одно и то же время на 60 и на 30 кадрах в секунду.
+     */
+    private fun advanceTransition(k: Float) {
+        neon = VoiceNeonPalette.lerpColor(neon, targetNeon, k)
+        haloEnergy += (targetHaloEnergy - haloEnergy) * k
+        coronaEnergy += (targetCoronaEnergy - coronaEnergy) * k
+        limbEnergy += (targetLimbEnergy - limbEnergy) * k
+        waveEnergy += (targetWaveEnergy - waveEnergy) * k
+        // Каналы сошлись до 1/255 — дожимаем ровно в цель: экспонента не достигает её никогда, и
+        // без этого цикл кадров гонялся бы за последним битом цвета ещё пару секунд после того,
+        // как глаз переход уже не видит.
+        if (neon != targetNeon && colorsConverged(neon, targetNeon)) neon = targetNeon
+        paintWithNeon()
+    }
+
+    /** Есть ли ещё расхождение с целью: по цвету — точное, по энергиям — с допуском. */
+    private fun needsTransition(): Boolean =
+        neon != targetNeon ||
+            abs(haloEnergy - targetHaloEnergy) > TRANSITION_EPSILON ||
+            abs(coronaEnergy - targetCoronaEnergy) > TRANSITION_EPSILON ||
+            abs(limbEnergy - targetLimbEnergy) > TRANSITION_EPSILON ||
+            abs(waveEnergy - targetWaveEnergy) > TRANSITION_EPSILON
+
+    /** Совпадают ли цвета поканально в пределах 1/255 — критерий дожима в цель. */
+    private fun colorsConverged(a: Int, b: Int): Boolean =
+        abs(((a ushr 16) and 0xFF) - ((b ushr 16) and 0xFF)) <= 1 &&
+            abs(((a ushr 8) and 0xFF) - ((b ushr 8) and 0xFF)) <= 1 &&
+            abs((a and 0xFF) - (b and 0xFF)) <= 1
+
+    /**
+     * Перекрасить кисти и градиенты под текущий [neon].
+     *
+     * Единственное место, где цвет фазы доходит до рисования: вызывается и при мгновенном
+     * применении ([snapToTargets]), и на каждом кадре перехода. Градиенты пересобираются, потому
+     * что их стопы — это тот же неон с разной альфой.
+     */
+    private fun paintWithNeon() {
         wavePaint.color = neon
         hazePaint.color = neon
         crescentPaint.color = neon
@@ -493,11 +637,6 @@ class VoiceModeOrbView @JvmOverloads constructor(
         limbGlowPaint.color = neon
         nightRimPaint.color = blendColors(neon, MarsSpaceShaderPolicy.COLOR_ATMOSPHERE_CORE, NIGHT_RIM_WARMTH)
         // Планета остаётся Марсом во всех фазах: цвет несёт атмосфера, а не поверхность.
-        val energy = energyFor(tone)
-        haloEnergy = energy[0]
-        coronaEnergy = energy[1]
-        limbEnergy = energy[2]
-        waveEnergy = energy[3]
         buildShaders()
     }
 
@@ -505,12 +644,13 @@ class VoiceModeOrbView @JvmOverloads constructor(
      * Неон фазы.
      *
      * Это не палитра темы, а именно неоновые акценты атмосферы: у [MarsTheme] нет ролей
-     * «рубиновый неон» и «аквамариновая плазма», а выводить их из `STATUS_*` значило бы получить
+     * «рубиновый неон» и «персиковое золото», а выводить их из `STATUS_*` значило бы получить
      * грязные полутона. Базовый Марс при этом остаётся из [MarsSpaceShaderPolicy].
      *
-     * Пара `IDLE`/`LISTENING` разведена намеренно: покой — глубокий рубин, слушание — живой алый
-     * с большей энергией. Одинаковый оттенок в двух состояниях читался бы как «ничего не
-     * изменилось».
+     * Вся четвёрка живёт в одной тёплой гамме ([VoiceNeonPalette]): покой — глубокий рубин,
+     * слушание — коралловый рубин с большей энергией, размышление — янтарь, речь — персиковое
+     * золото. Резкого перехода «красный → кислотно-голубой» больше нет: фазы различаются
+     * светлотой и энергией внутри одной гаммы.
      */
     private fun neonFor(tone: VoiceModeTone): Int = VoiceNeonPalette.of(tone)
 
@@ -543,14 +683,13 @@ class VoiceModeOrbView @JvmOverloads constructor(
         // Дыхание: альфа берётся из общей политики пульсации, а не из своей косинусной формулы, —
         // тогда период и «мягкость» у орба те же, что у остальных живых индикаторов приложения, и
         // выключенные анимации гасятся в одном месте.
-        val glowAlpha = if (breathing) {
-            MarsPulsePolicy.alphaAt(phase)
-        } else {
-            MarsPulsePolicy.MIN_ALPHA +
-                (MarsPulsePolicy.MAX_ALPHA - MarsPulsePolicy.MIN_ALPHA) * REST_BREATH
-        }
-        val breath = ((glowAlpha - MarsPulsePolicy.MIN_ALPHA) /
-            (MarsPulsePolicy.MAX_ALPHA - MarsPulsePolicy.MIN_ALPHA)).coerceIn(0f, 1f)
+        //
+        // Одна и та же формула и в цикле кадров, и в статичном кадре: статичная ветка берёт ту же
+        // [phase] ([REST_PHASE] — точка, где дыхание равно прежней константе покоя). Пока статика
+        // считалась отдельной формулой, в момент остановки цикла (переход в IDLE доехал) альфа
+        // прыгала с текущей фазы на середину подъёма — заметный щелчок яркости в самом конце
+        // перехода, хотя цвет к тому моменту уже перетёк плавно.
+        val breath = OrbMotionPolicy.breathAt(phase)
 
         // Речь сильнее дыхания: громкое слово должно быть видно даже в «тихой» точке периода.
         val voice = (smoothedLevel * VOICE_WEIGHT + breath * BREATH_WEIGHT).coerceIn(0f, 1f)
@@ -715,7 +854,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
         // Вьюха могла быть прикреплена уже после render(): здесь догоняем состояние. Здесь же
         // перечитываем системные флаги: человек мог вернуться на экран после того, как выключил
         // анимации в настройках.
-        motionAllowed = pulses && animationAllowed()
+        animationsOn = animationAllowed()
+        hostPaused = false
         syncBreathing()
     }
 
@@ -723,34 +863,94 @@ class VoiceModeOrbView @JvmOverloads constructor(
         // Сначала гасим цикл, потом отдаём вьюху системе: иначе следующий кадр пришёл бы на
         // отсоединённую вьюху и держал её (и Activity) до своего конца.
         stopBreathing()
+        // Возврата на экран из этого состояния уже не будет, а на следующем появлении нужен кадр
+        // ровно в цели, а не остаток недоехавшего перехода.
+        if (needsTransition()) snapToTargets()
+        hostPaused = false
         super.onDetachedFromWindow()
     }
 
     /**
-     * Согласовать цикл кадров с желанием вызывающего и системными флагами.
+     * Видимость вьюхи или её предков.
+     *
+     * Слой голосового режима живёт в дереве постоянно и просто прячется через `GONE` у корня:
+     * `onDetachedFromWindow` при этом не приходит, а `render()` продолжает вызываться хостом на
+     * каждое обновление снимка речи. Без этой проверки орб крутил цикл кадров на невидимой вьюхе,
+     * пока человек читает чат, — ровно та утечка батареи, ради которой цикл и сделан явным.
+     */
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (!isAttachedToWindow) return
+        syncBreathing()
+    }
+
+    /** Окно ушло в фон (или вернулось): кадры под чужой активностью не нужны. */
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (!isAttachedToWindow) return
+        syncBreathing()
+    }
+
+    /**
+     * Остановить кадры снаружи: хост ушёл в фон, но окно ещё формально видимо.
+     *
+     * Тон и цели не сбрасываются — на возвращении ([resumeMotion]) переход продолжит с того
+     * места, где остановился, а не начнётся заново.
+     */
+    fun pauseMotion() {
+        hostPaused = true
+        stopBreathing()
+    }
+
+    /** Хост вернулся: вернуть цикл кадров, если фаза его всё ещё требует. */
+    fun resumeMotion() {
+        hostPaused = false
+        syncBreathing()
+    }
+
+    /**
+     * Настоящая ли это видимость: прикреплена, вся цепочка предков `VISIBLE`, окно `VISIBLE`.
+     *
+     * `isShown` покрывает прикрепление и видимость предков, но НЕ видимость окна — поэтому окно
+     * проверяется отдельно. Догонять переход на невидимой вьюхе незачем: кадры не увидят.
+     */
+    private fun canAnimate(): Boolean =
+        isShown && windowVisibility == View.VISIBLE && !hostPaused
+
+    /**
+     * Согласовать цикл кадров с желанием вызывающего, видимостью и системными флагами.
      *
      * Единственное место, где решается «дышать или стоять», поэтому здесь же снимаются кадры при
-     * выключенных анимациях — иначе решение пришлось бы дублировать в [render] и в
-     * [onAttachedToWindow].
+     * выключенных анимациях и у спрятанной вьюхи — иначе решение пришлось бы дублировать в
+     * [render], в [onAttachedToWindow] и в обработчиках видимости.
      */
     private fun syncBreathing() {
-        if (!motionAllowed) {
+        if (OrbMotionPolicy.shouldSnap(animationsOn, canAnimate())) {
             stopBreathing()
-            // Статичный кадр — не «пустой»: орб остаётся видимым, просто не дышит. Фаза
-            // сбрасывается в опорную точку, чтобы картинка не зависела от того, на каком кадре
-            // человек выключил анимации.
-            phase = REST_PHASE
+            // Плавность — это тоже движение, которого не просили: при выключенных анимациях
+            // переход ставится мгновенно. У невидимой вьюхи догонять нечего по той же причине —
+            // кадры ушли бы в никуда.
+            if (needsTransition()) snapToTargets()
+            if (!animationsOn) phase = REST_PHASE
             smoothedLevel = level
             invalidate()
             return
         }
-        if (isAttachedToWindow) startBreathing() else stopBreathing()
+        // Кадры нужны, пока идёт дыхание фазы ИЛИ пока цвет и энергии не сошлись с целью:
+        // переход в IDLE тоже обязан доехать плавно, а не оборваться на полпути.
+        if (OrbMotionPolicy.needsFrames(pulses, needsTransition(), animationsOn, canAnimate())) {
+            startBreathing()
+        } else {
+            stopBreathing()
+        }
     }
 
     private fun startBreathing() {
         if (breathing) return
         breathing = true
-        originNanos = 0L
+        // Фаза НЕ сбрасывается: она живёт дольше одного запуска цикла, иначе каждый перезапуск
+        // ронял бы дыхание в самую тёмную точку периода. Обнуляется только отметка времени —
+        // первый кадр нового цикла даёт нулевое приращение.
         lastFrameNanos = 0L
         scheduleFrame()
         invalidate()
@@ -800,11 +1000,15 @@ class VoiceModeOrbView @JvmOverloads constructor(
          */
         val PERIOD_MS: Long = MarsPulsePolicy.PERIOD_ONLINE_MS.toLong()
 
-        /** Опорная фаза статичного кадра: середина подъёма — орб выглядит «живым», но стоит. */
-        const val REST_PHASE = 0.32f
-
-        /** Та же точка в долях амплитуды — для ветки без цикла кадров. */
-        const val REST_BREATH = 0.32f
+        /**
+         * Опорная фаза статичного кадра: орб выглядит «живым», но стоит.
+         *
+         * 0.19 — точка подъёма, где `alphaAt` даёт ровно прежнюю константу покоя (0.32 амплитуды,
+         * альфа 0.378). Значение подобрано обратной задачей `(1 - cos 2πp) / 2 = 0.32`: фаза и
+         * «доля амплитуды» — теперь одно и то же число, и статичный кадр не отличается по яркости
+         * от прежнего, хотя считается той же формулой, что и дыхание.
+         */
+        const val REST_PHASE = 0.1914f
 
         /** Корона занимает 98% меньшей стороны: габарит вьюхи — это «воздух» вокруг света. */
         const val HALO_FILL = 0.98f
@@ -860,10 +1064,24 @@ class VoiceModeOrbView @JvmOverloads constructor(
 
         // --- энергия фаз: [гало, кольцо, лимб, волны] ---------------------------------------
 
-        val ENERGY_IDLE = floatArrayOf(0.40f, 0.38f, 0.50f, 0.00f)
-        val ENERGY_LISTENING = floatArrayOf(0.66f, 0.60f, 0.78f, 0.50f)
-        val ENERGY_THINKING = floatArrayOf(0.70f, 0.62f, 0.68f, 0.00f)
-        val ENERGY_SPEAKING = floatArrayOf(0.58f, 0.78f, 0.98f, 0.80f)
+        /**
+         * Энергии слоёв — на 15–20% ниже прежних пиков.
+         *
+         * Прежние значения (`0.40/0.66/0.70/0.58` по гало, `0.98` по лимбу в речи) вместе с
+         * плотными альфа-стопами градиентов давали на пике речи слепящий белый ободок вокруг
+         * диска: свет «резал» глаз вместо того, чтобы мягко светиться. Свечение должно быть
+         * бархатным — яркость фазы теперь читается по цвету и площади гало, а не по вспышке.
+         */
+        val ENERGY_IDLE = floatArrayOf(0.34f, 0.32f, 0.42f, 0.00f)
+        val ENERGY_LISTENING = floatArrayOf(0.56f, 0.51f, 0.66f, 0.42f)
+        val ENERGY_THINKING = floatArrayOf(0.59f, 0.53f, 0.58f, 0.00f)
+        val ENERGY_SPEAKING = floatArrayOf(0.49f, 0.66f, 0.82f, 0.67f)
+
+        /**
+         * Допуск схождения перехода по энергии: 0.3% амплитуды — это меньше одного шага альфы
+         * (1/255 = 0.39%), то есть дальше догонять уже нечего, разница не видна на экране.
+         */
+        const val TRANSITION_EPSILON = 0.003f
 
         // --- корона -------------------------------------------------------------------------
 
@@ -898,12 +1116,13 @@ class VoiceModeOrbView @JvmOverloads constructor(
         const val MIN_SCALE = 0.985f
         const val BREATH_SCALE = 0.020f
 
-        /** Доля радиуса, которую добавляет полная громкость: заметно, но не «прыжок». */
+        /**
+         * Доля радиуса, которую добавляет полная громкость: заметно, но не «прыжок».
+         */
         const val LEVEL_SCALE = 0.045f
 
-        /** Атака/спад сглаживания уровня за кадр. */
-        const val LEVEL_ATTACK = 0.45f
-        const val LEVEL_RELEASE = 0.12f
+        // Атака/спад сглаживания амплитуды живут в [OrbMotionPolicy] как постоянные времени:
+        // шаг «доля за кадр» зависел от частоты кадров, и на 120 Гц орб гас вдвое быстрее, чем на 60.
 
         // --- волны --------------------------------------------------------------------------
 
@@ -918,8 +1137,8 @@ class VoiceModeOrbView @JvmOverloads constructor(
         const val WAVE_START = 1.04f
         const val WAVE_SPAN = 0.46f
 
-        const val WAVE_BASE_ALPHA = 0.30f
-        const val WAVE_VOICE_ALPHA = 0.42f
+        const val WAVE_BASE_ALPHA = 0.25f
+        const val WAVE_VOICE_ALPHA = 0.35f
 
         /** Ширина полосы в долях радиуса: широкая и мягкая, а не векторное кольцо. */
         const val WAVE_WIDTH_MIN = 0.10f
@@ -998,17 +1217,33 @@ class VoiceModeOrbView @JvmOverloads constructor(
  */
 internal object VoiceNeonPalette {
 
-    /** Покой: благородный тёмно-рубиновый Марс. */
-    val IDLE = 0xFFC41E3A.toInt()
+    /**
+     * Постоянная времени перехода между фазами, секунды.
+     *
+     * 0.45 с — это ~95% пути за 1.35 с и ~99% за 2 с: глаз читает такой переход как «свет
+     * перетёк», а не как «включили другую лампу». Быстрее 0.3 с снова выглядит вспышкой,
+     * медленнее 0.7 с — как будто интерфейс подвис.
+     */
+    const val TRANSITION_TAU_SEC = 0.45f
 
-    /** Слушаю: живой алый — микрофон открыт, человек говорит. */
-    val LISTENING = 0xFFFF3D4F.toInt()
+    /** Покой: глубокий благородный тёмно-рубиновый — тлеющая корона. */
+    val IDLE = 0xFFB8293D.toInt()
 
-    /** Думаю: золотисто-янтарная солнечная корона. */
-    val THINKING = 0xFFFFC24D.toInt()
+    /** Слушаю: мягкий тёплый кораллово-рубиновый — микрофон открыт, человек говорит. */
+    val LISTENING = 0xFFE84A58.toInt()
 
-    /** Говорю: неоново-лазурная плазма вокруг рубинового Марса. */
-    val SPEAKING = 0xFF4CC8FF.toInt()
+    /** Думаю: мягкий янтарно-терракотовый закат Марса — модель считает. */
+    val THINKING = 0xFFE58B42.toInt()
+
+    /**
+     * Говорю: тёплый персиково-золотистый — солнечный свет в атмосфере Марса.
+     *
+     * Раньше здесь стоял кислотно-голубой `0xFF4CC8FF`: переход с рубинового на него был
+     * контрастом в 180° по тону, и смена фазы била по глазам. Теперь речь — самая светлая и
+     * тёплая точка той же гаммы: синий канал вырос (0x79 против 0x3D у покоя), но красный
+     * по-прежнему доминирует, поэтому оттенок читается как золото, а не как холодный синий.
+     */
+    val SPEAKING = 0xFFF2A679.toInt()
 
     /** Цвет фазы: ровно один на каждую роль, без «похожих» пар. */
     fun of(tone: VoiceModeTone): Int = when (tone) {
@@ -1016,5 +1251,189 @@ internal object VoiceNeonPalette {
         VoiceModeTone.LISTENING -> LISTENING
         VoiceModeTone.THINKING -> THINKING
         VoiceModeTone.SPEAKING -> SPEAKING
+    }
+
+    /**
+     * Поканальная интерполяция ARGB: `t = 0` — [from], `t = 1` — [to].
+     *
+     * Считается в int-каналах, а не через `Color`/`ColorUtils`: объект обязан оставаться
+     * независимым от `android.*`, иначе палитру нельзя проверить обычным JVM-тестом. Альфа
+     * интерполируется наравне с цветом — иначе переход между полупрозрачными красками давал бы
+     * рывок по плотности.
+     *
+     * Канал считается с округлением и гарантированным шагом в единицу ([mixChannel]): иначе
+     * пошаговая интерполяция с малым `k` застывала бы, не дойдя до цели, и цикл кадров крутился
+     * бы вечно вокруг цвета, который уже не меняется.
+     */
+    fun lerpColor(from: Int, to: Int, t: Float): Int {
+        val k = if (t.isFinite()) t.coerceIn(0f, 1f) else 0f
+        if (k <= 0f) return from
+        if (k >= 1f) return to
+        val a = mixChannel(channel(from, 24), channel(to, 24), k)
+        val r = mixChannel(channel(from, 16), channel(to, 16), k)
+        val g = mixChannel(channel(from, 8), channel(to, 8), k)
+        val b = mixChannel(channel(from, 0), channel(to, 0), k)
+        return (a shl 24) or (r shl 16) or (g shl 8) or b
+    }
+
+    /**
+     * Доля пути к цели за кадр длиной [dtSec] при постоянной времени [tauSec].
+     *
+     * Экспонента, а не фиксированный шаг: так переход занимает одно и то же время на любой
+     * частоте кадров и никогда не «перелетает» цель. `dt` зажат сверху четвертью секунды — после
+     * сворачивания приложения и возврата один гигантский кадр иначе перескочил бы сразу в конец,
+     * и переход выглядел бы щелчком.
+     */
+    fun stepFactor(dtSec: Float, tauSec: Float = TRANSITION_TAU_SEC): Float {
+        if (dtSec <= 0f || !dtSec.isFinite()) return 0f
+        if (tauSec <= 0f || !tauSec.isFinite()) return 1f
+        val dt = dtSec.coerceIn(0f, 0.25f)
+        return 1f - kotlin.math.exp((-dt / tauSec).toDouble()).toFloat()
+    }
+
+    /** Канал 0..255: сдвиг 24 — альфа, 16 — красный, 8 — зелёный, 0 — синий. */
+    private fun channel(color: Int, shift: Int): Int = (color ushr shift) and 0xFF
+
+    /**
+     * Один канал: линейная интерполяция с округлением и гарантированным шагом в единицу.
+     *
+     * Две ловушки целочисленной интерполяции:
+     * 1. `toInt()` на убывающей разности отсекает дробь и залипает на целом значении — нужно
+     *    округление;
+     * 2. при кадре 60 fps и тау 0.45 `k ≈ 0.036`, то есть шаг `(to - from) * k` становится меньше
+     *    половины канала, округляется в ноль — и канал замирает в 13 единицах от цели, а цикл
+     *    кадров крутится вечно. Поэтому пока канал не равен цели, он двигается минимум на 1.
+     *
+     * Перелёта при этом не бывает: `rounded` не выходит за [to], а `coerceIn` держит его между
+     * «шагнул на единицу» и целью.
+     */
+    private fun mixChannel(from: Int, to: Int, k: Float): Int {
+        if (from == to) return from
+        val rounded = kotlin.math.round(from + (to - from) * k).toInt()
+        return if (to > from) rounded.coerceIn(from + 1, to) else rounded.coerceIn(to, from - 1)
+    }
+}
+
+/**
+ * Движение орба: когда вообще нужны кадры, как копится фаза дыхания и как сглаживается речь.
+ *
+ * Зачем отдельный объект, а не пять строк внутри вьюхи: `View` и `Choreographer` на обычной JVM
+ * не собрать, и всё, что живёт прямо в [VoiceModeOrbView], проверяется только чтением исходника.
+ * Здесь же нет ни одного `android.*` — правила «когда дыхание честное, а когда статичный кадр»,
+ * непрерывность фазы и частотно-независимое сглаживание проверяются обычным JUnit
+ * ([VoiceModeOrbViewContractTest]), включая те дефекты, которые до этой волны ловились только
+ * глазами на телефоне.
+ *
+ * Три правила, вокруг которых всё построено:
+ * 1. **Право системы и просьба хоста — разные вещи.** [pulses] — «дыши, пока я показываю фазу»,
+ *    анимация разрешена/запрещена настройками. Переход цвета обязан ехать, даже когда дыхание уже
+ *    не нужно (переход в `IDLE`), поэтому [needsFrames] складывает оба условия, а не склеивает их
+ *    в один флаг.
+ * 2. **Невидимая вьюха кадров не просит.** Спрятанный слой (`GONE`) и фоновое окно — это не
+ *    «медленно», это «зря»: цикл кадров на невидимой вьюхе жжёт батарею и держит Activity.
+ * 3. **Фаза живёт дольше одного запуска.** Она копится по `dt` и не сбрасывается ни на старте
+ *    цикла, ни на его остановке: иначе каждый перезапуск ронял бы дыхание в самую тёмную точку,
+ *    а кольца акустических волн телепортировались бы назад.
+ */
+internal object OrbMotionPolicy {
+
+    /**
+     * Потолок приращения времени за кадр, секунды.
+     *
+     * После сворачивания приложения, подлагивания или долгой паузы `dt` бывает в сотни
+     * миллисекунд; без потолка фаза и дрейф перескочили бы на полпериода за один кадр — это и
+     * читается как «орб дёрнулся».
+     */
+    const val MAX_FRAME_DT_SEC = 0.05f
+
+    /**
+     * Постоянная времени атаки амплитуды речи, секунды.
+     *
+     * 0.028 с — это прежние 45% пути за кадр 60 fps, переписанные как время: слово по-прежнему
+     * «вспыхивает», но на 120 Гц орб больше не гаснет вдвое быстрее, чем на 60.
+     */
+    const val LEVEL_ATTACK_TAU_SEC = 0.028f
+
+    /** Постоянная времени спада: прежние 12% за кадр 60 fps — плавное затухание между словами. */
+    const val LEVEL_RELEASE_TAU_SEC = 0.131f
+
+    /**
+     * Допуск схождения амплитуды: 0.2% — меньше одного шага альфы (1/255 = 0.39%).
+     * Дальше догонять нечего, а экспонента сама по себе не достигает цели никогда.
+     */
+    const val LEVEL_SNAP = 0.002f
+
+    /**
+     * Нужны ли кадры прямо сейчас.
+     *
+     * @param pulses просит ли хост дыхание фазы;
+     * @param transitioning не сошёлся ли переход цвета/энергий (его обязано доехать даже в `IDLE`);
+     * @param animationsOn разрешены ли анимации системой;
+     * @param visible видна ли вьюха на самом деле.
+     */
+    fun needsFrames(
+        pulses: Boolean,
+        transitioning: Boolean,
+        animationsOn: Boolean,
+        visible: Boolean,
+    ): Boolean = animationsOn && visible && (pulses || transitioning)
+
+    /**
+     * Ставить ли цели мгновенно, без кадров.
+     *
+     * Мгновенно — только когда движение запрещено системой или его некому увидеть.
+     */
+    fun shouldSnap(animationsOn: Boolean, visible: Boolean): Boolean = !animationsOn || !visible
+
+    /** Фаза в 0..1: битое значение (NaN, бесконечность) — начало цикла, а не случайный кадр. */
+    fun normalizePhase(phase: Float): Float {
+        if (!phase.isFinite()) return 0f
+        val wrapped = phase - kotlin.math.floor(phase)
+        return if (wrapped >= 1f) 0f else wrapped
+    }
+
+    /**
+     * Один шаг фазы дыхания: `dt / период`, зажатый сверху [MAX_FRAME_DT_SEC].
+     *
+     * Накопление, а не `(время - начало) % период`: у накопления нет начала, которое можно
+     * потерять при перезапуске цикла, — поэтому остановка и возврат не дают скачка. Уплывание
+     * накопления (float за минуты) для декоративной синусоиды не значит ничего: важна
+     * непрерывность, а не абсолютная фаза.
+     */
+    fun advancePhase(phase: Float, dtSec: Float, periodMs: Long): Float {
+        val current = normalizePhase(phase)
+        if (periodMs <= 0L) return current
+        if (!dtSec.isFinite() || dtSec <= 0f) return current
+        val stepSec = dtSec.coerceAtMost(MAX_FRAME_DT_SEC)
+        return normalizePhase(current + stepSec / (periodMs / 1000f))
+    }
+
+    /**
+     * «Дыхание» 0..1 в фазе [phase]: та же кривая, что у статус-точек ([MarsPulsePolicy.alphaAt]),
+     * нормированная в долю амплитуды.
+     *
+     * Одна формула на цикл кадров и на статичный кадр: раньше статика считалась отдельной
+     * константой, и в момент остановки цикла яркость прыгала к ней с текущей фазы.
+     */
+    fun breathAt(phase: Float): Float {
+        val span = MarsPulsePolicy.MAX_ALPHA - MarsPulsePolicy.MIN_ALPHA
+        if (span <= 0f) return 0f
+        val alpha = MarsPulsePolicy.alphaAt(normalizePhase(phase))
+        return ((alpha - MarsPulsePolicy.MIN_ALPHA) / span).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Сглаженная амплитуда речи: атака быстрее спада, шаг — экспонента от `dt`.
+     *
+     * Цель приходит пачками 10–16 Гц; без сглаживания речь читалась бы как мигание, а шаг «доля
+     * за кадр» делал бы скорость реакции зависимой от частоты экрана.
+     */
+    fun smoothLevel(current: Float, target: Float, dtSec: Float): Float {
+        val from = if (current.isFinite()) current.coerceIn(0f, 1f) else 0f
+        val to = if (target.isFinite()) target.coerceIn(0f, 1f) else 0f
+        if (from == to) return to
+        val tau = if (to > from) LEVEL_ATTACK_TAU_SEC else LEVEL_RELEASE_TAU_SEC
+        val next = from + (to - from) * VoiceNeonPalette.stepFactor(dtSec, tau)
+        return if (kotlin.math.abs(to - next) <= LEVEL_SNAP) to else next.coerceIn(0f, 1f)
     }
 }

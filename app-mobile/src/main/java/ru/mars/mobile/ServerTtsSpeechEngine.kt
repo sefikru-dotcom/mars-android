@@ -2,17 +2,26 @@ package ru.mars.mobile
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.EdgeNeuralTtsClient
+import ru.mars.network.repository.OpenAiSpeechTtsClient
+import ru.mars.network.repository.PaidTtsClient
+import ru.mars.network.repository.PlusVibeMediaTtsClient
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsSpeechRequest
 import ru.mars.network.repository.ServerTtsVoiceProfile
 import ru.mars.network.repository.ServerTtsVoices
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
 
 /**
  * Порты серверного синтеза — единственное, что нужно движку озвучки, чтобы не знать
@@ -82,23 +91,29 @@ interface ServerTtsPlayback {
 }
 
 /**
- * Голосовой вывод с серверным синтезом и ПРОЗРАЧНЫМ фолбэком на системный Android TTS.
+ * Голосовой вывод с серверным синтезом и ПРОЗРАЧНЫМ фолбэком на РЕЗЕРВНЫЙ движок.
  *
- * Реализует контракт [VoiceOutputController.SpeechEngine], оборачивая платформенный
- * движок ([fallback], обычно [AndroidSpeechEngine]), поэтому [VoiceOutputController] и
- * весь существующий голосовой путь не меняются: контроллер видит один движок и
- * по-прежнему получает только «принято / не принято».
+ * Реализует контракт [VoiceOutputController.SpeechEngine], оборачивая резервный движок
+ * ([fallback] — обычно локальную модель Piper, см. [LocalVoiceTts]), поэтому
+ * [VoiceOutputController] и весь существующий голосовой путь не меняются: контроллер видит
+ * один движок и по-прежнему получает только «принято / не принято».
+ *
+ * Резерв — это политика вызывающего, а не догадка движка: раньше здесь стоял платформенный
+ * `TextToSpeech`, и любой отказ облака (401, 429, таймаут, битый поток) молча подменял
+ * выбранный «нейро»-голос роботом Android, хотя живая модель лежала на устройстве. Теперь
+ * цель деградации задаётся снаружи, а её канал сообщается хосту ([fallbackChannel] →
+ * [onVoiceSubstituted]), поэтому подмена всегда видна.
  *
  * Порядок решения для одной реплики:
  * 1. текст длиннее [ServerTtsContract.MAX_TEXT_LENGTH] — на сервер НЕ отправляем
- *    (иначе гарантированный `400 text too long`), сразу системный TTS;
+ *    (иначе гарантированный `400 text too long`), сразу резерв;
  * 2. иначе запускается серверный синтез; [speak] возвращает `true` немедленно
  *    (fire-and-forget, как у платформенного движка) и не блокирует UI-поток;
- * 3. пришло аудио и оно стартовало — говорим им; системный TTS не задействован;
+ * 3. пришло аудио и оно стартовало — говорим им; резерв не задействован;
  * 4. любой другой исход (401/404/429/5xx, невалидный ответ, транспортный сбой,
  *    не запустившееся воспроизведение, асинхронная ошибка декодера) — ТОТ ЖЕ текст
- *    уходит в [fallback]. Пользователю не показывается ни ошибки, ни тоста, наружу
- *    ничего не бросается.
+ *    уходит в [fallback], и о подмене канала сообщается хосту. Пользователю не показывается
+ *    ни ошибки, ни тоста, наружу ничего не бросается.
  *
  * Серверный маршрут открыт: `/api/tts` входит в `NATIVE_BEARER_EXACT_PATHS`
  * (`api/auth.py`), device-Bearer получает 200 и MP3 — ветка 4 ниже остаётся
@@ -108,13 +123,26 @@ interface ServerTtsPlayback {
  * Реплики не накладываются: каждый новый [speak] отменяет предыдущую незавершённую
  * попытку (семантика `QUEUE_FLUSH` платформенного движка).
  *
- * @param fallback системный TTS — обязательный путь деградации.
+ * Предсинтез ([prefetch]): следующая фраза синтезируется, пока звучит текущая, поэтому
+ * [speak] для неё не ждёт сеть. Без этого TTFB синтеза (0.4–2 с) складывался с концом
+ * предыдущей фразы в паузу посреди ответа — «дошёл до запятой и остановился на 5–10 с».
+ *
+ * @param fallback резервный движок — цель деградации при отказе облака. В голосовом режиме
+ *   это локальная модель Piper; платформенный TTS остаётся им только тогда, когда модели на
+ *   устройстве нет вовсе.
  * @param client источник серверного аудио.
  * @param playback проигрывание серверного аудио.
  * @param scope область для фонового синтеза (в приложении — `lifecycleScope`).
  * @param onServerAudioAvailable вызывается один раз при первом реально зазвучавшем
  *   серверном аудио: хост может вернуть вывод в строй, если платформенный TTS на
  *   устройстве отсутствовал (серверный канал от него не зависит).
+ * @param fallbackChannel каким каналом является [fallback] — это знает только вызывающий,
+ *   движок видит интерфейс. Нужно, чтобы сообщить хосту, ЧЕМ именно заменён выбранный голос.
+ * @param onVoiceSubstituted реплику произнёс резерв вместо облачного голоса. Подмена —
+ *   разрешённое поведение, но молчаливая подмена запрещена: хост показывает её человеку.
+ * @param onSilent ни облако, ни резерв не дали звука. Событие обязательно: [speak] отвечает
+ *   `true` оптимистично (синтез асинхронный), и без этого сигнала хост остался бы в фазе
+ *   «говорю» навсегда — с закрытым микрофоном и висящей кнопкой.
  */
 class ServerTtsSpeechEngine(
     private val fallback: VoiceOutputController.SpeechEngine,
@@ -122,10 +150,51 @@ class ServerTtsSpeechEngine(
     private val playback: ServerTtsPlayback,
     private val scope: CoroutineScope,
     private val onServerAudioAvailable: () -> Unit = {},
+    private val fallbackChannel: VoiceChannel = VoiceChannel.SYSTEM,
+    /**
+     * Последний резерв ПОСЛЕ [fallback] — платформенный `TextToSpeech`.
+     *
+     * Зачем отдельный параметр. В серверном чате [fallback] — локальная модель Piper, но
+     * она физически не может звучать, пока модель не скачана (первый запуск, 21 МиБ).
+     * Без этого резерва такая фраза пропадала бы молча: облако отказало, Piper не готов, и
+     * человек не слышал ничего. Теперь порядок честный и полный:
+     * облако → Piper → платформа, и каждый шаг объявляется своим каналом.
+     *
+     * `null` (значение по умолчанию) — прежнее поведение: два канала, второй отказ означает
+     * тишину (так живут тесты и сценарии без офлайн-модели).
+     */
+    private val lastResort: VoiceOutputController.SpeechEngine? = null,
+    private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
+    private val onSilent: () -> Unit = {},
 ) : VoiceOutputController.SpeechEngine {
 
     /** Незавершённая серверная попытка; отменяется новым [speak]/[stop]/[shutdown]. */
     private var attempt: Job? = null
+
+    /**
+     * Поколение реплики: [stop]/[shutdown]/новый [speak] его поднимают.
+     *
+     * Зачем отдельно от [attempt]: корутина попытки может уже выйти из ожидания (аудио
+     * получено, `play` принял байты) и продолжить выполнение ПОСЛЕ того, как человек нажал
+     * микрофон. Без счётчика отменённая реплика «догоняла» бы его резервным голосом — уже
+     * после тишины и уже в новом ходе.
+     */
+    @Volatile
+    private var generation: Long = 0L
+
+    /**
+     * Предсинтез следующих фраз: текст → уже запущенный синтез.
+     *
+     * Зачем: синтез занимает 0.4–2 с (сеть, сервер), а очередь отдаёт следующую фразу
+     * ТОЛЬКО после того, как доиграла текущая. Без предсинтеза эти секунды складывались в
+     * паузу посреди ответа — ту самую «дошёл до запятой и остановился на 5–10 секунд».
+     * С предсинтезом фраза N+1 синтезируется, пока звучит фраза N, и [speak] забирает
+     * готовое аудио без ожидания сети.
+     *
+     * Ключ — сам текст: очередь отдаёт куски дословно, и повтор того же текста (эхо,
+     * повторное «Проверить») получает тот же готовый результат.
+     */
+    private val prefetched = ConcurrentHashMap<String, Deferred<ServerTtsResult>>()
 
     /** Системный TTS уже отказал: повторять его вслепую нельзя. */
     private var fallbackDead = false
@@ -140,42 +209,110 @@ class ServerTtsSpeechEngine(
     var serverAttemptCount: Int = 0
         private set
 
+    /** Сколько фраз ждёт предсинтеза — диагностика и тесты, решений не принимает. */
+    val prefetchedCount: Int
+        get() = prefetched.size
+
     /**
-     * Озвучивает [text]: сервером, а при любом сбое — системным TTS.
+     * Предсинтезировать [text], пока звучит текущая фраза.
+     *
+     * Вызывается очередью ([LocalVoiceTts]) сразу после запуска предыдущего куска, поэтому
+     * к моменту [speak] результат обычно уже готов. Отменяется в [stop]/[shutdown]: тишина
+     * не должна оплачиваться сетевым запросом, который больше никому не нужен.
+     *
+     * Ничего не делает для пустого/слишком длинного текста (сервер ответил бы 400) и когда
+     * оба канала уже мертвы: предсинтез мёртвого канала — это просто лишний запрос.
+     */
+    override fun prefetch(text: String) {
+        if (text.isBlank()) return
+        if (text.length > ServerTtsContract.MAX_TEXT_LENGTH) return
+        if (fallbackDead && lastServerUnavailable) return
+        if (prefetched.containsKey(text)) return
+        // Потолок очереди: три фразы вперёд — это уже весь буфер SpeechChunker, а больше
+        // означало бы синтез в пустоту (человек перебьёт ответ раньше, чем он зазвучит).
+        if (prefetched.size >= MAX_PREFETCH) return
+        val pending = scope.async {
+            try {
+                client.synthesize(text)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // Порт обязан не бросать; страховка — тот же фолбэк вместо падения.
+                ServerTtsResult.Unavailable("transport")
+            }
+        }
+        // Гонка двух вызовов на одну фразу: проигравший отменяется, иначе лишний сетевой
+        // запрос жил бы до конца реплики и мог перезаписать уже лежащий результат.
+        if (prefetched.putIfAbsent(text, pending) != null) pending.cancel()
+    }
+
+    /**
+     * Озвучивает [text]: сервером, а при любом сбое — резервным движком ([fallback]).
      *
      * @return `true`, если реплика принята (серверная попытка запущена либо её принял
-     *   системный движок); `false` — звука не будет НИ одним каналом (оба уже отказали),
+     *   резервный движок); `false` — звука не будет НИ одним каналом (оба уже отказали),
      *   тогда контроллер честно выключает вывод и показывает «озвучивание недоступно».
      */
     override fun speak(text: String): Boolean {
         // Правило длины: >5000 символов сервер отклоняет с 400 — не создаём этот 400 сами.
         if (text.length > ServerTtsContract.MAX_TEXT_LENGTH) {
-            return trackFallback(fallback.speak(text))
+            prefetched.remove(text)?.cancel()
+            return speakByFallback(text)
         }
-        // Оба канала уже мертвы — не притворяемся, что реплика принята.
-        if (fallbackDead && lastServerUnavailable) return false
+        // Все каналы уже мертвы — не притворяемся, что реплика принята. Пока жив последний
+        // резерв (платформа), фраза ещё может прозвучать, поэтому проверка его учитывает.
+        if (fallbackDead && lastServerUnavailable && lastResort == null) return false
         attempt?.cancel()
         serverAttemptCount++
+        // Новая реплика — новое поколение: поздние колбэки прошлой (асинхронный отказ декодера,
+        // запоздавший ответ сети) больше не имеют права звучать. Это семантика `QUEUE_FLUSH`,
+        // которую обещает контракт движка.
+        generation++
+        // Поколение снимается ДО запуска: поздний ответ этой попытки не должен звучать после
+        // стопа, который случится, пока она в сети.
+        val token = generation
+        // Предсинтезированная фраза забирается ДО запуска новой попытки: ожидания синтеза
+        // между фразами нет вовсе, звук стартует сразу после предыдущего.
+        val ready = prefetched.remove(text)
         attempt = scope.launch {
-            val result = try {
-                client.synthesize(text)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                // Порты обязаны не бросать; страховка — тот же фолбэк вместо падения.
-                ServerTtsResult.Unavailable("transport")
+            val result = if (ready != null) {
+                try {
+                    ready.await()
+                } catch (cancelled: CancellationException) {
+                    // Отменённый предсинтез — это не отмена реплики: если нас самих не
+                    // отменили, честно уходим в фолбэк, а не теряем фразу молча.
+                    coroutineContext.ensureActive()
+                    ServerTtsResult.Unavailable("transport")
+                } catch (error: Exception) {
+                    ServerTtsResult.Unavailable("transport")
+                }
+            } else {
+                try {
+                    client.synthesize(text)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    // Порты обязаны не бросать; страховка — тот же фолбэк вместо падения.
+                    ServerTtsResult.Unavailable("transport")
+                }
             }
+            // Реплику отменили, пока шёл синтез: ни играть, ни отдавать резерву нельзя.
+            if (token != generation) return@launch
             when (result) {
                 is ServerTtsResult.Audio -> {
                     val started = playback.play(result.bytes, result.contentType) {
-                        // Асинхронный отказ декодера: тот же текст уходит в системный TTS.
-                        trackFallback(fallback.speak(text))
+                        // Асинхронный отказ декодера приходит уже ПОСЛЕ возврата из play():
+                        // если за это время прошёл стоп, реплика отменена и звучать не должна.
+                        if (token == generation && !speakByFallback(text)) notifySilent()
                     }
-                    if (started) markServerWorking() else trackFallback(fallback.speak(text))
+                    when {
+                        started -> markServerWorking()
+                        token == generation && !speakByFallback(text) -> notifySilent()
+                    }
                 }
                 is ServerTtsResult.Unavailable -> {
                     lastServerUnavailable = true
-                    trackFallback(fallback.speak(text))
+                    if (token == generation && !speakByFallback(text)) notifySilent()
                 }
             }
         }
@@ -183,7 +320,7 @@ class ServerTtsSpeechEngine(
     }
 
     /**
-     * Темп и высота: сервер получает их в теле запроса, а системный резерв — вызовом.
+     * Темп и высота: сервер получает их в теле запроса, а резервный движок — вызовом.
      *
      * Две разные дороги, и обе нужны: у `api/tts` темп едет полем запроса (его подставляет
      * [RepositoryServerTtsClient]), а платформенный TTS меняет темп только через
@@ -194,26 +331,82 @@ class ServerTtsSpeechEngine(
         runCatching { fallback.setProsody(prosody) }
     }
 
-    /** Тишина: отменяет серверную попытку и глушит оба канала. */
+    /** Тишина: отменяет серверную попытку и предсинтез, глушит ВСЕ каналы. */
     override fun stop() {
+        generation++
         attempt?.cancel()
         attempt = null
+        cancelPrefetched()
         runCatching { playback.stop() }
         runCatching { fallback.stop() }
+        runCatching { lastResort?.stop() }
     }
 
-    /** Хост уничтожен: освобождаем оба движка. */
+    /** Хост уничтожен: освобождаем все движки. */
     override fun shutdown() {
+        generation++
         attempt?.cancel()
         attempt = null
+        cancelPrefetched()
         runCatching { playback.release() }
         runCatching { fallback.shutdown() }
+        runCatching { lastResort?.shutdown() }
     }
 
-    /** Системный TTS ответил отказом — фиксируем, чтобы не обещать звук вслепую. */
-    private fun trackFallback(accepted: Boolean): Boolean {
-        if (!accepted) fallbackDead = true
-        return accepted
+    /**
+     * Отменить весь предсинтез и очистить карту.
+     *
+     * Отмена обязательна: незавершённый синтез держал бы сокет и (на платном голосе) деньги
+     * за запрос, который уже никто не услышит. Очистка — чтобы следующий [speak] не забрал
+     * результат, отменённый прошлой тишиной.
+     */
+    private fun cancelPrefetched() {
+        prefetched.values.forEach { it.cancel() }
+        prefetched.clear()
+    }
+
+    /**
+     * Отдать реплику резерву — и сказать об этом хосту.
+     *
+     * Резерв разрешён, молчаливая подмена — нет. Хост получает [onVoiceSubstituted] с каналом
+     * [fallbackChannel], поэтому «услышал робота вместо Светланы» перестаёт быть загадкой:
+     * это либо локальная модель (нормальный резерв), либо платформа (крайний случай, о котором
+     * нужно сообщить).
+     *
+     * `runCatching` обязателен: резерв — чужой код (нативный синтез, платформа), и его
+     * исключение не должно всплывать из корутины синтеза.
+     */
+    private fun speakByFallback(text: String): Boolean {
+        val accepted = runCatching { fallback.speak(text) }.getOrDefault(false)
+        if (!accepted) {
+            // «Резерв мёртв» — это про канал БЕЗ последнего резерва. Когда последний резерв
+            // есть, отказ Piper чаще всего означает «модель ещё скачивается»: пометить его
+            // мёртвым навсегда значило бы навсегда лишить озвучку локального голоса после
+            // первой же фразы на новом устройстве.
+            fallbackDead = lastResort == null
+            // Последний шанс: платформа. Молчания не будет, и подмена объявляется честно.
+            val platform = lastResort ?: return false
+            val platformAccepted = runCatching { platform.speak(text) }.getOrDefault(false)
+            if (!platformAccepted) return false
+            runCatching {
+                onVoiceSubstituted(
+                    VoiceSubstitution(VoiceChannel.SYSTEM, VoiceSubstitutionReason.SYSTEM_RESERVE),
+                )
+            }
+            return true
+        }
+        val reason = if (fallbackChannel == VoiceChannel.SYSTEM) {
+            VoiceSubstitutionReason.SYSTEM_RESERVE
+        } else {
+            VoiceSubstitutionReason.CLOUD_FAILED
+        }
+        runCatching { onVoiceSubstituted(VoiceSubstitution(fallbackChannel, reason)) }
+        return true
+    }
+
+    /** Звука не будет ни одним каналом: очередь обязана закрыть фазу, а не ждать колбэка. */
+    private fun notifySilent() {
+        runCatching { onSilent() }
     }
 
     /** Серверное аудио зазвучало: канал рабочий, при первом успехе сообщаем хосту. */
@@ -223,6 +416,17 @@ class ServerTtsSpeechEngine(
             serverAnnounced = true
             runCatching { onServerAudioAvailable() }
         }
+    }
+
+    companion object {
+        /**
+         * Сколько фраз можно предсинтезировать вперёд.
+         *
+         * Три — это ровно буфер `SpeechChunker` (текущая фраза + два куска очереди).
+         * Больше означало бы синтез в пустоту: человек перебьёт ответ или уйдёт с экрана
+         * раньше, чем эти фразы зазвучат, а запросы (и деньги на платном голосе) уже ушли.
+         */
+        const val MAX_PREFETCH: Int = 3
     }
 }
 
@@ -240,13 +444,21 @@ class ServerTtsSpeechEngine(
  * `429`/`401` профиль НЕ понижают (это лимитер и токен, а не отсутствие голоса).
  *
  * Порядок одной реплики:
+ * 0. если человек выбрал платный облачный голос ([ServerTtsVoices.PLUSVIBE_ALICE] или
+ *    [ServerTtsVoices.PLUSVIBE_ONYX]) — асинхронный контракт провайдера
+ *    ([PlusVibeMediaTtsClient]: `media/generate` + поллинг задачи), а при любом отказе
+ *    (нет ключа, потолок цены, таймаут, ошибка задачи) — прямой нейро-голос Дмитрия.
+ *    «Оникс» и «Алиса» не падают в механический системный TTS и не ждут зависший апстрим
+ *    дольше отведённого контрактом времени;
  * 1. прямой WebSocket ([EdgeNeuralTtsClient]) выбранным голосом — ДАЖЕ без credential:
  *    Microsoft не спрашивает наш токен, и именно этот путь снимает 2-секундный лимитер
  *    сервера, из-за которого «Светлана», «Дмитрий» и «как в вебе» звучали одним системным
  *    голосом Android (жалоба владельца «дмитрий, светлана — один и тот же голос»);
  * 2. если сокет не дал аудио (провайдер блокирует Bing, DRM-отказ, таймаут) — серверный
  *    `/api/tts` тем же голосом, с ОДНИМ повтором после `429`;
- * 3. дальше — цепочка профилей (Дмитрий → Ава → Ирина) по фактическому ответу сервера.
+ * 3. дальше — цепочка профилей (Светлана → Дмитрий → Ава) по фактическому ответу сервера.
+ *    Платные профили в автоматическом переборе не участвуют: они стоят денег и выбираются
+ *    человеком осознанно (шаг 0), а не «на всякий случай».
  *
  * Одна реплика перебирает ЦЕПОЧКУ профилей, а не один профиль. Раньше здесь стоял
  * `selector.current()` и один запрос: любой отказ по голосу (`503` «Edge TTS engine not
@@ -310,9 +522,36 @@ class RepositoryServerTtsClient(
      * только серверная цепочка.
      */
     private val directEdgeClient: EdgeNeuralTtsClient? = EdgeNeuralTtsClient(),
+    /**
+     * Платный облачный синтез (асинхронный контракт провайдера).
+     *
+     * `null` (значение по умолчанию) — платный голос выключен: профили
+     * [ServerTtsVoices.PLUSVIBE_ALICE] и [ServerTtsVoices.PLUSVIBE_ONYX] в переборе
+     * пропускаются, а при их явном выборе фраза уходит прямому нейро-голосу. Это не дыра,
+     * а обратная совместимость: ключ провайдера приезжает из настроек позже, и все
+     * существующие вызовы конструктора остаются валидными без правок.
+     *
+     * Тип — порт [PaidTtsClient], а не конкретный класс: боевой маршрут
+     * ([PlusVibeMediaTtsClient]) асинхронный, а синхронный [OpenAiSpeechTtsClient] оставлен
+     * эталоном контракта и подменой в тестах.
+     */
+    private val paidClient: PaidTtsClient? = null,
     private val transport: ServerTtsTransport = ServerTtsTransport { url, credential, request ->
         ServerTtsRepository().synthesize(url, credential, request)
     },
+    /**
+     * Выбранный ПЛАТНЫЙ голос не прозвучал, и фразу прочитал нейро-резерв.
+     *
+     * Зачем отдельный сигнал: в этой ветке отказ платного клиента не доходит до движка —
+     * вызывающему возвращается уже готовое аудио другого голоса, и без этого колбэка
+     * человек слышал бы Дмитрия, выбрав «Алису», без единого объяснения. Ровно тот же
+     * принцип, что у [ServerTtsSpeechEngine.onVoiceSubstituted]: резерв разрешён, молчаливая
+     * подмена — нет.
+     *
+     * @param reason причина отказа клиента (`no_plusvibe_profile`, `no_api_key`, `timeout`,
+     *   `transport`, …) — короткий код без ключа и текста реплики.
+     */
+    private val onPaidUnavailable: (String?) -> Unit = {},
     /**
      * Ожидание перед повтором после `429`.
      *
@@ -320,6 +559,19 @@ class RepositoryServerTtsClient(
      * логика («подождать и повторить РОВНО один раз») от длительности не зависит.
      */
     private val sleeper: suspend (Long) -> Unit = { millis -> delay(millis) },
+    /**
+     * Сколько ждать ОДНУ реплику выбранным платным голосом до нейро-фолбэка, мс.
+     *
+     * Значение берётся у профиля ([ServerTtsVoiceProfile.waitBudgetMs]): у именованных
+     * голосов (`Alice`, `onyx`) бюджета нет — их потолок остаётся транспортным (90 с), потому
+     * что апстрим под нагрузкой честно отвечает за 13 с, и обрывать живой запрос значило бы
+     * платить дважды. А у голоса из библиотеки (`voice_id`) дефект другой: живой замер
+     * 18.11.2026 — 5 из 5 задач не завершились вовсе, поэтому ждать 90 с бессмысленно.
+     *
+     * Лямбда, а не значение: решение «сколько ждать» принадлежит профилю, а подмена в тестах
+     * не должна ждать реальные 8 с.
+     */
+    private val paidWaitBudget: (ServerTtsVoiceProfile) -> Long? = { it.waitBudgetMs },
 ) : ServerTtsClient {
 
     /** Исход попытки одним профилем — только метаданные, без текста реплики. */
@@ -336,8 +588,49 @@ class RepositoryServerTtsClient(
 
     override suspend fun synthesize(text: String): ServerTtsResult {
         val explicitChoice = chosenProfile()
-        val chosen = explicitChoice ?: ServerTtsVoices.NATURAL_SVETLANA
-        val attempts = ArrayList<Attempt>(ServerTtsVoices.VOICE_DIALOG.size + 1)
+        // Ничего не выбрано — говорим ОСНОВНЫМ голосом приложения (PlusVibe), а не первым
+        // бесплатным: это и есть «основной голос» из политики [ServerTtsVoices.DEFAULT_VOICE].
+        val chosen = explicitChoice ?: ServerTtsVoices.DEFAULT_VOICE
+        val attempts = ArrayList<Attempt>(ServerTtsVoices.VOICE_DIALOG.size + 2)
+
+        // 0) Платный облачный голос (engine = "plusvibe"/"openai"): асинхронный контракт
+        //    провайдера. Он НЕ ходит в серверный `/api/tts`: серверный движок не знает ни
+        //    модели ElevenLabs, ни голоса `onyx`, поэтому запрос туда гарантировал бы 400 и
+        //    лишнюю паузу в речи.
+        if (isPaidEngine(chosen.engine)) {
+            val paid = paidAttempt(text, chosen)
+            if (paid is ServerTtsResult.Audio) {
+                attempts += Attempt(chosen.id, null, null)
+                lastProfileId = chosen.id
+                lastAttempts = attempts
+                selector?.onAudio(chosen)
+                return paid
+            }
+            val paidFailure = paid as? ServerTtsResult.Unavailable
+            paidFailure?.let { failure ->
+                attempts += Attempt(chosen.id, failure.reason, failure.httpCode)
+                selector?.onUnavailable(chosen, failure)
+            }
+            // Прозрачный нейро-фолбэк: платный голос не должен звучать механическим
+            // системным роботом только потому, что у провайдера нет ключа или задача
+            // не уложилась в потолок ожидания.
+            val neural = directAttempt(text, ServerTtsVoices.NATURAL_DMITRY)
+            if (neural is ServerTtsResult.Audio) {
+                attempts += Attempt(ServerTtsVoices.NATURAL_DMITRY.id, null, null)
+                lastProfileId = ServerTtsVoices.NATURAL_DMITRY.id
+                lastAttempts = attempts
+                selector?.onAudio(ServerTtsVoices.NATURAL_DMITRY)
+                // Подмена объявляется ДО возврата: дальше фразу никто не переспросит, и
+                // хост узнаёт о ней только отсюда.
+                runCatching { onPaidUnavailable(paidFailure?.reason) }
+                return neural
+            }
+            (neural as? ServerTtsResult.Unavailable)?.let { failure ->
+                attempts += Attempt(ServerTtsVoices.NATURAL_DMITRY.id, failure.reason, failure.httpCode)
+            }
+            // Дальше — обычный серверный маршрут: он тем же текстом попробует остальные
+            // профили (платный профиль в переборе пропускается, см. цикл ниже).
+        }
 
         // 1) Прямой WebSocket к Microsoft: без credential и без серверного лимитера.
         val direct = directAttempt(text, chosen)
@@ -373,13 +666,17 @@ class RepositoryServerTtsClient(
         if (candidates.isEmpty()) {
             // Все профили на паузе. Запрос БЕЗ профиля здесь запрещён: сервер подставит
             // свой дефолт (piper/dmitri) и приложение заговорит чужим голосом молча.
-            // Честнее явный отказ — вызывающий слой уйдёт на системный TTS.
+            // Честнее явный отказ — вызывающий слой уйдёт на локальную модель.
             lastProfileId = if (direct == null) null else chosen.id
             lastAttempts = attempts
             return ServerTtsResult.Unavailable(PROFILES_COOLING)
         }
         var last: ServerTtsResult.Unavailable? = null
         for (profile in candidates) {
+            // Платный облачный профиль пробуется ТОЛЬКО выбранным человеком (шаг 0): в
+            // автоматическом переборе он стоил бы денег за каждую фразу и не является
+            // резервом «на случай отсутствия сети» — для этого есть edge и piper.
+            if (isPaidEngine(profile.engine)) continue
             lastProfileId = profile.id
             when (val result = requestWithRateLimitRetry(text, credential, profile)) {
                 is ServerTtsResult.Audio -> {
@@ -401,7 +698,7 @@ class RepositoryServerTtsClient(
         }
         lastAttempts = attempts
         // Цепочка исчерпана: явная ошибка с последней причиной, а не тишина. Движок
-        // увидит Unavailable и озвучит системным TTS — это видимая деградация, не молчание.
+        // увидит Unavailable и отдаст фразу резерву — это видимая деградация, не молчание.
         // Повтор на уровне очереди это не отменяет: на реплику по-прежнему уходит не больше
         // запросов, чем профилей в политике (Светлана → Дмитрий → Ава → Ирина), и каждый
         // следующий идёт ДРУГИМ голосом — то есть с новым шансом на звук.
@@ -410,6 +707,65 @@ class RepositoryServerTtsClient(
             httpCode = last?.httpCode,
             retryAfterMs = last?.retryAfterMs,
         )
+    }
+
+    /**
+     * Платный облачный синтез выбранным голосом (маркер маршрута `plusvibe`/`openai`).
+     *
+     * Темп человека уезжает в клиент: у OpenAI-совместимого провайдера это множитель, а не
+     * `+15%`, и `VoiceProsody.speed` уже ограничен `0.25..4.0`, поэтому в тело не попадёт
+     * мусор. Media-контракт поля темпа не имеет — там его роль играет сама модель.
+     *
+     * Модель берётся из ПРОФИЛЯ ([ServerTtsVoiceProfile.model]): голос `Alice` существует
+     * только внутри `elevenlabs-v4-tts`, а `onyx` — внутри `gpt-4o-mini-tts`. Пустая строка
+     * означает «модель клиента по умолчанию».
+     *
+     * Голос из БИБЛИОТЕКИ провайдера ([ServerTtsVoiceProfile.voiceId], русские Лариса и Катя)
+     * уезжает отдельным параметром: у ElevenLabs это другое поле контракта (`voice_id`), и
+     * положить id в `voice` значило бы получить `422` или молчаливое «Rachel».
+     *
+     * Бюджет ожидания ([ServerTtsVoiceProfile.waitBudgetMs]) применяется ЗДЕСЬ, а не в
+     * клиенте: истечение бюджета обязано привести к фолбэку, а фолбэк — политика этого класса.
+     * Живой дефект `voice_id` — задача не завершается никогда; без бюджета реплика молчала бы
+     * весь транспортный потолок (90 с). После бюджета вызывающий получает
+     * [REASON_PAID_DEADLINE], и в [synthesize] сразу идёт нейро-резерв — то есть таймаут
+     * не теряет фразу, а меняет голос.
+     *
+     * @return исход провайдера. Отсутствие клиента и исключение — тоже
+     *   [ServerTtsResult.Unavailable]: вызывающий обязан уйти на нейро-фолбэк, а не упасть.
+     */
+    private suspend fun paidAttempt(
+        text: String,
+        profile: ServerTtsVoiceProfile,
+    ): ServerTtsResult {
+        val client = paidClient ?: return ServerTtsResult.Unavailable(REASON_NO_PAID_CLIENT)
+        val effective = prosodyProvider?.invoke() ?: prosody
+        val budget = paidWaitBudget(profile)?.takeIf { it > 0L }
+        return try {
+            val call: suspend () -> ServerTtsResult = {
+                client.synthesize(
+                    text = text,
+                    voice = profile.voice,
+                    model = profile.model.orEmpty(),
+                    speed = effective?.speed ?: OpenAiSpeechTtsClient.DEFAULT_SPEED,
+                    voiceId = profile.voiceId,
+                )
+            }
+            // `withTimeoutOrNull`, а не `withTimeout`: отмена по бюджету — это НЕ отмена
+            // реплики, и она обязана вернуть причину, по которой вызывающий уйдёт в резерв.
+            // Отмена СНАРУЖИ (перебивание, стоп) по-прежнему бросает CancellationException.
+            if (budget != null) {
+                withTimeoutOrNull(budget) { call() }
+                    ?: ServerTtsResult.Unavailable(REASON_PAID_DEADLINE)
+            } else {
+                call()
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // Порт обязан не бросать; страховка — тот же нейро-фолбэк.
+            ServerTtsResult.Unavailable(OpenAiSpeechTtsClient.REASON_TRANSPORT)
+        }
     }
 
     /**
@@ -457,6 +813,17 @@ class RepositoryServerTtsClient(
         sleeper(wait)
         return request(text, credential, profile)
     }
+
+    /**
+     * Маршрут платного облака.
+     *
+     * Два маркера, потому что они появились в разное время: `openai` — исторический
+     * (`plusvibe-onyx`, id профиля сохранён ради уже выбранного голоса), `plusvibe` —
+     * новый основной (`plusvibe-alice`). Оба означают одно: реплику синтезирует
+     * [PaidTtsClient], а не `/api/tts`.
+     */
+    private fun isPaidEngine(engine: String?): Boolean =
+        engine == ENGINE_OPENAI || engine == ENGINE_PLUSVIBE
 
     /**
      * Профиль, выбранный человеком вручную, или `null` — «как в вебе».
@@ -557,6 +924,39 @@ class RepositoryServerTtsClient(
 
         /** Движок, у которого есть прямой WebSocket-путь (остальные идут на сервер). */
         const val ENGINE_EDGE: String = "edge"
+
+        /**
+         * Движок платного облачного синтеза (исторический маркер `plusvibe-onyx`).
+         *
+         * Это маркер МАРШРУТА, а не поле запроса `/api/tts`: профиль с этим движком никогда
+         * не уходит на сервер Марса — только в [PaidTtsClient], а при отказе — в прямой
+         * нейро-голос ([ServerTtsVoices.NATURAL_DMITRY]).
+         */
+        const val ENGINE_OPENAI: String = "openai"
+
+        /**
+         * Движок ОСНОВНОГО платного голоса (`plusvibe-alice`, ElevenLabs turbo).
+         *
+         * Отдельный маркер, а не переиспользование [ENGINE_OPENAI]: маркер описывает модель,
+         * а не компанию, и смешивать `gpt-4o-mini-tts` с `elevenlabs-v4-tts` под одним
+         * именем значило бы потерять это различие в логах и диагностике.
+         */
+        const val ENGINE_PLUSVIBE: String = "plusvibe"
+
+        /** Платный клиент не подключён (нет ключа провайдера): фолбэк на нейро-голос. */
+        const val REASON_NO_PAID_CLIENT: String = "paid_client_absent"
+
+        /**
+         * Бюджет ожидания голоса истёк ([ServerTtsVoiceProfile.waitBudgetMs]).
+         *
+         * Отдельная причина, а не `timeout` транспорта: транспортный таймаут — «апстрим не
+         * ответил за 90 с», а здесь мы сами решили не ждать зависший канал. В диагностике
+         * `lastAttempts` эти два случая обязаны различаться, иначе нельзя понять, чинить ли
+         * сеть или конкретный голос. Человеку показывается обычная подмена
+         * ([ru.mars.mobile.VoiceSubstitutionNotice.paidUnavailable]): «голос не ответил —
+         * читаю другим голосом».
+         */
+        const val REASON_PAID_DEADLINE: String = "deadline"
 
         /** Пауза повтора, если сервер не прислал `Retry-After`: окно лимитера — 2 с. */
         const val DEFAULT_RATE_LIMIT_WAIT_MS: Long = 2_000L

@@ -25,6 +25,32 @@ enum class AudioRoute {
     val isEchoRisk: Boolean get() = this != HEADPHONES
 }
 
+/**
+ * Активный маршрут вывода и то, можно ли ему верить.
+ *
+ * Зачем отдельно от [AudioRoute]. «В списке доступных выходов есть наушники» и «звук сейчас идёт
+ * в наушники» — разные утверждения, и первое верно даже тогда, когда гарнитура просто воткнута, а
+ * ответ читает встроенный динамик. Решение «открывать ли микрофон во время озвучки» обязано
+ * опираться только на второе: ошибка в эту сторону стоит дороже всего — Марс услышит сам себя,
+ * отправит свой ответ новым вопросом и перебьёт сам себя.
+ *
+ * [confirmed] = `false` означает «активный выход недоказуем». Такой маршрут эхо-опасен по
+ * определению ([isEchoRisk]), и автоперебивание на нём выключено, а не «включено наполовину».
+ */
+data class ActiveOutput(val route: AudioRoute, val confirmed: Boolean) {
+
+    /** Есть ли риск услышать собственную озвучку. Недоказанный маршрут — всегда риск. */
+    val isEchoRisk: Boolean get() = !confirmed || route.isEchoRisk
+
+    /** Можно ли утверждать, что звук идёт в наушники (единственное безопасное для микрофона). */
+    val isConfirmedHeadphones: Boolean get() = confirmed && route == AudioRoute.HEADPHONES
+
+    companion object {
+        /** Маршрут не определён: эхо-опасен, акустического перебивания на нём нет. */
+        val UNKNOWN: ActiveOutput = ActiveOutput(AudioRoute.UNKNOWN, confirmed = false)
+    }
+}
+
 /** Класс устройства вывода в терминах домена (Android-free). */
 enum class OutputKind {
     /** Наушники/гарнитура любого вида: проводные, BT, USB, слуховой аппарат. */
@@ -94,4 +120,25 @@ object AudioRoutePolicy {
 
     /** Маршрут по сырым типам устройств (`AudioDeviceInfo.type`). */
     fun routeForDeviceTypes(types: Collection<Int>): AudioRoute = routeFor(types.map(::kindFor))
+
+    /**
+     * Маршрут по ОДНОМУ устройству, которое платформа назвала активным.
+     *
+     * Отличие от [routeForDeviceTypes] принципиальное: там перечислены ДОСТУПНЫЕ выходы (воткнутая
+     * гарнитура рядом со встроенным динамиком), здесь — тот единственный, куда звук идёт сейчас.
+     * Поэтому приоритет «наушники > динамик» здесь не нужен и вреден: активное устройство одно.
+     *
+     * @param deviceType `AudioDeviceInfo.type` активного выхода; `null` — платформа не назвала
+     *   устройство.
+     * @return [AudioRoute.UNKNOWN] — по типу нельзя утверждать, куда идёт звук (HDMI, line-out,
+     *   неизвестный тип).
+     */
+    fun confirmedRouteFor(deviceType: Int?): AudioRoute {
+        if (deviceType == null) return AudioRoute.UNKNOWN
+        return when (kindFor(deviceType)) {
+            OutputKind.HEADPHONES -> AudioRoute.HEADPHONES
+            OutputKind.SPEAKER -> AudioRoute.SPEAKER
+            OutputKind.OTHER -> AudioRoute.UNKNOWN
+        }
+    }
 }

@@ -1,6 +1,7 @@
 package ru.mars.mobile.tts
 
 import android.content.Context
+import android.os.StatFs
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import ru.mars.mobile.asr.ModelStore
@@ -12,6 +13,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
 
 /**
  * Установка русской TTS-модели на диск: HTTPS -> `.part` -> SHA-256 архива -> распаковка
@@ -41,6 +43,19 @@ import java.net.URL
  *
  * Повторный вызов при уже установленной модели не ходит в сеть ([isInstalled]).
  * Сеть нужна ровно один раз; после установки синтез работает в авиарежиме.
+ *
+ * ## Одна модель, никаких «запасных»
+ * int8-варианта в установке больше нет: в приложении ровно один голос — полноточная Ирина
+ * ([OfflineTtsManifest.MODEL_ID]). Каталог `…-int8`, оставшийся от прежних версий, удаляется
+ * точечно и только при точном опознании ([purgeLegacyModel]) — это не «зачистка каталога»,
+ * а снятие ровно одного известного каталога.
+ *
+ * ## Место на диске
+ * На пике существуют ОБЕ копии модели: архив (64 МиБ) и распакованное дерево в staging
+ * (77,4 МиБ). Поэтому перед скачиванием проверяется [OfflineTtsManifest.PEAK_BYTES]
+ * (≈149 МиБ): иначе телефон с 70 МиБ свободных молча качает 64 МиБ и падает на распаковке,
+ * оставив за собой недокачанный архив. Проверка не блокирует установку, когда размер
+ * свободного места неизвестен (`<= 0`).
  */
 class OfflineTtsModel(
     private val store: ModelStore,
@@ -49,9 +64,24 @@ class OfflineTtsModel(
     private val archiveSize: Long = OfflineTtsManifest.ARCHIVE_SIZE,
     private val onProgress: ((downloaded: Long, total: Long) -> Unit)? = null,
     private val log: (String) -> Unit = { android.util.Log.w(TAG, it) },
+    /**
+     * Свободно байт в приватном хранилище приложения. `<= 0` — неизвестно (тогда проверка
+     * места не блокирует установку): на JVM-тестах `StatFs` отдаёт 0, и трактовать ноль как
+     * «места нет» значило бы запретить установку в любом тесте.
+     */
+    private val freeBytes: () -> Long = { freeBytesIn(store.rootDir) },
+    /**
+     * Паспорт устаревшей int8-модели — по нему опознаётся каталог, который разрешено удалить.
+     * Параметр, а не константа внутри: иначе проверку опознания нельзя было бы протестировать
+     * без 18,5-мегабайтного файла.
+     */
+    private val legacy: LegacyModelSpec = LegacyModelSpec.fromManifest(),
 ) {
     /** Боевой каталог модели: `<filesDir>/tts/vits-piper-ru_RU-irina-medium`. */
     val modelDir: File get() = store.modelDir
+
+    /** Каталог устаревшей int8-модели: `<filesDir>/tts/vits-piper-ru_RU-irina-medium-int8`. */
+    val legacyModelDir: File get() = File(store.rootDir, legacy.id)
 
     /** Каталог словарей espeak-ng — аргумент `dataDir` для sherpa-onnx. */
     val espeakDir: File get() = File(modelDir, OfflineTtsManifest.ESPEAK_DIR)
@@ -72,21 +102,40 @@ class OfflineTtsModel(
     /**
      * Гарантировать модель на диске.
      *
+     * Побочные действия, оба намеренные: снимается точно опознанный устаревший int8-каталог
+     * ([purgeLegacyModel]) и проверяется свободное место ДО скачивания.
+     *
      * @return `true` — модель установлена и проверена (или уже была); `false` — сеть, архив,
      *   место или права подвели. Повторного скачивания при `false` не будет до следующего
      *   вызова: решает хост.
      */
+    @Synchronized
     fun ensure(): Boolean {
+        // Устаревший int8-каталог снимается ДО любых проверок — в том числе когда полная
+        // модель уже стоит: именно у этих устройств он и остался мёртвыми 36,6 МиБ.
+        // Нет каталога — одна проверка `exists()`, на бюджете это не видно.
+        purgeLegacyModel()
+
         if (isInstalled()) return true
 
         store.rootDir.mkdirs()
+        // Место проверяется ДО сети: 64 МиБ архива, который заведомо не распакуется, — это
+        // минуты трафика и заполненный раздел. Неизвестный размер (`<= 0`) не блокирует.
+        val free = runCatching { freeBytes() }.getOrDefault(-1L)
+        if (free in 1 until OfflineTtsManifest.PEAK_BYTES) {
+            log(
+                "not enough free space for model: $free < ${OfflineTtsManifest.PEAK_BYTES} bytes",
+            )
+            return false
+        }
+
         val archive = File(store.rootDir, "tts-${System.nanoTime()}.tar.bz2.part")
         try {
             if (!download(archive)) {
                 log("download failed: $archiveUrl")
                 return false
             }
-            // Дешёвая проверка до хеширования 21 МиБ: обрезанная загрузка отсекается сразу.
+            // Дешёвая проверка до хеширования 64 МиБ: обрезанная загрузка отсекается сразу.
             if (archive.length() != archiveSize) {
                 log("archive size mismatch: ${archive.length()} != $archiveSize")
                 return false
@@ -127,10 +176,82 @@ class OfflineTtsModel(
         } catch (e: SecurityException) {
             log("model download denied: ${e.message}")
             return false
+        } catch (e: Exception) {
+            // Контракт [ensure] — «вернул false», а не «бросил наружу»: сюда попадают
+            // NoSuchAlgorithmException из [ModelStore.sha256], IllegalArgumentException
+            // на кривом URL и прочие редкие отказы. Ловим после IOException/SecurityException,
+            // чтобы их сообщения не потерялись в общем тексте.
+            log("model install error: ${e.message}")
+            return false
         } finally {
-            // Архив после установки не нужен: ещё 21 МиБ в filesDir — заметно на бюджете.
+            // Архив после установки не нужен: ещё 64 МиБ в filesDir — заметно на бюджете.
             archive.delete()
         }
+    }
+
+    /**
+     * Удалить устаревший каталог int8-модели, если он ТОЧНО опознан.
+     *
+     * Правило узкое намеренно: под удаление попадает ровно один каталог с известным именем
+     * в корне TTS-хранилища, и только если внутри лежит `.onnx` известного размера с
+     * известным SHA-256. Всё остальное (чужое имя, другой/недокачанный файл, симлинк,
+     * каталог вне корня) остаётся на месте — «на всякий случай почистить filesDir» здесь
+     * запрещено: рядом живут ASR-модель, кэши и пользовательские данные.
+     *
+     * Идемпотентно: каталога нет — `true` (удалять нечего).
+     *
+     * @return `true` — каталога больше нет (удалён или отсутствовал); `false` — он есть, но
+     *   не опознан как int8-модель либо ФС не дала удалить.
+     */
+    fun purgeLegacyModel(): Boolean {
+        val dir = legacyModelDir
+        if (!dir.exists()) return true
+        if (!isLegacyModelDir(dir)) {
+            log("legacy tts dir is not the known int8 model, keeping: ${dir.absolutePath}")
+            return false
+        }
+        val removed = runCatching { dir.deleteRecursively() }.getOrDefault(false)
+        if (removed) {
+            log("removed legacy int8 tts model: ${dir.absolutePath}")
+        } else {
+            log("could not remove legacy int8 tts model: ${dir.absolutePath}")
+        }
+        return removed
+    }
+
+    /**
+     * Каталог — это именно та int8-модель, которую ставили прежние версии.
+     *
+     * Проверки по порядку (первая же несошедшаяся — «не она»):
+     * 1. имя каталога — [LegacyModelSpec.id], без разделителей и `..` и НЕ имя текущей модели;
+     * 2. это каталог, а не файл;
+     * 3. каталог — не симлинк, а канонический путь лежит ПРЯМО в корне TTS-хранилища;
+     * 4. `.onnx` — обычный файл (не ссылка), нужного размера и SHA-256, то есть действительно
+     *    скачан целиком.
+     *
+     * Про симлинки отдельно: `canonicalFile` разыменовывает ссылку на Linux (значит, и на
+     * Android), но НЕ на Windows — там канонический путь остаётся путём ссылки. Поэтому
+     * ссылка проверяется ещё и явно ([Files.isSymbolicLink]): без этого `deleteRecursively`
+     * на Windows снёс бы содержимое каталога, на который указывает ссылка.
+     */
+    private fun isLegacyModelDir(dir: File): Boolean {
+        val id = legacy.id
+        if (id.isBlank() || id == OfflineTtsManifest.MODEL_ID) return false
+        if (id.contains('/') || id.contains('\\') || id.contains("..")) return false
+        if (!dir.isDirectory) return false
+        if (Files.isSymbolicLink(dir.toPath())) return false
+
+        val root = store.rootDir.canonicalFile
+        val canonical = dir.canonicalFile
+        // На Linux ссылка уже разыменована: чужой родитель отсекается здесь.
+        if (canonical.parentFile != root) return false
+        if (canonical.name != id) return false
+
+        val onnx = File(canonical, legacy.fileName)
+        if (!onnx.isFile || onnx.length() != legacy.size) return false
+        if (Files.isSymbolicLink(onnx.toPath())) return false
+        val actual = runCatching { ModelStore.sha256(onnx) }.getOrNull() ?: return false
+        return actual.equals(legacy.sha256, ignoreCase = true)
     }
 
     /** Скачать [archiveUrl] в [dest]. `true` при HTTP 2xx и непустом файле. */
@@ -317,6 +438,48 @@ class OfflineTtsModel(
         ): OfflineTtsModel = OfflineTtsModel(
             store = storeFor(context),
             onProgress = onProgress,
+        )
+
+        /**
+         * Свободно байт на разделе с [dir]. `<= 0` — размер неизвестен: так же, как
+         * `WarmUpDiagnostics.freeBytes`, «нет данных» отделено от «ноль байт».
+         *
+         * `StatFs` нужен только установщику; тесты подставляют свою функцию, поэтому ни один
+         * тест не зависит от свободного места на машине сборки.
+         */
+        private fun freeBytesIn(dir: File): Long = try {
+            dir.mkdirs()
+            StatFs(dir.absolutePath).availableBytes
+        } catch (t: Throwable) {
+            -1L
+        }
+    }
+}
+
+/**
+ * Паспорт устаревшей int8-модели: чем опознаётся каталог, который разрешено удалить.
+ *
+ * Отдельный тип, а не набор констант в коде удаления, ровно для тестируемости: проверка
+ * «имя + размер + SHA-256» обязана быть покрыта тестом, а гонять в тесте настоящий
+ * 18,5-мегабайтный `.onnx` незачем — подставляется паспорт на пару байт.
+ */
+data class LegacyModelSpec(
+    /** Имя каталога в корне TTS-хранилища. */
+    val id: String,
+    /** Имя `.onnx` внутри каталога. */
+    val fileName: String,
+    /** Точный размер `.onnx`: у int8 он 18 579 710 байт, у полной модели — другой. */
+    val size: Long,
+    /** SHA-256 `.onnx`: каталог с тем же именем, но другим файлом не удаляется. */
+    val sha256: String,
+) {
+    companion object {
+        /** Паспорт настоящей int8-модели из [OfflineTtsManifest]. */
+        fun fromManifest(): LegacyModelSpec = LegacyModelSpec(
+            id = OfflineTtsManifest.LEGACY_MODEL_ID,
+            fileName = OfflineTtsManifest.MODEL_FILE,
+            size = OfflineTtsManifest.LEGACY_MODEL_FILE_BYTES,
+            sha256 = OfflineTtsManifest.LEGACY_MODEL_FILE_SHA256,
         )
     }
 }

@@ -4,12 +4,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.EdgeNeuralTtsClient
+import ru.mars.network.repository.OpenAiSpeechTtsClient
+import ru.mars.network.repository.PaidTtsClient
 import ru.mars.network.repository.ServerTtsContract
 import ru.mars.network.repository.ServerTtsResult
+import ru.mars.network.repository.ServerTtsVoiceProfile
 import ru.mars.network.repository.ServerTtsVoices
 
 /**
@@ -102,12 +106,18 @@ class ServerTtsSpeechEngineTest {
         client: FakeClient = FakeClient(),
         playback: FakePlayback = FakePlayback(),
         onServerAudioAvailable: () -> Unit = {},
+        fallbackChannel: VoiceChannel = VoiceChannel.SYSTEM,
+        onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
+        onSilent: () -> Unit = {},
     ) = ServerTtsSpeechEngine(
         fallback = system,
         client = client,
         playback = playback,
         scope = CoroutineScope(Dispatchers.Unconfined),
         onServerAudioAvailable = onServerAudioAvailable,
+        fallbackChannel = fallbackChannel,
+        onVoiceSubstituted = onVoiceSubstituted,
+        onSilent = onSilent,
     )
 
     // --- Серверный путь --------------------------------------------------------------------
@@ -255,6 +265,54 @@ class ServerTtsSpeechEngineTest {
 
         assertTrue(engine.speak("первый раз принят в попытку"))
         assertFalse("мёртвый системный TTS и недоступный сервер не должны обещать звук", engine.speak("второй раз"))
+    }
+
+    // --- Последний резерв: Piper не готов (модель не скачана) ------------------------------
+
+    @Test
+    fun `dead offline reserve falls through to the platform and announces it`() {
+        // Piper ещё не поднят (21 МиБ модели не скачаны) — это не «звука нет вовсе».
+        val piper = FakeSystemTts(accept = false)
+        val platform = FakeSystemTts()
+        val events = mutableListOf<VoiceSubstitution>()
+        val engine = ServerTtsSpeechEngine(
+            fallback = piper,
+            client = FakeClient(ServerTtsResult.Unavailable("transport")),
+            playback = FakePlayback(),
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            fallbackChannel = VoiceChannel.OFFLINE,
+            lastResort = platform,
+            onVoiceSubstituted = { events += it },
+        )
+
+        assertTrue("фраза обязана прозвучать хотя бы платформой", engine.speak("фраза"))
+
+        assertEquals(listOf("фраза"), platform.spoken)
+        // Объявляется ФАКТИЧЕСКИЙ канал: звучит платформа, а не «локальный голос».
+        assertEquals(
+            listOf(VoiceChannel.SYSTEM to VoiceSubstitutionReason.SYSTEM_RESERVE),
+            events.map { it.spoken to it.reason },
+        )
+    }
+
+    @Test
+    fun `dead reserve and dead platform still report silence instead of pretending`() {
+        val piper = FakeSystemTts(accept = false)
+        val platform = FakeSystemTts(accept = false)
+        var silent = 0
+        val engine = ServerTtsSpeechEngine(
+            fallback = piper,
+            client = FakeClient(ServerTtsResult.Unavailable("transport")),
+            playback = FakePlayback(),
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            fallbackChannel = VoiceChannel.OFFLINE,
+            lastResort = platform,
+            onSilent = { silent++ },
+        )
+
+        assertTrue("реплика принята в попытку", engine.speak("фраза"))
+        assertEquals(1, silent)
+        assertTrue(platform.spoken.isEmpty())
     }
 
     // --- Мост «сеть + credential» ---------------------------------------------------------
@@ -534,14 +592,22 @@ class ServerTtsSpeechEngineTest {
         kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
 
         // Причина каждого шага видна снаружи: «голос сменился» без причины необъяснимо.
+        // Первым в списке идёт ОСНОВНОЙ голос (PlusVibe Alice): платного клиента в этом мосте
+        // нет, поэтому его отказ — `paid_client_absent` без HTTP-кода. Дальше обычная цепочка
+        // бесплатных профилей.
         assertEquals(
             listOf(
+                "plusvibe-alice" to null,
                 "natural-svetlana" to 503,
                 "natural-dmitry" to 503,
                 "natural-ava" to 503,
                 "local-irina" to 400,
             ),
             client.lastAttempts.map { it.profileId to it.httpCode },
+        )
+        assertEquals(
+            "paid_client_absent",
+            client.lastAttempts.first().reason,
         )
     }
 
@@ -849,6 +915,32 @@ class ServerTtsSpeechEngineTest {
         }
     }
 
+    /** Подмена платного облачного клиента: запоминает запрос и отвечает заданным исходом. */
+    private class FakeOpenAi(
+        private var result: ServerTtsResult = ServerTtsResult.Audio(byteArrayOf(9), "audio/mpeg"),
+    ) : OpenAiSpeechTtsClient() {
+        val calls = mutableListOf<Triple<String, String, Float>>()
+        /** `voice_id`, с которым позвали: русские голоса едут только так. */
+        val voiceIds = mutableListOf<String?>()
+
+        override suspend fun synthesize(
+            text: String,
+            voice: String,
+            model: String,
+            speed: Float,
+            instructions: String?,
+            voiceId: String?,
+        ): ServerTtsResult {
+            calls += Triple(text, voice, speed)
+            voiceIds += voiceId
+            return result
+        }
+
+        fun setResult(next: ServerTtsResult) {
+            result = next
+        }
+    }
+
     /** Мост с прямым сокетом и (опционально) серверным транспортом. */
     private fun bridgeWithEdge(
         edge: EdgeNeuralTtsClient?,
@@ -882,8 +974,12 @@ class ServerTtsSpeechEngineTest {
 
         assertTrue("без токена звук обязан прийти из сокета", result is ServerTtsResult.Audio)
         assertEquals(0, transportCalls)
-        assertEquals(listOf(Triple("ru-RU-SvetlanaNeural", "+8%", "+0Hz")), edge.calls)
-        assertEquals("natural-svetlana", client.lastProfileId)
+        // Голоса не выбирали — значит звучит ОСНОВНОЙ голос (PlusVibe). Платного клиента в
+        // этом мосте нет вовсе, поэтому честный резерв — прямой нейро-голос Дмитрия: он
+        // единственный доступен без токена Марса. Светлана здесь не звучит намеренно, иначе
+        // «основной голос» снова зависел бы от порядка бесплатных профилей.
+        assertEquals(listOf(Triple("ru-RU-DmitryNeural", "+5%", "+0Hz")), edge.calls)
+        assertEquals("natural-dmitry", client.lastProfileId)
     }
 
     @Test
@@ -984,5 +1080,450 @@ class ServerTtsSpeechEngineTest {
             voices,
         )
         assertEquals("natural-svetlana", client.lastProfileId)
+    }
+
+    // --- Предсинтез (prefetch): фраза N+1 синтезируется, пока звучит фраза N --------------
+    //
+    // Требование: пауза 5–10 с после первой запятой возникала потому, что кусок N+1 уходил в
+    // синтез ТОЛЬКО после тишины. Предсинтез убирает эту паузу: speak забирает готовый
+    // результат и не делает второго запроса. Проверяется наблюдаемое — число запросов к
+    // синтезу и число проигранных фрагментов.
+
+    @Test
+    fun `prefetched phrase is spoken without a second synthesize call`() {
+        val client = FakeClient(audio)
+        val playback = FakePlayback()
+        val engine = engine(client = client, playback = playback)
+
+        engine.prefetch("вторая фраза")
+        assertEquals(1, engine.prefetchedCount)
+        assertEquals(listOf("вторая фраза"), client.requests)
+
+        assertTrue(engine.speak("вторая фраза"))
+
+        // Ровно ОДИН запрос: speak забрал готовое аудио, а не синтезировал фразу заново.
+        assertEquals(listOf("вторая фраза"), client.requests)
+        assertEquals(1, playback.played.size)
+        assertEquals(0, engine.prefetchedCount)
+    }
+
+    @Test
+    fun `prefetch ignores blank and oversized text`() {
+        val client = FakeClient(audio)
+        val engine = engine(client = client)
+
+        engine.prefetch("   ")
+        engine.prefetch("")
+        engine.prefetch("я".repeat(ServerTtsContract.MAX_TEXT_LENGTH + 1))
+
+        // Пустой текст сервер отверг бы, а длинный — 400: предсинтез не создаёт этот запрос.
+        assertEquals(0, engine.prefetchedCount)
+        assertTrue(client.requests.isEmpty())
+    }
+
+    @Test
+    fun `prefetch keeps at most three phrases ahead`() {
+        val engine = engine(client = FakeClient(audio))
+
+        engine.prefetch("раз")
+        engine.prefetch("два")
+        engine.prefetch("три")
+        engine.prefetch("четыре")
+
+        // Потолок очереди: дальше — синтез в пустоту (человек перебьёт ответ раньше).
+        assertEquals(ServerTtsSpeechEngine.MAX_PREFETCH, engine.prefetchedCount)
+    }
+
+    @Test
+    fun `the same phrase is prefetched only once`() {
+        val client = FakeClient(audio)
+        val engine = engine(client = client)
+
+        engine.prefetch("повтор")
+        engine.prefetch("повтор")
+
+        assertEquals(1, engine.prefetchedCount)
+        assertEquals(1, client.requests.size)
+    }
+
+    @Test
+    fun `stop cancels prefetched work so silence costs no request`() {
+        val engine = engine(client = FakeClient(audio))
+        engine.prefetch("не доиграло")
+
+        engine.stop()
+
+        assertEquals("предсинтез отменён вместе с тишиной", 0, engine.prefetchedCount)
+    }
+
+    @Test
+    fun `shutdown drops prefetched work too`() {
+        val engine = engine(client = FakeClient(audio))
+        engine.prefetch("не доиграло")
+
+        engine.shutdown()
+
+        assertEquals(0, engine.prefetchedCount)
+    }
+
+    @Test
+    fun `prefetched failure still falls back to system tts`() {
+        val system = FakeSystemTts()
+        val client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401))
+        val engine = engine(system, client)
+
+        engine.prefetch("фраза")
+        assertTrue(engine.speak("фраза"))
+
+        // Отказ из предсинтеза — не повод синтезировать заново: фраза уходит в системный TTS.
+        assertEquals(listOf("фраза"), system.spoken)
+        assertEquals(1, client.requests.size)
+    }
+
+    // --- Платный облачный голос (OpenAI/PlusVibe) и нейро-фолбэк --------------------------
+    //
+    // Требование: выбранный «Оникс» не должен падать в механический системный TTS, даже если
+    // ключа нет или апстрим PlusVibe завис. Проверяется наблюдаемое: кто реально синтезировал.
+
+    /** Мост с платным клиентом и (опционально) прямым сокетом. */
+    private fun bridgeWithPaid(
+        paid: PaidTtsClient?,
+        edge: EdgeNeuralTtsClient? = FakeEdge(),
+        prosody: VoiceProsody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_ONYX.id),
+        /** Бюджет ожидания платного голоса: в тестах короткий, чтобы не ждать 8 с. */
+        paidWaitBudget: (ServerTtsVoiceProfile) -> Long? = { it.waitBudgetMs },
+        transport: ServerTtsTransport = ServerTtsTransport { _, _, _ ->
+            ServerTtsResult.Unavailable("server_error", 503)
+        },
+    ) = RepositoryServerTtsClient(
+        baseUrl = "https://marscore.ru",
+        credentialProvider = { credential },
+        prosody = prosody,
+        directEdgeClient = edge,
+        paidClient = paid,
+        paidWaitBudget = paidWaitBudget,
+        transport = transport,
+    )
+
+    @Test
+    fun `paid voice answers and the edge socket stays silent`() {
+        val paid = FakeOpenAi()
+        val edge = FakeEdge()
+        val client = bridgeWithPaid(paid = paid, edge = edge)
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        assertEquals(listOf(Triple("фраза", "onyx", 1.0f)), paid.calls)
+        assertTrue("при живом платном голосе сокет не нужен", edge.calls.isEmpty())
+        assertEquals("plusvibe-onyx", client.lastProfileId)
+    }
+
+    @Test
+    fun `paid voice receives the person tempo as speed`() {
+        val paid = FakeOpenAi()
+        val client = bridgeWithPaid(
+            paid = paid,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_ONYX.id, speed = 1.15f),
+        )
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        // У провайдера темп — множитель, а не «+15%»: ползунок обязан доехать как 1.15.
+        assertEquals(1.15f, paid.calls.single().third, 0.001f)
+    }
+
+    @Test
+    fun `paid voice timeout falls back to the edge neural voice instead of the robot`() {
+        val paid = FakeOpenAi(ServerTtsResult.Unavailable(OpenAiSpeechTtsClient.REASON_TRANSPORT))
+        val edge = FakeEdge()
+        val client = bridgeWithPaid(paid = paid, edge = edge)
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("отказ платного голоса не должен съедать фразу", result is ServerTtsResult.Audio)
+        // Резерв — нейросетевой Дмитрий, а не системный робот: тембр остаётся живым.
+        assertEquals(listOf(Triple("ru-RU-DmitryNeural", "+5%", "+0Hz")), edge.calls)
+        assertEquals("natural-dmitry", client.lastProfileId)
+        assertEquals(
+            listOf("plusvibe-onyx" to OpenAiSpeechTtsClient.REASON_TRANSPORT, "natural-dmitry" to null),
+            client.lastAttempts.map { it.profileId to it.reason },
+        )
+    }
+
+    @Test
+    fun `paid voice without a configured client is a neural fallback`() {
+        val edge = FakeEdge()
+        // paidClient по умолчанию null — так вызывается конструктор во всём старом коде.
+        val client = bridgeWithPaid(paid = null, edge = edge)
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        assertEquals("ru-RU-DmitryNeural", edge.calls.single().first)
+        assertEquals("natural-dmitry", client.lastProfileId)
+    }
+
+    // --- Русский голос из библиотеки: `voice_id` и бюджет ожидания -------------------------
+    //
+    // Живой дефект канала (18.11.2026): задача с `voice_id` принимается (`202`, id в
+    // `effectiveOpts`) и НЕ завершается — 5 из 5 попыток висели в `processing` через 20–25 с,
+    // тогда как контрольный вызов с `voice:"Alice"` в ту же минуту дал аудио. Требование:
+    // такая реплика не молчит транспортные 90 с, а меняет голос на нейро-резерв.
+
+    /** Платный клиент, который «принял заявку и завис»: ровно поведение `voice_id`. */
+    private class HangingPaid : PaidTtsClient {
+        var calls: Int = 0
+            private set
+
+        override suspend fun synthesize(
+            text: String,
+            voice: String,
+            model: String,
+            speed: Float,
+            instructions: String?,
+            voiceId: String?,
+        ): ServerTtsResult {
+            calls++
+            // Задача не завершается никогда: единственный выход — бюджет ожидания вызывающего.
+            kotlinx.coroutines.delay(Long.MAX_VALUE)
+            return ServerTtsResult.Unavailable("unreachable")
+        }
+    }
+
+    @Test
+    fun `library voice travels to the paid client as a voice id, not as a name`() {
+        val paid = FakeOpenAi()
+        val client = bridgeWithPaid(
+            paid = paid,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_LARISA.id),
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        // В провайдера уезжает именно id: имени `Larisa` нет в перечислении 21 голоса.
+        assertEquals(listOf<String?>(ServerTtsVoices.LIBRARY_VOICE_LARISA), paid.voiceIds)
+        assertEquals("Larisa", paid.calls.single().second)
+        assertEquals("plusvibe-larisa", client.lastProfileId)
+    }
+
+    @Test
+    fun `hung library voice is cut by its budget and read by the neural reserve`() {
+        val paid = HangingPaid()
+        val edge = FakeEdge()
+        val client = bridgeWithPaid(
+            paid = paid,
+            edge = edge,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_LARISA.id),
+            // 40 мс вместо боевых 8 с: проверяется ПОЛИТИКА, а не длительность.
+            paidWaitBudget = { 40L },
+        )
+
+        val startedAt = System.currentTimeMillis()
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+        val elapsedMs = System.currentTimeMillis() - startedAt
+
+        // Таймаут не теряет фразу: её читает нейро-голос, и подмена объявляется причиной.
+        assertTrue("фраза обязана прозвучать резервом", result is ServerTtsResult.Audio)
+        assertEquals(listOf("ru-RU-DmitryNeural"), edge.calls.map { it.first })
+        assertEquals("natural-dmitry", client.lastProfileId)
+        assertEquals(
+            "истечение бюджета — своя причина, отличная от таймаута транспорта",
+            listOf(
+                "plusvibe-larisa" to RepositoryServerTtsClient.REASON_PAID_DEADLINE,
+                "natural-dmitry" to null,
+            ),
+            client.lastAttempts.map { it.profileId to it.reason },
+        )
+        assertTrue("ожидание обязано оборваться по бюджету: ${elapsedMs}мс", elapsedMs < 5_000)
+    }
+
+    @Test
+    fun `named voice has no budget and is not cut while the provider is merely slow`() {
+        // У `Alice`/`onyx` бюджета нет: апстрим под нагрузкой честно отвечает за 13 с, и
+        // обрывать живой платный запрос значило бы заплатить дважды за одну фразу.
+        assertNull(ServerTtsVoices.PLUSVIBE_ALICE.waitBudgetMs)
+
+        val paid = FakeOpenAi()
+        val client = bridgeWithPaid(
+            paid = paid,
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_ALICE.id),
+            // Бюджет есть, но профиль его не объявляет — значит он и не применяется.
+            paidWaitBudget = { it.waitBudgetMs },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        assertEquals("plusvibe-alice", client.lastProfileId)
+        assertEquals(listOf<String?>(null), paid.voiceIds)
+    }
+
+    @Test
+    fun `paid profile is never sent to the mars server`() {
+        val engines = mutableListOf<String?>()
+        val client = RepositoryServerTtsClient(
+            baseUrl = "https://marscore.ru",
+            credentialProvider = { credential },
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_ONYX.id),
+            directEdgeClient = null,
+            paidClient = null,
+            transport = ServerTtsTransport { _, _, request ->
+                engines += request.engine
+                ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+            },
+        )
+
+        kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        // Сервер не знает голос `onyx`: запрос с engine=openai был бы гарантированным 400.
+        assertEquals(listOf("edge"), engines)
+        assertEquals("natural-svetlana", client.lastProfileId)
+    }
+
+    // --- Резерв: КТО именно заговорил после отказа облака ---------------------------------
+    //
+    // Требование: при отказе облака фразу произносит ЛОКАЛЬНАЯ модель, а не системный робот;
+    // если модели на устройстве нет вовсе — говорит платформа, но событие подмены уходит хосту.
+    // Проверяется наблюдаемое: что попало в резервный движок и какое событие получил хост.
+
+    @Test
+    fun `offline reserve speaks after a cloud failure and reports its channel`() {
+        val piper = FakeSystemTts()
+        val events = mutableListOf<VoiceSubstitution>()
+        val engine = engine(
+            system = piper,
+            client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401)),
+            fallbackChannel = VoiceChannel.OFFLINE,
+            onVoiceSubstituted = { events += it },
+        )
+
+        assertTrue(engine.speak("фраза"))
+
+        assertEquals("отказ облака обязан звучать локальной моделью", listOf("фраза"), piper.spoken)
+        assertEquals(
+            listOf(VoiceSubstitution(VoiceChannel.OFFLINE, VoiceSubstitutionReason.CLOUD_FAILED)),
+            events,
+        )
+    }
+
+    @Test
+    fun `platform reserve reports the system channel so the substitution is visible`() {
+        val events = mutableListOf<VoiceSubstitution>()
+        val engine = engine(
+            client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401)),
+            fallbackChannel = VoiceChannel.SYSTEM,
+            onVoiceSubstituted = { events += it },
+        )
+
+        assertTrue(engine.speak("фраза"))
+
+        assertEquals(
+            listOf(VoiceSubstitution(VoiceChannel.SYSTEM, VoiceSubstitutionReason.SYSTEM_RESERVE)),
+            events,
+        )
+    }
+
+    @Test
+    fun `oversized text goes straight to the reserve and is reported`() {
+        val system = FakeSystemTts()
+        val events = mutableListOf<VoiceSubstitution>()
+        val engine = engine(
+            system = system,
+            client = FakeClient(audio),
+            fallbackChannel = VoiceChannel.OFFLINE,
+            onVoiceSubstituted = { events += it },
+        )
+        val tooLong = "я".repeat(ServerTtsContract.MAX_TEXT_LENGTH + 1)
+
+        assertTrue(engine.speak(tooLong))
+
+        assertEquals(0, engine.serverAttemptCount)
+        assertEquals(listOf(tooLong), system.spoken)
+        assertEquals(1, events.size)
+    }
+
+    @Test
+    fun `a phrase stopped by the user never speaks through the reserve afterwards`() {
+        val system = FakeSystemTts()
+        val playback = FakePlayback()
+        val engine = engine(system, FakeClient(audio), playback)
+
+        engine.speak("отменённая фраза")
+        engine.stop()
+        // Поздний отказ декодера приходит уже после стопа: реплика отменена и звучать не должна.
+        playback.failAsync()
+
+        assertTrue("после стопа реплика не догоняет пользователя", system.spoken.isEmpty())
+    }
+
+    @Test
+    fun `a stop during the network attempt keeps the phrase silent`() {
+        val system = FakeSystemTts()
+        // Держатель вместо lateinit: клиент обращается к движку, который создаётся после него.
+        val holder = arrayOfNulls<ServerTtsSpeechEngine>(1)
+        val client = object : ServerTtsClient {
+            override suspend fun synthesize(text: String): ServerTtsResult {
+                // Человек нажал микрофон, пока шёл синтез: стоп приходит публичным путём,
+                // то есть ровно так, как это делает очередь озвучки.
+                holder[0]?.stop()
+                return ServerTtsResult.Unavailable("transport")
+            }
+        }
+        val engine = ServerTtsSpeechEngine(
+            fallback = system,
+            client = client,
+            playback = FakePlayback(),
+            scope = CoroutineScope(Dispatchers.Unconfined),
+        )
+        holder[0] = engine
+
+        assertTrue(engine.speak("отменённая фраза"))
+
+        assertTrue("отменённую реплику резерв озвучивать не должен", system.spoken.isEmpty())
+    }
+
+    @Test
+    fun `a phrase after a stop still reaches the reserve`() {
+        val system = FakeSystemTts()
+        val client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401))
+        val engine = engine(system, client)
+
+        engine.stop()
+
+        // Счётчик поколения не глушит движок навсегда: следующая реплика звучит штатно.
+        assertTrue(engine.speak("следующая фраза"))
+        assertEquals(listOf("следующая фраза"), system.spoken)
+    }
+
+    @Test
+    fun `a phrase nobody could speak is reported as silent`() {
+        var silent = 0
+        val engine = engine(
+            // Резерв мёртв (нет ни модели, ни платформенного движка), облако отказало.
+            system = FakeSystemTts(accept = false),
+            client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401)),
+            onSilent = { silent++ },
+        )
+
+        assertTrue("спикер принят оптимистично", engine.speak("фраза"))
+
+        // Без этого сигнала хост навсегда остался бы в фазе «говорю»: speak ответил true,
+        // а колбэка «дочитал» не будет ни от одного канала.
+        assertEquals(1, silent)
+    }
+
+    @Test
+    fun `a phrase that did reach the reserve is not reported as silent`() {
+        var silent = 0
+        val engine = engine(
+            client = FakeClient(ServerTtsResult.Unavailable("unauthorized", 401)),
+            onSilent = { silent++ },
+        )
+
+        assertTrue(engine.speak("фраза"))
+
+        assertEquals(0, silent)
     }
 }

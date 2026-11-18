@@ -29,6 +29,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -86,11 +87,17 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
     private var windowVisible = false
     private var animating = false
 
+    /** Хост попросил паузу ([pauseMotion]): окно может быть ещё видимым, но кадры не нужны. */
+    private var hostPaused = false
+
     private var simTimeSec = MarsSpaceShaderPolicy.STATIC_TIME_SEC
     private var smoothScroll = 0f
     private var rawScrollPx = 0
     private var lastFrameNs = 0L
     private var lastDrawMs = 0L
+
+    /** Один `Choreographer` на вьюху: `getInstance()` — обращение к ThreadLocal на каждый кадр. */
+    private var choreographer: Choreographer? = null
 
     /**
      * Режим голосового орба: заставка становится акустическим гало экрана разговора.
@@ -102,14 +109,39 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
      */
     private var voiceOrbMode = false
 
-    /** Амплитуда голоса 0..1 (uniform `uVoiceLevel`). */
+    /** Амплитуда голоса 0..1 (uniform `uVoiceLevel`): СГЛАЖЕННАЯ, её и видят шейдер и фоллбэк. */
     private var voiceLevel = 0f
 
-    /** Неон текущей фазы (uniform `uVoiceNeon`), разложенный по каналам один раз на смену тона. */
+    /**
+     * Цель сглаживания амплитуды — то, что пришло из контроллера.
+     *
+     * Контроллер публикует громкость 10–16 раз в секунду ([LocalVoiceController] троттлит её
+     * осознанно). Пока шейдер получал это число напрямую, неоновая туманность вспыхивала
+     * ступенькой каждые 60–100 мс — при 60 кадрах в секунду это читается как рывки, и хуже
+     * всего то, что корона планеты в этот момент уже шла плавно (сглаживание уровня живёт в
+     * [OrbMotionPolicy]). Теперь фон догоняет цель по кадрам тем же сглаживанием
+     * ([OrbMotionPolicy.smoothLevel]), и оба индикатора дышат синхронно.
+     */
+    private var voiceLevelTarget = 0f
+
+    /** Неон текущей фазы (uniform `uVoiceNeon`), разложенный по каналам. Догоняет цель в кадре. */
     private var voiceNeonColor = 0
     private var voiceNeonR = 1f
     private var voiceNeonG = 0.24f
     private var voiceNeonB = 0.23f
+
+    /**
+     * Целевой неон фазы.
+     *
+     * Раньше `setVoiceState` присваивал каналы напрямую, и туманность перекрашивалась за один
+     * кадр: вместе с орбом это давало ту самую вспышку «красный → голубой». Теперь здесь только
+     * цель, а [advanceVoiceNeon] подтягивает к ней текущие каналы тем же экспоненциальным шагом
+     * ([VoiceNeonPalette.stepFactor]), что и корона планеты.
+     */
+    private var targetNeonColor = 0
+    private var targetNeonR = 1f
+    private var targetNeonG = 0.24f
+    private var targetNeonB = 0.23f
 
     private val frameCallback = Choreographer.FrameCallback { frameTimeNanos -> onFrame(frameTimeNanos) }
 
@@ -134,6 +166,27 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
 
     /** Живой ли сейчас тикер (для тестов и логов). */
     val isAnimating: Boolean get() = animating
+
+    /**
+     * Заморозить фон, не трогая GL-поток.
+     *
+     * Хост зовёт это на `onPause`: окно после паузы ещё какое-то время видимо, а кадры под чужой
+     * активностью не нужны. Именно остановка тикера, а не `GLSurfaceView.onPause()`: контекст
+     * остаётся живым, на экране — последний нарисованный кадр, и возврат не требует пересборки
+     * шейдеров.
+     */
+    fun pauseMotion() {
+        hostPaused = true
+        animating = false
+        frames().removeFrameCallback(frameCallback)
+    }
+
+    /** Продолжить с того же места: время симуляции не сбрасывается, скачка нет. */
+    fun resumeMotion() {
+        hostPaused = false
+        if (!shouldRender()) return
+        resumeRendering()
+    }
 
     /** Работает ли Canvas-фоллбэк вместо GPU. */
     val isUsingCanvasFallback: Boolean get() = fallingBack
@@ -169,40 +222,130 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
      * запрос одного кадра.
      *
      * @param level амплитуда речи; зажимается [MarsSpaceShaderPolicy.voiceLevel] (NaN → 0);
-     * @param neonColor ARGB неона фазы: рубиновый/алый/янтарный/лазурный.
+     * @param neonColor ARGB неона фазы: рубиновый/коралловый/янтарный/персиковый.
      */
     fun setVoiceState(level: Float, neonColor: Int) {
         val nextLevel = MarsSpaceShaderPolicy.voiceLevel(level)
-        val levelChanged = nextLevel != voiceLevel
-        voiceLevel = nextLevel
-        renderer.voiceLevel = nextLevel
-        canvasBackdrop.voiceLevel = nextLevel
+        val levelChanged = nextLevel != voiceLevelTarget
+        voiceLevelTarget = nextLevel
+        // Кадров нет (reduce motion, скрытый слой): сглаживать нечем — ставим ровно, иначе фон
+        // остался бы на амплитуде прошлой реплики до первого кадра. Перерисовку в этом случае
+        // заказывает requestVoiceFrame ниже — статичным кадром.
+        val snapped = !animating && voiceLevel != nextLevel
+        if (snapped) setVoiceLevel(nextLevel)
 
-        if (neonColor != voiceNeonColor) {
-            voiceNeonColor = neonColor
-            voiceNeonR = MarsSpaceShaderPolicy.neonChannel(neonColor, 16)
-            voiceNeonG = MarsSpaceShaderPolicy.neonChannel(neonColor, 8)
-            voiceNeonB = MarsSpaceShaderPolicy.neonChannel(neonColor, 0)
-            renderer.voiceNeonR = voiceNeonR
-            renderer.voiceNeonG = voiceNeonG
-            renderer.voiceNeonB = voiceNeonB
-            canvasBackdrop.voiceNeonColor = neonColor
+        if (neonColor != targetNeonColor) {
+            targetNeonColor = neonColor
+            targetNeonR = MarsSpaceShaderPolicy.neonChannel(neonColor, 16)
+            targetNeonG = MarsSpaceShaderPolicy.neonChannel(neonColor, 8)
+            targetNeonB = MarsSpaceShaderPolicy.neonChannel(neonColor, 0)
+            if (!animating || voiceNeonColor == 0) {
+                // Кадров нет (reduce motion, скрытый слой) или это самый первый цвет — красить
+                // плавно не от чего: фон остался бы на цвете предыдущей фазы до первого кадра.
+                snapVoiceNeon()
+            }
             requestVoiceFrame()
             return
         }
-        if (levelChanged) requestVoiceFrame()
+        if (levelChanged || snapped) requestVoiceFrame()
     }
 
     /**
-     * Запросить один кадр немедленно.
+     * Плавный шаг амплитуды речи: подтянуть текущую громкость к цели.
      *
-     * Только когда тикер уже идёт: иначе кадр нарисует статичная ветка reduce motion, и
-     * «живость» включилась бы в обход системного запрета анимаций.
+     * Шаг — то же сглаживание, что у короны планеты ([OrbMotionPolicy.smoothLevel]): одинаковая
+     * атака и одинаковый спад на одном и том же кадре. Иначе два индикатора одного и того же
+     * голоса жили бы с разной задержкой и на экране это читалось бы как рассинхрон.
+     */
+    private fun advanceVoiceLevel(dt: Float) {
+        val next = OrbMotionPolicy.smoothLevel(voiceLevel, voiceLevelTarget, dt)
+        if (next != voiceLevel) setVoiceLevel(next)
+    }
+
+    /** Раздать сглаженную амплитуду шейдеру и Canvas-фоллбэку — одна точка, одно число. */
+    private fun setVoiceLevel(value: Float) {
+        voiceLevel = value
+        renderer.voiceLevel = value
+        canvasBackdrop.voiceLevel = value
+    }
+
+    /**
+     * Плавный шаг неона фазы: подтянуть текущие каналы к целевым.
+     *
+     * Вызывается из кадрового цикла до отрисовки, поэтому uniform `uVoiceNeon` и Canvas-фоллбэк
+     * всегда видят одно и то же число. Допуск 1/255 — тот же, что у орба: экспонента не достигает
+     * цели никогда, а держать цикл кадров за последним битом цвета незачем.
+     */
+    private fun advanceVoiceNeon(dt: Float) {
+        if (!neonTransitioning()) return
+        val k = VoiceNeonPalette.stepFactor(dt)
+        voiceNeonR += (targetNeonR - voiceNeonR) * k
+        voiceNeonG += (targetNeonG - voiceNeonG) * k
+        voiceNeonB += (targetNeonB - voiceNeonB) * k
+        if (abs(targetNeonR - voiceNeonR) <= NEON_SNAP &&
+            abs(targetNeonG - voiceNeonG) <= NEON_SNAP &&
+            abs(targetNeonB - voiceNeonB) <= NEON_SNAP
+        ) {
+            voiceNeonR = targetNeonR
+            voiceNeonG = targetNeonG
+            voiceNeonB = targetNeonB
+        }
+        publishVoiceNeon()
+    }
+
+    /** Поставить неон ровно в цель — статичный кадр, скрытый слой, конец перехода. */
+    private fun snapVoiceNeon() {
+        voiceNeonR = targetNeonR
+        voiceNeonG = targetNeonG
+        voiceNeonB = targetNeonB
+        voiceNeonColor = targetNeonColor
+        renderer.voiceNeonR = voiceNeonR
+        renderer.voiceNeonG = voiceNeonG
+        renderer.voiceNeonB = voiceNeonB
+        canvasBackdrop.voiceNeonColor = voiceNeonColor
+    }
+
+    /** Разложить текущие каналы в uniform рендерера и в цвет Canvas-фоллбэка. */
+    private fun publishVoiceNeon() {
+        renderer.voiceNeonR = voiceNeonR
+        renderer.voiceNeonG = voiceNeonG
+        renderer.voiceNeonB = voiceNeonB
+        // Цвет фоллбэка собирается из тех же каналов, а не интерполируется отдельно: две
+        // независимые интерполяции одного цвета разъехались бы по фазе.
+        voiceNeonColor = Color.rgb(
+            byteChannel(voiceNeonR),
+            byteChannel(voiceNeonG),
+            byteChannel(voiceNeonB),
+        )
+        canvasBackdrop.voiceNeonColor = voiceNeonColor
+    }
+
+    /** Есть ли ещё расхождение неона с целью (поканально, с допуском [NEON_SNAP]). */
+    private fun neonTransitioning(): Boolean =
+        abs(targetNeonR - voiceNeonR) > NEON_SNAP ||
+            abs(targetNeonG - voiceNeonG) > NEON_SNAP ||
+            abs(targetNeonB - voiceNeonB) > NEON_SNAP
+
+    /** Канал 0..1 в байт без риска выйти за границу: `Color.rgb` ждёт 0..255. */
+    private fun byteChannel(value: Float): Int = (value * 255f).toInt().coerceIn(0, 255)
+
+    /**
+     * Запросить кадр.
+     *
+     * При живом тикере это только «следующий vsync нужен сразу»: рисовать прямо здесь нельзя —
+     * сглаженные uniform'ы двигаются в кадровом цикле, и внеочередной кадр показал бы прошлое
+     * значение громкости, добавив лишний кадр вне vsync (рваный ритм вместо ровных 60).
+     *
+     * Когда тикера нет (reduce motion, скрытый слой) — наоборот, нужен один статичный кадр: иначе
+     * фон навсегда остался бы на цвете и громкости прошлой фазы, ведь кадров, которые донесли бы
+     * новые uniform'ы, не будет.
      */
     private fun requestVoiceFrame() {
-        if (!animating) return
+        if (!animating) {
+            drawStaticFrame()
+            return
+        }
         lastDrawMs = 0L
-        drawFrame(simTimeSec, smoothScroll)
     }
 
     // ── GL ─────────────────────────────────────────────────────────────────────────────
@@ -241,7 +384,7 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         if (fallingBack) return
         fallingBack = true
         animating = false
-        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        frames().removeFrameCallback(frameCallback)
         glView?.let { view ->
             glPause()
             removeView(view)
@@ -250,7 +393,8 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         canvasBackdrop.visibility = VISIBLE
         canvasBackdrop.setFrame(MarsSpaceShaderPolicy.STATIC_TIME_SEC, smoothScroll)
         canvasBackdrop.invalidate()
-        if (attached && windowVisible) resumeRendering()
+        // Спрятанный слой кадров не просит: `shouldRender()` учитывает и видимость предков.
+        if (shouldRender()) resumeRendering()
     }
 
     private fun glResume() {
@@ -290,6 +434,12 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         }
         lastFrameNs = frameTimeNanos
         simTimeSec += dt
+        // Неон фазы перетекает из состояния в состояние тем же экспоненциальным шагом, что и
+        // корона планеты: иначе 3D-туманность перекрашивалась бы за один кадр и вспыхивала.
+        advanceVoiceNeon(dt)
+        // Амплитуда речи догоняет цель тем же шагом: контроллер присылает её 10–16 раз в секунду,
+        // и без сглаживания газ вспыхивал бы ступенькой на каждом пакете.
+        advanceVoiceLevel(dt)
         smoothScroll = MarsSpaceShaderPolicy.smoothScroll(rawScrollPx, smoothScroll, dt)
         val scrolling = MarsSpaceShaderPolicy.isScrolling(rawScrollPx, smoothScroll)
         // Голосовой орб — такая же «живая» сцена, как скролл: неоновая туманность обязана
@@ -299,7 +449,7 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
             lastDrawMs = nowMs
             drawFrame(simTimeSec, smoothScroll)
         }
-        Choreographer.getInstance().postFrameCallback(frameCallback)
+        frames().postFrameCallback(frameCallback)
     }
 
     private fun drawFrame(timeSec: Float, scroll: Float) {
@@ -316,11 +466,26 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
 
     private fun drawStaticFrame() {
         smoothScroll = 0f
+        // Статичный кадр кадров не имеет — догонять амплитуду нечем, ставим её ровно в цель.
+        if (voiceLevel != voiceLevelTarget) setVoiceLevel(voiceLevelTarget)
+        if (neonTransitioning()) snapVoiceNeon()
         drawFrame(MarsSpaceShaderPolicy.STATIC_TIME_SEC, 0f)
     }
 
+    /**
+     * Можно ли вообще рисовать: вьюха в окне, окно видимо, её цепочка предков не спрятана и хост не
+     * просил паузу.
+     *
+     * Одно место вместо трёх разных наборов условий: раньше [onAttachedToWindow] проверял
+     * `isShown`, а [switchToCanvasFallback] — только `attached && windowVisible`, поэтому
+     * спрятанный слой (корень голосового режима в `GONE`) продолжал крутить кадры после падения
+     * GL на Canvas-фоллбэк.
+     */
+    private fun shouldRender(): Boolean =
+        attached && windowVisible && isShown && !hostPaused
+
     private fun resumeRendering() {
-        if (!attached || !windowVisible) return
+        if (!shouldRender()) return
         glResume()
         val scale = animatorScale()
         val animate = MarsSpaceShaderPolicy.shouldAnimate(
@@ -333,20 +498,25 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
                 animating = true
                 lastFrameNs = 0L
                 lastDrawMs = 0L
-                Choreographer.getInstance().postFrameCallback(frameCallback)
+                frames().postFrameCallback(frameCallback)
             }
         } else {
             // Reduce motion / энергосбережение: один выразительный статичный кадр и тишина.
             animating = false
-            Choreographer.getInstance().removeFrameCallback(frameCallback)
+            frames().removeFrameCallback(frameCallback)
             drawStaticFrame()
         }
     }
 
     private fun pauseRendering() {
         animating = false
-        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        frames().removeFrameCallback(frameCallback)
         glPause()
+    }
+
+    /** Один `Choreographer` на вьюху: `getInstance()` — обращение к ThreadLocal, а кадров 60 в секунду. */
+    private fun frames(): Choreographer = choreographer ?: Choreographer.getInstance().also {
+        choreographer = it
     }
 
     private fun animatorScale(): Float = try {
@@ -370,17 +540,20 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         super.onAttachedToWindow()
         attached = true
         windowVisible = windowVisibility == VISIBLE
+        // Новое окно — новая жизнь: пауза прошлого окна к этому отношения не имеет.
+        hostPaused = false
         // Перевешиваем слушатель скролла на «настоящий» ViewTreeObserver: до attach он
         // плавающий, и подписка, сделанная в wrap(), молча теряется при вложении в окно.
         removeScrollTracking()
         installScrollTracking()
         // Голосовой слой приезжает в окно уже скрытым (`GONE`): кадры не нужны, пока его не
         // покажут, иначе GL-поток грел бы телефон под лентой чата.
-        if (isShown && windowVisible) resumeRendering() else pauseRendering()
+        if (shouldRender()) resumeRendering() else pauseRendering()
     }
 
     override fun onDetachedFromWindow() {
         attached = false
+        hostPaused = false
         pauseRendering()
         removeScrollTracking()
         super.onDetachedFromWindow()
@@ -408,7 +581,7 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         if (!attached) return
         // `isShown` учитывает всю цепочку предков: скрытый корень слоя гасит фон, даже если у
         // самой вьюхи visibility осталась VISIBLE.
-        if (isShown && windowVisible) resumeRendering() else pauseRendering()
+        if (shouldRender()) resumeRendering() else pauseRendering()
     }
 
     // ── Скролл контента ───────────────────────────────────────────────────────────────
@@ -614,6 +787,15 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
 
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        /** Отдельная кисть под неоновую корону: пульс идёт её `alpha`, градиент переиспользуется. */
+        private val neonPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var neonShader: RadialGradient? = null
+        private var neonShaderColor = 0
+        private var neonShaderRadius = -1f
+        private var neonShaderCx = -1f
+        private var neonShaderCy = -1f
+
         private val arcBounds = RectF()
         private val planetClip = Path()
 
@@ -643,30 +825,48 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
          *
          * Без GPU это единственный способ показать, что фон слышит речь, — поэтому пульс здесь
          * читается даже сильнее, чем в шейдере: у фоллбэка нет объёмной туманности.
+         *
+         * Градиент кэшируется по цвету и геометрии, а пульс идёт через `Paint.alpha`. Раньше
+         * `RadialGradient` собирался НА КАЖДОМ КАДРЕ: четыре цвета плюс нативный шейдер 60 раз в
+         * секунду — это и мусор в молодом поколении, и заметный шаг по времени кадра ровно в тот
+         * момент, когда человек говорит.
          */
         private fun drawVoiceNeon(canvas: Canvas, w: Float, h: Float, minDim: Float) {
             val gate = if (voiceOrbMode) 1f else voiceLevel
             if (gate <= 0.01f) return
             val pulse = 0.28f + 0.95f * voiceLevel
             val alpha = (0.55f * gate * pulse).coerceIn(0f, 1f)
-            val neon = if (voiceNeonColor == 0) 0xFFC41E3A.toInt() else voiceNeonColor
+            val neon = if (voiceNeonColor == 0) VoiceNeonPalette.IDLE else voiceNeonColor
             val cx = w * 0.5f
             val cy = h * 0.5f
             val radius = minDim * 0.78f
-            glowPaint.style = Paint.Style.FILL
-            glowPaint.shader = RadialGradient(
-                cx, cy, radius,
-                intArrayOf(
-                    Color.argb((alpha * 235f).toInt().coerceIn(0, 255), Color.red(neon), Color.green(neon), Color.blue(neon)),
-                    Color.argb((alpha * 120f).toInt().coerceIn(0, 255), Color.red(neon), Color.green(neon), Color.blue(neon)),
-                    Color.argb((alpha * 45f).toInt().coerceIn(0, 255), Color.red(neon), Color.green(neon), Color.blue(neon)),
-                    Color.TRANSPARENT,
-                ),
-                floatArrayOf(0f, 0.34f, 0.66f, 1f),
-                Shader.TileMode.CLAMP,
-            )
-            canvas.drawCircle(cx, cy, radius, glowPaint)
-            glowPaint.shader = null
+            if (neonShader == null ||
+                neonShaderColor != neon ||
+                neonShaderRadius != radius ||
+                neonShaderCx != cx ||
+                neonShaderCy != cy
+            ) {
+                val red = Color.red(neon)
+                val green = Color.green(neon)
+                val blue = Color.blue(neon)
+                neonShader = RadialGradient(
+                    cx, cy, radius,
+                    intArrayOf(
+                        Color.argb(235, red, green, blue),
+                        Color.argb(120, red, green, blue),
+                        Color.argb(45, red, green, blue),
+                        Color.TRANSPARENT,
+                    ),
+                    floatArrayOf(0f, 0.34f, 0.66f, 1f),
+                    Shader.TileMode.CLAMP,
+                ).also { neonPaint.shader = it }
+                neonShaderColor = neon
+                neonShaderRadius = radius
+                neonShaderCx = cx
+                neonShaderCy = cy
+            }
+            neonPaint.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
+            canvas.drawCircle(cx, cy, radius, neonPaint)
         }
 
         private fun drawVoid(canvas: Canvas, w: Float, h: Float) {
@@ -859,6 +1059,14 @@ class MarsSpaceBackgroundView @JvmOverloads constructor(
         private val QUAD_COORDS = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         private const val STAR_COUNT = 150
         private const val CRATER_COUNT = 9
+
+        /**
+         * Допуск схождения неона: 1/255 — меньше одного шага байта канала.
+         *
+         * Экспонента не достигает цели никогда, поэтому на этом расстоянии каналы ставятся ровно
+         * в цель — иначе переход «тикал» бы ещё секунды после того, как разница стала невидимой.
+         */
+        private const val NEON_SNAP = 1f / 255f
 
         /**
          * Оборачивает корневую View экрана в FrameLayout с живым космическим фоном Марса позади

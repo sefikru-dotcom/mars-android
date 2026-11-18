@@ -2,9 +2,17 @@
 <!--
     appwidget-provider виджета «Марс — Панель управления и последний чат».
 
-    minWidth/minHeight = 4x2 в dp (ячейка ~70dp минус служебные отступы лаунчера).
-    minResize* разрешают сжать панель до 4x1 (останется одна строка действий) и
-    растянуть до 4x3 — превью ответа получит третью строку воздуха.
+    ГАБАРИТ. Панель занимает 4x3, а не 4x2, как заявлялось раньше: четыре полосы
+    (шапка 20dp + блок диалога + линия 5dp + композер 34dp + пилюли 28dp + паддинги 12dp)
+    дают в сумме ~154dp, а 4x2 — это 110dp (формула хоста: 70*n - 30). С прежним
+    minHeight=110dp хост отдавал окно на 40dp ниже содержимого, и нижняя строка
+    «Быстрые инструменты» физически не рисовалась. 180dp = ровно три ячейки, и в них
+    помещается всё, включая две строки превью.
+
+    minResize* разрешают сжать панель до 4x2 (110dp): блок диалога объявлен
+    `0dp` + `layout_weight="1"`, поэтому при сжатии ужимается превью ответа, а шапка,
+    композер и пилюли остаются на месте. Ниже 2 ячеек панель не имеет смысла —
+    минимальная высота ресайза и есть 110dp.
     updatePeriodMillis=0: виджет обновляется сам, когда приложение сообщает
     живое состояние (MarsQuickWidgetProvider.notifyStateChanged), а не по таймеру —
     иначе лаунчер будил бы процесс каждые 30 минут впустую.
@@ -13,13 +21,13 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/widget_mars_quick_description"
     android:initialLayout="@layout/widget_mars_quick"
-    android:minHeight="110dp"
-    android:minResizeHeight="56dp"
+    android:minHeight="180dp"
+    android:minResizeHeight="110dp"
     android:minResizeWidth="180dp"
     android:minWidth="250dp"
     android:previewLayout="@layout/widget_mars_quick"
     android:resizeMode="horizontal|vertical"
-    android:targetCellHeight="2"
+    android:targetCellHeight="3"
     android:targetCellWidth="4"
     android:updatePeriodMillis="0"
     android:widgetCategory="home_screen" />

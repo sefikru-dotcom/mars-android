@@ -41,6 +41,15 @@ class OfflineTtsSpeechEngine(
     private val port: OfflineTtsPort,
     /** «Звук начался / кончился» — фаза SPEAKING у кнопки живёт по этому событию. */
     private val onSpeakingChanged: (Boolean) -> Unit = {},
+    /**
+     * Освобождать ли порт в [shutdown].
+     *
+     * `false` — порт принадлежит процессу (`ru.mars.mobile.tts.OfflineVoice`): экран,
+     * закрываясь, обязан погасить СВОЮ речь, но не нативный движок, которым в этот момент
+     * может говорить другой чат или фоновый сервис. `true` (по умолчанию) — прежнее
+     * поведение для собственных портов (тесты и разовые движки).
+     */
+    private val releasePort: Boolean = true,
 ) : SpeechEngine {
 
     private val main = Handler(Looper.getMainLooper())
@@ -105,11 +114,23 @@ class OfflineTtsSpeechEngine(
         runCatching { backend.setSpeed(prosody.offlineSpeed()) }
     }
 
+    /**
+     * Освободить порт. Повторный вызов — no-op.
+     *
+     * Почему guard, а не просто `runCatching`: в полной цепочке этот движок достижим ДВУМЯ
+     * путями — как `offline` обёртки выбора голоса и как резерв сетевого движка
+     * ([ServerTtsSpeechEngine.fallback]). `shutdown` приходит по обоим (PreferOfflineEngine
+     * освобождает и свой офлайн, и резерв), и второй `port.release()` освобождал бы нативный
+     * движок, который первый вызов уже погасил, — а `AudioTrack` освобождается не мгновенно и
+     * второй вызов пришёлся бы ровно в это окно.
+     */
     override fun shutdown() {
+        if (released) return
         released = true
         main.removeCallbacks(watchSpeech)
         runCatching { port.stop() }
-        runCatching { port.release() }
+        // Общий порт процесса не освобождаем: им могут говорить другие экраны и сервис.
+        if (releasePort) runCatching { port.release() }
         if (speaking) finishSpeaking()
     }
 

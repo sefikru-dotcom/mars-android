@@ -221,4 +221,37 @@ class VoiceOutputControllerTest {
         controller.speakNow("Второе")
         assertEquals(listOf("Первое", "Второе"), engine.spoken)
     }
+
+    // --- После освобождения движок не дёргается ---------------------------------------------
+
+    @Test
+    fun `after destroy no speech request reaches the released engine`() {
+        controller.setAutoSpeak(true)
+        controller.onTurnComplete("до уничтожения")
+        assertEquals(listOf("до уничтожения"), engine.spoken)
+
+        controller.onDestroy()
+        // Поздние колбэки UI: нажатие «Озвучить», завершение хода, ответ сети.
+        assertEquals(SpeakOutcome.ENGINE_UNAVAILABLE, controller.speakNow("после уничтожения"))
+        controller.prefetch("после уничтожения")
+        controller.onTurnComplete("после уничтожения")
+
+        assertEquals("освобождённый движок не должен получать реплики", listOf("до уничтожения"), engine.spoken)
+        assertEquals(1, engine.shutdownCount)
+    }
+
+    @Test
+    fun `late engine callback after destroy does not reopen the microphone`() {
+        var finished = 0
+        controller.onSpeakingFinished = { finished++ }
+        controller.setAutoSpeak(true)
+        controller.onTurnComplete("ответ")
+        controller.onDestroy()
+        val afterDestroy = finished
+
+        // Движок дочитал уже после уничтожения экрана: хост не должен снова открыть микрофон.
+        controller.notifySpeakingFinished()
+
+        assertEquals(afterDestroy, finished)
+    }
 }

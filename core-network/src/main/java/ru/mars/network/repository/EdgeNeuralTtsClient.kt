@@ -44,7 +44,7 @@ import kotlin.coroutines.resume
  * `403` от DRM, пустое аудио) — [ServerTtsResult.Unavailable], то есть приглашение
  * вызывающему слою уйти на серверный `/api/tts` или системный TTS.
  *
- * @param httpClient транспорт; таймауты заданы здесь (8 с коннект, 15 с чтение), потому
+ * @param httpClient транспорт; таймауты заданы здесь (3 с коннект, 6 с чтение), потому
  *   что зависший сокет не должен держать реплику дольше, чем её озвучил бы сервер.
  * @param wssUrl база сокета; параметры `ConnectionId`/`Sec-MS-GEC` добавляются на каждый
  *   запрос. Отдельным параметром — только чтобы тест мог поднять локальный сервер.
@@ -233,8 +233,18 @@ open class EdgeNeuralTtsClient(
         /** `turn.end` без аудио: сервер отказал по голосу или DRM. */
         const val REASON_EMPTY_AUDIO: String = "edge_empty_audio"
 
-        private const val CONNECT_TIMEOUT_SECONDS = 8L
-        private const val READ_TIMEOUT_SECONDS = 15L
+        /**
+         * Коннект 3 с: недоступный Bing должен отдавать отказ быстро, а не держать фразу
+         * 8 с. Раньше здесь стояло 8 с, и при блокировке провайдера очередь речи стояла
+         * почти десять секунд ровно на первой же фразе.
+         */
+        private const val CONNECT_TIMEOUT_SECONDS = 3L
+
+        /**
+         * Чтение 6 с: реплика Edge приходит за 350–450 мс, поэтому 6 с — уже аварийный
+         * порог (было 15 с: зависший сокет превращался в 15-секундную тишину).
+         */
+        private const val READ_TIMEOUT_SECONDS = 6L
 
         /** Транспорт с таймаутами реплики (общий пул соединений модуля). */
         fun defaultHttpClient(): OkHttpClient = HttpClients.restBuilder()

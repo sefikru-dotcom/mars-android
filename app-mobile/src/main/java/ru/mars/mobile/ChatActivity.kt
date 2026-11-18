@@ -253,6 +253,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * «ход озвучивается» и «аудио сейчас звучит» — разные вопросы (см. [StreamSpeechLifecycle]).
      */
     internal val streamSpeech = StreamSpeechLifecycle()
+    /**
+     * Последнее показанное событие потоковой озвучки (подмена голоса / пропущенная фраза).
+     *
+     * Нужно, чтобы одна и та же новость не переписывала строку статуса на каждой фразе: при
+     * отказе обоих каналов очередь сообщает о каждой, и без дедупликации текст «фраза не
+     * озвучена» выдавливал бы подсказку фазы до конца хода. Сбрасывается на старте и отмене
+     * хода — новый ответ снова имеет право рассказать о подмене.
+     */
+    internal var lastStreamSpeechNotice: String? = null
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     internal var speechEngineInitResult: Boolean? = null
     internal lateinit var voiceSession: VoiceSessionController
@@ -595,6 +604,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun isGoalPlateReady(): Boolean = ::goalPlate.isInitialized
     internal fun isLiveRunPlateReady(): Boolean = ::liveRunPlate.isInitialized
     internal fun isVoiceSessionReady(): Boolean = ::voiceSession.isInitialized
+    internal fun isStatusViewReady(): Boolean = ::statusView.isInitialized
     /** Хост каркаса экрана: колбэки шапки/чипов/композера (объект создаётся один раз). */
     internal val scaffoldHost = createScaffoldHost()
 

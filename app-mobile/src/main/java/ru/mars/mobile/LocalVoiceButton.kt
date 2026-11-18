@@ -71,6 +71,14 @@ class LocalVoiceButton(
     serverTts: ServerTtsClient? = null,
     /** Офлайн-синтез (Piper): ответ звучит им, а не системным роботом. */
     offlineTts: (() -> ru.mars.mobile.tts.OfflineTtsPort?)? = null,
+    /**
+     * Реплику произнёс резерв вместо выбранного голоса.
+     *
+     * Проброс к [LocalVoiceController]: кнопка — лицо канала, и экран, у которого на руках
+     * только она, обязан узнать о подмене. Молчаливая подмена запрещена — хост показывает
+     * текст из [VoiceSubstitutionNotice].
+     */
+    private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
 ) {
 
     private val context: Context = activity
@@ -126,6 +134,7 @@ class LocalVoiceButton(
             asrEngine = asrEngine,
             serverTts = serverTts,
             offlineTts = offlineTts,
+            onVoiceSubstituted = onVoiceSubstituted,
         )
         // Контроллер в конструкторе молчит, поэтому первый снимок рисуем сами, а проверку
         // доступности (разрешение, TTS-сервис) откладываем до конца конструктора: иначе колбэк

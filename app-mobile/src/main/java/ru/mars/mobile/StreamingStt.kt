@@ -107,9 +107,12 @@ class StreamingStt(
 
     override fun startUtterance() {
         val target = engine ?: return
-        if (!target.isReady) return
+        // Реплика открывается и на НЕготовом движке. Готовность проверяется на каждом буфере,
+        // а «не готов прямо сейчас» — не повод убить всю фразу: раньше `utteranceOpen`
+        // оставался `false`, и микрофон отдавал звук в никуда, пока экран писал «Слушаю…».
+        // Сам движок начинает реплику на первом принятом PCM (см. [StreamingAsrEngine]).
         utteranceOpen = true
-        target.startUtterance()
+        if (target.isReady) target.startUtterance()
     }
 
     override fun acceptPcm(pcm: ByteArray, length: Int) {
@@ -117,7 +120,9 @@ class StreamingStt(
         if (!utteranceOpen) return
         val target = engine ?: return
         if (!target.isReady) {
-            utteranceOpen = false
+            // Движок отвалился на этом буфере: буфер пропускаем, но реплику НЕ закрываем.
+            // Раньше здесь снимался `utteranceOpen`, и весь остаток фразы молча терялся —
+            // в локальном чате whisper-пути нет, восстанавливать её было нечем.
             return
         }
         val valid = minOf(length, pcm.size)
