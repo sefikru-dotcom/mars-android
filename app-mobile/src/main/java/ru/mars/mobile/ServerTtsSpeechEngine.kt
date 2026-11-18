@@ -15,6 +15,7 @@ import ru.mars.network.repository.OpenAiSpeechTtsClient
 import ru.mars.network.repository.PaidTtsClient
 import ru.mars.network.repository.PlusVibeMediaTtsClient
 import ru.mars.network.repository.ServerTtsContract
+import ru.mars.network.repository.ServerTtsPrefetchKeys
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsSpeechRequest
@@ -51,6 +52,22 @@ interface ServerTtsClient {
      *   [ServerTtsResult.Unavailable] — приглашение к фолбэку на системный TTS.
      */
     suspend fun synthesize(text: String): ServerTtsResult
+
+    /**
+     * Применить темп и голос к СЛЕДУЮЩИМ репликам.
+     *
+     * Зачем метод в ПОРТЕ, а не приведение типа у вызывающего. Раньше выбор голоса доезжал
+     * до клиента только через `serverTts as? RepositoryServerTtsClient` в
+     * [LocalVoiceTts] — то есть через знание конкретного класса. Любая другая сборка
+     * (`ChatInitSection`, локальный чат) и любой фейк в тестах этого приведения не имеют,
+     * и вызов молча пропадал: шторка показывала новый голос, а синтез продолжал идти
+     * прежним. Метод в порте делает зависимость явной и типизированной.
+     *
+     * Тело по умолчанию НАРОЧНО: порт принимает только текст, и реализация без темпа
+     * (фейки, офлайн-клиенты) обязана компилироваться без правок. Молчаливый `Unit`
+     * честнее исключения — голос важнее темпа.
+     */
+    fun setProsody(prosody: VoiceProsody) = Unit
 }
 
 /** Проигрывание готового аудио. Реализация владеет аудиодвижком и временным файлом. */
@@ -191,10 +208,29 @@ class ServerTtsSpeechEngine(
      * С предсинтезом фраза N+1 синтезируется, пока звучит фраза N, и [speak] забирает
      * готовое аудио без ожидания сети.
      *
-     * Ключ — сам текст: очередь отдаёт куски дословно, и повтор того же текста (эхо,
-     * повторное «Проверить») получает тот же готовый результат.
+     * Ключ — ГОЛОС + текст ([ServerTtsPrefetchKeys]). Пока ключом был один текст, кэш не
+     * знал, каким голосом синтезирована фраза: смена голоса посреди ответа оставляла
+     * остаток реплики прежним голосом, хотя шторка уже показывала новый выбор. Текст в
+     * ключе сохраняет прежнюю пользу (очередь отдаёт куски дословно, и повтор того же
+     * текста получает готовый результат), голос — запрещает отдавать чужое аудио.
      */
     private val prefetched = ConcurrentHashMap<String, Deferred<ServerTtsResult>>()
+
+    /**
+     * Последний присланный хостом темп и голос.
+     *
+     * Хранится, а не только переливается в [fallback], потому что по нему решаются ДВЕ вещи,
+     * которые движок больше никак не узнает:
+     * - какой голос указать в ключе предсинтеза ([prefetchKey]);
+     * - что выбор изменился и кэш прежнего голоса больше нельзя отдавать человеку.
+     *
+     * Раньше значения не было вовсе: [setProsody] отдавал его резерву и забывал, поэтому
+     * клиент синтеза узнавал о голосе только через приведение типа в [LocalVoiceTts].
+     *
+     * `@Volatile`: ставится с главного потока из шторки, читается из корутины синтеза.
+     */
+    @Volatile
+    private var prosody: VoiceProsody? = null
 
     /** Системный TTS уже отказал: повторять его вслепую нельзя. */
     private var fallbackDead = false
@@ -214,6 +250,24 @@ class ServerTtsSpeechEngine(
         get() = prefetched.size
 
     /**
+     * Текущий темп и голос, последние присланные хостом; `null` — хост ещё не присылал.
+     *
+     * Нужен хосту для диагностики («каким голосом движок считает, что говорит») и тестам:
+     * без него проверять сохранение настройки пришлось бы по звуку.
+     */
+    val currentProsody: VoiceProsody?
+        get() = prosody
+
+    /**
+     * Ключ предсинтеза для [text] ТЕКУЩИМ голосом.
+     *
+     * Читает [prosody] один раз на вызов: если голос сменится между prefetch и speak, ключи
+     * разойдутся, и фраза будет синтезирована заново — это и требуется.
+     */
+    private fun prefetchKey(text: String): String =
+        ServerTtsPrefetchKeys.of(prosody?.voiceId, text)
+
+    /**
      * Предсинтезировать [text], пока звучит текущая фраза.
      *
      * Вызывается очередью ([LocalVoiceTts]) сразу после запуска предыдущего куска, поэтому
@@ -227,7 +281,8 @@ class ServerTtsSpeechEngine(
         if (text.isBlank()) return
         if (text.length > ServerTtsContract.MAX_TEXT_LENGTH) return
         if (fallbackDead && lastServerUnavailable) return
-        if (prefetched.containsKey(text)) return
+        val key = prefetchKey(text)
+        if (prefetched.containsKey(key)) return
         // Потолок очереди: три фразы вперёд — это уже весь буфер SpeechChunker, а больше
         // означало бы синтез в пустоту (человек перебьёт ответ раньше, чем он зазвучит).
         if (prefetched.size >= MAX_PREFETCH) return
@@ -243,7 +298,7 @@ class ServerTtsSpeechEngine(
         }
         // Гонка двух вызовов на одну фразу: проигравший отменяется, иначе лишний сетевой
         // запрос жил бы до конца реплики и мог перезаписать уже лежащий результат.
-        if (prefetched.putIfAbsent(text, pending) != null) pending.cancel()
+        if (prefetched.putIfAbsent(key, pending) != null) pending.cancel()
     }
 
     /**
@@ -256,7 +311,7 @@ class ServerTtsSpeechEngine(
     override fun speak(text: String): Boolean {
         // Правило длины: >5000 символов сервер отклоняет с 400 — не создаём этот 400 сами.
         if (text.length > ServerTtsContract.MAX_TEXT_LENGTH) {
-            prefetched.remove(text)?.cancel()
+            prefetched.remove(prefetchKey(text))?.cancel()
             return speakByFallback(text)
         }
         // Все каналы уже мертвы — не притворяемся, что реплика принята. Пока жив последний
@@ -273,7 +328,7 @@ class ServerTtsSpeechEngine(
         val token = generation
         // Предсинтезированная фраза забирается ДО запуска новой попытки: ожидания синтеза
         // между фразами нет вовсе, звук стартует сразу после предыдущего.
-        val ready = prefetched.remove(text)
+        val ready = prefetched.remove(prefetchKey(text))
         attempt = scope.launch {
             val result = if (ready != null) {
                 try {
@@ -326,8 +381,24 @@ class ServerTtsSpeechEngine(
      * [RepositoryServerTtsClient]), а платформенный TTS меняет темп только через
      * `setSpeechRate`. Если пробросить вызов лишь в одну сторону, человек услышит свой
      * темп ровно до первого отказа сервера, а дальше — прежний.
+     *
+     * Третья дорога — [client] (порт синтеза). Раньше её не было: значение уходило в
+     * [fallback] и забывалось, а клиент узнавал о голосе только через приведение типа в
+     * [LocalVoiceTts]. Любая сборка без этого приведения (серверный чат, локальный чат,
+     * тесты) теряла выбор человека — шторка применяла его визуально, а звучал прежний голос.
+     *
+     * Смена значения отменяет предсинтез: фраза, синтезированная ПРЕЖНИМ голосом, не имеет
+     * права зазвучать после того, как человек выбрал новый. Текущая реплика при этом не
+     * обрывается — её запрос уже ушёл, и рвать звук ради настройки значило бы наказать
+     * человека за неё.
      */
     override fun setProsody(prosody: VoiceProsody) {
+        val changed = this.prosody != prosody
+        this.prosody = prosody
+        if (changed) cancelPrefetched()
+        // Клиент синтеза — явная типизированная зависимость порта ([ServerTtsClient]),
+        // а не приведение к [RepositoryServerTtsClient] на стороне вызывающего.
+        runCatching { client.setProsody(prosody) }
         runCatching { fallback.setProsody(prosody) }
     }
 
@@ -572,6 +643,25 @@ class RepositoryServerTtsClient(
      * не должна ждать реальные 8 с.
      */
     private val paidWaitBudget: (ServerTtsVoiceProfile) -> Long? = { it.waitBudgetMs },
+
+    /**
+     * Выбранный человеком голос не прозвучал — прозвучал ДРУГОЙ профиль этой же реплики.
+     *
+     * Это профильный уровень той же правды, что [ServerTtsSpeechEngine.onVoiceSubstituted]
+     * сообщает на уровне канала. Нужен потому, что внутри одной реплики цепочка перебирает
+     * профили САМА: выбранный «Дмитрий» получает `400 invalid voice`, и фразу читает
+     * «Светлана». Аудио при этом приходит нормальное, движок видит успех и молчит — то есть
+     * человек слышит не тот голос и не узнаёт об этом. Здесь этот факт не теряется.
+     *
+     * @param wanted id профиля, который человек выбрал (`null` — он ничего не выбирал,
+     *   и тогда подмены нет вовсе: колбэк не вызывается).
+     * @param actual id профиля, который реально синтезировал реплику.
+     * @param reason код отказа выбранного профиля (`invalid_voice`, `server_error`,
+     *   `transport`, …) либо `null`, если отказ случился не в этой реплике. Ни текста
+     *   реплики, ни ключей здесь нет.
+     */
+    private val onVoiceSubstituted: (wanted: String?, actual: String, reason: String?) -> Unit =
+        { _, _, _ -> },
 ) : ServerTtsClient {
 
     /** Исход попытки одним профилем — только метаданные, без текста реплики. */
@@ -611,6 +701,13 @@ class RepositoryServerTtsClient(
                 attempts += Attempt(chosen.id, failure.reason, failure.httpCode)
                 selector?.onUnavailable(chosen, failure)
             }
+            // Подмена объявляется СРАЗУ после отказа, а не в ветке успеха нейро-резерва.
+            // Раньше колбэк стоял только там, и любой другой исход (Дмитрий тоже не ответил,
+            // фразу прочитала «Светлана» серверной цепочки) уходил человеку МОЛЧА: он выбрал
+            // «Алису», услышал чужой голос и не получил ни одного объяснения. Платный
+            // профиль в автоматическом переборе не участвует (см. цикл ниже), поэтому
+            // вернуться к нему эта реплика уже не может — событие окончательное.
+            notifyPaidUnavailable(paidFailure?.reason)
             // Прозрачный нейро-фолбэк: платный голос не должен звучать механическим
             // системным роботом только потому, что у провайдера нет ключа или задача
             // не уложилась в потолок ожидания.
@@ -620,9 +717,6 @@ class RepositoryServerTtsClient(
                 lastProfileId = ServerTtsVoices.NATURAL_DMITRY.id
                 lastAttempts = attempts
                 selector?.onAudio(ServerTtsVoices.NATURAL_DMITRY)
-                // Подмена объявляется ДО возврата: дальше фразу никто не переспросит, и
-                // хост узнаёт о ней только отсюда.
-                runCatching { onPaidUnavailable(paidFailure?.reason) }
                 return neural
             }
             (neural as? ServerTtsResult.Unavailable)?.let { failure ->
@@ -672,6 +766,9 @@ class RepositoryServerTtsClient(
             return ServerTtsResult.Unavailable(PROFILES_COOLING)
         }
         var last: ServerTtsResult.Unavailable? = null
+        // Почему не зазвучал ИМЕННО выбранный профиль: без этой причины событие подмены
+        // сообщало бы «прозвучал другой голос» без единого намёка, что чинить.
+        var chosenFailure: ServerTtsResult.Unavailable? = null
         for (profile in candidates) {
             // Платный облачный профиль пробуется ТОЛЬКО выбранным человеком (шаг 0): в
             // автоматическом переборе он стоил бы денег за каждую фразу и не является
@@ -683,10 +780,18 @@ class RepositoryServerTtsClient(
                     attempts += Attempt(profile.id, null, null)
                     lastAttempts = attempts
                     selector.onAudio(profile)
+                    // Выбранный голос не прозвучал, зазвучал этот. Внутри одной реплики
+                    // цепочка перебирает профили молча, и без этого уведомления человек,
+                    // выбравший «Дмитрия», слышит «Светлану» без объяснения — та самая
+                    // «визуально применилось, а по факту нет».
+                    if (explicitChoice != null && explicitChoice.id != profile.id) {
+                        notifyVoiceSubstituted(explicitChoice.id, profile.id, chosenFailure?.reason)
+                    }
                     return result
                 }
                 is ServerTtsResult.Unavailable -> {
                     attempts += Attempt(profile.id, result.reason, result.httpCode)
+                    if (profile.id == explicitChoice?.id) chosenFailure = result
                     last = result
                     // false — отказ не про голос (лимитер/токен): следующий голос не поможет.
                     if (!selector.onUnavailable(profile, result)) {
@@ -900,13 +1005,36 @@ class RepositoryServerTtsClient(
      * `candidates()` ещё 45 секунд, и человек слышал бы прежний голос, только что выбрав
      * новый. Снимать паузы на смену ТЕМПА нельзя — это обнуляло бы знание «голос не
      * работает» без всякой причины.
+     *
+     * `override` — метод порта [ServerTtsClient], а не «просто публичный метод»: движок
+     * озвучки вызывает его через порт, поэтому выбор голоса доезжает до синтеза без
+     * приведения типа у вызывающего.
      */
-    fun setProsody(value: VoiceProsody) {
-        val previous = prosody
-        prosody = value
-        if (previous?.voiceId != value.voiceId) {
+    override fun setProsody(prosody: VoiceProsody) {
+        val previous = this.prosody
+        this.prosody = prosody
+        if (previous?.voiceId != prosody.voiceId) {
             runCatching { selector?.reset() }
         }
+    }
+
+    /**
+     * Сказать хосту, что выбранный платный голос не прозвучал.
+     *
+     * `runCatching` обязателен: колбэк — чужой код (экран, уведомление), и его исключение не
+     * должно отменять звук, который уже получен.
+     */
+    private fun notifyPaidUnavailable(reason: String?) {
+        runCatching { onPaidUnavailable(reason) }
+    }
+
+    /**
+     * Сказать хосту, что выбранный голос заменён другим профилем этой же реплики.
+     *
+     * `runCatching` по той же причине: факт подмены не должен стоить реплике звука.
+     */
+    private fun notifyVoiceSubstituted(wanted: String?, actual: String, reason: String?) {
+        runCatching { onVoiceSubstituted(wanted, actual, reason) }
     }
 
     companion object {

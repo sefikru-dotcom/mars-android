@@ -58,10 +58,11 @@ class PaidVoiceNoticeTest {
             VoiceSubstitutionNotice.PLUSVIBE_NOT_CONFIGURED,
             VoiceSubstitutionNotice.paidUnavailable(PlusVibeTtsProfile.REASON_NO_PROFILE),
         )
-        // Остальные отказы (нет ключа, таймаут, транспорт) — про провайдера и сеть, не про
-        // настройки: им достаётся общий текст.
+        // Нет ключа — это НЕ «провайдер/сеть не ответили», а недонастроенный профиль: человек
+        // лечит это вставкой ключа, а не ожиданием сети. Прежний общий текст скрывал от него
+        // единственное действие, которое помогает, поэтому здесь ожидается точная причина.
         assertEquals(
-            VoiceSubstitutionNotice.PAID_UNAVAILABLE,
+            PlusVibeTtsProfile.humanReason(PlusVibeTtsProfile.REASON_NO_KEY),
             VoiceSubstitutionNotice.paidUnavailable(PlusVibeTtsProfile.REASON_NO_KEY),
         )
         assertEquals(

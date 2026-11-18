@@ -103,7 +103,9 @@ class ServerTtsSpeechEngineTest {
 
     private fun engine(
         system: FakeSystemTts = FakeSystemTts(),
-        client: FakeClient = FakeClient(),
+        // Порт, а не конкретный фейк: часть тестов проверяет, что движок доносит выбор голоса
+        // до НАСТОЯЩЕГО моста ([RepositoryServerTtsClient]) через метод порта.
+        client: ServerTtsClient = FakeClient(),
         playback: FakePlayback = FakePlayback(),
         onServerAudioAvailable: () -> Unit = {},
         fallbackChannel: VoiceChannel = VoiceChannel.SYSTEM,
@@ -1525,5 +1527,135 @@ class ServerTtsSpeechEngineTest {
         assertTrue(engine.speak("фраза"))
 
         assertEquals(0, silent)
+    }
+
+    // --- Выбор голоса доезжает до синтеза -------------------------------------------------
+    //
+    // Требование Волны 22: голос, выбранный в шторке, обязан ЗВУЧАТЬ, а не только
+    // подсвечиваться. Дефект был двойной: `setProsody` движка переливал значение в резерв и
+    // забывал его (клиент синтеза узнавал о голосе только через приведение типа в
+    // `LocalVoiceTts`), а кэш предсинтеза индексировался одним текстом, поэтому остаток
+    // ответа доигрывал прежним голосом.
+
+    @Test
+    fun `engine prosody reaches the synthesis client so the chosen voice is requested`() {
+        val voices = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+        }
+        val engine = engine(client = client, playback = FakePlayback())
+
+        engine.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id))
+        assertTrue(engine.speak("фраза"))
+
+        // Без выбора движок попросил бы Светлану (первый бесплатный профиль). Дмитрий в
+        // запросе — доказательство, что настройка доехала до синтеза, а не осталась в шторке.
+        assertEquals(listOf("ru-RU-DmitryNeural"), voices)
+        assertEquals(ServerTtsVoices.NATURAL_DMITRY.id, engine.currentProsody?.voiceId)
+    }
+
+    @Test
+    fun `prefetched phrase is not served after the voice changed`() {
+        val voices = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            voices += request.voice
+            ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+        }
+        val playback = FakePlayback()
+        val engine = engine(client = client, playback = playback)
+
+        engine.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id))
+        engine.prefetch("фраза")
+        assertEquals(1, engine.prefetchedCount)
+
+        engine.setProsody(VoiceProsody(voiceId = ServerTtsVoices.NATURAL_SVETLANA.id))
+
+        // Кэш прежнего голоса отменён: иначе фраза зазвучала бы Дмитрием после того, как
+        // человек выбрал Светлану, — то есть выбор снова был бы только визуальным.
+        assertEquals(0, engine.prefetchedCount)
+        assertTrue(engine.speak("фраза"))
+        assertEquals(listOf("ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural"), voices)
+        assertEquals(1, playback.played.size)
+    }
+
+    @Test
+    fun `tempo change also drops the prefetched phrase synthesized at the old rate`() {
+        val rates = mutableListOf<String?>()
+        val client = bridge { _, _, request ->
+            rates += request.rate
+            ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+        }
+        val engine = engine(client = client, playback = FakePlayback())
+
+        engine.setProsody(VoiceProsody(speed = 1.15f))
+        engine.prefetch("фраза")
+        engine.setProsody(VoiceProsody(speed = 0.9f))
+
+        // Темп уезжает в том же запросе, что и голос, поэтому устаревший предсинтез — это
+        // фраза, прочитанная не тем темпом, который человек только что выставил.
+        assertEquals(0, engine.prefetchedCount)
+        assertTrue(engine.speak("фраза"))
+        assertEquals(listOf("+15%", "-10%"), rates)
+    }
+
+    @Test
+    fun `paid voice replaced by the server chain is announced instead of silently swapped`() {
+        val reasons = mutableListOf<String?>()
+        val voices = mutableListOf<String?>()
+        val client = RepositoryServerTtsClient(
+            baseUrl = "https://marscore.ru",
+            credentialProvider = { credential },
+            selector = SpeechVoiceProfileSelector(),
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.PLUSVIBE_ALICE.id),
+            directEdgeClient = null,
+            // Платный клиент не подключён: ровно тот случай, когда «Алиса» молча звучала
+            // Дмитрием, а если и он не ответил — Светланой.
+            paidClient = null,
+            transport = ServerTtsTransport { _, _, request ->
+                voices += request.voice
+                ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+            },
+            onPaidUnavailable = { reason -> reasons += reason },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue("фразу обязан прочитать резерв, а не потерять", result is ServerTtsResult.Audio)
+        // Звук есть — но это НЕ выбранный голос, и человек обязан узнать об этом.
+        assertEquals(listOf("ru-RU-SvetlanaNeural"), voices)
+        assertEquals(listOf<String?>(RepositoryServerTtsClient.REASON_NO_PAID_CLIENT), reasons)
+    }
+
+    @Test
+    fun `chosen voice demoted inside the chain reports wanted and actual profile ids`() {
+        val events = mutableListOf<Triple<String?, String, String?>>()
+        val client = RepositoryServerTtsClient(
+            baseUrl = "https://marscore.ru",
+            credentialProvider = { credential },
+            selector = SpeechVoiceProfileSelector(),
+            prosody = VoiceProsody(voiceId = ServerTtsVoices.NATURAL_DMITRY.id),
+            directEdgeClient = null,
+            transport = ServerTtsTransport { _, _, request ->
+                if (request.voice == ServerTtsVoices.NATURAL_DMITRY.voice) {
+                    ServerTtsResult.Unavailable("invalid_voice", 400)
+                } else {
+                    ServerTtsResult.Audio(byteArrayOf(1), "audio/mpeg")
+                }
+            },
+            onVoiceSubstituted = { wanted, actual, reason -> events += Triple(wanted, actual, reason) },
+        )
+
+        val result = kotlinx.coroutines.runBlocking { client.synthesize("фраза") }
+
+        assertTrue(result is ServerTtsResult.Audio)
+        // Аудио вернулось штатно, поэтому движок увидел бы «успех» и промолчал: без этого
+        // события «выбрал Дмитрия — услышал Светлану» осталось бы загадкой.
+        assertEquals(
+            listOf<Triple<String?, String, String?>>(
+                Triple(ServerTtsVoices.NATURAL_DMITRY.id, ServerTtsVoices.NATURAL_SVETLANA.id, "invalid_voice"),
+            ),
+            events,
+        )
     }
 }

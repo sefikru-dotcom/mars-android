@@ -238,6 +238,25 @@ class OfflineTtsBackend(
     fun isSpeaking(): Boolean = synchronized(lock) { !released && active != null }
 
     /**
+     * Сессия `AudioTrack` звучащей реплики — для измерителя громкости орба ([SpeechLevelSource]).
+     *
+     * Только чтение: ни трек, ни реплику этот геттер не трогает и синтез не меняет. Он нужен
+     * ровно затем, чтобы контроллер мог привязать `Visualizer` к ТОМУ ЖЕ треку, который сейчас
+     * играет: у каждой реплики свой `AudioTrack` (см. [Utterance]), а значит и своя сессия, и
+     * кэшировать её на весь бэкенд нельзя.
+     *
+     * `null` — звука нет: реплика не начата, трек ещё не создан, реплика остановлена или бэкенд
+     * освобождён. Нулевую сессию тоже отдаём как `null`: `Visualizer` на нуле привязался бы ко
+     * всему выводу устройства.
+     */
+    fun currentSessionId(): Int? = synchronized(lock) {
+        if (released) return@synchronized null
+        val track = active?.track ?: return@synchronized null
+        val session = runCatching { track.audioSessionId }.getOrNull() ?: return@synchronized null
+        session.takeIf { it != NO_SESSION }
+    }
+
+    /**
      * Сменить темп для последующих реплик.
      *
      * Два пути, и выбор между ними не косметический:
@@ -731,6 +750,9 @@ class OfflineTtsBackend(
         private const val TAG = "MarsOfflineTts"
 
         private const val THREAD_NAME = "mars-offline-tts"
+
+        /** `AudioTrack` не выдал сессию: привязывать `Visualizer` не к чему. */
+        private const val NO_SESSION = 0
 
         /** 2 потока: синтез VITS на 1 потоке не успевает за реальным временем на слабых SoC. */
         private const val NUM_THREADS = 2

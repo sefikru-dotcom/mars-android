@@ -201,6 +201,29 @@ class AndroidServerTtsPlayback(
         player = null
     }
 
+    /**
+     * Сессия играющего плеера — для измерителя громкости орба ([SpeechLevelSource]).
+     *
+     * ## Почему геттер, а не параметр конструктора
+     * Сессия выдаётся платформой в момент старта звука и живёт ровно столько, сколько живёт этот
+     * `ExoPlayer`: у каждой фразы (и каждого пересоздания плеера в [playInternal]) она своя. Хост
+     * спрашивает её в тот момент, когда контроллер объявил фазу SPEAKING, то есть уже после
+     * `prepare()`.
+     *
+     * ## Почему `null`, а не `0`
+     * `0` — «сессии нет» (`C.AUDIO_SESSION_ID_UNSET`): `Visualizer` на нулевой сессии означал бы
+     * «слушай весь вывод устройства», а это чужой звук и отказ эффекта на части прошивок. `null`
+     * для вызывающего — честный сигнал «мерить нечего, оставайся на огибающей».
+     *
+     * Вызывать только с главного потока: [player] по контракту движка живёт на нём.
+     */
+    fun currentSessionId(): Int? {
+        val current = player ?: return null
+        if (!current.isPlaying) return null
+        val session = runCatching { current.audioSessionId }.getOrNull() ?: return null
+        return session.takeIf { it != NO_SESSION }
+    }
+
     private fun deleteTempFile() {
         runCatching { tempFile?.delete() }
         tempFile = null
@@ -209,5 +232,8 @@ class AndroidServerTtsPlayback(
     companion object {
         private const val THREAD_NAME = "mars-server-tts-write"
         private const val FILE_PREFIX = "mars-tts-"
+
+        /** `C.AUDIO_SESSION_ID_UNSET`: платформа ещё не выдала сессию (или уже отобрала). */
+        private const val NO_SESSION = 0
     }
 }

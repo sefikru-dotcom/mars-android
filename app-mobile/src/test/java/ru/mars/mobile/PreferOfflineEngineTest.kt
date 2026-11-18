@@ -301,4 +301,45 @@ class PreferOfflineEngineTest {
         // Предсинтез серверного канала: запрос уходит заранее, под звук предыдущего куска.
         assertEquals(listOf("следующий кусок"), client.requests)
     }
+
+    // --- Голос, которого нет в каталоге сборки ------------------------------------------
+
+    @Test
+    fun `a stale voice id is announced instead of being silently replaced`() {
+        val piper = FakeEngine()
+        val events = mutableListOf<VoiceSubstitution>()
+        val prefer = PreferOfflineEngine(
+            offline = piper,
+            // Сетевого канала нет: тогда выбор «неизвестный голос» уходит на локальную модель.
+            fallback = FakeEngine(),
+            onVoiceSubstituted = { events += it },
+        )
+        // Настройка приехала из старой версии: такого профиля в VOICE_DIALOG больше нет.
+        prefer.setProsody(VoiceProsody(voiceId = "plusvibe-kate-removed"))
+
+        assertTrue(prefer.speak("привет"))
+
+        assertEquals(listOf("привет"), piper.spoken)
+        // Раньше это было единственным видом подмены БЕЗ события: шторка показывала «Катю»,
+        // звучала Ирина, и человек считал, что выбор просто не работает.
+        assertEquals(
+            listOf(VoiceSubstitution(VoiceChannel.OFFLINE, VoiceSubstitutionReason.VOICE_UNKNOWN)),
+            events,
+        )
+    }
+
+    @Test
+    fun `a valid local choice is never announced as unknown`() {
+        val events = mutableListOf<VoiceSubstitution>()
+        val prefer = PreferOfflineEngine(
+            offline = FakeEngine(),
+            fallback = FakeEngine(),
+            onVoiceSubstituted = { events += it },
+        )
+        prefer.setProsody(VoiceProsody(voiceId = ServerTtsVoices.LOCAL_IRINA.id))
+
+        assertTrue(prefer.speak("привет"))
+
+        assertTrue("выбранный голос прозвучал им же — событий быть не должно", events.isEmpty())
+    }
 }

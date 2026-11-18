@@ -79,6 +79,19 @@ class LocalVoiceButton(
      * текст из [VoiceSubstitutionNotice].
      */
     private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
+    /**
+     * Источник громкости играющего аудио: орб пульсирует РЕАЛЬНЫМ звуком Марса, а не
+     * синтетической огибающей. `null` — прежнее поведение (огибающая).
+     */
+    levelSource: SpeechLevelSource? = null,
+    /**
+     * Сессия звука, которую слушает [levelSource].
+     *
+     * Лямбда, а не число: сессия появляется через 150–600 мс после старта речи и меняется от
+     * реплики к реплике. Снимок значения здесь всегда был бы `null` — ровно та ошибка, из-за
+     * которой реальная громкость не заработала бы никогда.
+     */
+    audioSessionProvider: (() -> Int?)? = null,
 ) {
 
     private val context: Context = activity
@@ -135,6 +148,8 @@ class LocalVoiceButton(
             serverTts = serverTts,
             offlineTts = offlineTts,
             onVoiceSubstituted = onVoiceSubstituted,
+            levelSource = levelSource,
+            audioSessionProvider = audioSessionProvider,
         )
         // Контроллер в конструкторе молчит, поэтому первый снимок рисуем сами, а проверку
         // доступности (разрешение, TTS-сервис) откладываем до конца конструктора: иначе колбэк
@@ -245,6 +260,15 @@ class LocalVoiceButton(
      * [LocalVoiceController]. `null` — вернуть умолчания.
      */
     fun setProsody(prosody: VoiceProsody?) = controller.setProsody(prosody)
+
+    /**
+     * Сессия звука, который играет сейчас, — для [SpeechLevelSource].
+     *
+     * Кнопка пробрасывает факт от контроллера, а не решает сама: чем именно звучит реплика
+     * (облако/Piper/система) знает озвучка, и второй источник правды здесь завёл бы
+     * расхождение «орб слушает одну сессию, а говорит другая».
+     */
+    fun audioSessionId(): Int? = controller.currentAudioSessionId()
 
     /** Немедленная тишина. */
     fun stopSpeaking() = controller.stopSpeaking()

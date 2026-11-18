@@ -459,6 +459,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Голос и темп — ДО поднятия голосового стека: клиенты синтеза читают это поле лямбдой
+        // на каждую реплику, и пустое значение означало, что выбранный в шторке голос в
+        // серверном чате не звучал НИКОГДА (объявлено и ни разу не присвоено — ровно та
+        // «настройка, которая меняется визуально»). Порядок здесь важен: `initializeVoiceStack`
+        // ниже строит движки, и до этой строки они видели бы дефолт.
+        voiceProsody = VoiceProsodyPrefs(this).load()
         initializeChatStores()
         initializeVoiceStack()
         initializeScreenControllers()

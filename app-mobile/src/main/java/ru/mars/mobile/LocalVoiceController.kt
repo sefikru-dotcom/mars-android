@@ -137,6 +137,24 @@ class LocalVoiceController(
      * передавал). Экран показывает текст из [VoiceSubstitutionNotice].
      */
     private val onVoiceSubstituted: (VoiceSubstitution) -> Unit = {},
+    /**
+     * Источник громкости ИГРАЮЩЕГО аудио ([SpeechLevelSource]): пока Марс говорит, орб пульсирует
+     * РЕАЛЬНЫМ звуком, а не синтетической огибающей.
+     *
+     * `null` по умолчанию — поведение прежнее (огибающая), и существующие сборки контроллера без
+     * Android продолжают работать. Источник включается ТОЛЬКО на время фазы SPEAKING и только если
+     * [SpeechLevelSource.start] вернул `true`: молчаливый отказ эффекта (занят другим приложением)
+     * не имеет права оставить орб без движения.
+     */
+    private val levelSource: SpeechLevelSource? = null,
+    /**
+     * Сессия играющего аудио на текущий момент (её даёт хост из плеера/Piper).
+     *
+     * Лямбда, а не число: сессия выдаётся платформой при старте конкретной реплики и меняется от
+     * фразы к фразе, а контроллер узнаёт о речи раньше, чем у него появляется сессия. `null` или
+     * `0` в ответ означают «мерить нечего» — остаётся резервная огибающая.
+     */
+    private val audioSessionProvider: (() -> Int?)? = null,
 ) {
 
     private val main = Handler(Looper.getMainLooper())
@@ -360,8 +378,9 @@ class LocalVoiceController(
     }
 
     /**
-     * Живая громкость речи 0..1: сырой RMS микрофона во время реплики человека и синтетическая
-     * огибающая во время ответа Марса.
+     * Живая громкость речи 0..1: сырой RMS микрофона во время реплики человека и громкость
+     * ИГРАЮЩЕГО звука во время ответа Марса ([SpeechLevelSource]); синтетическая огибающая — только
+     * резерв, если измерить вывод не удалось.
      *
      * Зачем колбэк, а не поле в [LocalVoiceState]: уровень меняется 10–16 раз в секунду, и
      * гонять его через снимок состояния значило бы перерисовывать весь полноэкранный слой
@@ -378,11 +397,28 @@ class LocalVoiceController(
     private var speechPhase = 0f
 
     /**
+     * Чей уровень громкости рисует орб во время речи Марса: реальный (Visualizer) или резервный
+     * (синтетическая огибающая).
+     *
+     * Политика вынесена в чистый [SpeechLevelRouter], потому что цена ошибки здесь — «планета
+     * застыла» либо «планета дёргается на битом значении». На JVM это проверяется фейком источника,
+     * без `Visualizer` и без `Handler`.
+     */
+    private val speechLevels = SpeechLevelRouter(
+        source = levelSource,
+        sessionId = { audioSessionProvider?.invoke() },
+        onLevel = { level -> publishLevel(level) },
+        // Те же монотонные часы, что у сторожа: повторы источника считаются по ним.
+        nowMs = { watchdogClock() },
+    )
+
+    /**
      * Огибающая «речи» Марса, пока звучит ответ.
      *
-     * Почему не реальный уровень: на время озвучки микрофон закрыт намеренно (иначе в захват
-     * попал бы собственный динамик), и брать громкость неоткуда. Синтетическая огибающая с
-     * паузами между «словами» даёт ровно то, что видит человек: планета дышит вместе с голосом.
+     * Резерв, а не основной путь. Реальную громкость даёт [SpeechLevelSource] (см.
+     * [startSpeechLevel]); огибающая включается только если источник недоступен: эффект занят
+     * другим приложением, сессия ещё не выдана, `Visualizer` запрещён политикой устройства. Тогда
+     * лучше синтетический ритм, чем мёртвая планета.
      *
      * Объект, а не лямбда: `main.postDelayed(this, …)` обязан получить сам Runnable, а в лямбде
      * `this` указывает на контроллер.
@@ -390,8 +426,16 @@ class LocalVoiceController(
     private val speechEnvelope = object : Runnable {
         override fun run() {
             if (released || state.phase != LocalVoicePhase.SPEAKING) return
-            speechPhase += SPEECH_TICK_PHASE
-            onAudioLevel?.invoke(envelopeAt(speechPhase))
+            // Источник мог опоздать: SPEAKING включается на ПРИНЯТОМ синтезе, а сессию платформа
+            // выдаёт позже — когда `ExoPlayer` реально начнёт играть. Пока тикает резерв, политика
+            // изредка пробует источник снова и, если он ожил, синтетика прекращается совсем.
+            if (speechLevels.retry()) return
+            // `null` — источник жив: считать синтетику больше не нужно.
+            val level = speechLevels.envelopeLevel {
+                speechPhase += SPEECH_TICK_PHASE
+                envelopeAt(speechPhase)
+            } ?: return
+            onAudioLevel?.invoke(level)
             main.postDelayed(this, SPEECH_TICK_MS)
         }
     }
@@ -796,6 +840,15 @@ class LocalVoiceController(
         pendingProsody = value
         runCatching { tts?.setProsody(value) }
     }
+
+    /**
+     * Сессия звука, который играет сейчас, или `null` — для [SpeechLevelSource].
+     *
+     * Не создаёт движок: если озвучка ещё не поднята, значит и звука нет, и поднимать её ради
+     * вопроса «какая у тебя сессия» значило бы заводить `AudioTrack` на пустом месте.
+     */
+    fun currentAudioSessionId(): Int? =
+        runCatching { tts?.currentAudioSessionId() }.getOrNull()
 
     /** Озвучить произвольный текст (пункт «Озвучить» у сообщения). */
     fun speakNow(text: String?) {
@@ -1510,10 +1563,16 @@ class LocalVoiceController(
         publishLevel(next)
     }
 
-    /** Отдать уровень подписчику (орбу). Всегда на главном потоке. */
+    /**
+     * Отдать уровень подписчику (орбу). Всегда на главном потоке.
+     *
+     * `NaN`/`±∞` сюда доезжают из ЧУЖИХ измерений (Visualizer, `AudioTrack`), а `.coerceIn` их не
+     * зажимает: `NaN` не больше и не меньше границы. Один такой кадр у [VoiceModeOrbView] — и
+     * планета гаснет до следующего обновления, поэтому значение санируется, а не «зажимается».
+     */
     private fun publishLevel(value: Float) {
         val listener = onAudioLevel ?: return
-        post { listener(value.coerceIn(0f, 1f)) }
+        post { listener(SpeechLevelMath.sanitize(value)) }
     }
 
     /**
@@ -1530,14 +1589,49 @@ class LocalVoiceController(
         return (ENVELOPE_BASE + ENVELOPE_SPAN * syllables * phrases * breath).coerceIn(0f, 1f)
     }
 
+    /**
+     * Громкость для орба на время речи Марса: РЕАЛЬНАЯ, если её можно измерить.
+     *
+     * Порядок решений и почему он такой:
+     * 1. источник пробуем первым — он и есть цель волны: планета обязана захлёбываться на громком
+     *    слове и притухать на паузе, как орб ChatGPT, а не идти ровной синусоидой;
+     * 2. `false` от источника (эффект занят другим приложением, сессии ещё нет, нет разрешения) —
+     *    резерв: синтетическая огибающая. Она хуже, но живая планета лучше мёртвой;
+     * 3. при живом источнике снимается ТОЛЬКО тик огибающей. Через [stopSpeechEnvelope] этого
+     *    делать нельзя: он отпускает источник целиком, то есть погасил бы только что включённый
+     *    `Visualizer` и вернул орб к синусоиде.
+     *
+     * Сессию берём на КАЖДЫЙ старт речи, а не один раз за сессию разговора: у серверной озвучки и
+     * Piper разные треки, и номер сессии меняется от фразы к фразе.
+     */
+    private fun startSpeechLevel() {
+        // Орб не подписан (обычный чат без полноэкранного слоя) — мерить не для кого: эффект
+        // поднимать незачем, а `Visualizer` занимает сессию в аудио-сервисе.
+        if (onAudioLevel == null) return
+        if (speechLevels.begin()) {
+            main.removeCallbacks(speechEnvelope)
+            return
+        }
+        startSpeechEnvelope()
+    }
+
     private fun startSpeechEnvelope() {
         main.removeCallbacks(speechEnvelope)
         if (onAudioLevel == null) return
         main.postDelayed(speechEnvelope, SPEECH_TICK_MS)
     }
 
+    /**
+     * Погасить уровень речи целиком: и огибающую, и источник.
+     *
+     * Одна точка, а не две. `Visualizer` живёт в аудио-сервисе системы и держит сессию: забытый
+     * эффект продолжает отдавать процессу чужой звук и не даёт следующему приложению включить
+     * свой. Поэтому «снять огибающую» и «отпустить источник» — это одно и то же событие: речь
+     * кончилась (смена фазы, стоп человека, уход экрана, `release`).
+     */
     private fun stopSpeechEnvelope() {
         main.removeCallbacks(speechEnvelope)
+        speechLevels.stop()
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1797,9 +1891,9 @@ class LocalVoiceController(
             // в [BargeInMicPolicy]; здесь только последствия.
             if (!armBargeInMic()) {
                 closeMicForAssistantSpeech()
-                // Микрофон закрыт на время озвучки, поэтому громкость «речи» синтетическая:
-                // орб должен дышать вместе с голосом, а не застывать.
-                startSpeechEnvelope()
+                // Микрофон закрыт на время озвучки — громкость берём из тракта ВЫВОДА
+                // ([SpeechLevelSource]), а синтетическая огибающая остаётся резервом.
+                startSpeechLevel()
             } else {
                 // Захват открыт: уровень придёт из настоящего PCM микрофона, синтетическая
                 // огибающая только спорила бы с ним.
@@ -2025,6 +2119,13 @@ class LocalVoiceController(
 
     private fun emit(next: LocalVoiceState) {
         if (released) return
+        // Уход из SPEAKING — единственный надёжный признак «речь кончилась»: именно по нему
+        // отпускается источник громкости. Проверка здесь, а не только в `onTtsSpeakingChanged`,
+        // потому что фазу снимают и другие пути (стоп человека, уход экрана, провал движка), и
+        // забытый `Visualizer` на сессии отыгравшего плеера — это утечка эффекта и чужой звук.
+        if (state.phase == LocalVoicePhase.SPEAKING && next.phase != LocalVoicePhase.SPEAKING) {
+            stopSpeechEnvelope()
+        }
         state = next
         runCatching { onState(next) }
         // Второй наблюдатель — полноэкранный слой. Отдельный вызов, а не часть `onState`:
@@ -2363,4 +2464,132 @@ internal object BargeInMicPolicy {
         accepted: Boolean,
         userStopped: Boolean,
     ): Boolean = captureOpen && owned && !accepted && !userStopped
+}
+
+/**
+ * Чей уровень громкости рисует орб, пока Марс говорит: реальный звук вывода или резервная
+ * синтетическая огибающая.
+ *
+ * ## Зачем отдельный объект
+ * Решение «мерить или синтезировать» — единственное место волны, где ошибка видна человеку сразу:
+ * неверный выбор даёт либо мёртвую планету (источник не ответил, а огибающую не включили), либо
+ * драку двух источников (огибающая продолжает тикать поверх реального уровня). Ни то, ни другое
+ * нельзя проверить юнит-тестом контроллера: он требует `Handler` главного `Looper` и `Activity`.
+ * Поэтому политика собрана здесь, без Android, и проверяется фейком [SpeechLevelSource]
+ * ([SpeechLevelTapTest]).
+ *
+ * ## Почему одной попытки мало ([retry])
+ * Фаза SPEAKING включается на ПРИНЯТОМ синтезе (`LocalVoiceTts`), то есть РАНЬШЕ первого сэмпла:
+ * `ExoPlayer` в этот момент ещё пишет файл, `AudioTrack` у Piper ещё не создан, и сессии у
+ * платформы нет вовсе. Одиночная попытка в этот момент вернула бы `false` ВСЕГДА, и реальная
+ * громкость не появилась бы никогда — ровно тот дефект, который волна и закрывает. Поэтому пока
+ * тикает резервная огибающая, источник пробуется ещё несколько раз с шагом [RETRY_INTERVAL_MS].
+ *
+ * ## Правила, которые объект держит
+ * - [begin] спрашивает источник только при живой сессии;
+ * - `true` от источника — [envelopeLevel] возвращает `null`, то есть синтетика не считается вовсе
+ *   (а не «считается и не публикуется»: лишняя тригонометрия в кадре 10 раз в секунду никому не
+ *   нужна);
+ * - `false` — огибающая включается, и [fromSource] остаётся `false`: фаза SPEAKING от этого не
+ *   залипает;
+ * - повторы ОГРАНИЧЕНЫ ([MAX_RETRIES]): эффект, который не даётся, нельзя дёргать каждые 90 мс —
+ *   создание и освобождение `Visualizer` дороже, чем польза от попытки;
+ * - любой уровень снаружи проходит через [SpeechLevelMath.sanitize]: `NaN`/`±∞`/выход за границы
+ *   не ломают кадр;
+ * - [stop] отпускает источник, только если он был запущен, и запрещает повторы до следующей речи.
+ *
+ * @param source сам измеритель (`null` — мерить нечем, всегда огибающая);
+ * @param sessionId сессия играющего аудио на текущий момент;
+ * @param onLevel куда отдавать уровень из источника (контроллер публикует его орбу);
+ * @param nowMs монотонные часы: подменяются в тесте, чтобы проверить шаг повторов.
+ */
+internal class SpeechLevelRouter(
+    private val source: SpeechLevelSource?,
+    private val sessionId: () -> Int?,
+    private val onLevel: (Float) -> Unit,
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
+) {
+
+    /** `true` — уровень идёт из источника; `false` — из синтетической огибающей. */
+    var fromSource: Boolean = false
+        private set
+
+    /** Сколько попыток ещё разрешено в текущей реплике (0 — источник больше не трогаем). */
+    private var attemptsLeft: Int = 0
+
+    private var nextAttemptAt: Long = 0L
+
+    /**
+     * Первая попытка — на старте речи.
+     *
+     * @return `true` — источник ожил, огибающая не нужна; `false` — остаёмся на резерве.
+     */
+    fun begin(): Boolean {
+        attemptsLeft = MAX_RETRIES
+        nextAttemptAt = nowMs() + RETRY_INTERVAL_MS
+        if (fromSource) return true
+        return attempt()
+    }
+
+    /**
+     * Повтор посреди реплики: сессия у платформы появляется с задержкой (см. KDoc класса).
+     *
+     * @return `true` — источник только что ожил (синтетику пора прекращать); `false` — ещё нет.
+     */
+    fun retry(): Boolean {
+        if (fromSource) return true
+        if (attemptsLeft <= 0) return false
+        val now = nowMs()
+        if (now < nextAttemptAt) return false
+        attemptsLeft--
+        nextAttemptAt = now + RETRY_INTERVAL_MS
+        return attempt()
+    }
+
+    /**
+     * Кадр огибающей: `null` — источник жив, считать синтетику не нужно.
+     *
+     * @param compute само значение огибающей; зовётся только на резервном пути.
+     */
+    fun envelopeLevel(compute: () -> Float): Float? {
+        if (fromSource) return null
+        return SpeechLevelMath.sanitize(compute())
+    }
+
+    /** Речь кончилась (или контроллер освобождён): источник отпускается, повторы запрещаются. */
+    fun stop() {
+        attemptsLeft = 0
+        nextAttemptAt = 0L
+        if (!fromSource) return
+        fromSource = false
+        runCatching { source?.stop() }
+    }
+
+    /** Одна попытка подписки. Провайдер чужой и может бросить — разговор важнее диагностики. */
+    private fun attempt(): Boolean {
+        val session = runCatching { sessionId() }.getOrNull() ?: return false
+        // `source` необязателен: без него подписки нет вовсе, и это не ошибка, а «источника
+        // не дали». `?: false` обязателен — `source?.start(...)` даёт `Boolean?`, и без него
+        // компилятор справедливо отказывается присваивать результат полю `Boolean`.
+        val started = runCatching {
+            source?.start(session) { level -> onLevel(SpeechLevelMath.sanitize(level)) } ?: false
+        }.getOrDefault(false)
+        fromSource = started
+        return started
+    }
+
+    private companion object {
+        /**
+         * Шаг повторов. Кадр огибающей идёт каждые 90 мс, а сессия у ExoPlayer появляется через
+         * 150–600 мс после старта речи: 250 мс — компромисс между «поймали быстро» и «не дёргаем
+         * эффект на каждом кадре».
+         */
+        const val RETRY_INTERVAL_MS = 250L
+
+        /**
+         * Потолок повторов на реплику: 12 × 250 мс ≈ 3 с. Если за три секунды речи сессии так и не
+         * появилось, дело не в опоздании, а в отказе — дальше только огибающая.
+         */
+        const val MAX_RETRIES = 12
+    }
 }

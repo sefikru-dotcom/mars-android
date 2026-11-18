@@ -199,6 +199,70 @@ class LocalChatActivity : ComponentActivity() {
     /** Голосовой ввод (микрофон → ASR → композер). Инициализируется в [buildView]. */
     private lateinit var voice: LocalVoiceButton
 
+    /**
+     * Источник громкости играющего звука для орба — один на экран.
+     *
+     * Создаётся здесь, а не в конструкторе кнопки, потому что `Visualizer` занимает системный
+     * аудиоэффект: два экземпляра (кнопка + полноэкранный разговор) подрались бы за него, и
+     * второй молча остался бы без данных. Одним объектом владеет экран и отдаёт его обоим слоям.
+     */
+    private val speechLevelSource: SpeechLevelSource by lazy { VisualizerLevelSource(this) }
+
+    /**
+     * Серверный синтез голоса — полем, а не инлайном в конструкторе кнопки.
+     *
+     * Причина ровно одна: экран обязан читать ФАКТ озвучки после каждой реплики
+     * ([RepositoryServerTtsClient.lastProfileId]) и писать его в лог вместе с выбором человека.
+     * Пока клиент создавался инлайном, у экрана не было на него ссылки, и вопрос «чем реально
+     * прозвучало» оставался без ответа — именно поэтому «выбрал голос, а он не тот» нельзя было
+     * ни доказать, ни опровергнуть.
+     *
+     * Адрес и ключ — у НАСТРОЕННОГО профиля PlusVibe, а не у активного: в этом чате активным
+     * может быть любой OpenAI-совместимый провайдер (Yeta, прокси), и ключ PlusVibe на его хост
+     * уходить не должен. Нет профиля — клиент честно отвечает `no_plusvibe_profile`.
+     */
+    private val ttsClient: RepositoryServerTtsClient by lazy {
+        RepositoryServerTtsClient(
+            baseUrl = ChatActivity.BASE_URL,
+            credentialProvider = { runCatching { credentialStore.read() }.getOrNull() },
+            selector = SpeechVoiceProfileSelector(),
+            prosodyProvider = { voiceProsody },
+            // Платный голос — РЕАЛЬНЫЙ синтез провайдера по асинхронному контракту:
+            // `POST /api/media/generate` → поллинг задачи → скачивание. Синхронный
+            // `/v1/audio/speech` возвращал обрезанные фрагменты (3 из 10 вызовов), поэтому
+            // в боевой проводке его нет.
+            paidClient = PlusVibeTtsAccess(providerStore).client(),
+            // Платный голос не прозвучал, и фразу прочитал нейро-резерв: молчаливая подмена
+            // запрещена — человек видит ПОЧЕМУ услышал не «Алису», а не только «услышал другое».
+            onPaidUnavailable = { reason ->
+                presenter.setNotice(VoiceSubstitutionNotice.paidUnavailable(reason))
+                scaffold.statusLine.setText(VoiceSubstitutionNotice.PAID_UNAVAILABLE_SHORT)
+                VoiceTrace.report(
+                    VoiceReport(
+                        wantedProfileId = voiceProsody.voiceId ?: ServerTtsVoices.DEFAULT_VOICE.id,
+                        actualChannel = VoiceOutcomeChannel.CLOUD_SERVER,
+                        actualProfileId = null,
+                        reason = reason,
+                        atMs = System.currentTimeMillis(),
+                    ),
+                )
+            },
+            // Понижение ВНУТРИ серверной цепочки (выбранный голос отказал → прозвучал другой)
+            // раньше не сообщалось вовсе: человек слышал не тот голос без единого объяснения.
+            onVoiceSubstituted = { wanted, actual, reason ->
+                VoiceTrace.report(
+                    VoiceReport(
+                        wantedProfileId = wanted,
+                        actualChannel = VoiceOutcomeChannel.CLOUD_SERVER,
+                        actualProfileId = actual,
+                        reason = reason,
+                        atMs = System.currentTimeMillis(),
+                    ),
+                )
+            },
+        )
+    }
+
     /** Чип фонового прослушивания в шапке. */
     private lateinit var wakeChip: android.widget.TextView
 
@@ -389,6 +453,13 @@ class LocalChatActivity : ComponentActivity() {
         // Профиль обязан дойти до презентера до первого кадра: иначе чип модели пуст, а
         // переключатель reasoning не знает, поддерживает ли модель `reasoning_effort`.
         presenter.bindProfile(providerStore.state().active)
+        // Одна строка на вход в чат: есть ли профиль PlusVibe, ключ и модель Piper. Это первое,
+        // что нужно при разборе «голос молчит» — до первой реплики, а не после.
+        VoiceTrace.readiness(
+            paidReady = PlusVibeTtsAccess(providerStore).bind()?.apiKey != null,
+            piperReady = hasOfflineVoice(),
+            serverReady = true,
+        )
 
         setContentView(buildView())
 
@@ -873,30 +944,15 @@ class LocalChatActivity : ComponentActivity() {
                 renderVoiceStatusLine(state)
             },
             onOpenX = { openAppSettings() },
-            serverTts = RepositoryServerTtsClient(
-                baseUrl = ChatActivity.BASE_URL,
-                credentialProvider = { runCatching { credentialStore.read() }.getOrNull() },
-                selector = SpeechVoiceProfileSelector(),
-                prosodyProvider = { voiceProsody },
-                // Платный голос — РЕАЛЬНЫЙ синтез провайдера по асинхронному контракту:
-                // `POST /api/media/generate` → поллинг задачи → скачивание. Синхронный
-                // `/v1/audio/speech` возвращал обрезанные фрагменты (3 из 10 вызовов), поэтому
-                // в боевой проводке его нет.
-                //
-                // Адрес и ключ — у НАСТРОЕННОГО профиля PlusVibe, а не у активного: в этом
-                // чате активным может быть любой OpenAI-совместимый провайдер (Yeta, прокси),
-                // и ключ PlusVibe на его хост уходить не должен. Нет профиля — клиент честно
-                // отвечает «недоступно» (`no_plusvibe_profile`), а не ищет адрес наугад.
-                paidClient = PlusVibeTtsAccess(providerStore).client(),
-                // Платный голос не прозвучал, и фразу прочитал нейро-резерв: молчаливая
-                // подмена запрещена — человек видит, почему услышал не «Алису».
-                onPaidUnavailable = { reason ->
-                    presenter.setNotice(VoiceSubstitutionNotice.paidUnavailable(reason))
-                    scaffold.statusLine.setText(VoiceSubstitutionNotice.PAID_UNAVAILABLE_SHORT)
-                },
-            ),
+            serverTts = ttsClient,
             // Офлайн-Piper для автоозвучки: без него ответ читает системный робот.
             offlineTts = { offlineTts() },
+            // Орб слышит САМ голос Марса: `Visualizer` на сессии играющего звука даёт реальную
+            // огибающую, поэтому планета захлёбывается на громком слове и замирает на паузе —
+            // как в ChatGPT. Без этой проводки орб пульсировал синтетической синусоидой
+            // (ровный ритм в любую фразу), что и было второй половиной жалобы владельца.
+            levelSource = speechLevelSource,
+            audioSessionProvider = { if (::voice.isInitialized) voice.audioSessionId() else null },
             // Подмена голоса обязана быть видимой: полный текст — в плашку-уведомление,
             // короткая форма — в узкую строку статуса (она живёт до следующего события и не
             // должна выдавливать подсказку фазы).

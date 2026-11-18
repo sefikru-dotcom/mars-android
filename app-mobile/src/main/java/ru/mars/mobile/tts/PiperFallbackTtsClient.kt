@@ -2,6 +2,7 @@ package ru.mars.mobile.tts
 
 import kotlinx.coroutines.CancellationException
 import ru.mars.mobile.ServerTtsClient
+import ru.mars.mobile.VoiceProsody
 import ru.mars.network.repository.ServerTtsResult
 
 /**
@@ -99,6 +100,19 @@ class PiperFallbackTtsClient(
         // Причина облака сохраняется: если она повторяемая (`429`/`5xx`), очередь имеет право
         // на один повтор — к тому моменту сервер может ожить.
         return failure
+    }
+
+    /**
+     * Темп и голос — дальше по цепочке.
+     *
+     * Без этого переопределения вызов молча съедался бы дефолтным телом порта (`= Unit`): шторка
+     * «Голос и темп» показывала бы выбранное значение, а обёртка над Piper продолжала бы
+     * синтезировать прежним голосом и темпом. Ровно тот класс дефекта, на который жалуется
+     * владелец: «меняется визуально, а по факту нет». Piper темпа не принимает в запросе (он
+     * применяется движком при `speak`), поэтому форвард обязателен для серверной половины.
+     */
+    override fun setProsody(prosody: VoiceProsody) {
+        runCatching { server.setProsody(prosody) }
     }
 
     /** Колбэк хоста не должен ломать синтез: его падение — это не отказ звука. */

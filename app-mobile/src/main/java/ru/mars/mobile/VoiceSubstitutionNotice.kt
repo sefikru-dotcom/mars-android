@@ -86,11 +86,17 @@ object VoiceSubstitutionNotice {
      *
      * Причина приходит кодом отказа платного клиента, а не каналом: в этой ветке звучит
      * нейро-резерв, и канал у него тот же, что у выбранного голоса. Разделение важное:
-     * `no_plusvibe_profile` — это «провайдер не заведён в настройках», остальные коды —
+     * `no_plusvibe_profile` — это «провайдер не заведён в настройках», `no_api_key` — «провайдер
+     * заведён, но ключ не сохранён» (лечатся они в разных местах экрана), остальные коды —
      * «провайдер/сеть не дали звука». Незнакомый код не оставляет человека без объяснения.
+     *
+     * Подробная формулировка берётся у [PlusVibeTtsProfile.humanReason], а не пишется здесь
+     * второй раз: два набора текстов на один код рано или поздно сказали бы разное об одном
+     * и том же отказе.
      */
     fun paidUnavailable(reason: String?): String = when (reason) {
         PlusVibeTtsProfile.REASON_NO_PROFILE -> PLUSVIBE_NOT_CONFIGURED
+        PlusVibeTtsProfile.REASON_NO_KEY -> PlusVibeTtsProfile.humanReason(reason)
         else -> PAID_UNAVAILABLE
     }
 }

@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -11,6 +12,7 @@ import ru.mars.network.local.LocalProviderProfile
 import ru.mars.network.local.LocalProviderState
 import ru.mars.network.local.LocalProviderStore
 import ru.mars.network.repository.PaidTtsClient
+import ru.mars.network.repository.PlusVibeMediaTtsClient
 import ru.mars.network.repository.ServerTtsResult
 
 /**
@@ -270,7 +272,48 @@ class PlusVibeTtsAccessTest {
         assertEquals("запрос без ключа не имеет смысла", 0, transportsBuilt)
     }
 
+    // --- человеческая причина для плашки -----------------------------------------------------
+    //
+    // Причина подмены обязана доходить до человека, но код `no_plusvibe_profile` — это язык
+    // логов. Текст проверяется здесь, а не на телефоне: это чистая функция.
+
+    @Test
+    fun `human reason explains every known failure in russian`() {
+        val known = listOf(
+            PlusVibeTtsProfile.REASON_NO_PROFILE,
+            PlusVibeTtsProfile.REASON_NO_KEY,
+            PlusVibeMediaTtsClient.REASON_TIMEOUT,
+            PlusVibeMediaTtsClient.REASON_TRANSPORT,
+        )
+
+        known.forEach { code ->
+            val text = PlusVibeTtsProfile.humanReason(code)
+            assertTrue("код $code обязан получить объяснение", text.isNotBlank())
+            assertNotEquals("код $code не показывается человеку как есть", code, text)
+            assertTrue("объяснение $code обязано быть по-русски: $text", CYRILLIC.containsMatchIn(text))
+        }
+    }
+
+    @Test
+    fun `human reason keeps an unknown code as is`() {
+        // Выдумывать объяснение опаснее, чем показать код: по коду хотя бы можно искать в логах.
+        assertEquals("provider_quota_exceeded", PlusVibeTtsProfile.humanReason("provider_quota_exceeded"))
+    }
+
+    @Test
+    fun `human reason without a code still says what happened`() {
+        val text = PlusVibeTtsProfile.humanReason(null)
+
+        assertTrue("молчания быть не должно даже без причины", text.isNotBlank())
+        assertTrue(CYRILLIC.containsMatchIn(text))
+        // Пустой код — та же неизвестность: пустая плашка выглядела бы как «ничего не было».
+        assertEquals(text, PlusVibeTtsProfile.humanReason("   "))
+    }
+
     // --- вспомогательное --------------------------------------------------------------------
+
+    /** Буквы, по которым видно, что текст человеческий, а не код. */
+    private val CYRILLIC = Regex("[а-яА-ЯёЁ]")
 
     private fun profile(id: String, baseUrl: String): LocalProviderProfile = LocalProviderProfile(
         id = id,

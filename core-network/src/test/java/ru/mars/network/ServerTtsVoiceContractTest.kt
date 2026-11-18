@@ -5,12 +5,14 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
 import ru.mars.network.repository.OpenAiSpeechTtsClient
 import ru.mars.network.repository.ServerTtsContract
+import ru.mars.network.repository.ServerTtsPrefetchKeys
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsRetryPolicy
@@ -454,6 +456,43 @@ class ServerTtsVoiceContractTest {
         val profile: ServerTtsVoiceProfile = ServerTtsVoices.NATURAL_SVETLANA
         assertEquals("natural-svetlana(edge/ru-RU-SvetlanaNeural)", profile.logTag)
         assertFalse(profile.logTag.contains("token"))
+    }
+
+    // --- Кэш предсинтеза: голос обязан входить в ключ ---------------------------------------
+    //
+    // Дефект: кэш индексировался ОДНИМ текстом, поэтому смена голоса посреди ответа оставляла
+    // остаток фраз прежним голосом. Проверяется чистая функция ключа — то есть ровно то, от
+    // чего зависит «фраза другого голоса не будет отдана как своя».
+
+    @Test
+    fun `prefetch key is bound to the voice that synthesized the phrase`() {
+        val dmitry = ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_DMITRY.id, "фраза")
+        val svetlana = ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_SVETLANA.id, "фраза")
+
+        assertNotEquals("фраза одного голоса не может быть отдана другому", dmitry, svetlana)
+        // Тот же голос и тот же текст — тот же ключ: повтор фразы (эхо, «Проверить») берёт
+        // готовое аудио, а не платит за второй синтез.
+        assertEquals(dmitry, ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_DMITRY.id, "фраза"))
+    }
+
+    @Test
+    fun `prefetch key does not collide when a voice id is glued to a text`() {
+        // Без разделителя `("a", "bc")` и `("ab", "c")` дали бы одну строку "abc".
+        assertNotEquals(
+            ServerTtsPrefetchKeys.of("a", "bc"),
+            ServerTtsPrefetchKeys.of("ab", "c"),
+        )
+    }
+
+    @Test
+    fun `no chosen voice is its own key and not the empty id`() {
+        val web = ServerTtsPrefetchKeys.of(null, "текст")
+
+        // «Как в вебе» — это ВЫБОР по умолчанию, а не отсутствие голоса: он не должен
+        // совпадать с ключом явно выбранного профиля.
+        assertNotEquals(web, ServerTtsPrefetchKeys.of(ServerTtsVoices.PLUSVIBE_ALICE.id, "текст"))
+        // Пустой id — то же самое, что «не выбрано»: два разных написания одного состояния.
+        assertEquals(web, ServerTtsPrefetchKeys.of("   ", "текст"))
     }
 
     // --- Платный облачный синтез: OpenAI-совместимый /v1/audio/speech ----------------------

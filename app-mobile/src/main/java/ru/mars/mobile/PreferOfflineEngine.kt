@@ -31,6 +31,17 @@ enum class VoiceSubstitutionReason {
 
     /** Говорит системный TTS: ни облака, ни локальной модели нет. */
     SYSTEM_RESERVE,
+
+    /**
+     * Выбранного голоса нет в каталоге этой сборки.
+     *
+     * Так бывает после обновления: настройка приехала из старой версии, а профиль из
+     * [ServerTtsVoices.VOICE_DIALOG] убрали или переименовали. Раньше такой выбор молча
+     * приводил к локальной модели: шторка показывала выбранный голос, звучала Ирина, и
+     * человек не понимал, почему его выбор не работает. Отдельная причина нужна, чтобы этот
+     * случай не путали с сетевым сбоем: чинится он ПОВТОРНЫМ выбором голоса, а не сетью.
+     */
+    VOICE_UNKNOWN,
 }
 
 /**
@@ -130,7 +141,10 @@ class PreferOfflineEngine(
      * (другой нейро-голос лучше робота), а при его отсутствии — платформой, объявив подмену.
      */
     private fun speakLocalFirst(body: String): Boolean {
-        if (trySpeak(offline, body)) return true
+        if (trySpeak(offline, body)) {
+            announceUnknownChoice()
+            return true
+        }
         if (serverChannel) {
             if (trySpeak(fallback, body)) {
                 announce(VoiceChannel.CLOUD, VoiceSubstitutionReason.OFFLINE_FAILED)
@@ -145,6 +159,22 @@ class PreferOfflineEngine(
             return true
         }
         return false
+    }
+
+    /**
+     * Объявить, что выбранного голоса нет в каталоге сборки.
+     *
+     * [prefersServerVoice] отправляет такой выбор на локальную модель (обещать сетевой канал
+     * для несуществующего профиля значило бы гарантированный отказ), и раньше это
+     * происходило БЕЗ единого сигнала: человек видел в шторке «Катя», слышал Ирину и считал,
+     * что выбор не работает. Проверка дешёвая и идемпотентная, поэтому выполняется на каждой
+     * локальной реплике, а не один раз при смене настройки: настройка могла приехать из
+     * хранилища до того, как шторка вообще открывалась.
+     */
+    private fun announceUnknownChoice() {
+        val voiceId = prosody.voiceId ?: return
+        if (ServerTtsVoices.byId(voiceId) != null) return
+        announce(VoiceChannel.OFFLINE, VoiceSubstitutionReason.VOICE_UNKNOWN)
     }
 
     /**
