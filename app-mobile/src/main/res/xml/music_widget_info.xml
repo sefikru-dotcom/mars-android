@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Метаданные виджета «Музыка Марса» для домашнего экрана.
+
+    * minWidth/minHeight 250x110dp — формат 4x2 на телефоне (ячейка ~70x70dp
+      плюс отступы сетки). targetCellWidth/Height (API 31+) задают то же самое
+      явно: на Android 12+ лаунчер раскладывает ячейками и без них растянул бы
+      виджет на 3x2.
+    * resizeMode horizontal|vertical — виджет можно тянуть в обе стороны и
+      увеличенный (5x2, 4x3) не обрезает транспорт: текст занимает вес, а
+      транспорт прижат вправо.
+    * updatePeriodMillis="0" — событийных обновлений достаточно, а периодические
+      будильники будят устройство (минимум раз в 30 минут) и жрут батарею.
+
+    initialLayout обязателен и должен существовать всегда: лаунчер рисует его
+    первым кадром ДО того, как провайдер получит onUpdate, поэтому это
+    бюджетная заглушка с текстом, а не тяжёлая карточка.
+
+    previewLayout (API 31+) рисует ту же заглушку в списке выбора виджетов — без
+    него Android 12+ показывает пустую плашку. Требует API 31, поэтому
+    tools:targetApi гасит NewApi на compileSdk 34: ниже 31 атрибут игнорируется,
+    а initialLayout там всё равно служит превью по умолчанию.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:description="@string/music_widget_description"
+    android:initialLayout="@layout/music_widget_initial"
+    android:minHeight="110dp"
+    android:minResizeHeight="110dp"
+    android:minResizeWidth="250dp"
+    android:minWidth="250dp"
+    android:previewLayout="@layout/music_widget_initial"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="4"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    tools:targetApi="31" />

@@ -26,6 +26,27 @@
         <!-- Уровень списка диалогов — корень раздела CHAT двухуровневого навигатора (волна 2). -->
         <activity android:name=".ChatSessionsActivity" />
         <activity android:name=".MusicActivity" />
+        <!-- Виджет домашнего экрана «Музыка Марса» (4x2): обложка, название,
+             исполнитель, prev/play-pause/next. Своего плеера и сервиса у виджета
+             нет — кнопки шлют те же ACTION_*, что и шторка, в MarsMusicService,
+             а состояние приходит из процессного MarsMusicPlayer. exported=false:
+             AppWidget broadcast приходит от системного лаунчера тому получателю,
+             которого назвал сам launcher по метаданным, поэтому наружу receiver
+             не открыт.
+             initialKeyguardLayout не задан намеренно: на экране блокировки виджет
+             уже рисуется MediaSession'ом сервиса, и второй набор контролов там
+             только мешает. -->
+        <receiver
+            android:name=".widget.MusicWidgetProvider"
+            android:exported="false"
+            android:label="@string/music_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/music_widget_info" />
+        </receiver>
         <service
             android:name=".service.MarsMusicService"
             android:exported="false"
