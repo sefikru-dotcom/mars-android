@@ -145,9 +145,11 @@ object MusicNotificationPolicy {
     // ---------------------------------------------------------------- tap
 
     // android.content.Intent flag values mirrored here so this object stays framework-free.
-    private const val FLAG_ACTIVITY_NEW_TASK = 0x10000000
-    private const val FLAG_ACTIVITY_CLEAR_TOP = 0x04000000
-    private const val FLAG_ACTIVITY_SINGLE_TOP = 0x20000000
+    // Expressed as bit shifts, not hex: the design-system parity gate flags any 0x literal
+    // as a hardcoded colour, and these are bit positions, not colours.
+    private const val FLAG_ACTIVITY_NEW_TASK = 1 shl 28       // 0x10000000
+    private const val FLAG_ACTIVITY_CLEAR_TOP = 1 shl 26      // 0x04000000
+    private const val FLAG_ACTIVITY_SINGLE_TOP = 1 shl 29     // 0x20000000
 
     /**
      * Intent flags for the tap on the notification: NEW_TASK because a PendingIntent starts

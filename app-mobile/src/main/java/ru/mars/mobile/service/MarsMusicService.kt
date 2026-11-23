@@ -273,8 +273,8 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         stopSelf()
     }
 
-    // TAP_INTENT_FLAGS holds Intent.FLAG_ACTIVITY_* as literals on purpose: the policy is
-    // framework-free so it stays JVM-testable, and lint cannot see through the mirror.
+    // TAP_INTENT_FLAGS mirrors Intent.FLAG_ACTIVITY_* because the policy is framework-free
+    // (JVM-testable); the constant is annotated where it is declared.
     @SuppressLint("WrongConstant")
     private fun buildNotification(track: MusicTrack?, isPlaying: Boolean): Notification {
         // CLEAR_TOP|SINGLE_TOP|NEW_TASK from one place: tapping the shade reuses the open
