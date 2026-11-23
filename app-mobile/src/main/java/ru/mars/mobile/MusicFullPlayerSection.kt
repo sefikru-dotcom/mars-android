@@ -18,6 +18,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import ru.mars.mobile.MusicTab
+import ru.mars.network.model.MusicTrack
 
 /** Длительность выезда раскрытого плеера (сдвиг по вертикали). */
 private const val FULL_PLAYER_ANIM_MS = 220L
