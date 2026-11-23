@@ -11,7 +11,6 @@ import java.net.URL
 import java.util.concurrent.Executor
 import ru.mars.mobile.ImageDiskCache
 import ru.mars.mobile.ImageLoaderPolicy
-import ru.mars.mobile.MusicNotificationPolicy
 import ru.mars.mobile.ThumbnailUrlResolver
 
 /**

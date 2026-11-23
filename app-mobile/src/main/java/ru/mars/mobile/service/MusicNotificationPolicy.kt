@@ -144,6 +144,11 @@ object MusicNotificationPolicy {
 
     // ---------------------------------------------------------------- tap
 
+    // android.content.Intent flag values mirrored here so this object stays framework-free.
+    private const val FLAG_ACTIVITY_NEW_TASK = 0x10000000
+    private const val FLAG_ACTIVITY_CLEAR_TOP = 0x04000000
+    private const val FLAG_ACTIVITY_SINGLE_TOP = 0x20000000
+
     /**
      * Intent flags for the tap on the notification: NEW_TASK because a PendingIntent starts
      * outside any activity, CLEAR_TOP|SINGLE_TOP so tapping an already-open player reuses
@@ -151,9 +156,4 @@ object MusicNotificationPolicy {
      */
     const val TAP_INTENT_FLAGS: Int =
         FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_CLEAR_TOP or FLAG_ACTIVITY_SINGLE_TOP
-
-    // android.content.Intent flag values mirrored here so this object stays framework-free.
-    private const val FLAG_ACTIVITY_NEW_TASK = 0x10000000
-    private const val FLAG_ACTIVITY_CLEAR_TOP = 0x04000000
-    private const val FLAG_ACTIVITY_SINGLE_TOP = 0x20000000
 }
