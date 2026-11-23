@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Подложка виджета «Музыка Марса»: карточка дизайн-системы (палитра Mars) —
+    поверхность mars_surface, рамка mars_border, скругление 18dp (радиус карточек
+    MarsTheme.card по умолчанию 14, у виджета чуть крупнее: он лежит на обоине и
+    углы читаются как отдельная плашка).
+
+    Не стекло: стеклянная подложка (mars_glass_fill) работает поверх кадра
+    приложения, а за виджетом — обои любого цвета, и полупрозрачность там даёт
+    нечитаемый текст на светлых обоях.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/mars_surface" />
+    <stroke
+        android:width="1dp"
+        android:color="@color/mars_border" />
+    <corners android:radius="18dp" />
+</shape>

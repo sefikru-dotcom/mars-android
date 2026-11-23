@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Виджет «Музыка Марса», 4x2.
+
+    Вёрстка намеренно на LinearLayout: RemoteViews умеет только FrameLayout,
+    LinearLayout, RelativeLayout и GridLayout — ConstraintLayout в виджете не
+    существует, и перенос вёрстки с экрана музыки сюда невозможен.
+
+    Плотность: контролы компактные (28dp по высоте, иконка 18dp внутри) и НЕ
+    увеличены «для тач-френдли» — владелец просил именно компактный вид.
+    Высота блока: 8 (паддинг) + 60 (обложка) + 6 + 28 + 8 = 110dp, ровно
+    minHeight из music_widget_info.xml, поэтому в 4x2 ничего не обрезается.
+
+    Цвета — только токены палитры (@color/mars_*): hex в экранах запрещён гейтом
+    scripts/theme-parity-audit.py. Иконки — существующие векторные
+    ic_play/ic_pause/ic_skip_prev/ic_skip_next/ic_music; собственных глифов нет.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/music_widget_bg"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <!-- Верхний блок: обложка + название/исполнитель. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:orientation="horizontal">
+
+        <!--
+            scaleType centerInside, а не centerCrop: обложка деликатно вписывается в
+            квадрат (реальные обложки Марса квадратные — разницы нет), а заглушка
+            ic_music рисуется своим размером 24dp, а не растянутой на 60dp.
+            Паддинга нет намеренно: он ужимал бы и саму обложку, оставляя по краям
+            подложку — рамка вокруг картинки выглядела бы как обрезанный кадр.
+        -->
+        <ImageView
+            android:id="@+id/widget_cover"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:background="@drawable/music_widget_cover_bg"
+            android:contentDescription="@string/music_widget_cover"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_music" />
+
+        <LinearLayout
+            android:id="@+id/widget_text"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/widget_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="@string/music_widget_label"
+                android:textColor="@color/mars_text"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_artist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/mars_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!--
+        Транспорт: prev / play-pause / next, прижат вправо — под текстом, а не под
+        обложкой, чтобы название получало всю оставшуюся ширину.
+        contentDescription здесь — стартовый текст; провайдер переставляет подписи
+        на каждом обновлении по ДЕЙСТВИЮ кнопки (MusicWidgetContent).
+    -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="28dp"
+        android:layout_marginTop="6dp"
+        android:gravity="end|center_vertical"
+        android:orientation="horizontal">
+
+        <ImageButton
+            android:id="@+id/widget_prev"
+            android:layout_width="32dp"
+            android:layout_height="28dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="@string/music_widget_prev"
+            android:padding="5dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_skip_prev" />
+
+        <ImageButton
+            android:id="@+id/widget_play"
+            android:layout_width="32dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="2dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="@string/music_widget_play"
+            android:padding="5dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_play" />
+
+        <ImageButton
+            android:id="@+id/widget_next"
+            android:layout_width="32dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="2dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="@string/music_widget_next"
+            android:padding="5dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_skip_next" />
+    </LinearLayout>
+</LinearLayout>
