@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
 import android.widget.ImageButton
@@ -152,6 +153,12 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal var albumJob: Job? = null
     /** True while the user's finger owns the seek thumb: the ticker must not fight the drag. */
     internal var isDraggingSeek = false
+    /**
+     * Раскрытый плеер (оверлей поверх контента этой же Activity). Создаётся лениво при
+     * первом открытии: до этого момента ни одного лишнего вида в дереве нет. Отдельной
+     * Activity он быть не может — воспроизведение прервалось бы на её запуске.
+     */
+    internal var fullPlayer: FullPlayerHolder? = null
     /** Last dragged-to position; applied to the player once, on release (see [SeekDragPolicy]). */
     internal var pendingSeekMs = SeekDragPolicy.NO_PENDING_SEEK
     /** Running play/pause glyph crossfades, one per button; ended at their final frame in onPause/onStop. */
@@ -165,6 +172,9 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
                     seek.progress = MarsMusicPlayer.currentPosition
                     time.text = "${fmt(MarsMusicPlayer.currentPosition)} / ${fmt(MarsMusicPlayer.duration)}"
                 }
+                // Раскрытый плеер идёт по тому же тикеру: между кадрами состояния плеера
+                // позиция в нём обязана двигаться (иначе тумб замирает на открытии).
+                updateFullPlayerProgress(MarsMusicPlayer.currentPosition, MarsMusicPlayer.duration)
                 seek.postDelayed(this, TICKER_INTERVAL_MS)
             }
         }
@@ -226,6 +236,14 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onDestroy() {
         finishIconCrossfades()
+        // Оверлей раскрытого плеера снимается вместе с экраном: он держит ссылки на
+        // ImageView/SeekBar и колбэк «назад», которым больше некуда возвращаться.
+        fullPlayer?.let { holder ->
+            holder.root.animate().cancel()
+            holder.backCallback.isEnabled = false
+            (holder.root.parent as? ViewGroup)?.removeView(holder.root)
+        }
+        fullPlayer = null
         remoteSubscription?.close()
         remoteSubscription = null
         MarsMusicPlayer.unregisterListener(this)
