@@ -24,6 +24,8 @@ import ru.mars.mobile.MusicActivity
 import ru.mars.mobile.R
 import ru.mars.mobile.service.MusicNotificationPolicy.ActionType
 import ru.mars.network.model.MusicTrack
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 
 /**
  * Foreground service that keeps [MarsMusicPlayer] mirrored in the notification shade.
@@ -44,6 +46,27 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
     private var startedForeground = false
     private var mediaSession: MediaSessionCompat? = null
 
+    /**
+     * Which cover the shade currently shows (the policy's artwork key, i.e. the trimmed
+     * thumbnail URL). Null means no cover yet; it is compared against the incoming track so
+     * a state tick for the same track never re-downloads the art.
+     */
+    private var artworkKey: String? = null
+
+    /**
+     * Single background thread for cover fetches. One is enough — the shade shows one track
+     * at a time, and a queue of one keeps a fast skip from spawning parallel downloads.
+     */
+    private val artworkExecutor: Executor = Executors.newSingleThreadExecutor()
+
+    /**
+     * Last position mirrored into the session. The player fires progress far more often
+     * than the shade can redraw, so the session is only rewritten on real jumps (a seek or
+     * a resume) — see [MusicNotificationPolicy.shouldRefreshSessionPosition].
+     */
+    private var sessionPositionMs: Int = 0
+
+    /** The seekable player controls Android's shade scrubber and the headset buttons. */
     private val sessionCallback = object : MediaSessionCompat.Callback() {
         override fun onPlay() { MarsMusicPlayer.play() }
         override fun onPause() { MarsMusicPlayer.pause() }
@@ -52,6 +75,38 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         override fun onStop() {
             MarsMusicPlayer.clearQueue()
             stopPlaybackService()
+        }
+
+        /** Shade scrubber: an absolute position chosen by the system. */
+        override fun onSeekTo(pos: Long) {
+            MarsMusicPlayer.seekTo(
+                MusicNotificationPolicy.clampPosition(pos, MarsMusicPlayer.duration)
+            )
+            refreshAfterSeek()
+        }
+
+        /** Rewind button / headset "back": one policy step, never a magic number inline. */
+        override fun onRewind() {
+            MarsMusicPlayer.seekTo(
+                MusicNotificationPolicy.seekTarget(
+                    MarsMusicPlayer.currentPosition,
+                    -MusicNotificationPolicy.SEEK_STEP_MS,
+                    MarsMusicPlayer.duration
+                )
+            )
+            refreshAfterSeek()
+        }
+
+        /** Fast-forward button / headset "forward": one policy step. */
+        override fun onFastForward() {
+            MarsMusicPlayer.seekTo(
+                MusicNotificationPolicy.seekTarget(
+                    MarsMusicPlayer.currentPosition,
+                    MusicNotificationPolicy.SEEK_STEP_MS,
+                    MarsMusicPlayer.duration
+                )
+            )
+            refreshAfterSeek()
         }
     }
 
@@ -100,6 +155,9 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         MarsMusicPlayer.unregisterListener(this)
         mediaSession?.release()
         mediaSession = null
+        // Releases the cover-fetch thread; without it a stopped service keeps one alive.
+        (artworkExecutor as? java.util.concurrent.ExecutorService)?.shutdownNow()
+        artworkKey = null
         startedForeground = false
         super.onDestroy()
     }
@@ -113,13 +171,73 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         if (!startedForeground) return
         if (MusicNotificationPolicy.isPlaybackAlive(track != null, isPlaying)) {
             updateNotification(track, isPlaying)
+            loadArtworkIfNeeded(track)
         } else {
             stopPlaybackService()
         }
     }
 
-    /** The shade shows no scrubber; progress ticks must not spam the NotificationManager. */
-    override fun onProgress(currentMs: Int, totalMs: Int) = Unit
+    /**
+     * Fetches the shade cover off the main thread, once per track. When it lands the
+     * notification and the session are rebuilt so both the shade and the lock screen pick
+     * up the bitmap; a fetch for a track the user already skipped past is discarded.
+     */
+    private fun loadArtworkIfNeeded(track: MusicTrack?) {
+        if (!MusicNotificationPolicy.needsArtworkLoad(artworkKey, track?.thumbnail)) return
+        val key = MusicNotificationPolicy.artworkKey(track?.thumbnail) ?: return
+        MusicArtwork.load(key, artworkExecutor) { readyKey ->
+            if (readyKey != MusicNotificationPolicy.artworkKey(
+                    MarsMusicPlayer.currentTrack?.thumbnail
+                )
+            ) {
+                return@load // stale: the track changed while the cover was downloading
+            }
+            artworkKey = readyKey
+            val current = MarsMusicPlayer.currentTrack ?: return@load
+            val playing = MarsMusicPlayer.isPlaying
+            updateSession(current, playing)
+            if (startedForeground) updateNotification(current, playing)
+        }
+    }
+
+    /**
+     * The transport controls live in the session, so progress never rebuilds the
+     * notification. It does keep the session's position honest — but only on real jumps:
+     * the player ticks far faster than the shade can redraw, and every rewrite is a binder
+     * round-trip, so plain ticks are skipped.
+     */
+    override fun onProgress(currentMs: Int, totalMs: Int) {
+        val session = mediaSession ?: return
+        if (!MusicNotificationPolicy.shouldRefreshSessionPosition(sessionPositionMs, currentMs)) {
+            return
+        }
+        sessionPositionMs = currentMs
+        session.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(sessionActions())
+                .setState(
+                    if (MarsMusicPlayer.isPlaying) PlaybackStateCompat.STATE_PLAYING
+                    else PlaybackStateCompat.STATE_PAUSED,
+                    currentMs.toLong(),
+                    1f
+                )
+                .build()
+        )
+    }
+
+    /** Action mask advertised on the session; seeking is included on purpose. */
+    private fun sessionActions(): Long =
+        PlaybackStateCompat.ACTION_PLAY or
+            PlaybackStateCompat.ACTION_PAUSE or
+            PlaybackStateCompat.ACTION_PLAY_PAUSE or
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackStateCompat.ACTION_STOP or
+            // Seeking rides on the session, not on extra notification buttons:
+            // a sixth action would be silently dropped from the shade row.
+            PlaybackStateCompat.ACTION_SEEK_TO or
+            PlaybackStateCompat.ACTION_REWIND or
+            PlaybackStateCompat.ACTION_FAST_FORWARD
 
     // ---------------------------------------------------------------- notification
 
@@ -155,11 +273,17 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         stopSelf()
     }
 
+    // TAP_INTENT_FLAGS mirrors Intent.FLAG_ACTIVITY_* because the policy is framework-free
+    // (JVM-testable); the constant is annotated where it is declared.
+    @SuppressLint("WrongConstant")
     private fun buildNotification(track: MusicTrack?, isPlaying: Boolean): Notification {
+        // CLEAR_TOP|SINGLE_TOP|NEW_TASK from one place: tapping the shade reuses the open
+        // player instead of stacking duplicate activities behind it.
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MusicActivity::class.java),
+            Intent(this, MusicActivity::class.java)
+                .addFlags(MusicNotificationPolicy.TAP_INTENT_FLAGS),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val builder = NotificationCompat.Builder(this, MusicNotificationPolicy.CHANNEL_ID)
@@ -170,6 +294,12 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        // Cover in the shade: the already-fetched bitmap if this track has one, so the very
+        // first build is not blocked on the network.
+        MusicNotificationPolicy.artworkKey(track?.thumbnail)?.let { key ->
+            MusicArtwork.cached(key)?.let { builder.setLargeIcon(it) }
+        }
 
         val actions = MusicNotificationPolicy.actions(isPlaying, track != null)
         actions.forEach { mediaAction ->
@@ -219,28 +349,41 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         }
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
-                .setActions(
-                    PlaybackStateCompat.ACTION_PLAY or
-                        PlaybackStateCompat.ACTION_PAUSE or
-                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_STOP
-                )
+                .setActions(sessionActions())
                 .setState(state, MarsMusicPlayer.currentPosition.toLong(), 1f)
                 .build()
         )
         if (track != null) {
-            session.setMetadata(
-                MediaMetadataCompat.Builder()
-                    .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, track.id)
-                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track.title)
-                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, track.title)
-                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track.artist)
-                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, track.thumbnail)
-                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, MarsMusicPlayer.duration.toLong())
-                    .build()
-            )
+            sessionPositionMs = MarsMusicPlayer.currentPosition
+            val builder = MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, track.id)
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, track.title)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, track.title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, track.artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, track.thumbnail)
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, MarsMusicPlayer.duration.toLong())
+            // Decoded cover, when it is already in the cache: lock screen and Bluetooth
+            // displays read the bitmap from here, not from the notification builder.
+            MusicNotificationPolicy.artworkKey(track.thumbnail)?.let { key ->
+                MusicArtwork.cached(key)?.let { art ->
+                    builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
+                    builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, art)
+                }
+            }
+            session.setMetadata(builder.build())
+        }
+    }
+
+    /**
+     * Rebuilds notification + session after a seek so the shade scrubber and lock screen
+     * show the new position immediately instead of waiting for the next state tick.
+     */
+    private fun refreshAfterSeek() {
+        val track = MarsMusicPlayer.currentTrack
+        val playing = MarsMusicPlayer.isPlaying
+        updateSession(track, playing)
+        if (startedForeground && MusicNotificationPolicy.isPlaybackAlive(track != null, playing)) {
+            updateNotification(track, playing)
         }
     }
 
