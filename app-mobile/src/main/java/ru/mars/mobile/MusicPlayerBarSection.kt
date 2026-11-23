@@ -21,7 +21,7 @@ import ru.mars.network.model.MusicTrack
  */
 
 internal fun MusicActivity.buildPlayerBar(): View {
-    val playerPanel = LinearLayout(this).apply {
+    val playerPanel = MusicBarGestureLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = MarsTheme.card(this@buildPlayerBar, MarsTheme.SURFACE_CARD, radiusDp = 18, strokeColor = MarsTheme.BORDER)
         setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -206,6 +206,14 @@ internal fun MusicActivity.buildPlayerBar(): View {
 
     playerPanel.addView(controls)
 
+    // MUS-M3: тап по полосе (обложка/название — не по кнопкам) и свайп вверх открывают
+    // раскрытый плеер. Зоны контролов передаются явно: касание, начавшееся на перемотке
+    // или кнопке, остаётся их жестом.
+    attachBarGesture(
+        playerPanel,
+        listOf(seek, radioBtn, lyricsBtn, shuffleBtn, prevBtn, playButton, nextBtn, repeatBtn),
+    )
+
     return playerPanel
 }
 
@@ -217,6 +225,9 @@ internal fun MusicActivity.renderPlayerState(track: MusicTrack?, isPlaying: Bool
     runOnUiThread {
         syncMusicService(track, isPlaying)
         title.text = track?.title ?: "Ничего не играет"
+        // Подпись узла «название» (открывает раскрытый плеер) называет действие и трек:
+        // статичная строка потеряла бы имя песни для TalkBack.
+        renderBarTitleTarget(track)
         // Мини-плеер: альбом дописывается в ТУ ЖЕ строку, что и исполнитель —
         // второй строки у подписи нет (на 411dp после обложки и двух кнопок
         // остаётся ~229dp, третья строка выломала бы однострочную вёрстку блока).
@@ -234,6 +245,10 @@ internal fun MusicActivity.renderPlayerState(track: MusicTrack?, isPlaying: Bool
         seek.max = MarsMusicPlayer.duration.coerceAtLeast(1)
         updateQueueIcons()
         updatePlayerActionStates()
+        // Раскрытый плеер обновляется на КАЖДЫЙ кадр состояния плеера, а не только при
+        // открытии: иначе автопереход на следующий трек оставлял бы в нём название,
+        // артиста и обложку предыдущего (реальный баг веб-версии).
+        updateFullPlayer()
         refreshTrackRows()
         // Keep the queue tab in sync with player state (active track, play/pause,
         // auto-advance): re-render it whenever the queue view is on screen.
@@ -256,6 +271,9 @@ internal fun MusicActivity.renderPlayerState(track: MusicTrack?, isPlaying: Bool
 internal fun MusicActivity.renderProgress(currentMs: Int, totalMs: Int) {
     runOnUiThread {
         seek.max = totalMs.coerceAtLeast(1)
+        // Раскрытый плеер живёт на том же тикере: его тумб и подпись времени обновляются
+        // вместе с нижней полосой (при перетаскивании позиция не трогается — SeekDragPolicy).
+        updateFullPlayerProgress(currentMs, totalMs)
         if (isDraggingSeek) return@runOnUiThread // thumb belongs to the finger, not the player
         seek.progress = currentMs
         time.text = "${fmt(currentMs)} / ${fmt(totalMs)}"
