@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Рамка обложки: подложка под картинку, скругление 12dp — она меньше карточки,
+    и одинаковый радиус смотрелся бы как обрезанный угол.
+
+    Подложка mars_surface_subtle держит заглушку ic_music читаемой: пока обложка
+    качается (или у трека её нет), на месте картинки стоит монохромная нота.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/mars_surface_subtle" />
+    <corners android:radius="12dp" />
+</shape>
