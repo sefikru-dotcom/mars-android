@@ -243,7 +243,11 @@ internal object MusicWidgetHost {
         PendingIntent.getActivity(
             context,
             REQUEST_OPEN,
-            Intent(context, MusicActivity::class.java),
+            // Те же флаги, что у тапа по уведомлению: без CLEAR_TOP|SINGLE_TOP каждый
+            // тап по виджету ставил бы ещё один MusicActivity в стек — «назад»
+            // потом прокручивал бы копии плеера вместо выхода из раздела.
+            Intent(context, MusicActivity::class.java)
+                .addFlags(MusicNotificationPolicy.TAP_INTENT_FLAGS),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 

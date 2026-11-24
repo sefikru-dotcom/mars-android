@@ -287,12 +287,12 @@ internal fun MusicActivity.renderProgress(currentMs: Int, totalMs: Int) {
  * reset the flag and let it own its lifecycle.
  */
 internal fun MusicActivity.syncMusicService(track: MusicTrack?, isPlaying: Boolean) {
-    if (track != null && !musicServiceStarted) {
-        MarsMusicService.start(this)
-        musicServiceStarted = true
-    } else if (track == null && !isPlaying) {
-        musicServiceStarted = false
-    }
+    // Сервис умеет останавливаться сам (onTaskRemoved в паузе, пустая очередь) и может
+    // быть убит системой, пока флаг в Activity остаётся true. Политика заставляет
+    // перепроверять FGS на каждом кадре воспроизведения — иначе play без уведомления.
+    val decision = MusicServiceSyncPolicy.resolve(track != null, isPlaying, musicServiceStarted)
+    musicServiceStarted = decision.rememberStarted
+    if (decision.startService) MarsMusicService.start(this)
 }
 
 /** Radio/lyrics act on the current track only: dim and disable both without one. */

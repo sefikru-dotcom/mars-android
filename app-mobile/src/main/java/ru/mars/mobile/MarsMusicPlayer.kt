@@ -16,7 +16,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import ru.mars.network.model.MusicTrack
+import ru.mars.network.repository.MusicPreloadPolicy
+import ru.mars.network.repository.MusicRepository
 
 /**
  * Process-scoped player; its engine survives Activity recreation and screen changes.
@@ -75,6 +81,15 @@ object MarsMusicPlayer {
 
     /** Pure retry/circuit-breaker decision core (backoff, error classification, skip streaks). */
     private val retryPolicy = PlaybackRetryPolicy()
+
+    /**
+     * B1: серверная предзагрузка — фоновый и необязательный вызов.
+     * вместе с процессом; репозиторий создаётся лениво и не блокирует старт трека.
+     */
+    private val preloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val preloadRepository by lazy { MusicRepository() }
+    @Volatile private var lastPreloadedTrackId: String? = null
+
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private var pendingRetry: Runnable? = null
     /** Position the next prepared stream must seek to (mid-track retry); 0 = start over. */
@@ -230,6 +245,7 @@ object MarsMusicPlayer {
         if (!isRetry) {
             retryPolicy.onTrackSelected()
             retryResumeMs = 0
+            maybePreloadNext()
         }
         val startMs = (resumeOverrideMs ?: retryResumeMs).coerceAtLeast(0)
         retryResumeMs = 0
@@ -575,6 +591,29 @@ object MarsMusicPlayer {
     }
 
     @Synchronized fun unregisterListener(listener: MarsMusicListener) { listeners.remove(listener) }
+
+    /**
+     * B1: точечный вызов [MusicPreloadPolicy] при старте текущего трека. Решение
+     * принимается по уже посчитанному [MusicQueueManager.nextIndex] — порядок,
+     * shuffle и repeat остаются исключительной ответственностью очереди. Сеть
+     * идёт в фоне; неудачная предзагрузка никогда не ломает воспроизведение.
+     */
+    private fun maybePreloadNext() {
+        val nextId = queueManager.nextIndex()?.let { queueManager.queue.getOrNull(it)?.id }
+        val decision = MusicPreloadPolicy.decide(
+            nextId = nextId,
+            currentId = currentTrack?.id,
+            lastPreloadedId = lastPreloadedTrackId,
+            queueSize = queueManager.size,
+            repeatOne = queueManager.repeatMode == MusicQueueManager.RepeatMode.ONE,
+        )
+        val target = (decision as? MusicPreloadPolicy.Decision.Warm)?.id ?: return
+        // Отмечаем заявку ДО запроса: повторный старт того же трека не шлёт дубликат.
+        lastPreloadedTrackId = target
+        preloadScope.launch {
+            runCatching { preloadRepository.preload(target, streamQuality.queryValue ?: "standard") }
+        }
+    }
 
     private fun notifyState() { listeners.toList().forEach { it.onStateChanged(currentTrack, isPlaying) } }
     private fun notifyProgress() {

@@ -103,4 +103,22 @@
     <string name="music_widget_prev">Предыдущий трек</string>
     <string name="music_widget_play">Воспроизвести</string>
     <string name="music_widget_next">Следующий трек</string>
+    <string name="music_import_title">Импорт плейлиста</string>
+    <string name="music_import_hint">Вставьте ссылку YouTube Music на плейлист или его ID. Будет создан новый плейлист на сервере (до 100 треков).</string>
+    <string name="music_import_url_hint">Ссылка на плейлист или ID</string>
+    <string name="music_import_submit">Импортировать</string>
+    <string name="music_import_cancel">Отмена</string>
+    <string name="music_import_bad_url">Некорректная ссылка или ID плейлиста</string>
+    <string name="music_import_offline">Не удалось связаться с сервером</string>
+    <string name="music_import_done_title">Импортирован плейлист «%1$s»: %2$d треков</string>
+    <string name="music_export_preparing">Готовлю m3u8…</string>
+    <string name="music_export_done">Файл готов — выберите, куда сохранить</string>
+    <string name="music_export_failed">Не удалось экспортировать плейлист</string>
+    <string name="music_export_error">Ошибка экспорта: %1$s</string>
+    <string name="music_export_save_failed">Не удалось сохранить файл</string>
+    <string name="music_export_share_failed">Не удалось открыть системный шаринг</string>
+    <string name="music_export_chooser">Поделиться плейлистом</string>
+    <string name="music_import_action">Импорт из YouTube Music</string>
+    <string name="music_playlist_share">Поделиться плейлистом %1$s</string>
+    <string name="music_favorites_share">Поделиться избранным</string>
 </resources>

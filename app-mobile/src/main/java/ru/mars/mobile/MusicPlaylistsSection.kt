@@ -70,6 +70,8 @@ internal fun MusicActivity.renderPlaylistsContent(notice: String?) {
             action = "Создать плейлист",
             onAction = { promptCreatePlaylist() },
         )?.let { results.addView(it) }
+        // Импорт из YouTube Music: отдельная строка, потому что headerCard несёт только одно действие.
+        results.addView(importRow())
         playlists.forEach { playlist -> results.addView(playlistCard(playlist)) }
     }
 }
@@ -116,6 +118,18 @@ internal fun MusicActivity.playlistCard(playlist: Playlist): View {
     }
     row.addView(openBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
 
+    val shareBtn = MarsTheme.circleIconButton(
+        this,
+        R.drawable.ic_import,
+        getString(R.string.music_playlist_share, playlist.title),
+        bg = MarsTheme.SURFACE_SUBTLE,
+        iconTint = MarsTheme.TEXT_MUTED,
+        sizeDp = 34
+    ).apply {
+        setOnClickListener { sharePlaylistM3u8(playlist.id, fileName = null) }
+    }
+    row.addView(shareBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
+
     val deleteBtn = MarsTheme.circleIconButton(
         this,
         R.drawable.ic_trash,
@@ -129,6 +143,25 @@ internal fun MusicActivity.playlistCard(playlist: Playlist): View {
     row.addView(deleteBtn, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(6) })
 
     return row.also { it.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) } }
+}
+
+/**
+ * Строка «Импорт из YouTube Music» под заголовком вкладки: та же капсула действия, что и
+ * «Создать плейлист», на всю ширину. Открывает [promptImportPlaylist].
+ */
+internal fun MusicActivity.importRow(): View = TextView(this).apply {
+    text = getString(R.string.music_import_action)
+    textSize = 13f
+    setTextColor(MarsTheme.ACCENT_TEXT)
+    typeface = android.graphics.Typeface.DEFAULT_BOLD
+    gravity = Gravity.CENTER
+    setPadding(dp(14), dp(10), dp(14), dp(10))
+    background = MarsTheme.button(this@importRow, MarsTheme.ACCENT_BG, 10, MarsTheme.ACCENT)
+    isClickable = true
+    isFocusable = true
+    contentDescription = getString(R.string.music_import_action)
+    setOnClickListener { promptImportPlaylist() }
+    layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }
 }
 
 /** Asks for a title, then creates the playlist on the server and re-renders the list. */

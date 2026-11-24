@@ -148,6 +148,18 @@ class MusicWidgetContractTest {
         assertTrue("текст не кликабелен", provider.contains("R.id.widget_text, openIntent"))
     }
 
+    /** Тап по виджету не должен копировать экран плеера в стек, как это делает шторка. */
+    @Test
+    fun `тап по виджету переиспользует открытый плеер`() {
+        val open = provider.substringAfter("private fun openPlayerIntent(")
+            .substringBefore("private const val REQUEST_OPEN")
+        assertTrue(
+            "нет общих флагов открытия — тапы виджета плодили копии MusicActivity",
+            open.contains("MusicNotificationPolicy.TAP_INTENT_FLAGS"),
+        )
+        assertTrue("флаги должны применяться к intent", open.contains(".addFlags("))
+    }
+
     // ----------------------------------------------------------------- состояние
 
     @Test

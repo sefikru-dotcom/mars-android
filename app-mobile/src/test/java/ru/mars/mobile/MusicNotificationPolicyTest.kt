@@ -378,6 +378,57 @@ class MusicNotificationPolicyTest {
         )
     }
 
+    /** Тело функции до первой закрывающей скобки (упрощённый баланс для наших методов). */
+    private fun bodyOf(signature: String): String {
+        val start = serviceSource.indexOf(signature)
+        assertTrue("нет тела $signature", start >= 0)
+        val open = serviceSource.indexOf('{', start + signature.length)
+        var depth = 0
+        for (i in open until serviceSource.length) {
+            when (serviceSource[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return serviceSource.substring(open, i + 1)
+                }
+            }
+        }
+        throw AssertionError("тело не закрыто: $signature")
+    }
+
+    @Test
+    fun `сервис не поднимает фиктивный foreground без трека`() {
+        val body = bodyOf("override fun onStartCommand(")
+        val promote = body.indexOf("promoteToForeground()")
+        val alive = body.indexOf("isPlaybackAlive(")
+        assertTrue("нет проверки isPlaybackAlive в onStartCommand", alive >= 0)
+        assertTrue(
+            "старый порядок поднимал FGS до проверки состояния — мигало пустое уведомление",
+            promote > alive,
+        )
+        assertTrue(
+            "пустой плеер обязан просто остановиться, не показывая уведомление",
+            body.indexOf("stopSelf()") < promote,
+        )
+    }
+
+    @Test
+    fun `duplicate cover fetches are suppressed`() {
+        val artwork = source("app-mobile/src/main/java/ru/mars/mobile/service/MusicArtwork.kt")
+        assertTrue(
+            "нет множества загрузок в полёте — дубли скачивают одну обложку много раз",
+            artwork.contains("ConcurrentHashMap.newKeySet()"),
+        )
+        assertTrue(
+            "второй запрос того же ключа не должен ставить задачу в очередь",
+            artwork.contains("if (!inFlight.add(key)) return"),
+        )
+        assertTrue(
+            "ключ обязан сниматься из inFlight при любом исходе загрузки",
+            artwork.contains("inFlight.remove(key)"),
+        )
+    }
+
     private companion object {
         // Значения android.content.Intent.FLAG_ACTIVITY_* — литералы, чтобы политика
         // осталась без Android-типов и этот тест не тянул android.jar.

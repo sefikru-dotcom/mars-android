@@ -313,6 +313,24 @@ class MusicActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         }
     }
 
+    /**
+     * Разрешение получено уже после старта воспроизведения: без этого колбэка первый трек
+     * играет без уведомления в шторке, пока пользователь не перезапустит трек. Сервис
+     * поднимается только при живом воспроизведении — в покое пустое уведомление не нужно.
+     */
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_NOTIFICATIONS) return
+        val granted = grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted && MarsMusicPlayer.currentTrack != null) {
+            MarsMusicService.start(this)
+        }
+    }
+
     override fun onStateChanged(track: MusicTrack?, isPlaying: Boolean) = renderPlayerState(track, isPlaying)
 
     override fun onProgress(currentMs: Int, totalMs: Int) = renderProgress(currentMs, totalMs)

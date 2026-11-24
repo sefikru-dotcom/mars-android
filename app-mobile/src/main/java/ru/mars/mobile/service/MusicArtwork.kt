@@ -8,7 +8,9 @@ import android.util.LruCache
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import ru.mars.mobile.ImageDiskCache
 import ru.mars.mobile.ImageLoaderPolicy
 import ru.mars.mobile.ThumbnailUrlResolver
@@ -42,6 +44,13 @@ internal object MusicArtwork {
 
     private val main = Handler(Looper.getMainLooper())
 
+    /**
+     * Ключи, чья загрузка уже в полёте. Без неё каждый state tick нового трека
+     * (pause/resume, пока обложка ещё качается) ставил в очередь ещё один и тот же
+     * запрос: single-thread executor превращался в очередь дублей, тратя трафик.
+     */
+    private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** Already-decoded cover for [key], or null while it is still in flight. */
     fun cached(key: String): Bitmap? = cache.get(key)
 
@@ -55,10 +64,21 @@ internal object MusicArtwork {
             onReady(key)
             return
         }
-        executor.execute {
-            val bitmap = runCatching { fetchAndDecode(key) }.getOrNull()
-            if (bitmap != null) cache.put(key, bitmap)
-            main.post { onReady(key) }
+        // Второй вызов для того же ключа дождётся первого колбэка: один fetch на трек.
+        if (!inFlight.add(key)) return
+        try {
+            executor.execute {
+                try {
+                    val bitmap = runCatching { fetchAndDecode(key) }.getOrNull()
+                    if (bitmap != null) cache.put(key, bitmap)
+                } finally {
+                    inFlight.remove(key)
+                    main.post { onReady(key) }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Сервис уже уничтожил executor: ключ не должен остаться «в полёте».
+            inFlight.remove(key)
         }
     }
 

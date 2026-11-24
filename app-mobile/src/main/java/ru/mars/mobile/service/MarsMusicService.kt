@@ -122,9 +122,10 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Satisfy the startForegroundService() promise first, whatever the action is —
-        // Android kills the process if startForeground is not called within ~5 s.
-        promoteToForeground()
+        // Сначала выполняем команду: она локальна и быстра, а 5-секундное обещание
+        // startForegroundService всё ещё укладывается. Раньше сервис поднимался в
+        // foreground ДО проверки состояния — пустой плеер получал мигающее уведомление
+        // «Марс Музыка» и зря стартовал как FGS (в фоне это ещё и запрет API 31+).
         when (MusicNotificationPolicy.typeOf(intent?.action)) {
             ActionType.PLAY -> MarsMusicPlayer.play()
             ActionType.PAUSE -> MarsMusicPlayer.pause()
@@ -136,7 +137,16 @@ class MarsMusicService : Service(), MarsMusicPlayer.MarsMusicListener {
         if (!MusicNotificationPolicy.isPlaybackAlive(
                 MarsMusicPlayer.currentTrack != null, MarsMusicPlayer.isPlaying)
         ) {
-            stopPlaybackService()
+            // Не поднимаем фиктивный foreground-сервис ради отсутствующего трека.
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // Обещание выполняется до выхода из onStartCommand; onStateChanged от action
+        // уже прошёл с startedForeground == false и notification не обновлял.
+        if (!startedForeground) {
+            promoteToForeground()
+        } else {
+            updateNotification(MarsMusicPlayer.currentTrack, MarsMusicPlayer.isPlaying)
         }
         // No sticky restart: a killed service must not resurrect an empty notification.
         return START_NOT_STICKY

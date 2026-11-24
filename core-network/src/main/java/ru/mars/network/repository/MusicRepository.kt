@@ -95,6 +95,32 @@ sealed interface AlbumResult {
     data class Failed(val message: String) : AlbumResult
 }
 
+/**
+ * Результат серверной предзагрузки (`POST /api/preload/{id}?quality=`).
+ * Отказ сервера и сетевой сбой — обычные значения: пауза между треками не должна
+ * ломать воспроизведение из-за вспомогательного запроса.
+ */
+sealed interface MusicPreloadResult {
+    /** `{"success":true,"preloading":"<id>","quality":"<profile>"}`. */
+    data class Started(val videoId: String, val quality: String) : MusicPreloadResult
+
+    /** Сервер ответил `success:false` или сетевой сбой; [message] — причина. */
+    data class Failed(val message: String) : MusicPreloadResult
+}
+
+/**
+ * Результат импорта плейлиста (`POST /api/playlist/import`).
+ * Успех сервера: `{"success":true,"id":"<8 hex>","title":"…","count":N}`;
+ * отказ: HTTP 400 + `{"success":false,"error":"…"}` — текст ошибки показывается как есть.
+ */
+sealed interface MusicPlaylistImportResult {
+    data class Imported(val id: String, val title: String, val count: Int) : MusicPlaylistImportResult
+    data class Failed(val message: String) : MusicPlaylistImportResult
+}
+
+/** Загруженный m3u8-файл для системного шаринга. */
+data class MusicExportText(val text: String, val fileName: String)
+
 /** Mars Music's HTTP search/charts and Mars Connect WebSocket client. */
 class MusicRepository(
     private val baseUrl: String = "https://marscore.ru/music",
@@ -404,6 +430,93 @@ class MusicRepository(
         return parsed.translated.orEmpty()
     }
 
+    // ------------------------------------------------- B1/B2/B3: серверные-transfer'ы
+
+    /**
+     * POST /api/preload/{videoId}?quality=<profile> — прогреть кэш сервера для
+     * следующего трека. Живой ответ: `{"success":true,"preloading":"<id>","quality":"<profile>"}`;
+     * пустой id сервер отвергает 400 + `{"success":false,"error":"Missing video_id"}`.
+     *
+     * Возвращает [MusicPreloadResult] вместо исключения: это фоновое ускорение,
+     * а не часть воспроизведения — сеть или отказ сервера не должны ронять плеер.
+     * Отмена coroutine пробрасывается как есть.
+     */
+    suspend fun preload(videoId: String, quality: String): MusicPreloadResult {
+        val id = videoId.trim()
+        if (id.isEmpty()) return MusicPreloadResult.Failed("Missing video_id")
+        val profile = quality.trim().ifEmpty { "standard" } // server.py DEFAULT_QUALITY
+        // query добавляется отдельно: addPathSegments("api/preload/id?quality=x")
+        // превратил бы знак вопроса в часть сегмента.
+        val raw = try {
+            postTextWithQuery(
+                pathWithSegment("api/preload", id),
+                listOf("quality" to profile),
+                "{}",
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return MusicPreloadResult.Failed(error.message ?: "Preload request failed")
+        }
+        val parsed = runCatching {
+            moshi.adapter(PreloadEnvelope::class.java).fromJson(raw)
+        }.getOrNull() ?: return MusicPreloadResult.Failed("Malformed preload response")
+        if (parsed.success == false) {
+            return MusicPreloadResult.Failed(parsed.error ?: "Preload rejected by server")
+        }
+        val warmedId = parsed.preloading?.takeIf { it.isNotBlank() } ?: id
+        return MusicPreloadResult.Started(warmedId, parsed.quality?.takeIf { it.isNotBlank() } ?: profile)
+    }
+
+    /**
+     * POST /api/playlist/import с телом `{"url":"…"}`.
+     *
+     * Точные формы живого ответа (server.py, handle_import_playlist):
+     * - успех: `{"success":true,"id":"<8hex>","title":"…","count":N}`;
+     * - пустой URL: 400 `{"success":false,"error":"URL required"}`;
+     * - сбой загрузки: 400 `{"success":false,"error":"Failed to fetch playlist: …"}`.
+     * Текст `error` доставляется в [MusicPlaylistImportResult.Failed] дословно.
+     */
+    suspend fun importPlaylist(url: String): MusicPlaylistImportResult {
+        val raw = try {
+            postText(
+                "api/playlist/import",
+                moshi.adapter(ImportPlaylistRequest::class.java).toJson(ImportPlaylistRequest(url)),
+            )
+        } catch (error: Exception) {
+            return MusicPlaylistImportResult.Failed(error.message ?: "Import request failed")
+        }
+        val parsed = runCatching {
+            moshi.adapter(ImportPlaylistEnvelope::class.java).fromJson(raw)
+        }.getOrNull() ?: return MusicPlaylistImportResult.Failed("Malformed import response")
+        if (parsed.success == false) {
+            return MusicPlaylistImportResult.Failed(parsed.error ?: "Import rejected by server")
+        }
+        val id = parsed.id?.takeIf { it.isNotBlank() }
+            ?: return MusicPlaylistImportResult.Failed("Import response without id")
+        return MusicPlaylistImportResult.Imported(
+            id = id,
+            title = parsed.title?.takeIf { it.isNotBlank() } ?: "Импорт $id",
+            count = parsed.count?.toInt() ?: 0,
+        )
+    }
+
+    /**
+     * GET /api/playlist/{id}/export?format=m3u8 или /api/favorites/export?format=m3u8.
+     * Возвращает сырой текст плейлиста и имя файла из Content-Disposition сервера
+     * (`playlist_<id>.m3u8` / `mars_favorites.m3u8`). 404 «Playlist not found» — ошибка,
+     * не пустой файл: пользователь должен увидеть причину, а не пустой шаринг.
+     */
+    suspend fun exportM3u8(playlistId: String? = null): MusicExportText {
+        val path = if (playlistId == null) {
+            "api/favorites/export"
+        } else {
+            require(playlistId.isNotBlank()) { "playlistId must not be blank" }
+            pathWithSegment("api/playlist", playlistId) + "/export"
+        }
+        return getRawText(path, listOf("format" to "m3u8"))
+    }
+
     /**
      * Shared path builder for `/…/{segment}` calls: [addPathSegment] percent-encodes the
      * id, so a malformed one can never introduce an extra path level. It also keeps the
@@ -463,6 +576,82 @@ class MusicRepository(
                 }
             })
         }
+
+    /** POST JSON на [path] с query-параметрами; сырое тело сохраняется и для не-2xx. */
+    private suspend fun postTextWithQuery(
+        path: String,
+        query: List<Pair<String, String>>,
+        json: String,
+    ): String = suspendCancellableCoroutine { continuation ->
+        val request = Request.Builder()
+            .url(
+                baseUrl.toHttpUrl().newBuilder().addPathSegments(path)
+                    .apply { query.forEach { (key, value) -> addQueryParameter(key, value) } }
+                    .build(),
+            )
+            .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val body = resp.body?.string()
+                    if (continuation.isActive) {
+                        when (body) {
+                            null -> continuation.resumeWithException(IOException("Empty body from /$path"))
+                            else -> continuation.resume(body)
+                        }
+                    }
+                }
+            }
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+        })
+    }
+
+    /**
+     * GET с query, возвращающий сырое тело и Content-Disposition сервера.
+     * HTTP-код и тело НЕ истолковываются: экспорт — это текст плейлиста, а не JSON.
+     */
+    private suspend fun getRawText(
+        path: String,
+        query: List<Pair<String, String>> = emptyList(),
+    ): MusicExportText = suspendCancellableCoroutine { continuation ->
+        val request = Request.Builder()
+            .url(
+                baseUrl.toHttpUrl().newBuilder().addPathSegments(path)
+                    .apply { query.forEach { (key, value) -> addQueryParameter(key, value) } }
+                    .build(),
+            )
+            .get()
+            .build()
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val text = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                    if (!continuation.isActive) return@use
+                    if (resp.code !in HTTP_OK_RANGE) {
+                        // m3u8-экспорт плейлиста отвечает 404 text/plain «Playlist not found».
+                        val reason = errorText(text) ?: text.trim().ifEmpty { "HTTP ${resp.code}" }
+                        continuation.resumeWithException(IllegalStateException(reason))
+                        return@use
+                    }
+                    val disposition = resp.headers["Content-Disposition"].orEmpty()
+                    val name = DISPOSITION_FILENAME.find(disposition)?.groupValues?.getOrNull(1)
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "mars_playlist.m3u8"
+                    continuation.resume(MusicExportText(text, name))
+                }
+            }
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+        })
+    }
 
     /** POSTs a JSON body to [path] and maps the successful response through [parse]. */
     private suspend fun <T> postJson(path: String, json: String, parse: (ResponseBody) -> T): T =
@@ -1263,7 +1452,32 @@ class MusicRepository(
     private data class Session(val track: TrackDto? = null, val queue: List<TrackDto> = emptyList(), val currentIndex: Int = 0, val currentTime: Double = 0.0, val volume: Double = 0.8, val isPlaying: Boolean = false, val activeDeviceId: String? = null, val timestamp: Long? = null) {
         fun toModel() = MusicPlayerState(track?.toModel(), currentTime, durationSeconds(track?.duration), if (isPlaying) PlaybackStatus.PLAYING else if (track != null) PlaybackStatus.PAUSED else PlaybackStatus.STOPPED, volume, queue.map { it.toModel() }, currentIndex, activeDeviceId, timestamp)
     }
+    /** `{"success":true,"preloading":"<id>","quality":"<profile>"}` (404/400 — error). */
+    @JsonClass(generateAdapter = false)
+    private data class PreloadEnvelope(
+        val success: Boolean? = null,
+        val preloading: String? = null,
+        val quality: String? = null,
+        val error: String? = null,
+    )
+
+    /** `{"url":"…"}` — тело POST /api/playlist/import. */
+    @JsonClass(generateAdapter = false)
+    private data class ImportPlaylistRequest(val url: String)
+
+    /** `{"success":true,"id":"<8hex>","title":"…","count":N}`. */
+    @JsonClass(generateAdapter = false)
+    private data class ImportPlaylistEnvelope(
+        val success: Boolean? = null,
+        val id: String? = null,
+        val title: String? = null,
+        val count: Double? = null, // Moshi JVM: JSON-числа приходят Double
+        val error: String? = null,
+    )
+
     companion object {
+        /** Имя файла из `Content-Disposition: attachment; filename="..."`. */
+        private val DISPOSITION_FILENAME = Regex("filename=\"?([^\";]+)\"?", RegexOption.IGNORE_CASE)
         private const val NORMAL_CLOSURE = 1000
         private const val SESSION_RESTORE = "SESSION_RESTORE"
         private const val DEVICES_UPDATE = "DEVICES_UPDATE"
