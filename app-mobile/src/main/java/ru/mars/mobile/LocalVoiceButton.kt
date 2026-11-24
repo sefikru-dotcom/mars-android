@@ -5,7 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.widget.ImageButton
+import androidx.appcompat.widget.AppCompatImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 
@@ -76,7 +76,7 @@ class LocalVoiceButton(
      * экран добавляет root с `wrap_content`, и без фиксированного `onMeasure` ширина
      * снова поехала бы за содержимым (иконка + padding). 40 dp — всегда.
      */
-    val root: ImageButton = FixedCircleButton(context, dp(SIZE_DP)).apply {
+    val root: AppCompatImageButton = FixedCircleButton(context, dp(SIZE_DP)).apply {
         isClickable = true
         isFocusable = true
         minimumWidth = dp(SIZE_DP)
@@ -283,7 +283,7 @@ class LocalVoiceButton(
      * решалась бы содержимым (иконка 24 dp + padding 10 dp = 44 dp). `onMeasure` с жёстким
      * размером делает ширину независимой и от текста, и от хоста — 40 dp в любом родителе.
      */
-    private class FixedCircleButton(context: Context, private val sizePx: Int) : ImageButton(context) {
+    private class FixedCircleButton(context: Context, private val sizePx: Int) : AppCompatImageButton(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             setMeasuredDimension(sizePx, sizePx)
         }
