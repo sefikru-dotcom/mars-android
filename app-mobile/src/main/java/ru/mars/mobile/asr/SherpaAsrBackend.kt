@@ -99,10 +99,25 @@ class SherpaAsrBackend : AsrBackend {
         }
     }
 
+    /**
+     * Новый стрим реплики — с уже прогретым контекстным окном.
+     *
+     * Зачем подушка тишины. Zipformer2 — потоковый трансдьюсер: его окно мел-спектрограммы
+     * (`FeatureConfig`, 80-dim fbank) и состояние декодера на старте ПУСТЫЕ, и первые
+     * 150–250 мс речи уходят на «раскачку» левого контекста — ровно на них теряется первая
+     * фонема, то есть первое слово фразы. Если перед речью подать [LEAD_IN_SILENCE]
+     * (150 мс нулей), к первому настоящему сэмплу окно уже заполнено тишиной, и первая
+     * фонема ложится на прогретый контекст.
+     *
+     * Почему здесь, а не в [ru.mars.mobile.StreamingAsrEngine]: паддинг — свойство конкретной
+     * нативной модели (её sample rate и размер окна), а движок работает через интерфейс
+     * [AsrBackend] и в JVM-тестах подменяется фейком. Здесь подушка не влияет ни на один
+     * тест с фейковым бэкендом и не может «удвоиться» при смене реализации движка.
+     */
     override fun newStream(hotwords: List<String>) {
         val rec = recognizer ?: return
         stream?.release()
-        stream = try {
+        val created = try {
             if (hotwords.isEmpty()) {
                 rec.createStream()
             } else {
@@ -112,6 +127,23 @@ class SherpaAsrBackend : AsrBackend {
         } catch (t: Throwable) {
             Log.e(TAG, "failed to create stream", t)
             null
+        }
+        stream = created
+        if (created != null) primeFeatureWindow(created)
+    }
+
+    /**
+     * Прогреть окно фич тишиной: без этого первая фонема попадает в мёртвую зону первого окна.
+     *
+     * `acceptWaveform` ждёт float32 -1..1, поэтому нули — это и есть цифровая тишина.
+     * Ошибка здесь не должна убивать реплику: худший исход без подушки — потеря первого
+     * слова, худший исход с исключением — потеря всего диалога.
+     */
+    private fun primeFeatureWindow(s: OnlineStream) {
+        try {
+            s.acceptWaveform(LEAD_IN_SILENCE, SAMPLE_RATE)
+        } catch (t: Throwable) {
+            Log.w(TAG, "lead-in silence failed", t)
         }
     }
 
@@ -173,6 +205,21 @@ class SherpaAsrBackend : AsrBackend {
         private const val SAMPLE_RATE = 16_000
         private const val FEATURE_DIM = 80
         private const val MAX_ACTIVE_PATHS = 4
+
+        /**
+         * Подушка тишины перед речью: 150 мс (16 000 × 0.15 = 2 400 отсчётов).
+         *
+         * Меньше — окно фич не успевает заполниться, и первая фонема всё равно уходит в
+         * мёртвую зону; больше — человек слышит паузу перед собственным словом и видит
+         * лишнюю задержку первого партиала. 150 мс — ровно то, что съедал холодный старт.
+         */
+        private const val LEAD_IN_SILENCE_SAMPLES = 2_400
+
+        /**
+         * Общий массив нулей: `acceptWaveform` копирует данные в нативный буфер и не меняет
+         * исходный массив, поэтому аллоцировать 9.6 КБ на каждую реплику незачем.
+         */
+        private val LEAD_IN_SILENCE = FloatArray(LEAD_IN_SILENCE_SAMPLES)
 
         private const val ENCODER = "encoder.int8.onnx"
         private const val DECODER = "decoder.onnx"

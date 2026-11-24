@@ -21,7 +21,7 @@ class SessionRepositoryTest {
             assertEquals("Hello", repo.getSessionDetail(server.url("/").toString(), c, "s1")!!.messages.single().content)
             assertTrue(repo.deleteSession(server.url("/").toString(), c, "s1"))
             assertEquals("/api/sessions", server.takeRequest().path)
-            assertEquals("/api/session?session_id=s1", server.takeRequest().path)
+            assertEquals("/api/session?session_id=s1&resolve_model=1", server.takeRequest().path)
             val delete = server.takeRequest()
             assertEquals("POST", delete.method)
             assertEquals("/api/session/delete", delete.path)

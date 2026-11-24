@@ -66,4 +66,63 @@ object PushTapRouting {
         val id = tail.substringBefore('?').substringBefore('#').trim()
         return id.takeIf { it.isNotEmpty() }
     }
+
+    /**
+     * Сессия из `tag` уведомления — третий резервный источник.
+     *
+     * Сервер (`api/push_fcm.py`, `api/streaming.py`) метит push конкретного
+     * диалога тегом `hermes-<sid>`: он есть даже тогда, когда в `data` нет ни
+     * `session_id`, ни `url`. Служебный тег тестового пуша
+     * ([TAG_PUSH_TEST]) адресатом НЕ является — иначе тап по «проверке связи»
+     * открывал бы несуществующий диалог.
+     *
+     * null — тег не наш, пустой или в хвосте мусор (пробелы, `/`): такой
+     * «id» заведомо не session_id, а склеенная строка.
+     */
+    fun sessionIdFromTag(tag: String?): String? {
+        val raw = tag?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        if (!raw.startsWith(TAG_PREFIX, ignoreCase = true)) return null
+        if (raw.equals(TAG_PUSH_TEST, ignoreCase = true)) return null
+        val id = raw.substring(TAG_PREFIX.length).trim()
+        if (id.isEmpty()) return null
+        if (id.any { it.isWhitespace() || it == '/' }) return null
+        return id
+    }
+
+    /**
+     * Универсальное извлечение адресата из интента/уведомления.
+     *
+     * Источники перечислены по убыванию надёжности, потому что они приходят из
+     * РАЗНЫХ мест одного и того же события:
+     * 1. `explicitExtra` — наша собственная навигация (`extra_open_session_id` в
+     *    интенте ChatActivity): её ставит код приложения, значит она точнее
+     *    всего;
+     * 2. `sessionId` — `session_id`/`push_session_id` из data-payload: прямая
+     *    запись сервера, но её может не быть;
+     * 3. `sessionIdFromUrl(url)` — deep-link (`session/<sid>`,
+     *    `mars://chat/session/<sid>`), который сервер шлёт всегда вместе с
+     *    тегом;
+     * 4. `sessionIdFromTag(tag)` — последний резерв: `hermes-<sid>`.
+     *
+     * Возвращается ПЕРВЫЙ валидный (непустой после trim) id, а не склейка:
+     * расхождение источников означает чужой/устаревший ключ, и открывать по
+     * нему диалог нельзя.
+     */
+    fun extractSessionId(
+        explicitExtra: String? = null,
+        sessionId: String? = null,
+        url: String? = null,
+        tag: String? = null,
+    ): String? =
+        explicitExtra?.trim()?.takeIf { it.isNotEmpty() }
+            ?: sessionId?.trim()?.takeIf { it.isNotEmpty() }
+            ?: sessionIdFromUrl(url)
+            ?: sessionIdFromTag(tag)
+
+    /** Префикс tag, которым сервер метит push конкретного диалога. */
+    private const val TAG_PREFIX = "hermes-"
+
+    /** Служебный tag тестового пуша: не адресат, а проверка доставки. */
+    private const val TAG_PUSH_TEST = "hermes-push-test"
 }

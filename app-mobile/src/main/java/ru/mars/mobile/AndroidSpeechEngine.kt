@@ -32,6 +32,15 @@ class AndroidSpeechEngine(
     private var dead = false
     private var pendingText: String? = null
 
+    /**
+     * Темп, выставленный до готовности движка.
+     *
+     * У платформенного TTS параметры глобальные, но применяются они только к живому
+     * движку: вызов до `onInit` уходит в пустоту. Настройки читаются на старте экрана
+     * (раньше готовности), поэтому значение запоминается и применяется в [initListener].
+     */
+    private var pendingProsody: VoiceProsody? = null
+
     /** Считаем «озвучка идёт», чтобы не дёргать хост дважды (onDone + onError, стопы). */
     private var speaking = false
 
@@ -72,6 +81,9 @@ class AndroidSpeechEngine(
             })
         }
         ready = true
+        // Темп, выставленный до готовности: применяется ДО первой озвученной фразы,
+        // иначе буферизованная реплика зазвучала бы прежним темпом.
+        pendingProsody?.let { prosody -> tts?.let { applyProsody(it, prosody) } }
         pendingText?.let { text ->
             pendingText = null
             speaking = true
@@ -109,6 +121,33 @@ class AndroidSpeechEngine(
         runCatching { tts?.stop() }
         // Платформа не всегда присылает onStop после stop(): «звук кончился» объявляем сами.
         finishSpeech()
+    }
+
+    /**
+     * Темп и высота платформенного движка.
+     *
+     * У `TextToSpeech` это ГЛОБАЛЬНЫЕ параметры (`setSpeechRate`/`setPitch`), а не
+     * аргумент `speak`: значение действует на все последующие реплики и НЕ прерывает
+     * текущую. Именно то, что нужно шторке настроек: человек крутит темп, слушает
+     * следующую фразу, а не обрывок.
+     *
+     * Вызов до готовности движка не теряется: [pendingProsody] применяется в
+     * [initListener] сразу после `setLanguage`. Иначе первая же реплика, отправленная
+     * из буфера, зазвучала бы прежним темпом.
+     *
+     * Неудача молчит: часть платформенных движков не поддерживает высоту и возвращает
+     * `ERROR` — это не повод выключать озвучку целиком.
+     */
+    override fun setProsody(prosody: VoiceProsody) {
+        pendingProsody = prosody
+        val engine = tts ?: return
+        if (!ready) return
+        applyProsody(engine, prosody)
+    }
+
+    private fun applyProsody(engine: TextToSpeech, prosody: VoiceProsody) {
+        runCatching { engine.setSpeechRate(prosody.systemSpeechRate()) }
+        runCatching { engine.setPitch(prosody.systemPitch()) }
     }
 
     override fun shutdown() {

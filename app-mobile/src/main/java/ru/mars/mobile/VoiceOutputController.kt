@@ -43,6 +43,43 @@ class VoiceOutputController(
         fun stop()
         /** Release the engine permanently (host destroyed). */
         fun shutdown()
+
+        /**
+         * Применить темп и высоту к последующим репликам.
+         *
+         * Метод с телом по умолчанию НАРОЧНО: движков три ([AndroidSpeechEngine],
+         * [ServerTtsSpeechEngine], [OfflineTtsSpeechEngine]) и плюс фейки в тестах; без
+         * дефолта добавление метода сломало бы все реализации разом, включая те, где
+         * темпа нет вовсе (серверный синтез принимает его в запросе, а не вызовом).
+         *
+         * Реализация вправе проигнорировать вызов: отказ от темпа — не ошибка, а
+         * особенность движка. Молчание здесь честнее исключения: голос важнее темпа.
+         *
+         * Вызывать можно в любой момент, в том числе во время речи: движки применяют
+         * значение к СЛЕДУЮЩЕЙ реплике (у `TextToSpeech` параметры глобальные, у
+         * серверного синтеза и piper — на запрос), поэтому обрыв текущей фразы ради
+         * нового темпа был бы нежелателен.
+         */
+        fun setProsody(prosody: VoiceProsody) = Unit
+
+        /**
+         * Предсинтез (lookahead): подготовить [text] к озвучке ЗАРАНЕЕ, пока звучит
+         * предыдущий кусок.
+         *
+         * Зачем: движок синтезирует одну реплику за раз, и раньше кусок N+1 уходил в синтез
+         * только после того, как N отзвучал целиком (`onEngineSilent`) — то есть с нуля, в
+         * полной тишине. Для сетевого синтеза это 5–10 секунд паузы ровно после первой
+         * запятой (см. `SpeechChunker`), для Piper — сотни миллисекунд прогрева.
+         *
+         * Метод с телом по умолчанию НАРОЧНО, по той же причине, что и [setProsody]: движков
+         * четыре и плюс фейки в тестах, а предсинтез поддерживают не все. Молчаливый `Unit`
+         * честнее исключения: отсутствие предсинтеза — не ошибка, а потеря скорости.
+         *
+         * Реализация обязана быть безопасной для повторных вызовов и не обязана ничего
+         * гарантировать: если к моменту [speak] текста в кэше нет, движок синтезирует его
+         * обычным путём.
+         */
+        fun prefetch(text: String) = Unit
     }
 
     /** Result of a speak request — the host maps it to a status line. */
@@ -59,6 +96,18 @@ class VoiceOutputController(
     /** False between [onPause] and [onResume]: completed answers are never spoken in background. */
     var foreground: Boolean = true
         private set
+
+    /**
+     * Контроллер освобождён ([onDestroy]): движок уже отключён, и любое позднее обращение к
+     * нему — обращение к мёртвому объекту.
+     *
+     * Зачем флаг, а не расчёт на аккуратность хоста: колбэки UI (нажатие «Озвучить»,
+     * завершение хода, ответ сети) приходят и после уничтожения экрана — особенно в голосовом
+     * режиме, где ход живёт в `lifecycleScope`. Без флага такой вызов дёргал бы `stop()`/
+     * `speak()` у освобождённого `TextToSpeech`/Piper, а `stopSpeaking()` ещё и выстреливал бы
+     * в хост колбэком «звук кончился», по которому тот снова открывает микрофон.
+     */
+    private var destroyed: Boolean = false
 
     /** One-shot flag: the NEXT completed answer is spoken even with [autoSpeakEnabled] off. */
     private var speakNextAnswer = false
@@ -100,7 +149,22 @@ class VoiceOutputController(
     }
 
     /** Platform engine init result (async). `false` disables all output gracefully. */
+    /**
+     * Применить темп и высоту к движку: единственный вход для хоста.
+     *
+     * Зачем прокси, а не прямой вызов движка: у хоста на руках только контроллер, а
+     * движков внутри цепочки три (Piper → сервер → системный). Если бы экран выбирал
+     * движок сам, он повторил бы ту же логику выбора и однажды разошёлся бы с ней.
+     *
+     * Неудача молчит: движок, не поддерживающий темп, не должен ломать озвучку.
+     */
+    fun setProsody(prosody: VoiceProsody) {
+        if (destroyed) return
+        runCatching { engine.setProsody(prosody) }
+    }
+
     fun onEngineReady(available: Boolean) {
+        if (destroyed) return
         engineAvailable = available
         if (!available) speakNextAnswer = false
     }
@@ -118,6 +182,7 @@ class VoiceOutputController(
      * [onSessionSwitch]/engine death) — it never leaks across dialogs.
      */
     fun armSpeakNextAnswer() {
+        if (destroyed) return
         if (engineAvailable) speakNextAnswer = true
     }
 
@@ -129,6 +194,7 @@ class VoiceOutputController(
      * next completed turn in foreground.
      */
     fun onTurnComplete(finalAnswer: String?) {
+        if (destroyed) return
         if (!engineAvailable || !foreground) return
         if (!autoSpeakEnabled && !speakNextAnswer) return
         speakNextAnswer = false
@@ -137,8 +203,27 @@ class VoiceOutputController(
 
     /** Manual request (volume button / message speaker) — works with auto mode off. */
     fun speakNow(text: String?): SpeakOutcome {
+        if (destroyed) return SpeakOutcome.ENGINE_UNAVAILABLE
         if (!engineAvailable) return SpeakOutcome.ENGINE_UNAVAILABLE
         return speakInternal(text)
+    }
+
+    /**
+     * Предсинтез следующего куска, пока звучит текущий.
+     *
+     * Вызывающий ([LocalVoiceTts.prefetchNext]) уже держит очищенный текст, но фильтр здесь
+     * всё равно применяется: движку нельзя отдавать markdown/код ни на синтез, ни на
+     * предсинтез, иначе в кэш попадёт не то, что потом попросят произнести.
+     *
+     * Правила те же, что у озвучки: без движка и в фоне ([foreground]) предсинтез не нужен —
+     * звука всё равно не будет. Ошибки глотаются: предсинтез — оптимизация, а не гарантия.
+     */
+    fun prefetch(text: String?) {
+        if (destroyed) return
+        if (!engineAvailable || !foreground) return
+        val speakable = filter.filterForSpeech(text.orEmpty())
+        if (speakable.isBlank()) return
+        runCatching { engine.prefetch(speakable) }
     }
 
     /** A new turn starts: previous speech must not bleed into it. */
@@ -164,10 +249,13 @@ class VoiceOutputController(
         speakNextAnswer = false
         stopSpeaking()
         runCatching { engine.shutdown() }
+        // Флаг — ПОСЛЕ стопа и освобождения: остановка обязана доехать до живого движка.
+        destroyed = true
     }
 
     /** Immediate silence (e.g. explicit «stop»). Never throws into the host. */
     fun stopSpeaking() {
+        if (destroyed) return
         val wasSpeaking = speaking
         speaking = false
         runCatching { engine.stop() }
@@ -178,6 +266,8 @@ class VoiceOutputController(
 
     /** Движок сообщил, что дочитал (или упал): хост переводит цикл обратно в слушание. */
     fun notifySpeakingFinished() {
+        // Поздний колбэк освобождённого движка не должен открывать микрофон на мёртвом экране.
+        if (destroyed) return
         speaking = false
         runCatching { onSpeakingFinished?.invoke() }
     }

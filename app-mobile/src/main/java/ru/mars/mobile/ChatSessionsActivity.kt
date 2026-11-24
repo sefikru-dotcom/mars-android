@@ -1226,7 +1226,7 @@ class ChatSessionsActivity : ComponentActivity() {
         drawer = DrawerLayout(this).apply { setBackgroundColor(MarsTheme.SCREEN_VEIL) }
         drawer.addView(buildListContent(), DrawerLayout.LayoutParams(-1, -1))
         drawer.addView(buildSectionsDrawer(), DrawerLayout.LayoutParams(dp(310), -1, GravityCompat.START))
-        return drawer
+        return MarsSpaceBackgroundView.wrap(this, drawer)
     }
 
     /** Контент уровня: хедер (бар/заголовок/новый диалог), поиск, список. */

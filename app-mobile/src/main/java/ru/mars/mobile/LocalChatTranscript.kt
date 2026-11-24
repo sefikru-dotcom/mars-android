@@ -1,0 +1,825 @@
+package ru.mars.mobile
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Typeface
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import ru.mars.network.local.LocalRole
+
+/**
+ * Лента локального диалога: пузыри, markdown-ответы, карточки инструментов, автоскролл.
+ *
+ * Рендер инкрементальный: пока набор строк тот же (меняются только текст и статусы),
+ * вьюхи не пересобираются — стрим обновляет уже существующую карточку. Полная
+ * пересборка только при изменении состава строк (новое сообщение, карточка).
+ *
+ * Ответы ассистента рисует **существующий** [ChatMarkdownRenderer] (тот же, что в
+ * серверном чате): код, списки, таблицы, ссылки и цитаты выглядят одинаково в обоих
+ * чатах, и второго markdown-парсера в проекте не появляется. Поэтому тело ответа —
+ * не один `TextView`, а контейнер markdown-единиц.
+ *
+ * Долгое нажатие на сообщение отдаётся наружу ([onMessageLongPress]): лист действий —
+ * это диалог, а лента диалогов не показывает.
+ *
+ * Палитра — только [MarsTheme]: своих цветов у экрана нет, как и у остальных разделов.
+ */
+internal class LocalChatTranscript(
+    private val context: Context,
+    /** Долгое нажатие на сообщение; второй аргумент — «это последний ответ ассистента». */
+    private val onMessageLongPress: (LocalChatItem, Boolean) -> Unit,
+    /** Копирование из блока кода (кнопка «копировать» внутри markdown). */
+    private val onCopyText: (String) -> Unit,
+    /** Открытие ссылки/картинки из markdown. */
+    private val onOpenUrl: (String) -> Unit,
+    /** «Сохранить в галерею» на сгенерированной картинке; вторая картинка не нужна. */
+    private val onSaveImage: (java.io.File) -> Unit = {},
+    /**
+     * Копия картинки из истории по id TOOL-сообщения: байты, развёрнутые из текста
+     * сообщения. Нужна, когда файл в cacheDir уже вычищен системой, а диалог открыт снова.
+     */
+    private val onStoredImage: (String) -> ByteArray? = { null },
+    /**
+     * Быстрое действие «Ответить» на карточке сообщения: цитирование в композер.
+     * Пустая реализация по умолчанию — до склейки в [LocalChatActivity] экран ещё не
+     * знает про цитату, и лента обязана собираться без неё.
+     */
+    private val onReply: (LocalChatItem) -> Unit = {},
+    /** Быстрое действие «Озвучить»: текст ответа уходит в озвучку экрана. */
+    private val onSpeakText: (String) -> Unit = {},
+) {
+
+    private val column: LinearLayout = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, dp(2), 0, dp(6))
+    }
+
+    /** Скролл наружу: экран вешает его в контент-слот [SectionScaffold]. */
+    val view: ScrollView = ScrollView(context).apply {
+        isFillViewport = true
+        // Горизонтальный скролл запрещён: длинные строки переносятся внутри пузыря,
+        // а длинный код скроллится своим HorizontalScrollView (изолированный скролл),
+        // а не растягивает экран (POCO F5 — узкий портрет).
+        isHorizontalScrollBarEnabled = false
+        addView(column, ViewGroup.LayoutParams(-1, -2))
+    }
+
+    private var renderedIds: List<String> = emptyList()
+    private val userBubbles = HashMap<String, TextView>()
+    private val assistantCards = HashMap<String, AssistantCard>()
+    private val toolRows = HashMap<String, ToolRow>()
+
+    /** id последнего ответа ассистента: «Повторить» существует только для него. */
+    private var lastAssistantId: String? = null
+
+    /** Раскрытые блоки кода: ключ — (индекс сообщения, индекс блока). */
+    private val expandedCode = HashSet<Long>()
+
+    /**
+     * Держимся ли низа (гистерезис). Стартуем «прилипшими»: новый диалог обязан
+     * показывать хвост, а не начало.
+     */
+    private var sticking: Boolean = true
+
+    /**
+     * Показать состояние. Скролл — только пока лента «прилипла» к низу: иначе чтение
+     * середины диалога обрывалось бы на каждой дельте стрима.
+     *
+     * Решение о «прилип» вынесено в чистую [LocalScrollPolicy] (два порога, гистерезис):
+     * одного порога не хватает — на нём лента либо дёргается на каждом пикселе, либо
+     * отпускает низ при первом же дребезге и больше не возвращается.
+     */
+    fun render(state: LocalChatUiState) {
+        sticking = LocalScrollPolicy.shouldStick(
+            scrollY = view.scrollY,
+            distanceToBottom = distanceToBottom(),
+            wasSticking = sticking,
+            stickPx = dp(LocalScrollPolicy.STICK_DP),
+            leavePx = dp(LocalScrollPolicy.LEAVE_DP),
+        )
+        lastAssistantId = state.items
+            .lastOrNull { it.role == LocalRole.ASSISTANT && it.tool == null }
+            ?.id
+        val ids = state.items.map { it.id }
+        if (ids != renderedIds) rebuild(state) else update(state)
+        if (sticking) scrollToBottom()
+    }
+
+    /** Принудительно вниз — после отправки нового сообщения (это и есть «приколоть»). */
+    fun scrollToBottom() {
+        // Явный уход вниз по кнопке/отправке — снова держим низ: иначе человек, который
+        // только что отправил вопрос, читал бы ответ, уехавший за кадр.
+        sticking = true
+        view.post { runCatching { view.fullScroll(View.FOCUS_DOWN) } }
+    }
+
+    /** Расстояние до низа в пикселях; ≤ 0 — контент короче вьюпорта (underflow). */
+    private fun distanceToBottom(): Int {
+        val child = view.getChildAt(0) ?: return 0
+        return child.height - view.height - view.scrollY
+    }
+
+    private fun rebuild(state: LocalChatUiState) {
+        column.removeAllViews()
+        userBubbles.clear()
+        assistantCards.clear()
+        toolRows.clear()
+        renderedIds = state.items.map { it.id }
+
+        if (state.items.isEmpty()) {
+            column.addView(emptyHint(), LinearLayout.LayoutParams(-1, -2))
+            return
+        }
+
+        state.items.forEachIndexed { index, item ->
+            val tool = item.tool
+            if (tool != null) {
+                val row = ToolRow(context)
+                row.bind(tool)
+                toolRows[item.id] = row
+                column.addView(
+                    row.root,
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) },
+                )
+                return@forEachIndexed
+            }
+            if (item.role == LocalRole.USER) {
+                column.addView(
+                    userBubble(item),
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
+                )
+            } else {
+                val card = AssistantCard(item)
+                assistantCards[item.id] = card
+                // Окно контекста нужно футеру для пары «запрос/окно»: из предмета ленты
+                // его не взять — размер окна знает каталог модели, а не ответ.
+                card.bind(item, index, state.context?.windowTokens)
+                column.addView(
+                    card.root,
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) },
+                )
+            }
+        }
+    }
+
+    private fun update(state: LocalChatUiState) {
+        state.items.forEachIndexed { index, item ->
+            val tool = item.tool
+            if (tool != null) {
+                toolRows[item.id]?.bind(tool)
+                return@forEachIndexed
+            }
+            if (item.role == LocalRole.USER) {
+                userBubbles[item.id]?.text = item.text
+                return@forEachIndexed
+            }
+            assistantCards[item.id]?.bind(item, index, state.context?.windowTokens)
+        }
+    }
+
+    /**
+     * Пузырь пользователя: справа, сапфировый градиент, ограничение по ширине.
+     *
+     * Шапка пузыря — «Вы» и час сообщения, под текстом — компактная строка быстрых
+     * действий («Копировать», «Ответить», «⋮»). Раньше это был голый TextView: час
+     * терялся, а про копирование/ответ человек мог узнать только из долгого нажатия.
+     *
+     * Текст по-прежнему кладётся в [userBubbles]: инкрементальный [update] обновляет
+     * ровно его, не пересобирая пузырь (иначе правка сообщения мигала бы всей лентой).
+     */
+    private fun userBubble(item: LocalChatItem): View {
+        val bubble = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.userBubble(context)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(context).apply {
+            text = "Вы"
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(MarsTheme.TEXT_MUTED)
+        })
+        // Распорка: час прижат к правому краю пузыря, как в серверном чате.
+        header.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        header.addView(clockView(item.createdAt), LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+        bubble.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+        val text = TextView(context).apply {
+            this.text = item.text
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_STRONG)
+            setLineSpacing(0f, 1.15f)
+            // Длинное сообщение не должно упираться в край: пузырь занимает не больше
+            // 84% ширины, остальное — воздух (как в WebUI). Паддинги теперь у пузыря,
+            // поэтому из лимита вычтена их сумма.
+            maxWidth = (context.resources.displayMetrics.widthPixels * 0.84f).toInt() - dp(28)
+            // Своё сообщение тоже выделяется построчно/пословно: setTextIsSelectable
+            // ставится строго ПОСЛЕ text, а выделение подсвечивается рубиновым
+            // полупрозрачным ACCENT_BG (как в серверном чате).
+            setTextIsSelectable(true)
+            highlightColor = MarsTheme.ACCENT_BG
+        }
+        userBubbles[item.id] = text
+        bubble.addView(text, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+
+        val actions = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        // Копируется ЖИВОЙ текст вьюхи: сообщение могли отредактировать, а элемент
+        // ленты в этот момент ещё держит прежний снимок.
+        actions.addView(quickAction("Копировать") { onCopyText(text.text.toString()) })
+        actions.addView(
+            quickAction("Ответить") { onReply(item) },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(14) },
+        )
+        actions.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        val more = MarsTheme.circleIconButton(
+            context,
+            R.drawable.ic_more_vert,
+            "Действия с сообщением",
+            bg = Color.TRANSPARENT,
+            iconTint = MarsTheme.TEXT_MUTED,
+            sizeDp = 30,
+            strokeColor = 0,
+        ).apply {
+            setOnClickListener { onMessageLongPress(item, false) }
+        }
+        actions.addView(more, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(6) })
+        bubble.addView(actions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            addView(bubble, LinearLayout.LayoutParams(-2, -2))
+        }
+        // Лист действий — только по пустому месту вокруг пузыря и по его шапке: сам текст
+        // отдан нативному выделению (долгое нажатие на слово/строку → «Копировать»).
+        attachLongPress(row, item)
+        attachLongPress(header, item)
+        return row
+    }
+
+    /** Час сообщения для шапки карточки: 11sp [MarsTheme.TEXT_EM]; пусто — метки нет. */
+    private fun clockView(timestamp: Long): TextView = TextView(context).apply {
+        text = MessageTimePolicy.clockLabel(timestamp).orEmpty()
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_EM)
+        isSingleLine = true
+        maxLines = 1
+    }
+
+    /** Компактная текстовая кнопка ряда быстрых действий (11sp, без фона). */
+    private fun quickAction(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        textSize = 11f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setPadding(0, dp(2), 0, dp(2))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+    private fun emptyHint(): View = TextView(context).apply {
+        text = "Пока пусто. Сообщение уйдёт провайдеру напрямую — сервер Марса для этого " +
+            "чата не нужен."
+        textSize = 13f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setLineSpacing(0f, 1.2f)
+        setPadding(dp(4), dp(12), dp(4), dp(12))
+    }
+
+    /**
+     * Долгое нажатие на вьюху — лист действий над сообщением.
+     *
+     * НЕ рекурсивно: markdown-строки внутри тела ответа создаются с
+     * [TextView.setTextIsSelectable] и обязаны сами обрабатывать long-press нативным
+     * выделением строки/слова. Прежний рекурсивный обход вешал листенер на каждый
+     * TextView тела и напрочь блокировал выделение одной строчки.
+     */
+    private fun attachLongPress(view: View, item: LocalChatItem) {
+        view.setOnLongClickListener {
+            onMessageLongPress(item, item.id == lastAssistantId)
+            true
+        }
+    }
+
+    private fun dp(value: Int): Int = MarsTheme.dp(context, value)
+
+    private fun codeKey(messageIndex: Int, blockIndex: Int): Long =
+        (messageIndex.toLong() shl 32) or (blockIndex.toLong() and 0xffffffffL)
+
+    /**
+     * Карточка ответа ассистента: подпись «Марс» и тело, нарисованное
+     * [ChatMarkdownRenderer]. Пока ответ пуст и идёт стрим — курсивная заглушка.
+     */
+    private inner class AssistantCard(item: LocalChatItem) {
+
+        val root: LinearLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = MarsTheme.botMessageCard(context)
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+        }
+
+        private val placeholder: TextView = TextView(context).apply {
+            text = STREAMING_PLACEHOLDER
+            textSize = 14f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            typeface = Typeface.create("sans-serif", Typeface.ITALIC)
+            visibility = View.GONE
+        }
+
+        private val body: LinearLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        /**
+         * Футер хода: расход и пометка обрыва — одной строкой мелкого текста.
+         *
+         * Скрыт целиком, когда показывать нечего: пустая строка под ответом читалась бы
+         * как «здесь что-то не загрузилось». Правило «ноль не показываем» живёт в чистой
+         * [LocalTurnFooter] — карточка только рисует то, что вернула функция.
+         */
+        private val footer: TextView = TextView(context).apply {
+            textSize = 11f
+            setTextColor(MarsTheme.TEXT_MUTED)
+            visibility = View.GONE
+        }
+
+        private val markdownState = ChatMarkdownRenderer.MarkdownRenderState()
+
+        private var current: LocalChatItem = item
+        private var index: Int = 0
+
+        /** Час сообщения в шапке; обновляется в [bind] — элемент переживает кадры стрима. */
+        private val clock: TextView
+
+        /** Ряд быстрых действий под карточкой; виден только у законченного непустого ответа. */
+        private val actionsRow: LinearLayout
+
+        init {
+            // Шапка как в серверном чате: слева живая точка статуса и «Марс», справа — час.
+            // Раньше здесь было одно слово «Марс», и час с быстрыми действиями искать было
+            // негде: копирование/ответ прятались в долгом нажатии по заголовку.
+            val header = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            header.addView(
+                MarsTheme.glowingStatusDot(context, MarsTheme.STATUS_ONLINE),
+                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) },
+            )
+            val title = TextView(context).apply {
+                text = "Марс"
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(MarsTheme.TEXT_MUTED)
+            }
+            header.addView(title)
+            // Распорка: час уходит к правому краю карточки.
+            header.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            clock = clockView(item.createdAt)
+            header.addView(clock, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+
+            root.addView(header)
+            root.addView(placeholder, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            root.addView(body, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            // Футер — последним: он читается как подпись под ответом, а не как его часть.
+            root.addView(footer, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+            actionsRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                visibility = View.GONE
+            }
+            // Тексты берутся из [current] в момент клика: карточка живёт кадры стрима,
+            // и захваченный при сборке снимок успевает устареть.
+            actionsRow.addView(quickAction("Копировать") { onCopyText(current.text) })
+            actionsRow.addView(
+                quickAction("Ответить") { onReply(current) },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(14) },
+            )
+            actionsRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            val speak = MarsTheme.circleIconButton(
+                context,
+                R.drawable.ic_volume,
+                "Озвучить сообщение",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30,
+                strokeColor = 0,
+            ).apply {
+                setOnClickListener { onSpeakText(current.text) }
+            }
+            actionsRow.addView(speak, LinearLayout.LayoutParams(dp(30), dp(30)))
+            val more = MarsTheme.circleIconButton(
+                context,
+                R.drawable.ic_more_vert,
+                "Действия с сообщением",
+                bg = Color.TRANSPARENT,
+                iconTint = MarsTheme.TEXT_MUTED,
+                sizeDp = 30,
+                strokeColor = 0,
+            ).apply {
+                setOnClickListener { onMessageLongPress(current, current.id == lastAssistantId) }
+            }
+            actionsRow.addView(more, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(6) })
+            root.addView(actionsRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
+            // Лист действий — только на шапке карточки и на пустом месте root.
+            // Строки тела сюда НЕ вешаются: у них своё нативное выделение текста.
+            attachCardLongPress(title)
+            attachCardLongPress(header)
+            attachCardLongPress(root)
+        }
+
+        /**
+         * Долгое нажатие над ВСЕМ сообщением — только для шапки и пустого места карточки.
+         *
+         * Элемент берётся из [current] в момент нажатия: карточка живёт кадры стрима и
+         * захваченный при сборке снимок успевает устареть.
+         */
+        private fun attachCardLongPress(view: View) {
+            view.setOnLongClickListener {
+                onMessageLongPress(current, current.id == lastAssistantId)
+                true
+            }
+        }
+
+        fun bind(item: LocalChatItem, index: Int, windowTokens: Int? = null) {
+            current = item
+            this.index = index
+            // Футер обновляется ДО раннего выхода: голая строка «оборван» бывает и без
+            // текста, и терять её на стриме нельзя.
+            val footerLine = LocalTurnFooter.line(item, windowTokens)
+            footer.text = footerLine
+            footer.visibility = if (footerLine == null) View.GONE else View.VISIBLE
+            footer.contentDescription = footerLine
+            // Час и быстрые действия — тоже ДО раннего выхода: час уже известен, а ряд
+            // обязан исчезнуть, как только ответ начал стримиться заново.
+            clock.text = MessageTimePolicy.clockLabel(item.createdAt).orEmpty()
+            actionsRow.visibility = if (!item.streaming && item.text.isNotBlank()) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+            if (item.streaming && item.text.isBlank()) {
+                placeholder.visibility = View.VISIBLE
+                body.visibility = View.GONE
+                return
+            }
+            placeholder.visibility = View.GONE
+            body.visibility = View.VISIBLE
+            drawMarkdown()
+        }
+
+        /**
+         * Отрисовка markdown. [ChatMarkdownRenderer.render] сам решает, какой префикс
+         * переиспользовать: на дельтах стрима перерисовывается только хвост, поэтому
+         * лента не мигает и не теряет позицию скролла.
+         */
+        private fun drawMarkdown() {
+            ChatMarkdownRenderer.render(
+                context = context,
+                blocks = MarkdownFormatter.parseBlocks(current.text),
+                parent = body,
+                user = false,
+                messageIndex = index,
+                state = markdownState,
+                isCodeBlockExpanded = { message, block ->
+                    expandedCode.contains(codeKey(message, block))
+                },
+                toggleCodeBlock = { message, block -> toggleCode(message, block) },
+                copyMessage = onCopyText,
+                // Своего лайтбокса у локального чата нет: картинка открывается как ссылка.
+                openImage = onOpenUrl,
+                openUrl = onOpenUrl,
+            )
+            // Рекурсивный attachLongPress(body, …) здесь больше НЕ нужен и вреден:
+            // он вешал лист действий на каждый TextView тела и блокировал нативное
+            // выделение отдельной строки/слова (setTextIsSelectable в рендерере).
+        }
+
+        /**
+         * Раскрытие/сворачивание длинного блока кода. Набор markdown-единиц при этом не
+         * меняется, поэтому инкрементальный рендер изменения не заметит — тело
+         * перерисовывается с нуля (блоков кода в ответе единицы, это дешево).
+         */
+        private fun toggleCode(messageIndex: Int, blockIndex: Int) {
+            val key = codeKey(messageIndex, blockIndex)
+            if (!expandedCode.add(key)) expandedCode.remove(key)
+            body.removeAllViews()
+            markdownState.units = emptyList()
+            drawMarkdown()
+        }
+    }
+
+    /**
+     * Карточка инструмента: свёрнута в одну строку (имя + статус + превью), по тапу
+     * раскрывает аргументы. Отдельная кнопка не нужна — вся шапка кликабельна.
+     *
+     * У `generate_image` внутри карточки ещё и сама картинка: инструмент положил JPEG в
+     * `cacheDir`, и человек ждёт её здесь, а не в настройках. Файл — первичный источник;
+     * если систему вычистила кэш, берётся копия байтов из истории сообщения
+     * (`GeneratedImageStorage`), и только если нет и её — карточка остаётся без картинки.
+     */
+    private inner class ToolRow(private val context: Context) {
+
+        val root: LinearLayout
+        private val name: TextView
+        private val badge: TextView
+        private val preview: TextView
+        private val arguments: TextView
+        private var expanded = false
+
+        /** Блок сгенерированной картинки: виден только у `generate_image` с файлом. */
+        private val imageBlock: LinearLayout
+
+        private val imageView: android.widget.ImageView
+
+        /** Кнопка «Сохранить в галерею»: есть только у картинки, которой это уместно. */
+        private val saveButton: TextView
+
+        /** Что сейчас нарисовано: путь + размер файла — чтобы не перечитывать диск зря. */
+        private var drawnImage: String? = null
+
+        init {
+            root = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                background = MarsTheme.toolCallCard(context)
+                setPadding(dp(10), dp(6), dp(8), dp(6))
+            }
+
+            val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+
+            val icon = android.widget.ImageView(context).apply {
+                setImageDrawable(androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_chip))
+                imageTintList = android.content.res.ColorStateList.valueOf(MarsTheme.ACCENT_TEXT)
+            }
+            header.addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
+
+            name = TextView(context).apply {
+                textSize = 11.5f
+                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                setTextColor(MarsTheme.TEXT_EM)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                minimumWidth = 0
+            }
+            header.addView(name, LinearLayout.LayoutParams(0, -2, 1f))
+
+            badge = TextView(context).apply { textSize = 9.5f }
+            header.addView(
+                badge,
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) },
+            )
+
+            root.addView(header)
+            header.setOnClickListener { toggle() }
+
+            preview = TextView(context).apply {
+                textSize = 11.5f
+                setTextColor(MarsTheme.TEXT_MUTED)
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                visibility = View.GONE
+            }
+            root.addView(preview, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
+            arguments = TextView(context).apply {
+                textSize = 11f
+                typeface = Typeface.MONOSPACE
+                setTextColor(MarsTheme.TEXT_MUTED)
+                setTextIsSelectable(true)
+                visibility = View.GONE
+            }
+            root.addView(arguments, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+            imageView = android.widget.ImageView(context).apply {
+                adjustViewBounds = true
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                // Скругление — как у карточек темы, иначе JPEG с белым фоном «прилипает»
+                // прямоугольником к тёмному пузырю.
+                clipToOutline = true
+                background = MarsTheme.card(context, MarsTheme.CODE_BG, radiusDp = 12)
+                contentDescription = "Сгенерированная картинка"
+                visibility = View.GONE
+            }
+            imageBlock = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            imageBlock.addView(imageView, LinearLayout.LayoutParams(-1, -2))
+
+            saveButton = TextView(context).apply {
+                text = "Сохранить в галерею"
+                textSize = 12f
+                setTypeface(Typeface.DEFAULT_BOLD)
+                gravity = Gravity.CENTER
+                setTextColor(MarsTheme.ACCENT_TEXT)
+                background = MarsTheme.pill(context, MarsTheme.ACCENT_BG, MarsTheme.ACCENT_BORDER)
+                setPadding(dp(14), dp(9), dp(14), dp(9))
+                minHeight = dp(44)
+                isClickable = true
+                isFocusable = true
+                visibility = View.GONE
+            }
+            imageBlock.addView(
+                saveButton,
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) },
+            )
+            imageBlock.visibility = View.GONE
+            root.addView(imageBlock, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        }
+
+        fun bind(card: LocalToolCard) {
+            name.text = card.name
+            MarsTheme.applyStatusBadge(badge, statusOf(card.phase))
+            val result = card.preview?.trim().orEmpty()
+            preview.text = result
+            preview.visibility = if (result.isEmpty()) View.GONE else View.VISIBLE
+            arguments.text = card.argumentsJson.ifBlank { "{}" }
+            bindImage(card.imagePath)
+            root.contentDescription = buildString {
+                append(card.name)
+                append(", ")
+                append(statusLabel(card.phase))
+                if (result.isNotEmpty()) {
+                    append(", ")
+                    append(result)
+                }
+            }
+        }
+
+        /**
+         * Показать картинку инструмента.
+         *
+         * Перерисовка только при смене файла: `bind` зовётся на каждом кадре стрима и на
+         * каждом обновлении статуса, а декодирование 1024×1024 не бесплатное.
+         *
+         * Ни файла, ни копии — пустого места без объяснения нет: в подпись карточки
+         * добавляется «картинка удалена» (кэш чистится системой).
+         */
+        private fun bindImage(path: String?) {
+            // Файл из cacheDir, а если его уже вычистили — копия байтов в истории.
+            // Путь копии — не путь к файлу: id сообщения не содержит ни «/», ни «\\».
+            val file = path?.takeIf { it.isNotBlank() }?.let(::imageFile)
+            if (file == null) {
+                if (drawnImage != null) {
+                    drawnImage = null
+                    imageView.setImageDrawable(null)
+                    imageView.visibility = View.GONE
+                    saveButton.visibility = View.GONE
+                    imageBlock.visibility = View.GONE
+                }
+                return
+            }
+            val stamp = "${file.absolutePath}:${file.length()}"
+            if (stamp == drawnImage) return
+            drawnImage = stamp
+            val bitmap = decodeThumbnail(file)
+            if (bitmap == null) {
+                // Файл вычищен системой (cacheDir) — картинку не нарисовать.
+                imageView.setImageDrawable(null)
+                imageView.visibility = View.GONE
+                saveButton.visibility = View.GONE
+                imageBlock.visibility = View.GONE
+                root.contentDescription = root.contentDescription?.toString()
+                    ?.let { "$it, картинка удалена" }
+                return
+            }
+            imageView.setImageBitmap(bitmap)
+            imageView.visibility = View.VISIBLE
+            imageBlock.visibility = View.VISIBLE
+            // Только API 29+ умеет писать в общий альбом без разрешений; на 28 кнопка
+            // вела бы в тупик, поэтому её нет (см. GallerySaver.canSave).
+            saveButton.visibility = if (GallerySaver.canSave()) View.VISIBLE else View.GONE
+            saveButton.contentDescription = "Сохранить картинку в галерею"
+            saveButton.setOnClickListener { onSaveImage(file) }
+            imageView.setOnClickListener {
+                // Тап по картинке — тоже сохранение: это единственное действие, которое
+                // с ней имеет смысл, а системного просмотрщика для cache-файла нет.
+                if (GallerySaver.canSave()) onSaveImage(file)
+            }
+        }
+
+        /**
+         * Файл картинки для показа: сначала cacheDir (полная копия уже скачана), затем
+         * копия из истории, развёрнутая в приватный кэш.
+         *
+         * null — ни файла, ни копии.
+         */
+        private fun imageFile(handle: String): java.io.File? {
+            val direct = java.io.File(handle)
+            if (direct.isFile && direct.length() > 0L) return direct
+            val bytes = onStoredImage(handle) ?: return null
+            return runCatching {
+                val dir = java.io.File(context.cacheDir, STORED_DIR).apply { mkdirs() }
+                val target = java.io.File(dir, handle.replace(Regex("[^A-Za-z0-9_.-]"), "_") + ".jpeg")
+                if (!target.isFile || target.length() != bytes.size.toLong()) {
+                    target.writeBytes(bytes)
+                }
+                target
+            }.getOrNull()
+        }
+
+        /** Декод с уменьшением: полный 4096×4096 битмап в списке съел бы память. */
+        private fun decodeThumbnail(file: java.io.File): Bitmap? = runCatching {
+            require(file.isFile && file.length() > 0L) { "файла нет" }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            val target = dp(900)
+            var sample = 1
+            while (bounds.outWidth / sample > target * 2) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(file.absolutePath, options)
+        }.getOrNull()
+
+        private fun toggle() {
+            expanded = !expanded
+            arguments.visibility = if (expanded) View.VISIBLE else View.GONE
+            // Свёрнутое превью при раскрытии не нужно: аргументы важнее.
+            preview.visibility = if (!expanded && preview.text.isNotEmpty()) View.VISIBLE else View.GONE
+        }
+
+        private fun statusOf(phase: LocalToolPhase): MarsGradients.Status = when (phase) {
+            LocalToolPhase.PENDING, LocalToolPhase.RUNNING -> MarsGradients.Status.RUNNING
+            LocalToolPhase.DONE -> MarsGradients.Status.DONE
+            LocalToolPhase.FAILED -> MarsGradients.Status.ERROR
+        }
+
+        private fun statusLabel(phase: LocalToolPhase): String = when (phase) {
+            LocalToolPhase.PENDING, LocalToolPhase.RUNNING -> "выполняется"
+            LocalToolPhase.DONE -> "готово"
+            LocalToolPhase.FAILED -> "ошибка"
+        }
+
+        private fun dp(value: Int): Int = MarsTheme.dp(context, value)
+    }
+
+    private companion object {
+        const val STREAMING_PLACEHOLDER = "Печатает…"
+
+        /** Каталог развёрнутых копий картинок из истории (внутри cacheDir). */
+        const val STORED_DIR = "generated-history"
+    }
+}
+
+/**
+ * Политика «держать низ» для ленты: гистерезис из двух порогов.
+ *
+ * Одного порога не хватает: при нём лента либо цепляется за низ на каждом пикселе (человек
+ * не может дочитать ответ), либо отпускает низ от первого же дребезга раскладки и больше
+ * не возвращается. Два порога дают мёртвую зону: ушли выше [LEAVE_DP] — отпустили,
+ * вернулись ближе [STICK_DP] — снова держим (как в PocketPal `ChatView`, STICK=24, LEAVE=40).
+ *
+ * Чистая функция без `android.*`: единственный способ проверить это без эмулятора —
+ * JVM-тест [LocalScrollHysteresisTest].
+ */
+object LocalScrollPolicy {
+
+    /** Вернуться к удержанию низа, когда до него меньше 24dp. */
+    const val STICK_DP = 24
+
+    /** Отпустить низ, когда до него больше 40dp. */
+    const val LEAVE_DP = 40
+
+    /**
+     * Держать ли низ после очередного рендера.
+     *
+     * [distanceToBottom] — сколько пикселей ниже среза (≤ 0 — контент короче вьюпорта),
+     * [wasSticking] — состояние до рендера, [stickPx]/[leavePx] — пороги в пикселях.
+     */
+    fun shouldStick(
+        scrollY: Int,
+        distanceToBottom: Int,
+        wasSticking: Boolean,
+        stickPx: Int,
+        leavePx: Int,
+    ): Boolean {
+        // Нет прокрутки вовсе — контент короче вьюпорта либо вьюха ещё не разложена
+        // (scrollY == 0 и низ ближе нуля): держим низ всегда, иначе первые дельты
+        // стрима уехали бы за кадр.
+        if (scrollY <= 0 && distanceToBottom <= 0) return true
+        // Дальше решают пороги. Отрицательное расстояние при непустой прокрутке
+        // (rubber-band на краю) проходит любой из них как «внизу» — отдельная ветка
+        // для него не нужна.
+        return if (wasSticking) {
+            // Держим, пока не ушли выше мёртвой зоны: мелкий дребезг раскладки её не пробивает.
+            distanceToBottom <= leavePx
+        } else {
+            // Уже отпустили: возвращаемся, только когда человек сам подошёл к низу.
+            distanceToBottom < stickPx
+        }
+    }
+}

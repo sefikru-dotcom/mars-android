@@ -1,20 +1,27 @@
 package ru.mars.mobile
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
 /**
- * Контракт видимости порога автосжатия в композере (mobile).
+ * Контракт окна контекста и композера (mobile) после UX-волны 16.
  *
- * Диагноз: [ContextBudgetPolicy.pill] формировал `text` («25% · 50.0k/200.0k») и
- * `autoCompression` («Автосжатие при 160.0k · 80%»), но НИ ОДИН view их не читал —
- * владелец видел только цифру процента внутри 24dp-кольца, а порог — лишь после тапа
- * по кольцу. Поведение текста закреплено JVM-тестами [ContextBudgetPolicyTest];
- * instrumented-слоя нет, поэтому проводка закреплена как source-контракт (стиль
- * [ChatClickPathContractTest]): тест читает реальные production-исходники и проверяет,
- * что подпись действительно создаётся в каркасе, доезжает до Activity и обновляется
- * из чистой политики. Так «никто не отрисовывает» не вернётся молча.
+ * Что изменилось по сравнению с прежней версией теста (полоса под шапкой):
+ * - полоса `contextRow` ПОД ШАПКОЙ убрана с экрана совсем (пункт 5 владельца) — она
+ *   держится `GONE` и нулевой высоты, но поля `contextRow`/`contextCaption` остаются
+ *   в `ComposerViews` и в Activity: на них по-прежнему смотрят update*-методы;
+ * - кольцо контекста и подпись переехали в единственную кнопку-капсулу «Контекст»
+ *   внизу композера (`composerBottomBar`), кольцо видно ВСЕГДА (без замера — 0%),
+ *   иначе вместе с ним с экрана пропадал бы вход в окно контекста;
+ * - всё второстепенное (модель, мышление, режим, воркспейс, инструменты, квота,
+ *   расход, поиск, озвучка) собрано в стеклянное окно `showContextUsageDetails()`
+ *   на [MarsDialog] и разложено по трём разделам.
+ *
+ * Instrumented-слоя в проекте нет, поэтому проводка закреплена как source-контракт
+ * (стиль [ChatClickPathContractTest]): тест читает реальные production-исходники и
+ * проверяет, что вход в окно, тексты и обработчики действительно wired в UI-код.
  */
 class ContextCaptionContractTest {
 
@@ -36,39 +43,72 @@ class ContextCaptionContractTest {
     private val shell by lazy { source("src/main/java/ru/mars/mobile/ChatShellSection.kt") }
     private val modelSection by lazy { source("src/main/java/ru/mars/mobile/ChatModelSection.kt") }
     private val activity by lazy { source("src/main/java/ru/mars/mobile/ChatActivity.kt") }
+    private val ring by lazy { source("src/main/java/ru/mars/mobile/ContextRingView.kt") }
+
+    /** Блок кода от [start] до [end] — чтобы проверять содержимое конкретного view. */
+    private fun block(src: String, start: String, end: String): String {
+        val from = src.indexOf(start)
+        assertTrue("Не найден блок: $start", from >= 0)
+        val to = src.indexOf(end, from)
+        assertTrue("Не найден конец блока: $end", to > from)
+        return src.substring(from, to)
+    }
 
     @Test
-    fun `scaffold builds a caption next to the ring and exposes it to the activity`() {
+    fun `scaffold builds the context capsule with the ring and the caption`() {
         assertTrue(
             "Каркас обязан создавать подпись контекста (не только кольцо)",
             scaffold.contains("val contextCaption = TextView(context)"),
         )
         assertTrue(
-            "Кольцо и подпись живут в одной строке: подпись рядом с кольцом",
-            scaffold.contains("contextRow.addView(contextRing") &&
-                scaffold.contains("contextRow.addView(") &&
+            "Кольцо и подпись живут в одной кнопке-капсуле «Контекст»",
+            scaffold.contains("contextCapsule.addView(contextRing") &&
+                scaffold.contains("contextCapsule.addView(") &&
                 scaffold.contains("contextCaption,"),
         )
         assertTrue(
-            "Строка контекста обязана стоять ПОД ШАПКОЙ (root), а не в капсуле композера",
-            scaffold.contains("root.addView(contextRow") &&
-                !scaffold.contains("composer.addView(contextRow"),
+            "Кольцо в капсуле — компактное 24dp (не крупная кнопка)",
+            scaffold.contains("contextCapsule.addView(contextRing, LinearLayout.LayoutParams(dp(24), dp(24)))"),
         )
         assertTrue(
-            "Подпись и её строка отдаются наружу в ComposerViews",
+            "Подпись и её (скрытая) строка отдаются наружу в ComposerViews",
             scaffold.contains("val contextCaption: TextView") && scaffold.contains("val contextRow: LinearLayout"),
         )
         assertTrue(
-            "Подпись постоянная: одна строка с ellipsis, без скрытия по пустому замеру",
+            "Подпись — одна строка с ellipsis, без переноса",
             scaffold.contains("maxLines = 1") &&
-                !scaffold.contains("visibility = View.GONE\n            setPadding(0, dp(2), 0, 0)"),
+                scaffold.contains("ellipsize = android.text.TextUtils.TruncateAt.END"),
         )
     }
 
     @Test
-    fun `caption is carried from the scaffold to the activity`() {
+    fun `context strip under the header is gone but the fields stay wired`() {
         assertTrue(
-            "Activity обязана держать поля подписи и её строки",
+            "Полоса контекста больше не показывается под шапкой: GONE в каркасе",
+            block(
+                scaffold,
+                "val contextRow = LinearLayout(context).apply {",
+                "// Баннер сетевого статуса",
+            ).contains("visibility = View.GONE"),
+        )
+        assertTrue(
+            "Полоса добавлена в корень с нулевой высотой (места на экране не занимает)",
+            scaffold.contains("root.addView(contextRow, LinearLayout.LayoutParams(-1, 0))"),
+        )
+        assertFalse(
+            "Полоса контекста не переезжает в капсулу композера",
+            scaffold.contains("composer.addView(contextRow"),
+        )
+        assertTrue(
+            "updateContextIndicator держит полосу скрытой при любом замере",
+            modelSection.contains("contextRow?.visibility = View.GONE"),
+        )
+        assertFalse(
+            "Возврата полосы в видимое состояние быть не должно",
+            modelSection.contains("contextRow?.visibility = View.VISIBLE"),
+        )
+        assertTrue(
+            "Activity по-прежнему держит поля подписи и её строки",
             activity.contains("internal var contextCaption: TextView?") &&
                 activity.contains("internal var contextRow: LinearLayout?"),
         )
@@ -76,6 +116,86 @@ class ContextCaptionContractTest {
             "Проводка каркас -> Activity идёт через ChatShellSection",
             shell.contains("contextCaption = v.composer.contextCaption") &&
                 shell.contains("contextRow = v.composer.contextRow"),
+        )
+    }
+
+    @Test
+    fun `context capsule opens the context window from the bottom of the composer`() {
+        val capsule = block(scaffold, "val contextCapsule = LinearLayout(context).apply {", "// Воздух между")
+        assertTrue(
+            "Тап по капсуле открывает окно контекста",
+            capsule.contains("setOnClickListener { host.showContextUsageDetails() }"),
+        )
+        assertTrue(
+            "Капсула стоит в нижней панели капсулы композера",
+            scaffold.contains("composerBottomBar.addView(contextCapsule, LinearLayout.LayoutParams(-2, -2))"),
+        )
+        assertTrue(
+            "Кольцо и подпись тоже открывают окно контекста (паритет с прежним кольцом)",
+            scaffold.contains("setOnClickListener { host.showContextUsageDetails() }"),
+        )
+    }
+
+    @Test
+    fun `context ring is visible even before the first measurement`() {
+        assertTrue(
+            "Кольцо обязано быть видимым всегда — это вход в окно контекста",
+            ring.contains("visibility = VISIBLE"),
+        )
+        assertFalse(
+            "Кольцо не должно скрываться по пустому замеру",
+            ring.contains("visibility = GONE"),
+        )
+        assertTrue(
+            "Без замера кольцо показывает честный 0%, а не пустое место",
+            ring.contains("label = \"0\""),
+        )
+        assertTrue(
+            "TalkBack получает описание из политики (или нейтральное, пока замера нет)",
+            ring.contains("contentDescription = pill.contentDescription"),
+        )
+    }
+
+    @Test
+    fun `composer bottom bar keeps only context, attach, voice and the send star`() {
+        assertTrue(
+            "Скрепка, голосовой ввод и кнопка отправки — один размер 36dp",
+            listOf("attachBtn", "voiceButton", "sendButton").all { name ->
+                Regex("actionsRow\\.addView\\(\\s*$name,\\s*LinearLayout\\.LayoutParams\\(dp\\(36\\), dp\\(36\\)\\)")
+                    .containsMatchIn(scaffold)
+            },
+        )
+        assertTrue(
+            "Кнопка отправки несёт фирменную звезду (ic_send)",
+            scaffold.contains("R.drawable.ic_send"),
+        )
+        assertTrue(
+            "Чипы сессии спрятаны с экрана, но живут в дереве (обработчики сохранены)",
+            block(
+                scaffold,
+                "val chipsScroll = HorizontalScrollView(context).apply {",
+                "val chipsRow = LinearLayout(context).apply {",
+            ).contains("visibility = View.GONE"),
+        )
+        assertTrue(
+            "Расход сессии и чипы собраны в скрытую легаси-полосу",
+            scaffold.contains("val legacyControlsStrip = LinearLayout(context).apply {") &&
+                scaffold.contains("legacyControlsStrip.addView("),
+        )
+        assertTrue(
+            "Кнопка поиска спрятана с панели (вход — в окне контекста)",
+            block(scaffold, "val searchEntryBtn = MarsTheme.circleIconButton(", "actionsRow.addView(searchEntryBtn")
+                .contains("visibility = View.GONE"),
+        )
+        assertTrue(
+            "Кнопка озвучки спрятана с панели (вход — в окне контекста)",
+            block(scaffold, "val volumeButton = MarsTheme.circleIconButton(", "actionsRow.addView(volumeButton")
+                .contains("visibility = View.GONE"),
+        )
+        assertTrue(
+            "Полоса быстрых подсказок тоже скрыта: над полем ввода один ряд чипов",
+            block(scaffold, "val quickChipsScroll = HorizontalScrollView(context).apply {", "val quickBox =")
+                .contains("visibility = View.GONE"),
         )
     }
 
@@ -88,21 +208,68 @@ class ContextCaptionContractTest {
             ),
         )
         assertTrue(
-            "Подпись обязана реально отрисовываться (текст + постоянная видимость)",
+            "Подпись обязана реально отрисовываться (текст + видимость)",
             modelSection.contains("caption.text = label") &&
                 modelSection.contains("caption.visibility = View.VISIBLE"),
-        )
-        assertTrue(
-            "Строка контекста видима всегда, а не только на время хода",
-            modelSection.contains("contextRow?.visibility = View.VISIBLE"),
         )
         assertTrue(
             "TalkBack получает описание из политики (порог озвучивается)",
             modelSection.contains("caption.contentDescription = pill.contentDescription"),
         )
+    }
+
+    @Test
+    fun `context window lays everything out in three sections`() {
         assertTrue(
-            "Тап по подписи открывает те же детали контекста, что и кольцо",
-            scaffold.contains("setOnClickListener { host.showContextUsageDetails() }"),
+            "Окно контекста — стеклянная шторка MarsDialog, а не системный AlertDialog",
+            modelSection.contains("MarsDialog.show(activity)") &&
+                !modelSection.contains("setTitle(\"Окно контекста\")"),
+        )
+        assertTrue(
+            "Три раздела окна: контекст и расход, параметры сессии, режим/поиск/озвучка",
+            modelSection.contains("ОКНО КОНТЕКСТА И РАСХОД") &&
+                modelSection.contains("ПАРАМЕТРЫ СЕССИИ И МОДЕЛИ") &&
+                modelSection.contains("РЕЖИМ ЧАТА, ПОИСК И ОЗВУЧКА"),
+        )
+        assertTrue(
+            "Раздел 1: заполнение, расход и стоимость сессии, ручное сжатие",
+            modelSection.contains("ContextBudgetPolicy.detailsText(usage)") &&
+                modelSection.contains("SessionUsagePolicy.view(sessionUsage)") &&
+                modelSection.contains("Сжать контекст сейчас") &&
+                modelSection.contains("Фокус сжатия (необязательно)") &&
+                modelSection.contains("Автосжатие контекста при"),
+        )
+        assertTrue(
+            "Раздел 2: строки-карточки модели, мышления, воркспейса, инструментов и квоты",
+            modelSection.contains("paramRow(\"Модель\"") &&
+                modelSection.contains("modelSelection.buttonLabel() ?: \"По умолчанию\"") &&
+                modelSection.contains("chooseModel()") &&
+                modelSection.contains("paramRow(\"Уровень размышлений\"") &&
+                modelSection.contains("reasoningSelection.buttonLabel() ?: \"Авто\"") &&
+                modelSection.contains("chooseReasoningEffort()") &&
+                modelSection.contains("paramRow(\"Рабочее пространство\"") &&
+                modelSection.contains("workspaceSelection.buttonLabel() ?: \"Авто\"") &&
+                modelSection.contains("chooseWorkspace()") &&
+                modelSection.contains("paramRow(\"Инструменты сессии\", toolsetsPresenter.chipLabel())") &&
+                modelSection.contains("showToolsetsDialog()") &&
+                modelSection.contains("paramRow(\"Квота провайдера\", quotaPresenter.model().label)") &&
+                modelSection.contains("showQuotaDetails()"),
+        )
+        assertTrue(
+            "Раздел 3: режим активности, поиск по диалогу, озвучка и автоозвучка",
+            modelSection.contains("paramRow(\"Режим активности\", activityModeSelection.buttonLabel())") &&
+                modelSection.contains("chooseActivityMode()") &&
+                modelSection.contains("Найти текст в сообщениях") &&
+                modelSection.contains("openTranscriptSearch()") &&
+                modelSection.contains("Прочитать последний ответ вслух") &&
+                modelSection.contains("speakLastMessage()") &&
+                modelSection.contains("Автоозвучивание ответов") &&
+                modelSection.contains("toggleAutoSpeak()"),
+        )
+        assertTrue(
+            "Тап по строке-карточке закрывает окно и открывает выбор",
+            modelSection.contains("closeWindow()") &&
+                modelSection.contains("fun closeWindow()"),
         )
     }
 }

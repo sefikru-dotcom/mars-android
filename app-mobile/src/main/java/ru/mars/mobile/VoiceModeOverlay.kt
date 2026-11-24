@@ -1,0 +1,602 @@
+package ru.mars.mobile
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.text.TextUtils
+import android.widget.TextView
+
+/**
+ * Полноэкранный голосовой режим КАК СЛОЙ поверх экрана диалога, а не отдельная Activity.
+ *
+ * ## Почему не Activity (и это главное решение файла)
+ * Первая версия была отдельным экраном ([VoiceModeActivity]) — и она ломала сама себя:
+ * при её старте `LocalChatActivity` уходит в `onPause`, а там вызывается
+ * `voice.onPause()`, который **отменяет слушание и глушит озвучку**. То есть человек
+ * нажимал «разговор», экран открывался, и микрофон закрывался тем же кадром. Обойти это
+ * можно только флагом «мы открываем свой экран, не глуши», то есть исключением в чужой
+ * логике.
+ *
+ * Слой решает это без исключений: хост-активность остаётся на экране, её жизненный цикл
+ * не меняется, микрофон и синтез продолжают принадлежать тому же [LocalVoiceController].
+ * Второго микрофона, второго TTS и гонки за аудиофокус не возникает по построению.
+ *
+ * ## Что слой делает и чего не делает
+ * Рисует снимок [VoiceModeState] (переводит его в текст и цвет) и отдаёт нажатия хосту.
+ * Ни движков, ни разрешений, ни собственного состояния: закрыл — всё осталось как было.
+ *
+ * ## Фон — настоящая заставка, а не нарисованные пятна
+ * Первым слоем корня лежит [MarsSpaceBackgroundView] во весь экран в режиме голосового орба:
+ * глубокий космос, FBM-туманность, звёзды, кометы и рэлеевская корона считаются тем же
+ * GPU-шейдером, что и на заставке приложения, и пульсируют неоном фазы в такт речи
+ * ([setLevel] → `uVoiceLevel`). Планета в центре — фотореалистичный Марс из [VoiceModeOrbView];
+ * её гало концентрично диску, поэтому шар стоит ровно по центру композиции.
+ *
+ * [VoiceModeActivity] остаётся в дереве как самостоятельный экран для случая, когда
+ * голос нужен без диалога (например, с плитки быстрых действий). Этот класс от неё
+ * независим: логика подписей живёт в [VoiceModePresenter] и у них общая.
+ */
+internal class VoiceModeOverlay(activity: Activity) {
+
+    /** Куда слой отдаёт нажатия. Все вызовы — с UI-потока. */
+    interface Callbacks {
+        /** Основная кнопка: начать или закончить реплику. */
+        fun onMicTap()
+
+        /** Основная кнопка во время озвучки: немедленная тишина. */
+        fun onStopSpeech()
+
+        /** Крестик и системный «назад»: свернуть режим. */
+        fun onClose()
+
+        /** Вторая кнопка после неудачного хода. */
+        fun onRetry()
+
+        /**
+         * Тап по языковой пилюле: открыть выбор направления перевода.
+         *
+         * Слой не выбирает языки сам: список, запрет «тот же язык» и промпт живут в
+         * [TranslatePolicy], а шторка — в [TranslateSheet]. Здесь только кнопка.
+         */
+        fun onPickDirection()
+    }
+
+    private val context: Activity = activity
+
+    var callbacks: Callbacks? = null
+
+    /** Включён ли слой сейчас: хост решает по нему, перехватывать ли «назад». */
+    var isShowing: Boolean = false
+        private set
+
+    private val orb = VoiceModeOrbView(context)
+
+    private val phaseLabel = TextView(context).apply {
+        textSize = 17f
+        gravity = Gravity.CENTER
+        setTextColor(MarsTheme.TEXT)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    }
+
+    /** Строка подсказки: причина отказа или «можно повторить». Пустая — не рисуется. */
+    private val hintLabel = TextView(context).apply {
+        textSize = 13f
+        gravity = Gravity.CENTER
+        setTextColor(MarsTheme.TEXT_MUTED)
+        visibility = View.GONE
+    }
+
+    /** Услышанная реплика. Показывается, чтобы человек видел, что его поняли. */
+    private val userLine = TextView(context).apply {
+        textSize = 15f
+        gravity = Gravity.CENTER
+        setTextColor(MarsTheme.TEXT_EM)
+        setLineSpacing(dp(2).toFloat(), 1.05f)
+        // Стеклянная капсула, а не «текст в пустоте»: поверх космоса и звёзд строка без
+        // подложки терялась, и распознанную речь приходилось читать на ощупь.
+        background = capsule()
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        // Капсула, а не лента: три строки — предел, дальше многоточие. Иначе длинная реплика
+        // выдавила бы орб вверх и кнопка уехала бы из-под большого пальца.
+        maxLines = LINE_MAX
+        ellipsize = TextUtils.TruncateAt.END
+        visibility = View.GONE
+    }
+
+    /** Начало ответа: целиком он читается на слух, экран не должен стать лентой. */
+    private val assistantLine = TextView(context).apply {
+        textSize = 15f
+        gravity = Gravity.CENTER
+        setTextColor(MarsTheme.TEXT_MUTED)
+        setLineSpacing(dp(2).toFloat(), 1.05f)
+        // Та же капсула, что у реплики человека: две строки диалога читаются как пара
+        // «вопрос — ответ», а не как два случайных абзаца на фоне планеты.
+        background = capsule()
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        maxLines = LINE_MAX
+        ellipsize = TextUtils.TruncateAt.END
+        visibility = View.GONE
+    }
+
+    private val primaryButton = pill().apply {
+        setOnClickListener {
+            val screen = VoiceModePresenter.render(lastState, transcript = showTranscript)
+            when (screen.action) {
+                VoiceModeAction.START, VoiceModeAction.FINISH -> callbacks?.onMicTap()
+                VoiceModeAction.STOP -> callbacks?.onStopSpeech()
+                VoiceModeAction.NONE -> Unit
+            }
+        }
+    }
+
+    /**
+     * Контейнер кнопок: вторая («Повторить») показывается только после неудачи, и
+     * удобнее скрывать весь блок, чем считать его высоту вручную.
+     */
+    private val buttons = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+    }
+
+    private val retryButton = pill(heightDp = SECONDARY_HEIGHT_DP).apply {
+        text = RETRY_LABEL
+        setOnClickListener { callbacks?.onRetry() }
+    }
+
+    /** Крестик: свернуть. Текстовая кнопка, а не иконка: иконки в проекте — свои drawable. */
+    private val closeButton = TextView(context).apply {
+        text = CLOSE_LABEL
+        textSize = 15f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        contentDescription = CLOSE_DESCRIPTION
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        setOnClickListener { close() }
+    }
+
+    /**
+     * Верхняя панель одной стеклянной капсулой: направление перевода слева, «Свернуть» справа.
+     *
+     * Раньше это были две подписи прямо на фоне: на светлом участке кадра они сливались со
+     * звёздами и планетой, а «Свернуть» ещё и попадала под системный жест. Капсула даёт обеим
+     * контрастную подложку и общий край экрана.
+     */
+    private val topPanel = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = capsule()
+        setPadding(dp(6), dp(4), dp(6), dp(4))
+    }
+
+    /**
+     * Пилюля направления перевода: «Перевод выкл.» или «Рус → Англ».
+     *
+     * Стоит слева от крестика, а не в нижнем блоке: язык — это режим, в котором идёт
+     * разговор, и он должен быть виден всё время, а не только когда человек дотянется
+     * до нижних кнопок. Доступность зеркалит состояние: скринридер читает, включён ли
+     * перевод, а не только пару языков.
+     */
+    private val directionLabel = TextView(context).apply {
+        textSize = 13f
+        setTextColor(MarsTheme.TEXT_MUTED)
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        // min-width: 0 — иначе длинная подпись распирает шапку слоя.
+        minimumWidth = 0
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        setPadding(dp(10), dp(8), dp(10), dp(8))
+        setOnClickListener { callbacks?.onPickDirection() }
+    }
+
+    /** Показывать ли текст реплик. Слух — основной канал, но видеть услышанное важно. */
+    private var showTranscript: Boolean = true
+
+    /** Последний снимок: нужен кнопке, чтобы понять, что делать при нажатии. */
+    private var lastState: VoiceModeState = VoiceModeState()
+
+    /** Неон текущей фазы: один цвет на орб и на 3D-фон (см. [VoiceNeonPalette]). */
+    private var neon: Int = VoiceNeonPalette.IDLE
+
+    /** Последняя амплитуда речи 0..1: её же получает фон при смене фазы. */
+    private var level: Float = 0f
+
+    /**
+     * Корень слоя.
+     *
+     * Фон больше не глухая серая панель [MarsTheme.GLASS_PANEL]: первым слоем лежит настоящая
+     * 3D-заставка приложения ([MarsSpaceBackgroundView]) во весь экран, включённая в режим
+     * голосового орба. Именно она рисует глубокий космос, FBM-туманность, звёзды, кометы и
+     * рэлеевскую корону — и пульсирует неоном фазы в такт речи. Цвет корня — только запасной
+     * кадр на случай, если GL-поверхность ещё не поднялась.
+     */
+    val root: FrameLayout = FrameLayout(context).apply {
+        setBackgroundColor(MarsSpaceShaderPolicy.COLOR_VOID_TOP)
+        visibility = View.GONE
+        isClickable = true
+        // Фон перехватывает тапы: иначе нажатие мимо кнопки проваливалось бы в чат.
+        setOnClickListener { }
+    }
+
+    /**
+     * Живой космос заставки на весь экран разговора.
+     *
+     * Не `MarsSpaceBackgroundView.wrap(...)`: слой — это уже `FrameLayout` поверх чужого экрана,
+     * и оборачивать его второй раз значило бы держать две GL-поверхности. Здесь заставка — просто
+     * первый ребёнок корня, поэтому весь её газ, звёзды и неон оказываются ПОЗАДИ планеты и
+     * капсул, а не внутри квадрата орба.
+     */
+    private val spaceBg = MarsSpaceBackgroundView(context).apply {
+        isClickable = false
+        isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        // Маленькая планета на горизонте уступает место настоящему Марсу в центре.
+        setVoiceOrbMode(true)
+    }
+
+    init {
+        // Большой светящийся шар в центре — самая очевидная цель для пальца: тап по нему делает
+        // ровно то же, что основная кнопка (начать реплику, закончить её, заглушить ответ).
+        // Раньше орб был чистой графикой (`isClickable = false`), и человек, ткнув в него,
+        // не получал ничего — приходилось искать кнопку под шаром.
+        orb.isClickable = true
+        orb.isFocusable = true
+        orb.contentDescription = ORB_DESCRIPTION
+        orb.setOnClickListener { view ->
+            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            primaryButton.performClick()
+        }
+
+        val column = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        column.addView(
+            orb,
+            LinearLayout.LayoutParams(dp(ORB_DP), dp(ORB_DP)),
+        )
+        column.addView(phaseLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(18)
+        })
+        column.addView(hintLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(6)
+        })
+
+        buttons.addView(
+            primaryButton,
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(PRIMARY_HEIGHT_DP)).apply { topMargin = dp(24) },
+        )
+        buttons.addView(
+            retryButton,
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(SECONDARY_HEIGHT_DP)).apply { topMargin = dp(10) },
+        )
+        buttons.visibility = View.GONE
+
+        /*
+         * Компоновка из трёх независимых слоёв, а не из одной колонки с Gravity.BOTTOM.
+         *
+         * Раньше орб, подпись фазы, реплики и кнопки жили в одном LinearLayout, прижатом к низу:
+         * стоило появиться строке userLine/assistantLine, как весь блок вырастал вверх и планета
+         * уезжала. Теперь орб с подписью — отдельный слой со Gravity.CENTER (он стоит ровно по
+         * центру экрана и не двигается, что бы ни появлялось ниже), а реплики и кнопки — свой
+         * слой у нижней кромки, под большим пальцем.
+         */
+        val bottomBlock = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        bottomBlock.addView(userLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(12)
+        })
+        bottomBlock.addView(assistantLine, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(8)
+        })
+        bottomBlock.addView(buttons, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // Фон — первым ребёнком: заставка обязана оказаться под планетой и капсулами.
+        root.addView(spaceBg, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.CENTER
+            leftMargin = dp(24)
+            rightMargin = dp(24)
+        })
+        root.addView(bottomBlock, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.BOTTOM
+            bottomMargin = dp(24)
+            leftMargin = dp(20)
+            rightMargin = dp(20)
+        })
+        // Исходное состояние — «выключен»: до первого показа слоя направление ещё
+        // не выбрано, и подпись не должна обещать перевод, которого нет.
+        renderDirection(null)
+        // Верхняя панель — одной капсулой: направление слева (растягивается), «Свернуть» справа.
+        topPanel.addView(directionLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        topPanel.addView(closeButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        root.addView(topPanel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            gravity = Gravity.TOP
+            topMargin = dp(12)
+            leftMargin = dp(12)
+            rightMargin = dp(12)
+        })
+    }
+
+    /**
+     * Подпись языковой пары. null — перевод выключен («Перевод выкл.»).
+     *
+     * Отдельным методом, а не полем состояния: направление живёт в экране и сохраняется
+     * в настройках, слой о нём не помнит — иначе после поворота экрана подпись
+     * разошлась бы с тем, что реально уходит в промпт.
+     */
+    fun renderDirection(direction: TranslateDirection?) {
+        val label = if (direction == null) {
+            DIRECTION_OFF
+        } else {
+            TranslatePolicy.shortLabel(direction)
+        }
+        directionLabel.text = label
+        directionLabel.contentDescription = if (direction == null) {
+            DIRECTION_OFF_DESCRIPTION
+        } else {
+            "Перевод: ${TranslatePolicy.directionLabel(direction)}. Нажмите, чтобы изменить"
+        }
+        directionLabel.setTextColor(
+            if (direction == null) MarsTheme.TEXT_MUTED else MarsTheme.ACCENT,
+        )
+        // Пока переводим — цвет акцента: режим отличается от обычного разговора на глаз.
+        directionLabel.visibility = View.VISIBLE
+    }
+
+    /**
+     * Показать слой поверх [parent] (обычно `scaffold.root`). Идемпотентно.
+     *
+     * Показ включает **непрерывный разговор**: «Разговор» — это диалог, а не одна реплика.
+     * Микрофон открывается сразу (человек вошёл говорить), а после каждого ответа Марса
+     * [LocalVoiceController] откроет его сам — тянуться к кнопке «Говорить» больше не нужно.
+     */
+    fun show(parent: ViewGroup) {
+        if (parent.indexOfChild(root) < 0) {
+            parent.addView(root, ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+        root.visibility = View.VISIBLE
+        isShowing = true
+        // Слой мог быть показан сразу после паузы активности: снимаем паузу ДО первого кадра,
+        // иначе орб и фон остались бы стоять, пока хост не позовёт onResume.
+        orb.resumeMotion()
+        spaceBg.resumeMotion()
+        render(lastState)
+        val channel = LocalVoiceController.active()
+        channel?.continuousConversation = true
+        // Живая громкость речи → неоновая пульсация планеты: подписка на время показа слоя,
+        // потому что в чате этот колбэк никто не слушает, а кадры орба там не нужны.
+        channel?.onAudioLevel = { level -> setLevel(level) }
+        // Фаза меняется не только от кадров ленты. «Стоп» гасит озвучку в контроллере, а лента
+        // в этот момент уже не меняется — без этой подписки орб оставался бы в «Говорю…» с
+        // кнопкой «Стоп» поверх тишины, то есть кнопка выглядела бы нерабочей.
+        channel?.onStateObserver = { next -> if (isShowing) renderPhase(next) }
+        // Модель распознавания (23 МиБ) греется именно здесь: человек уже выбрал голосовой
+        // режим, и ждать загрузку на первом слове он не должен.
+        channel?.warmUpAsrInBackground()
+        if (channel != null && channel.state().phase == LocalVoicePhase.IDLE) {
+            channel.startListening()
+        }
+    }
+
+    /**
+     * Свернуть слой.
+     *
+     * Непрерывный разговор выключается вместе с ним: в обычном чате микрофон по-прежнему
+     * «одна реплика на одно нажатие». Открытая реплика закрывается — человек вернулся в чат,
+     * а его продолжали бы слушать.
+     */
+    fun hide() {
+        root.visibility = View.GONE
+        isShowing = false
+        // Орб гаснет: невидимый слой не должен крутить кадры в фоне (батарея).
+        orb.render(VoiceModeTone.IDLE, pulses = false)
+        val channel = LocalVoiceController.active()
+        channel?.continuousConversation = false
+        // Слой скрыт — подписка на громкость снимается: орба на экране нет, кадры не нужны.
+        channel?.onAudioLevel = null
+        // Наблюдатель фазы тоже снимается: скрытый слой не должен перерисовываться (и держать
+        // ссылку на своё View-дерево) после закрытия разговора.
+        channel?.onStateObserver = null
+        setLevel(0f)
+        // Гасим захват в любой фазе, а не только в LISTENING: при голосовом перебивании
+        // микрофон открыт и в SPEAKING, и «свернул разговор» не должен оставить его слушать.
+        if (channel != null) channel.cancelListening()
+    }
+
+    /** Крестик: сначала сообщаем хосту (он может остановить речь), потом прячемся. */
+    private fun close() {
+        callbacks?.onClose()
+        hide()
+    }
+
+    /**
+     * Отрисовать снимок. Идемпотентно и безопасно до показа: снимок копится в [lastState]
+     * и применяется в момент [show].
+     */
+    fun render(state: VoiceModeState) {
+        lastState = state
+        val screen = VoiceModePresenter.render(state, transcript = showTranscript)
+        phaseLabel.text = screen.phaseLabel
+        phaseLabel.setTextColor(toneColor(screen.tone))
+        orb.render(screen.tone, pulses = state.orbPulses)
+        // Тот же неон уходит в 3D-фон: корона планеты и туманность вспыхивают одним цветом.
+        neon = VoiceNeonPalette.of(screen.tone)
+        spaceBg.setVoiceState(level, neon)
+
+        showText(hintLabel, screen.hint)
+        showText(userLine, screen.userLine)
+        showText(assistantLine, screen.assistantLine)
+
+        primaryButton.text = screen.primaryLabel
+        primaryButton.isEnabled = screen.primaryEnabled
+        primaryButton.alpha = if (screen.primaryEnabled) 1f else DISABLED_ALPHA
+        primaryButton.background = pillBackground(screen.primaryEnabled)
+        primaryButton.contentDescription = screen.contentDescription
+
+        buttons.visibility = View.VISIBLE
+        retryButton.visibility = if (screen.showRetry) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Смена фазы канала — без ожидания кадра хоста.
+     *
+     * Хост перерисовывает слой на каждое изменение ЛЕНТЫ (дельты стрима), но не на каждое
+     * изменение фазы. Нажатие «Стоп» — ровно тот случай, когда лента уже стоит, а звук и
+     * подпись обязаны измениться тем же кадром: иначе орб продолжает говорить «Говорю…» с
+     * живой кнопкой «Стоп», и человек нажимает её второй раз, считая, что не сработало.
+     *
+     * Строки диалога сохраняются из последнего снимка хоста: контроллер о них не знает (он
+     * отдаёт только партиал), а подменять показанный ответ пустой строкой значило бы «мигать»
+     * транскриптом на каждой смене фазы.
+     */
+    private fun renderPhase(next: LocalVoiceState) {
+        val userLine = next.partial.ifBlank { lastState.userLine }
+        render(lastState.copy(phase = next.phase, notice = next.notice, userLine = userLine))
+    }
+
+    /**
+     * Амплитуда микрофона 0..1: и орб, и 3D-туманность заставки дышат по речи.
+     *
+     * Один вход — два потребителя, и оба получают одно и то же число: корона планеты и неоновая
+     * туманность вокруг неё обязаны вспыхивать синхронно, иначе экран выглядит как два
+     * независимых индикатора.
+     */
+    fun setLevel(level: Float) {
+        val next = MarsSpaceShaderPolicy.voiceLevel(level)
+        if (next == this.level) return
+        this.level = next
+        orb.setLevel(next)
+        spaceBg.setVoiceState(next, neon)
+    }
+
+    /**
+     * Экран ушёл в фон: кадры останавливаются, состояние слоя сохраняется.
+     *
+     * Раньше здесь стоял `orb.render(IDLE, pulses = false)`, то есть пауза ещё и ПЕРЕКРАШИВАЛА
+     * орб в покой: на возврате снимок применялся заново, и орб вспыхивал из рубинового `IDLE` в
+     * цвет текущей фазы — хотя человек всего лишь свернул и развернул приложение. Теперь пауза
+     * останавливает движение, не трогая фазу: [VoiceModeOrbView.pauseMotion] не меняет ни тон, ни
+     * цели, и переход продолжается с того же места.
+     */
+    fun onPause() {
+        orb.pauseMotion()
+        spaceBg.pauseMotion()
+    }
+
+    /** Экран вернулся: снимок применяется заново (орб снова дышит, если есть фаза). */
+    fun onResume() {
+        spaceBg.resumeMotion()
+        orb.resumeMotion()
+        render(lastState)
+    }
+
+    /**
+     * Цвет подписи фазы.
+     *
+     * Раньше здесь стояли статусные роли ([MarsTheme.STATUS_ONLINE] зелёный, `STATUS_WARNING`
+     * жёлтый, [MarsTheme.STATUS_INFO] голубой): на тёплом Марсе подпись «Говорю» светилась
+     * холодным голубым и спорила с планетой — тот же резкий разнобой, что был в палитре орба.
+     * Теперь подпись берёт неон фазы и приглушает его к текстовому цвету на 55%: она меняется
+     * вместе с короной, остаётся читаемой на стекле и не выпадает из гаммы. Покой — приглушённый
+     * текст: в покое сообщать нечего, и цветной акцент там был бы шумом.
+     */
+    private fun toneColor(tone: VoiceModeTone): Int = when (tone) {
+        VoiceModeTone.IDLE -> MarsTheme.TEXT_MUTED
+        else -> VoiceNeonPalette.lerpColor(VoiceNeonPalette.of(tone), MarsTheme.TEXT, TONE_TEXT_MIX)
+    }
+
+    /** Текст либо прячется целиком: пустая строка держала бы высоту и рвала ритм. */
+    private fun showText(view: TextView, text: String?) {
+        if (text.isNullOrBlank()) {
+            view.visibility = View.GONE
+        } else {
+            view.text = text
+            view.visibility = View.VISIBLE
+        }
+    }
+
+    private fun pill(heightDp: Int = PRIMARY_HEIGHT_DP): TextView = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 16f
+        setTextColor(MarsTheme.TEXT_STRONG)
+        isClickable = true
+        isFocusable = true
+        minHeight = dp(heightDp)
+        background = pillBackground(enabled = true)
+    }
+
+    private fun pillBackground(enabled: Boolean) = MarsTheme.pill(
+        context,
+        if (enabled) MarsTheme.ACCENT_BG else MarsTheme.SURFACE_SUBTLE,
+        strokeColor = if (enabled) MarsTheme.ACCENT_BORDER else MarsTheme.BORDER,
+    )
+
+    /**
+     * Стеклянная капсула для текста поверх космоса.
+     *
+     * [MarsTheme.glassSurface], а не [MarsTheme.card] с полупрозрачным цветом: у стекла верхний
+     * слой плотнее нижнего, поэтому и «просвечивание» есть, и контраст держится на любом участке
+     * кадра — включая яркий лимб планеты за спиной.
+     */
+    private fun capsule() = MarsTheme.glassSurface(
+        context,
+        radiusDp = CAPSULE_RADIUS_DP,
+        fill = MarsTheme.GLASS_FILL,
+        strokeColor = MarsTheme.GLASS_STROKE,
+    )
+
+    private fun dp(value: Int): Int = MarsTheme.dp(context, value)
+
+    private companion object {
+        /** Подпись, когда перевод выключен: режим виден, но не мешает. */
+        const val DIRECTION_OFF = "Перевод выкл."
+
+        /** Описание для скринридера: что произойдёт по нажатию. */
+        const val DIRECTION_OFF_DESCRIPTION = "Перевод выключен. Нажмите, чтобы включить"
+
+        /**
+         * Размер квадрата орба.
+         *
+         * Было 232 dp при `PLANET_RATIO = 0.49` — сам шар получался 113 dp, меньше трети ширины
+         * экрана, и владелец справедливо просил «сделать планету чуть больше». 300 dp вместе с
+         * `PLANET_RATIO = 0.66` даёт диск ~194 dp: планета, а не значок.
+         */
+        const val ORB_DP = 300
+        const val PRIMARY_HEIGHT_DP = 56
+        const val SECONDARY_HEIGHT_DP = 48
+
+        /** Радиус стеклянных капсул: достаточно круглый для «пилюли», но не «таблетка». */
+        const val CAPSULE_RADIUS_DP = 18
+
+        /** Предел строк в капсуле реплики: транскрипт не должен превращать экран в ленту. */
+        const val LINE_MAX = 3
+        const val DISABLED_ALPHA = 0.65f
+        const val CLOSE_LABEL = "Свернуть"
+        const val CLOSE_DESCRIPTION = "Свернуть голосовой режим"
+
+        /** Орб теперь нажимается: скринридер обязан сказать, что именно он делает. */
+        const val ORB_DESCRIPTION = "Планета Марс. Нажмите, чтобы говорить или остановить ответ"
+        const val RETRY_LABEL = "Повторить"
+
+        /**
+         * Сколько текстового цвета подмешано в неон подписи фазы.
+         *
+         * 0.55 — подпись остаётся узнаваемо «своей» по фазе, но уходит из чистого неона в
+         * приглушённый пастельный тон: чистый неон на стекле читался как подсветка, а не как текст.
+         */
+        const val TONE_TEXT_MIX = 0.55f
+    }
+}

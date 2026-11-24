@@ -11,6 +11,9 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-moshi:2.9.0")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     testImplementation("junit:junit:4.13.2")
+    // OwnerProfile читает JSON через org.json: на устройстве он в android.jar, а в
+    // JVM-тестах отсутствует, и тесты молча уходили в «пропущено» через assumeTrue.
+    testImplementation("org.json:json:20240303")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
 }

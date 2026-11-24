@@ -170,6 +170,11 @@ internal fun ChatActivity.startSendStream(
                 // field недоступен, и `::voiceInterruptChannel.isInitialized` там не компилируется.
                 if (voiceTurn) bindVoiceChannelToSession(ensured.sessionId)
                 if (targetSessionId == null && !hadSession) {
+                    // The created session's model is bound as SESSION truth only.
+                    // ModelSelection keeps the user's explicit pick apart from it, so
+                    // this server answer can no longer wipe `explicit_model_pick` — that
+                    // wipe was exactly why the first turn of a new chat fell back to
+                    // the profile default (haiku).
                     modelSelection.setSessionModel(ensured.model, ensured.modelProvider)
                     modelBtn?.text = modelSelection.buttonLabel() ?: "Модель"
                 }

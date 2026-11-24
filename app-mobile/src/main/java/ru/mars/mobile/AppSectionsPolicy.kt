@@ -32,6 +32,8 @@ object AppSectionsPolicy {
         AppDestination.SKILLS -> "ic_nav_skills"
         AppDestination.ANALYTICS -> "ic_nav_insights"
         AppDestination.SPACES -> "ic_nav_spaces"
+        // Локальный чат: диалог идёт к провайдеру напрямую, без сервера Марса.
+        AppDestination.LOCAL -> "ic_nav_local"
         AppDestination.SETTINGS -> "ic_nav_settings"
     }
 

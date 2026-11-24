@@ -307,4 +307,115 @@ class SpeechContentFilterTest {
         assertTrue(out.contains("второе"))
         assertFalse(out.contains("#"))
     }
+
+    // --- волна 20: отступы, списки, пунктуация -----------------------------------------------
+
+    @Test
+    fun `bullet markers never reach the engine as punctuation`() {
+        val out = filter.stripForSpeech("- первый\n  - вложенный\n• третий")
+        assertFalse("маркер списка не должен дойти до синтеза: $out", out.contains("-"))
+        assertFalse("bullet glyph must be gone", out.contains("•"))
+        assertTrue(out.contains("первый"))
+        assertTrue(out.contains("вложенный"))
+        assertTrue(out.contains("третий"))
+    }
+
+    @Test
+    fun `numbered list keeps its number and loses the indent`() {
+        val out = filter.stripForSpeech("План:\n   1. первое\n   2. второе")
+        assertTrue("номер пункта сохраняется: $out", out.contains("1. первое"))
+        assertFalse("отступ не должен остаться", out.contains("   1."))
+        assertTrue(out.contains("2. второе"))
+    }
+
+    @Test
+    fun `line breaks become one speakable line`() {
+        val out = filter.stripForSpeech("Готово\nДальше проверяю логи\n\nи всё.")
+        assertFalse("переводы строк дают синтезатору долгие паузы: $out", out.contains("\n"))
+        assertTrue("строка без точки получает точку: $out", out.contains("Готово."))
+        assertTrue(out.contains("Дальше проверяю логи."))
+        assertTrue(out.endsWith("и всё."))
+    }
+
+    @Test
+    fun `line break after punctuation does not double the pause`() {
+        val out = filter.stripForSpeech("Первое предложение.\nВторое предложение.")
+        assertEquals("Первое предложение. Второе предложение.", out)
+    }
+
+    @Test
+    fun `indented block loses leading spaces`() {
+        val out = filter.stripForSpeech("    Отступ четыре пробела\n        и восемь.")
+        assertFalse("двойных пробелов быть не должно: $out", out.contains("  "))
+        assertTrue(out.startsWith("Отступ"))
+    }
+
+    @Test
+    fun `doubled punctuation collapses`() {
+        val out = filter.stripForSpeech("Привет .. как дела ,, — — ?!")
+        assertFalse("сдвоенная пунктуация остаётся: $out", out.contains(".."))
+        assertFalse(out.contains(",,"))
+        assertFalse(out.contains("—"))
+        assertFalse("пробел перед знаком", out.contains(" ?"))
+        assertEquals("Привет. как дела?", out)
+    }
+
+    @Test
+    fun `dash becomes a comma pause and is never spoken`() {
+        val out = filter.stripForSpeech("Марс — это ассистент.")
+        assertFalse("тире не должно доехать до синтеза: $out", out.contains("—"))
+        assertEquals("Марс, это ассистент.", out)
+    }
+
+    @Test
+    fun `box drawing and status emoji are dropped`() {
+        val out = filter.stripForSpeech("│ шаг 1 ─── шаг 2 ═══ конец ⏳ 🎙")
+        listOf("│", "─", "═", "⏳", "🎙").forEach {
+            assertFalse("декоративный символ «$it» остался: $out", out.contains(it))
+        }
+        assertTrue(out.contains("шаг 1"))
+        assertTrue(out.contains("конец"))
+    }
+
+    @Test
+    fun `quotes and brackets are removed but their text is kept`() {
+        val out = filter.stripForSpeech("Он сказал «проверь» (и это важно).")
+        assertFalse(out.contains("«"))
+        assertFalse(out.contains("»"))
+        assertFalse(out.contains("("))
+        assertTrue(out.contains("проверь"))
+        assertTrue(out.contains("и это важно"))
+    }
+
+    @Test
+    fun `code placeholder keeps its parentheses`() {
+        val out = filter.stripForSpeech("Смотри:\n```kt\nval x = 1\n```\nГотово.")
+        assertTrue("фраза о коде произносится целиком: $out", out.contains(SpeechContentFilter.CODE_PLACEHOLDER))
+        assertFalse(out.contains("val x"))
+    }
+
+    @Test
+    fun `stripForSpeech and filterForSpeech agree`() {
+        val input = "# Итоги\n\n- **первый** пункт\n- второй пункт\n\nГотово ✅"
+        assertEquals(filter.filterForSpeech(input), filter.stripForSpeech(input))
+    }
+
+    @Test
+    fun `long markdown answer becomes flat speech`() {
+        val input = """
+            ## Отчёт
+
+            - Проверил **три** сервера — всё чисто.
+            - Перезапустил сервис: 12% CPU.
+
+            Готово.
+        """.trimIndent()
+        val out = filter.stripForSpeech(input)
+        assertFalse("переводы строк остались: $out", out.contains("\n"))
+        assertFalse(out.contains("  "))
+        assertFalse(out.contains("-"))
+        assertFalse(out.contains("#"))
+        assertTrue(out.contains("Проверил три сервера, всё чисто."))
+        assertTrue(out.contains("Перезапустил сервис: 12% CPU."))
+    }
 }

@@ -16,8 +16,9 @@ import androidx.core.view.ViewCompat
  * поведение проверяется в JVM-тестах, а этот файл остаётся тонким.
  *
  * Что важно и почему:
- * - размер кнопки не трогаем: layout-параметры задаёт каркас композера (34 dp), и менять их
- *   при смене фазы значит дёргать строку ввода на каждом переходе;
+ * - размер кнопки не трогаем: layout-параметры задаёт каркас композера (36 dp — единый ряд
+ *   со скрепкой и звездой отправки), и менять их при смене фазы значит дёргать строку ввода
+ *   на каждом переходе;
  * - активная кнопка красная с ПОСТОЯННОЙ обводкой: заливка [MarsTheme.ACCENT] + обводка
  *   [MarsTheme.ACCENT_HOVER] толщиной [VoiceDialogPresentationPolicy.ACTIVE_STROKE_DP].
  *   Обводка не анимируется и не пульсирует — «постоянная» значит одинаковая все три фазы;
@@ -35,8 +36,10 @@ object VoiceMicButtonRenderer {
         if (button == null) return
         button.setImageDrawable(ContextCompat.getDrawable(context, ui.iconRes))
         // На красной заливке тёмная иконка не читается — активная фаза рисует светлую.
+        // В покое иконка в едином тоне со скрепкой ([MarsTheme.TEXT_EM]): обе второстепенные
+        // кнопки композера выглядят одинаково благородно-тёмными.
         button.imageTintList = ColorStateList.valueOf(
-            if (ui.active) MarsTheme.TEXT_STRONG else MarsTheme.TEXT_MUTED
+            if (ui.active) MarsTheme.TEXT_STRONG else MarsTheme.TEXT_EM
         )
         button.background = background(context, active = ui.active)
         button.contentDescription = ui.contentDescription
@@ -44,16 +47,24 @@ object VoiceMicButtonRenderer {
     }
 
     /**
-     * Фон кнопки. Неактивная — прозрачная, как в каркасе (кнопка не «весит» в композере).
-     * Активная — красная заливка с постоянной обводкой; маска ripple остаётся круглой.
+     * Фон кнопки.
+     *
+     * Неактивная — тёмный стеклянный ореол [MarsTheme.COMPOSER_ACTION_BG] с тонкой гранью
+     * [MarsTheme.COMPOSER_ACTION_BORDER]: ровно тот же тон и та же грань, что у скрепки, —
+     * две второстепенные кнопки композера обязаны читаться как одна пара. Активная — заливка
+     * [MarsTheme.ACCENT] с ПОСТОЯННОЙ обводкой [MarsTheme.ACCENT_HOVER]; маска ripple
+     * остаётся круглой в обоих случаях.
      */
     fun background(context: Context, active: Boolean): RippleDrawable {
         val dp = { value: Int -> MarsTheme.dp(context, value) }
         val normal = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(if (active) MarsTheme.ACCENT else android.graphics.Color.TRANSPARENT)
             if (active) {
+                setColor(MarsTheme.ACCENT)
                 setStroke(dp(VoiceDialogPresentationPolicy.ACTIVE_STROKE_DP), MarsTheme.ACCENT_HOVER)
+            } else {
+                setColor(MarsTheme.COMPOSER_ACTION_BG)
+                setStroke(dp(INACTIVE_STROKE_DP), MarsTheme.COMPOSER_ACTION_BORDER)
             }
         }
         val mask = GradientDrawable().apply {
@@ -62,4 +73,7 @@ object VoiceMicButtonRenderer {
         }
         return RippleDrawable(ColorStateList.valueOf(MarsTheme.RIPPLE), normal, mask)
     }
+
+    /** Обводка неактивной кнопки: заметно, но тоньше акцентной — иерархия не перевёрнута. */
+    const val INACTIVE_STROKE_DP = 1
 }

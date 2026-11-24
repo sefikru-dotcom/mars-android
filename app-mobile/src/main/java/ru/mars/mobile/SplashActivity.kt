@@ -23,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
+import ru.mars.network.repository.PushTapRouting
 
 /**
  * Фирменная заставка запуска: фон Марса на полной яркости, планета в неоновом
@@ -70,6 +71,18 @@ class SplashActivity : ComponentActivity() {
     private var leaving = false
     private var navigated = false
 
+    /**
+     * Диалог, о котором сообщил тап по push-уведомлению; null — обычный запуск.
+     *
+     * FCM-сообщение с блоком `notification` в фоне показывает системный трей, и
+     * тап по нему запускает LAUNCHER-активность (эту) со ВСЕМИ ключами `data` в
+     * `intent.extras`: `session_id`, `url = "session/<sid>"`,
+     * `tag = "hermes-<sid>"`. Адресат считается один раз в [onCreate] через
+     * [PushTapRouting.extractSessionId] и дальше используется и для мгновенного
+     * маршрута, и для переноса в целевой Intent.
+     */
+    private var pushSessionId: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Тема приходит из манифеста (SplashTheme). Бары перекрашиваем в фон
@@ -80,6 +93,7 @@ class SplashActivity : ComponentActivity() {
 
         reducedMotion = MotionPolicy.isReducedMotion(animatorDurationScale())
         store = AndroidKeyStoreCredentialStore(this)
+        pushSessionId = pushSessionIdFrom(intent)
         setContentView(buildContent())
 
         startedAtMs = SystemClock.elapsedRealtime()
@@ -170,7 +184,7 @@ class SplashActivity : ComponentActivity() {
             Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
         ).apply { bottomMargin = dp(WORD_BOTTOM_MARGIN_DP) })
         contentColumn = column
-        return root
+        return MarsSpaceBackgroundView.wrap(this, root)
     }
 
     /**
@@ -261,6 +275,15 @@ class SplashActivity : ComponentActivity() {
     private fun scheduleRoute() {
         if (leaving) return
         routeTick?.let(handler::removeCallbacks)
+        routeTick = null
+        // Тап по пушу конкретного диалога: адресат уже известен, credential
+        // прочитан — ждать нижнюю границу показа (MIN_VISIBLE_MS) незачем.
+        // Человек выбрал экран тапом по уведомлению, и заставка для него сейчас
+        // только задержка: переходим сразу, без фейда.
+        if (hasPushTarget() && hasCredential && targetReady) {
+            leaveForPush()
+            return
+        }
         val elapsed = SystemClock.elapsedRealtime() - startedAtMs
         when (val decision = SplashPolicy.decisionFor(elapsed, targetReady, reducedMotion)) {
             is SplashPolicy.Decision.Hold -> {
@@ -272,6 +295,21 @@ class SplashActivity : ComponentActivity() {
             }
             SplashPolicy.Decision.Go -> leave()
         }
+    }
+
+    /**
+     * Немедленный уход по тапу на пуш: без фейда и без нижней границы показа.
+     *
+     * Отдельно от [leave], потому что там длительность гашения — решение
+     * [SplashPolicy.fadeOutMs]; здесь маршрут уже принят тапом пользователя, и
+     * любая анимация только откладывает нужный диалог.
+     */
+    private fun leaveForPush() {
+        if (leaving) return
+        leaving = true
+        routeTick?.let(handler::removeCallbacks)
+        routeTick = null
+        navigate()
     }
 
     /**
@@ -317,6 +355,12 @@ class SplashActivity : ComponentActivity() {
     /**
      * Открывает целевой экран по [SplashRoute]; повторный вызов игнорируется.
      *
+     * Ветка [SplashRoute.Destination.CHAT] неоднородна: тап по пуш-уведомлению
+     * ([hasPushTarget]) ведёт прямо в конкретный диалог ([ChatActivity] с
+     * [ChatActivity.EXTRA_OPEN_SESSION_ID]), а обычный запуск приложения — на
+     * страницу «Диалоги» ([ChatSessionsActivity]), чтобы человек начинал с
+     * выбора диалога, а не с пустого «Нового чата».
+     *
      * Перекрёстный фейд задаётся явно: без него система берёт дефолтную
      * анимацию перехода темы (на HyperOS — «всплытие» с затемнением), и стык
      * двух брендовых экранов читается как рывок.
@@ -326,13 +370,59 @@ class SplashActivity : ComponentActivity() {
         if (navigated) return
         navigated = true
         val target = when (SplashRoute.destinationFor(hasCredential)) {
-            SplashRoute.Destination.CHAT -> ChatActivity::class.java
+            // Тап по пуш-уведомлению ведёт сразу в конкретный диалог; обычный запуск
+            // приложения открывает страницу «Диалоги» ([ChatSessionsActivity]), а не
+            // пустой «Новый чат» — владелец начинает работу с выбора диалога.
+            SplashRoute.Destination.CHAT ->
+                if (hasPushTarget()) ChatActivity::class.java else ChatSessionsActivity::class.java
             SplashRoute.Destination.LOGIN -> MainActivity::class.java
         }
-        startActivity(Intent(this, target))
+        startActivity(targetIntent(target))
         overridePendingTransition(R.anim.mars_fade_in, R.anim.mars_fade_out)
         finish()
     }
+
+    /**
+     * Есть ли адресат push-тапа: известная сессия из data-payload либо наше действие
+     * «Ответить». Обе ветки означают, что человек уже выбрал диалог уведомлением, и
+     * маршрут обязан идти в [ChatActivity], а не в список диалогов.
+     */
+    private fun hasPushTarget(): Boolean =
+        pushSessionId != null || PushReplyPolicy.matchesAction(intent?.action)
+
+    /**
+     * Целевой Intent с перенесённым контекстом запуска.
+     *
+     * Пустой `Intent(this, target)` выбрасывал всё, с чем приложение запустили:
+     * при тапе по системному FCM-уведомлению адресат диалога лежит в
+     * `intent.extras` (`session_id`, `url`, `tag`) и в `intent.data` (deep-link),
+     * и без переноса чат открывался бы как «Новый чат». Поэтому extras и data
+     * копируются как есть, а распознанный адресат дополнительно кладётся в
+     * [ChatActivity.EXTRA_OPEN_SESSION_ID] — по этому ключу
+     * `restoreOpenSession` открывает нужный диалог.
+     */
+    private fun targetIntent(target: Class<*>): Intent {
+        val outgoing = Intent(this, target)
+        intent?.extras?.let { outgoing.putExtras(it) }
+        intent?.data?.let { outgoing.data = it }
+        pushSessionId?.let { outgoing.putExtra(ChatActivity.EXTRA_OPEN_SESSION_ID, it) }
+        return outgoing
+    }
+
+    /**
+     * Адресат push-тапа из интента запуска; null — обычный старт.
+     *
+     * Ключи читаются «сырыми»: системный трей переносит data-payload FCM в
+     * extras без переименования, а `PushReplyPolicy.EXTRA_SESSION_ID` покрывает
+     * случай, когда интент собран нашей же кнопкой «Ответить».
+     */
+    private fun pushSessionIdFrom(src: Intent?): String? = PushTapRouting.extractSessionId(
+        explicitExtra = src?.getStringExtra(ChatActivity.EXTRA_OPEN_SESSION_ID),
+        sessionId = src?.getStringExtra(KEY_SESSION_ID)
+            ?: src?.getStringExtra(PushReplyPolicy.EXTRA_SESSION_ID),
+        url = src?.getStringExtra(KEY_URL) ?: src?.dataString,
+        tag = src?.getStringExtra(KEY_TAG),
+    )
 
     /** Системный масштаб анимаций — тот же источник reduce motion, что у остального UI. */
     private fun animatorDurationScale(): Float = Settings.Global.getFloat(
@@ -367,5 +457,14 @@ class SplashActivity : ComponentActivity() {
 
         /** Запас на случай, если анимация гашения не доиграла. */
         const val FADE_GUARD_MS = 400L
+
+        /**
+         * Ключи data-payload FCM как их переносит системный трей в extras
+         * LAUNCHER-интента: сервер (`api/push_fcm.py`) шлёт `session_id`, `url`
+         * (`session/<sid>`) и `tag` (`hermes-<sid>`) без переименования.
+         */
+        const val KEY_SESSION_ID = "session_id"
+        const val KEY_URL = "url"
+        const val KEY_TAG = "tag"
     }
 }

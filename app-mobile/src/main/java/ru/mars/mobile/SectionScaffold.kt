@@ -3,6 +3,7 @@ package ru.mars.mobile
 import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -13,7 +14,7 @@ import androidx.core.view.WindowInsetsCompat
 /** Shared shell for section screens: safe-area, header, back and refresh. */
 object SectionScaffold {
     data class Parts(
-        val root: LinearLayout,
+        val root: FrameLayout,
         val content: LinearLayout,
         /** Индикатор загрузки шапки: спиннер (STANDARD) или точка (COMPACT). */
         val progress: View,
@@ -128,6 +129,6 @@ object SectionScaffold {
 
         val content = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-        return Parts(root, content, progress, statusLine)
+        return Parts(MarsSpaceBackgroundView.wrap(activity, root), content, progress, statusLine)
     }
 }

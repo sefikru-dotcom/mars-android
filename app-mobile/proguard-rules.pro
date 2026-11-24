@@ -71,3 +71,22 @@
 # минифицируется, поэтому дебажные тесты этого не видят).
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -dontwarn com.k2fsa.sherpa.onnx.**
+
+# --- Колбэк synthesize в native: сигнатура ищется по ИМЕНИ, а не по интерфейсу ---
+# libsherpa-onnx-jni.so зовёт колбэк через GetMethodID с ТОЧНОЙ сигнатурой
+# invoke([F)Ljava/lang/Integer; и падает процессом (SIGABRT) на любом расхождении:
+#   NoSuchMethodError: no non-static method "Lk8/b;.invoke([F)Ljava/lang/Integer;"
+# R8 при слиянии классов заменяет тип возврата лямбды на java.lang.Object, JNI метод
+# не находит и зовёт abort() — приложение схлопывается, а не бросает исключение.
+# Проверено на POCO 29.10: падение только в release, в debug незаметно.
+#
+# ВАЖНО: keep нужен для СПЕЦИАЛИЗИРОВАННОГО метода (Integer invoke(float[])), а не для
+# мостового (Object invoke(Object)). Если оставить мостовой, R8 выбрасывает настоящий —
+# проверено по dex: оставался только '(Ljava/lang/Object;)Ljava/lang/Object;', и JNI
+# снова не находил метод. Класс держим целиком: он маленький и целиком нужен JNI.
+-keep class ru.mars.mobile.tts.SynthesisCallback { *; }
+-keepclassmembers class * implements kotlin.jvm.functions.Function1 {
+    java.lang.Integer invoke(float[]);
+}
+-keep class kotlin.jvm.functions.Function1 { *; }
+-dontwarn kotlin.jvm.functions.Function1

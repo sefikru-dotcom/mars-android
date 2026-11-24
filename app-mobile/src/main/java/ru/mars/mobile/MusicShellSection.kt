@@ -113,7 +113,7 @@ internal fun MusicActivity.buildView(): View {
     // Bottom Player Bar
     root.addView(buildPlayerBar(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
-    return root
+    return MarsSpaceBackgroundView.wrap(this, root)
 }
 
 /**

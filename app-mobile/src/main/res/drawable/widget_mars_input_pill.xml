@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Капсула быстрого ввода в виджете («Спросить Марс…» и чип «Диалоги»).
+
+    Стекло, а не заливка: 8% белого на тёмном фоне читается как полупрозрачная
+    поверхность над космосом, а грань #33FFFFFF отделяет поле от карточки виджета
+    без второго прямоугольника. Радиус 18dp — «пилюля», паритет с композером чата.
+
+    Ripple-обёртка обязательна: это RemoteViews, у него нет setOnTouchListener,
+    единственная обратная связь на тап — фон-ripple, который система отрисует сама.
+-->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/mars_glass_stroke">
+
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="18dp" />
+            <solid android:color="#14FFFFFF" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/mars_glass_stroke" />
+        </shape>
+    </item>
+
+</ripple>

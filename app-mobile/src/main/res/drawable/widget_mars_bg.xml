@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Фон виджета Марса: глубокий космический обсидиан с деликатной рубиновой гранью.
+
+    Слои снизу вверх:
+      1) основной прямоугольник — диагональный градиент от #0B0E17 к #0A0C14
+         (угол 315: свет приходит сверху-слева, как лимб планеты на бренд-кадре)
+         и тонкая рамка #4DEF4444 (30% рубинового акцента);
+      2) внутренний верхний блик #14FFFFFF → прозрачность: стеклянная грань,
+         не дающая виджету выглядеть плоской заливкой.
+
+    Радиус 22dp — тот же, что у карточек экранов (MarsTheme.card), поэтому виджет
+    читается как часть приложения, а не как чужой прямоугольник на домашнем экране.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="22dp" />
+            <gradient
+                android:angle="315"
+                android:centerColor="#ED0A0C14"
+                android:endColor="#E60B0E17"
+                android:startColor="#F20B0E17"
+                android:type="linear" />
+            <stroke
+                android:width="1dp"
+                android:color="#4DEF4444" />
+        </shape>
+    </item>
+
+    <item
+        android:bottom="1dp"
+        android:left="1dp"
+        android:right="1dp"
+        android:top="1dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="21dp" />
+            <gradient
+                android:angle="270"
+                android:endColor="#00000000"
+                android:startColor="#14FFFFFF"
+                android:type="linear" />
+        </shape>
+    </item>
+
+</layer-list>

@@ -20,6 +20,7 @@ import ru.mars.network.model.MusicTrack
 import ru.mars.network.model.SessionUsage
 import ru.mars.network.repository.CompressionSummary
 import ru.mars.network.repository.LiveEventsRepository
+import ru.mars.network.repository.PushTapRouting
 import ru.mars.network.repository.SessionRepository
 
 class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
@@ -117,7 +118,13 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         set(value) {
             val previous = field
             field = value
-            if (previous != value) onActiveSessionChanged()
+            if (previous != value) {
+                onActiveSessionChanged()
+                // Виджет рабочего стола показывает ИМЕННО открытый диалог: смена адресата —
+                // единственная точка, где его подпись и адресат тапа обязаны обновиться сразу,
+                // иначе тап по карточке вёл бы во вчерашний чат.
+                syncWidgetState()
+            }
         }
 
     /**
@@ -161,6 +168,16 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal val firstSessionGate = FirstSessionGate(firstSessionFlow)
 
     internal var explicitStatus: String? = null
+
+    /**
+     * Ответ из шторки, ждущий загрузки своего диалога.
+     *
+     * Класть текст в поле ввода сразу нельзя: `restoreComposerDraft()` затрёт его
+     * черновиком загружаемого диалога, а `drafts.onSessionSwitch` сохранит предустановленный
+     * текст как черновик ПРЕДЫДУЩЕГО, то есть отправит его не туда. Поэтому текст ждёт
+     * здесь, пока сессия загрузится, и отправляется только после.
+     */
+    internal var pendingPushReply: String? = null
 
     /**
      * Транзиентная строка статуса префилл-контекста (SSE `context_status`,
@@ -213,6 +230,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal lateinit var voiceOutput: VoiceOutputController
     /** Серверный TTS (POST /api/tts) с фолбэком на [speechEngine] — движок контроллера. */
     internal lateinit var serverTtsEngine: ServerTtsSpeechEngine
+
+    /**
+     * Темп речи серверного чата.
+     *
+     * Отдельное поле от настроек: клиенты синтеза читают его лямбдой на каждую реплику
+     * ([ChatInitSection]), поэтому менять значение можно в любой момент — пересоздавать
+     * клиентов не нужно.
+     */
+    internal var voiceProsody: VoiceProsody = VoiceProsody()
     internal lateinit var serverTtsPlayback: AndroidServerTtsPlayback
     /**
      * Потоковая озвучка: дельты ответа → фразы → звук, не дожидаясь конца хода. Живёт
@@ -227,6 +253,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
      * «ход озвучивается» и «аудио сейчас звучит» — разные вопросы (см. [StreamSpeechLifecycle]).
      */
     internal val streamSpeech = StreamSpeechLifecycle()
+    /**
+     * Последнее показанное событие потоковой озвучки (подмена голоса / пропущенная фраза).
+     *
+     * Нужно, чтобы одна и та же новость не переписывала строку статуса на каждой фразе: при
+     * отказе обоих каналов очередь сообщает о каждой, и без дедупликации текст «фраза не
+     * озвучена» выдавливал бы подсказку фазы до конца хода. Сбрасывается на старте и отмене
+     * хода — новый ответ снова имеет право рассказать о подмене.
+     */
+    internal var lastStreamSpeechNotice: String? = null
     /** TTS init callback may fire before the controller exists (sync construction failure). */
     internal var speechEngineInitResult: Boolean? = null
     internal lateinit var voiceSession: VoiceSessionController
@@ -424,6 +459,12 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Голос и темп — ДО поднятия голосового стека: клиенты синтеза читают это поле лямбдой
+        // на каждую реплику, и пустое значение означало, что выбранный в шторке голос в
+        // серверном чате не звучал НИКОГДА (объявлено и ни разу не присвоено — ровно та
+        // «настройка, которая меняется визуально»). Порядок здесь важен: `initializeVoiceStack`
+        // ниже строит движки, и до этой строки они видели бы дефолт.
+        voiceProsody = VoiceProsodyPrefs(this).load()
         initializeChatStores()
         initializeVoiceStack()
         initializeScreenControllers()
@@ -435,7 +476,18 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
         loadWorkspaces()
         // Пересоздание экрана (поворот/тема/смерть процесса): открытый диалог восстанавливается
         // из savedInstanceState; на холодном старте savedInstanceState == null -> новый чат.
+        // Тап по системному FCM-уведомлению приносит адресат «сырыми» ключами data
+        // (`session_id`, `url`, `tag`), а не нашим extra: распознанный диалог фиксируем в
+        // интенте ДО восстановления, иначе restoreOpenSession нечего открывать.
+        resolvePushSessionId(intent)?.let { sid -> intent?.putExtra(EXTRA_OPEN_SESSION_ID, sid) }
         restoreOpenSession(savedInstanceState)
+        // Действие виджета рабочего стола (compose / voice / new_chat) — только на ХОЛОДНОМ
+        // старте: интент переживает пересоздание экрана, и оставленный `new_chat` сработал бы
+        // повторно на повороте, стерев открытый диалог.
+        if (savedInstanceState == null) applyWidgetAction(consumeWidgetAction())
+        // Кнопка «Ответить» при убитом процессе приходит в onCreate, а не в onNewIntent:
+        // без этой строки первый в жизни ответ из шторки терялся бы молча.
+        if (PushReplyPolicy.matchesAction(intent?.action)) intent?.let(::handlePushReply)
     }
 
     override fun onDestroy() {
@@ -558,6 +610,7 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
     internal fun isGoalPlateReady(): Boolean = ::goalPlate.isInitialized
     internal fun isLiveRunPlateReady(): Boolean = ::liveRunPlate.isInitialized
     internal fun isVoiceSessionReady(): Boolean = ::voiceSession.isInitialized
+    internal fun isStatusViewReady(): Boolean = ::statusView.isInitialized
     /** Хост каркаса экрана: колбэки шапки/чипов/композера (объект создаётся один раз). */
     internal val scaffoldHost = createScaffoldHost()
 
@@ -610,17 +663,53 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
 
     /**
+     * Адресат push-тапа из интента; null — интент не про конкретный диалог.
+     *
+     * Один разбор на все входы: наш собственный [EXTRA_OPEN_SESSION_ID] (навигация
+     * приложения), затем сырые ключи data-payload FCM (`session_id`,
+     * `push_session_id` кнопки «Ответить»), затем deep-link (`url`/`dataString`) и
+     * `tag` (`hermes-<sid>`). Системный трей показывает уведомление сам, когда
+     * процесс спит, и переименовывать ключи не станет — поэтому «сырые» имена
+     * читаются здесь, а не в платформенном слое.
+     */
+    internal fun resolvePushSessionId(src: Intent?): String? {
+        if (src == null) return null
+        return PushTapRouting.extractSessionId(
+            explicitExtra = src.getStringExtra(EXTRA_OPEN_SESSION_ID),
+            sessionId = src.getStringExtra(KEY_FCM_SESSION_ID)
+                ?: src.getStringExtra(PushReplyPolicy.EXTRA_SESSION_ID),
+            url = src.getStringExtra(KEY_FCM_URL) ?: src.dataString,
+            tag = src.getStringExtra(KEY_FCM_TAG),
+        )
+    }
+
+    /**
      * Повторный вход в уровень диалога (корень списка под стеком переиспользуется
      * флагами CLEAR_TOP|SINGLE_TOP): новый [EXTRA_OPEN_SESSION_ID] открывает
      * соответствующий чат; без extra экран остаётся как есть.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Адресат считается ДО setIntent: системный тап по уведомлению приносит
+        // только сырые ключи data, и без нормализации в [EXTRA_OPEN_SESSION_ID]
+        // пересоздание экрана (поворот) потеряло бы диалог.
+        val requested = resolvePushSessionId(intent).orEmpty()
+        if (requested.isNotEmpty()) intent.putExtra(EXTRA_OPEN_SESSION_ID, requested)
         setIntent(intent)
-        val requested = intent.getStringExtra(EXTRA_OPEN_SESSION_ID)?.trim().orEmpty()
+        // Ответ из уведомления — отдельная ветка: интент приносит текст из RemoteInput,
+        // а не намерение показать диалог. Раньше он уходил бы в проверку session_id и
+        // просто открывал чат, теряя набранное.
+        if (PushReplyPolicy.matchesAction(intent.action)) {
+            handlePushReply(intent)
+            return
+        }
         if (requested.isNotEmpty() && requested != currentSessionId) {
             loadSessionById(requested)
         }
+        // Виджет: тап по капсуле/микрофону/звезде на уже открытом экране — то же действие,
+        // что и на холодном старте. Extra снимается сразу (consumeWidgetAction), поэтому
+        // повторная доставка интента не запустит действие второй раз.
+        applyWidgetAction(consumeWidgetAction())
     }
 
     /**
@@ -666,11 +755,14 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         override fun onTurnCompleted() {
             finishRecoveredTurn(speakFinalAnswer = true)
+            // Восстановленный ход завершён: последний ответ агента — новый текст виджета.
+            syncWidgetState()
         }
 
         /** Серверная ошибка хода уже в транскрипте (onStreamEvent → uiState.fail()). */
         override fun onTurnEndedInError() {
             finishRecoveredTurn(speakFinalAnswer = false)
+            syncWidgetState()
         }
 
         /** Стрим исчез серверно (404/истёкший журнал): placeholder снимается, история перезагружается. */
@@ -700,6 +792,9 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
             updateControls()
             updateNetworkBanner()
             flushOfflineQueue()
+            // Провал восстановления — тоже терминальное состояние хода: виджет не должен
+            // показывать превью, которого на экране уже нет.
+            syncWidgetState()
         }
     }
 
@@ -836,6 +931,15 @@ class ChatActivity : ComponentActivity(), MarsMusicPlayer.MarsMusicListener {
 
         /** Ключ savedInstanceState: диалог, открытый в момент пересоздания экрана. */
         internal const val KEY_OPEN_SESSION_ID = "open_session_id"
+
+        /**
+         * Ключи data-payload FCM как их переносит системный трей: сервер
+         * (`api/push_fcm.py`, `api/streaming.py`) шлёт `session_id`, `url`
+         * (`session/<sid>`) и `tag` (`hermes-<sid>`) без переименования.
+         */
+        private const val KEY_FCM_SESSION_ID = "session_id"
+        private const val KEY_FCM_URL = "url"
+        private const val KEY_FCM_TAG = "tag"
         /** Privately-stored plaintext data cleared on every auth-exit path (набор — [AuthExitStores]). */
         internal const val DRAFTS_PREFS = AuthExitStores.DRAFTS_PREFS
         private const val MUSIC_HISTORY_PREFS = AuthExitStores.MUSIC_HISTORY_PREFS

@@ -199,9 +199,22 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
             items.mapNotNull { (it as? Map<*, *>)?.let(::sessionItem) }
         }
 
+    /**
+     * Деталь диалога: `GET /api/session?session_id=<id>&resolve_model=1`.
+     *
+     * `resolve_model=1` ОБЯЗАТЕЛЕН: сервер (`api/routes.py`) вычисляет
+     * `effective_model`/`effective_provider` только при этом флаге. Без него сессии,
+     * у которых модель резолвится через профиль/дефолт/state.db, отдают `model: null`,
+     * и телефон показывал чужую модель (паритет с WebUI, который всегда просит резолв).
+     */
     suspend fun getSessionDetail(baseUrl: String, credential: ConsumedDeviceCredential, sessionId: String): SessionDetail? =
         withContext(Dispatchers.IO) {
-            val url = baseUrl.toHttpUrl().newBuilder().addPathSegments("api/session").addQueryParameter("session_id", sessionId).build().toString()
+            val url = baseUrl.toHttpUrl().newBuilder()
+                .addPathSegments("api/session")
+                .addQueryParameter("session_id", sessionId)
+                .addQueryParameter("resolve_model", "1")
+                .build()
+                .toString()
             val root = parseMap(execute(url, credential) ?: return@withContext null) ?: return@withContext null
             val s = (root["session"] as? Map<*, *>) ?: root
             detail(s, sessionId)
@@ -740,6 +753,41 @@ class SessionRepository(private val client: OkHttpClient = HttpClients.rest) : S
         return when (val wire = sessionOp(baseUrl, credential, "api/session/toolsets", fields)) {
             is WireBody -> SessionToolsetsOutcome.Success(toolsetNames(wire.body["enabled_toolsets"]))
             is WireError -> SessionToolsetsOutcome.Failure(wire.message)
+        }
+    }
+
+    /**
+     * Сохраняет выбранную модель в сессию: `POST /api/session/update` body
+     * `{"session_id": sid, "model": modelId, "model_provider": providerId}` —
+     * ровно та же ручка, которой WebUI закрепляет модель за диалогом.
+     *
+     * Зачем: без этого серверная сессия продолжала жить со старой моделью, и
+     * следующий ход из WebUI шёл на ней, хотя на телефоне человек выбрал другую.
+     * `model_provider` необязателен (для провайдеров без явного id сервер
+     * резолвит его сам), поэтому пустое значение просто не отправляется.
+     *
+     * Возвращает `true` только когда сервер подтвердил запрос (`WireBody`); отказ
+     * сервера и сетевой сбой — `false` (локальный выбор при этом остаётся валидным,
+     * вызывающий не показывает ошибку фонового сохранения).
+     */
+    suspend fun updateSessionModel(
+        baseUrl: String,
+        credential: ConsumedDeviceCredential,
+        sessionId: String,
+        model: String,
+        modelProvider: String?,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (sessionId.isBlank() || model.isBlank()) return@withContext false
+        val fields = mutableMapOf<String, Any?>(
+            "session_id" to sessionId,
+            "model" to model,
+        )
+        if (!modelProvider.isNullOrBlank()) {
+            fields["model_provider"] = modelProvider
+        }
+        when (sessionOp(baseUrl, credential, "api/session/update", fields)) {
+            is WireBody -> true
+            is WireError -> false
         }
     }
 

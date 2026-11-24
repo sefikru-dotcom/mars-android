@@ -25,13 +25,21 @@ import androidx.core.content.ContextCompat
  * прежним путём ([MarsGradients.glowRing]) — их вид не меняется ни на байт.
  */
 object MarsTheme {
-    // Primary palette
+    // Primary palette.
+    // Поверхности экрана — полупрозрачное обсидиановое стекло: сквозь них мягко
+    // просвечивает живой космос с красной планетой. Плотность (72–85%) подобрана
+    // замером по худшему пикселю кадра, а не на глаз: на 66–77% стекла мелкий
+    // TEXT_MUTED держит порог AA, ниже — проваливается на ярком лимбе.
     const val BG = 0xff07080b.toInt()
-    const val SIDEBAR = 0xff0c0e14.toInt()
-    const val SURFACE = 0xff10131b.toInt()
-    const val SURFACE_SUBTLE = 0xff141822.toInt()
-    const val SURFACE_CARD = 0xff161b28.toInt()
-    
+    /** Боковая шторка разделов: 85% стекла, читается как слой над кадром. */
+    const val SIDEBAR = 0xd80a0d14.toInt()
+    /** Панели, инпуты, кнопки шапки: 72% стекла. */
+    const val SURFACE = 0xb810141e.toInt()
+    /** Чипы, подложки, вторичные плашки: 66% стекла. */
+    const val SURFACE_SUBTLE = 0xa8141926.toInt()
+    /** Карточки диалогов, проектов, задач, мини-плеера: 77% стекла. */
+    const val SURFACE_CARD = 0xc4151b28.toInt()
+
     // Borders
     const val BORDER = 0xff212634.toInt()
     const val BORDER_SUBTLE = 0xff171c26.toInt()
@@ -50,22 +58,54 @@ object MarsTheme {
     /** Standard 20% white ripple for every interactive surface (buttons, icon buttons). */
     const val RIPPLE = 0x33ffffff.toInt()
 
+    // ---- Композер: тёмный космический ореол кнопок (паритет с WebUI `.send-btn`) ----
+    /**
+     * Ореол второстепенных кнопок композера (скрепка, микрофон): глубокое тёмно-кобальтовое
+     * стекло 72%, а не сплошная заливка. Кнопка на капсуле читается как отдельный слой над
+     * космосом, но не спорит с акцентом: акцент в композере один — звезда отправки.
+     */
+    const val COMPOSER_ACTION_BG = 0xB8121620.toInt()
+    /** Тонкая стеклянная грань второстепенных кнопок: 1dp, 15% белого. */
+    const val COMPOSER_ACTION_BORDER = 0x26FFFFFF
+    /**
+     * Глубокий тёмный ореол звезды отправки — паритет с WebUI
+     * `rgba(26, 16, 22, 0.85)`. Звезда живёт В тёмном ореоле: залитый ярко-красный круг
+     * съедал иконку и делал отправку «кнопкой-плашкой», а не главным действием капсулы.
+     */
+    const val SEND_HALO_BG = 0xD81A1018.toInt()
+    /** Деликатное рубиновое кольцо ореола звезды: 45% акцента, 1dp. */
+    const val SEND_HALO_BORDER = 0x73EF4444
+    /** Мягкое тёплое свечение самой звезды внутри тёмного ореола. */
+    const val SEND_STAR_TINT = 0xFFFCA5A5.toInt()
+    /** Ореол в фазе «останавливаю…»: тот же тёмный рубин, но плотнее и с акцентным кольцом. */
+    const val SEND_HALO_STOPPING_BG = 0xD82A1215.toInt()
+
     // ---- Стекло (паритет с app-tv) ----
     /**
-     * Подложка «стеклянной» карточки: 69% непрозрачности #10131B поверх кадра.
+     * Подложка «стеклянной» карточки: 72% непрозрачности #10141E поверх кадра.
      * Те же значения, что у TV (mars_glass_fill), — один бренд, один токен.
      *
-     * Почему не плотнее и не прозрачнее: 69% — замер по худшему пикселю фона
+     * Почему не плотнее и не прозрачнее: 72% — замер по худшему пикселю фона
      * (яркий лимб планеты). На нём [TEXT_MUTED] держит 4.83:1, то есть проходит
      * WCAG AA для мелкого текста; при 55% тот же текст падает до 3.94:1 и
      * подписи в карточках, лежащих на освещённой части планеты, перестают
      * читаться. Плотнее — стекло превращается в глухую заливку и теряет смысл.
      */
-    const val GLASS_FILL = 0xb010131b.toInt()
+    const val GLASS_FILL = 0xb810141e.toInt()
     /** Стекло под нажатием/фокусом: чуть светлее, геометрия та же. */
     const val GLASS_FILL_FOCUSED = 0xcc161c28.toInt()
     /** Hairline-рамка стекла: 20% белого. */
     const val GLASS_STROKE = 0x33ffffff.toInt()
+    /**
+     * Стеклянная панель модальных окон и шторок: 81% обсидиана.
+     *
+     * Плотнее карточек намеренно: диалог — поверхность, на которой принимают
+     * решение, и лежит он поверх затемнения 55%, а не поверх чистого кадра.
+     * 81% даёт космосу просвечивать по краям и держит контраст текста внутри.
+     */
+    const val GLASS_PANEL = 0xd010141e.toInt()
+    /** Чипы композера и шапки: 66% стекла — мельче карточек, но читаемы. */
+    const val GLASS_CHIP = 0xa8121723.toInt()
     /**
      * Приглушённый текст НА стекле. Обычный [TEXT_MUTED] (#8B95A5) на
      * полупрозрачной подложке даёт 4.83:1 на ярком лимбе, этот тон — 5.85:1.
@@ -79,18 +119,19 @@ object MarsTheme {
      * Прозрачного корня недостаточно. Оконный слой уже гасит кадр до 62%, но
      * часть текста лежит не в карточках, а прямо на фоне: подписи шапки,
      * статус-строки, чипы подсказок. На самом ярком участке лимба [TEXT_MUTED]
-     * на голом кадре даёт 2.25:1 — вдвое ниже порога. С этой вуалью (55%)
-     * тот же текст держит 4.55:1, [TEXT] — 12.6:1, а планета остаётся
-     * различимой: просвечивание есть, «мёртвой заливки» нет.
+     * на голом кадре даёт 2.25:1 — вдвое ниже порога. С этой вуалью (22%)
+     * тот же текст держит порог AA, [TEXT] — двузначный контраст, а планета
+     * остаётся сочной: просвечивание есть, «мёртвой заливки» нет.
      *
      * Почему не решено одним цветом окна: окно рисует и заставку, где кадр
      * обязан быть на полной яркости. Вуаль — свойство экрана, не окна.
      *
-     * 42%, а не 55%: 55% гасит кадр вдвое и вместе с окном превращает планету
-     * в тёмное пятно. На 42% стеклянная карточка на лимбе держит [TEXT_MUTED]
-     * 4.64:1 (порог AA), [TEXT] — 12.8:1, и при этом кадр остаётся живым.
+     * 22%, а не 42%: контент теперь лежит на полупрозрачном стекле (66–81%),
+     * и прежняя вуаль вместе с ним гасила кадр до «тёмного пятна» вместо
+     * планеты. 22% — лёгкая вуаль: фон читается как глубокий космос, а текст
+     * держат сами стеклянные подложки, а не затемнение экрана.
      */
-    const val SCREEN_VEIL = 0x6b07080b.toInt()
+    const val SCREEN_VEIL = 0x3805070c.toInt()
     
     // Text colors
     const val TEXT = 0xfff1f5f9.toInt()
@@ -103,16 +144,20 @@ object MarsTheme {
     const val THOUGHT_BORDER = 0x333b82f6.toInt()
     
     // Chat & Code
+    // Тона пузырей и карточек — тоже стекло: под ними живой кадр, поэтому
+    // непрозрачных значений здесь больше нет.
     const val USER_BUBBLE = 0xff1c2436.toInt()
     const val USER_BORDER = 0xff2b374e.toInt()
-    const val BOT_CARD = 0xff0f121a.toInt()
+    /** Карточка ответа Mars: 69% стекла, тон светлее кадра (иначе «плита»). */
+    const val BOT_CARD = 0xb00f131c.toInt()
     const val BOT_BORDER = 0xff1b2230.toInt()
-    const val CODE_BG = 0xff090b10.toInt()
+    /** Блок кода: 80% стекла — код читается на почти чёрном, но кадр виден. */
+    const val CODE_BG = 0xcc080a10.toInt()
     const val CODE_BORDER = 0xff1c2331.toInt()
 
     // Quote & divider (WebUI blockquote grammar: подложка + вертикальный бар)
     /** Подложка строки цитаты — тот же тон, что у inline-кода (surface_subtle). */
-    const val QUOTE_BG = 0xff141822.toInt()
+    const val QUOTE_BG = 0xb0141822.toInt()
     /** Вертикальный бар слева от цитаты. */
     const val QUOTE_BAR = 0xffef4444.toInt()
     /** Горизонтальный разделитель блоков: рисуется View 1dp, не глифом. */
@@ -261,6 +306,34 @@ object MarsTheme {
     }
 
     /**
+     * Кнопка отправки: овальный ТЁМНЫЙ ореол со звездой внутри (паритет с WebUI
+     * `.send-btn`: `rgba(26,16,22,.85)` + рубиновая грань `rgba(239,68,68,.45)`).
+     *
+     * Почему не [circleIconButton] с `bg = ACCENT`: залитый ярко-красный круг превращал
+     * главное действие капсулы в «ещё одну красную плашку», а звезда внутри него терялась.
+     * Тёмный ореол держит акцент кольцом и свечением иконки, поэтому звезда читается
+     * как звезда в космосе, а не как пиктограмма на красной бляшке.
+     *
+     * Фаза `stopping` (ход уже отменён, ответ ещё доигрывает) — тот же тёмный ореол, но
+     * плотнее ([SEND_HALO_STOPPING_BG]) и с акцентным кольцом [ACCENT]: кнопка обещает
+     * остановку, но не заливается красным целиком.
+     */
+    fun sendHaloBackground(context: Context, stopping: Boolean = false): RippleDrawable {
+        val fill = if (stopping) SEND_HALO_STOPPING_BG else SEND_HALO_BG
+        val ring = if (stopping) ACCENT else SEND_HALO_BORDER
+        val normal = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(fill)
+            setStroke(dp(context, 1), ring)
+        }
+        val mask = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(TEXT_STRONG)
+        }
+        return RippleDrawable(ColorStateList.valueOf(RIPPLE), normal, mask)
+    }
+
+    /**
      * Small circular status dot, tinted with a STATUS_* color — replaces the `●` text glyph
      * (font-dependent metrics/color across OEM skins, same anti-pattern as emojis). The caller
      * sets the layout size (8 dp matches the WebUI status bullets).
@@ -375,8 +448,29 @@ object MarsTheme {
     /** Tool call card: matte technical graphite gradient. */
     fun toolCallCard(context: Context): GradientDrawable = gradientCard(context, MarsGradients.TOOL_CARD)
 
-    /** Composer capsule: floating layered pill with a thin frame and a soft glow color. */
-    fun composerCapsule(context: Context): GradientDrawable = gradientCard(context, MarsGradients.COMPOSER_CAPSULE)
+    /**
+     * Капсула композера: полупрозрачное стекло с тонкой рамкой и мягким свечением.
+     *
+     * Спека [MarsGradients.COMPOSER_CAPSULE] остаётся непрозрачной и её держит
+     * контракт глубины (`MarsThemeDepthTest`), но на экране капсула обязана быть
+     * стеклом: сквозь неё видно кадр, иначе поле ввода читается как глухая плита
+     * поверх космоса. Поэтому здесь собирается собственная стеклянная спека:
+     * те же геометрия, угол и ореол, но заливка 78% и стеклянная рамка #55384664.
+     */
+    private val COMPOSER_GLASS = MarsGradients.GradientSpec(
+        name = "composerGlass",
+        startColor = 0xc8131722.toInt(),
+        endColor = 0xc80d1017.toInt(),
+        angle = MarsGradients.Angle.TOP_BOTTOM,
+        radiusDp = MarsGradients.CAPSULE_RADIUS_DP,
+        strokeColor = 0x55384664.toInt(),
+        strokeWidthDp = 1,
+        glowColor = MarsGradients.COMPOSER_GLOW,
+        paddingDp = 12,
+    )
+
+    /** Composer capsule: floating glass pill with a thin frame and a soft glow color. */
+    fun composerCapsule(context: Context): GradientDrawable = gradientCard(context, COMPOSER_GLASS)
 
     /**
      * Soft ambient glow behind a floating surface (e.g. composer): a translucent

@@ -1,0 +1,270 @@
+package ru.mars.mobile
+
+import android.app.Activity
+import android.app.Dialog
+import android.content.Context
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
+
+/**
+ * Лист действий над сообщением локального диалога: Копировать, Повторить, Повторить другой
+ * моделью, Изменить, Выбрать текст, Озвучить, Поделиться.
+ *
+ * Открывается долгим нажатием на сообщение (пузырь пользователя, карточка ассистента).
+ * Состав листа — только реально выполнимые пункты: пустое сообщение нечего копировать и
+ * шарить, «Повторить» существует лишь для последнего ответа ассистента (повторять середину
+ * диалога нечего — ход уже ушёл), «Озвучить» скрыт, когда на устройстве нет движка TTS,
+ * а «Повторить другой моделью» — когда список альтернатив пуст.
+ * «Изменить» есть только у своей реплики и только когда ход не идёт — правило живёт в
+ * [LocalChatEditPolicy.canEdit], лист его не пересчитывает.
+ * Мёртвых кнопок здесь нет по построению.
+ *
+ * Стилистика — [MarsDialog] (тот же лист пилюль, что у серверного чата), поэтому лист
+ * выглядит родным без единого нового цвета.
+ */
+internal object LocalChatActionsSheet {
+
+    /** Подпись пункта «Повторить» (последний ответ ассистента). */
+    const val RETRY_LABEL = "Повторить"
+
+    /**
+     * Повтор на другой модели: тот же вопрос, другой ответ.
+     *
+     * Отдельный пункт, а не выпадашка в «Повторить»: обычный повтор — действие в один тап
+     * (та же модель, тот же вопрос), и превращать его в выбор из списка значило бы
+     * замедлить самый частый случай.
+     */
+    const val RETRY_WITH_LABEL = "Повторить другой моделью"
+
+    /** Заголовок подсписка моделей. */
+    const val RETRY_WITH_TITLE = "Повторить на модели"
+
+    const val COPY_LABEL = "Копировать"
+    const val SELECT_LABEL = "Выбрать текст"
+
+    /**
+     * Правка своей реплики: текст уходит провайдеру заново, ответы после неё — в мусор.
+     *
+     * Отдельный пункт, а не «Повторить с правкой»: это разные намерения. «Повторить»
+     * переспрашивает тот же вопрос (человек ждёт другой ответ на то же), «Изменить» —
+     * исправляет сам вопрос (опечатка, забытое условие), и прежний ответ после этого
+     * недействителен.
+     */
+    const val EDIT_LABEL = "Изменить"
+    const val SPEAK_LABEL = "Озвучить"
+
+    /** Дописать обрезанный ответ с того места, где модель упёрлась в лимит токенов. */
+    /** Пункт «Открыть»: длинный ответ в отдельной панели. */
+    const val OPEN_LABEL: String = "Открыть"
+
+    const val CONTINUE_LABEL = "Продолжить"
+
+    /** Пересобрать ответ в файл DOCX/XLSX/TXT и отдать в «Поделиться». */
+    const val SAVE_FILE_LABEL = "Сохранить как файл"
+    const val SHARE_LABEL = "Поделиться"
+
+    /**
+     * Показать лист действий. [canRetry] — сообщение является последним ответом
+     * ассистента; [canSpeak] — на устройстве доступна озвучка.
+     *
+     * [models] — модели, доступные для повтора (готовый список от экрана: каталог
+     * провайдера плюс текущая), [currentModel] — модель этого ответа. Пункт «Повторить
+     * другой моделью» появляется только если есть ЧТО выбирать: сам по себе
+     * [currentModel] в списке не альтернатива, и мёртвой кнопки с единственным
+     * вариантом здесь не бывает.
+     */
+    fun show(
+        activity: Activity,
+        text: String,
+        canRetry: Boolean,
+        canSpeak: Boolean,
+        onCopy: () -> Unit,
+        onRetry: () -> Unit,
+        onSelectText: () -> Unit,
+        onSpeak: () -> Unit,
+        onShare: () -> Unit,
+        onSaveFile: (() -> Unit)? = null,
+        models: List<String> = emptyList(),
+        currentModel: String? = null,
+        onRetryWith: (String) -> Unit = {},
+        /**
+         * Предложить «Продолжить»: только когда модель упёрлась в лимит выходных токенов.
+         *
+         * Считает экран через [LocalContinuePolicy] — лист не решает, была ли обрезка,
+         * чтобы правило не разъехалось с [LocalChatActions] и с футером.
+         */
+        canContinue: Boolean = false,
+        onContinue: () -> Unit = {},
+        /**
+         * Предложить «Изменить»: своя реплика и ход не идёт.
+         *
+         * Решает экран через [LocalChatEditPolicy.canEdit]: лист не пересчитывает ленту
+         * и не знает, где она кончается, — правило обязано жить в одном месте, иначе
+         * лист однажды предложит пункт, который политика отклонит, и нажатие молча
+         * ничего не сделает.
+         */
+        canEdit: Boolean = false,
+        onEdit: () -> Unit = {},
+        /**
+         * Предложить «Открыть»: ответ достаточно крупный, чтобы читать его отдельно.
+         *
+         * Решает экран через [ArtifactPolicy.decide]: лист не считает строки и не разбирает
+         * markdown — иначе правило «что считать артефактом» разъехалось бы с панелью и
+         * тестами. Обычный ответ остаётся в ленте: открывать ради него панель — лишний шаг.
+         */
+        canOpenAsArtifact: Boolean = false,
+        onOpenAsArtifact: () -> Unit = {},
+    ) {
+        val hasText = text.isNotBlank()
+        val retryModels = alternatives(models, currentModel)
+        val actions = ArrayList<Pair<String, () -> Unit>>(8)
+        if (hasText) actions += COPY_LABEL to onCopy
+        // «Открыть» — до «Повторить»: у длинного ответа человек ищет «прочитать целиком»,
+        // а не «сгенерировать заново». Пункт не дублирует «Копировать»: там текст уходит
+        // в буфер, здесь — в панель с сохранением в файл.
+        if (canOpenAsArtifact && hasText) actions += OPEN_LABEL to onOpenAsArtifact
+        if (canRetry) actions += RETRY_LABEL to onRetry
+        if (canRetry && retryModels.isNotEmpty()) {
+            actions += RETRY_WITH_LABEL to { showModelChooser(activity, retryModels, onRetryWith) }
+        }
+        // Порядок из контракта волны: Копировать → Повторить → Изменить → Выбрать.
+        // «Изменить» стоит перед «Выбрать текст»: обе работают с текстом реплики,
+        // и глаз ищет их рядом, а не через «Озвучить» и «Поделиться».
+        if (canEdit && hasText) actions += EDIT_LABEL to onEdit
+        if (hasText) actions += SELECT_LABEL to onSelectText
+        if (hasText && canSpeak) actions += SPEAK_LABEL to onSpeak
+        if (hasText) actions += SHARE_LABEL to onShare
+        if (hasText && onSaveFile != null) actions += SAVE_FILE_LABEL to onSaveFile
+        if (canContinue && hasText) actions += CONTINUE_LABEL to onContinue
+        // Нечего предложить — не показываем пустой лист.
+        if (actions.isEmpty()) return
+
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(activity) { root ->
+            root.addView(MarsDialog.header(activity, "Действия с сообщением", null))
+            root.addView(
+                MarsDialog.pillStack(
+                    activity,
+                    actions.map { (label, action) ->
+                        label to {
+                            dialog?.dismiss()
+                            action()
+                        }
+                    },
+                )
+            )
+            emptyList()
+        }
+        dialog?.window?.setDimAmount(0.55f)
+    }
+
+    /**
+     * Альтернативы для повтора: пустые и совпадающие с текущей моделью выкинуты.
+     *
+     * Сравнение без учёта регистра и пробелов по краям: имена моделей в каталоге и в
+     * профиле приходят из разных мест и могут отличаться хвостовым пробелом — такой
+     * «другой» вариант дал бы повтор на той же модели.
+     */
+    internal fun alternatives(models: List<String>, currentModel: String?): List<String> {
+        val current = currentModel?.trim()?.lowercase()
+        return models
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it.lowercase() != current }
+            .distinct()
+    }
+
+    /** Подсписок моделей — тот же [MarsDialog.pillStack], без нового цвета. */
+    private fun showModelChooser(
+        activity: Activity,
+        models: List<String>,
+        onRetryWith: (String) -> Unit,
+    ) {
+        // Показ — следующим кадром: лист действий к этому моменту уже закрыт, и второй
+        // диалог не должен создаваться поверх ещё не снятого окна (на части прошивок
+        // такой диалог выходит без затемнения и без тени).
+        val host = activity.window?.decorView ?: return
+        host.post {
+            var dialog: Dialog? = null
+            // Экран мог закрыться между нажатием и этим кадром: падать из-за диалога
+            // поверх умершего окна нельзя (BadTokenException).
+            runCatching {
+                dialog = MarsDialog.show(activity) { root ->
+                    root.addView(MarsDialog.header(activity, RETRY_WITH_TITLE, null))
+                    root.addView(
+                        MarsDialog.pillStack(
+                            activity,
+                            models.map { model ->
+                                model to {
+                                    dialog?.dismiss()
+                                    onRetryWith(model)
+                                }
+                            },
+                        )
+                    )
+                    emptyList()
+                }
+                dialog?.window?.setDimAmount(0.55f)
+            }
+        }
+    }
+
+    /**
+     * «Выбрать текст»: сырой текст сообщения в отдельном листе, доступный для выделения.
+     *
+     * Почему отдельный диалог, а не выделение прямо в ленте: ответ ассистента — набор
+     * markdown-вьюх (абзацы, блоки кода, таблицы), выделение по ним ходит рвано, а долгое
+     * нажатие на карточке занято листом действий. Здесь текст один и копируется целиком.
+     */
+    fun showSelectableText(activity: Activity, text: String) {
+        if (text.isBlank()) return
+        var dialog: Dialog? = null
+        dialog = MarsDialog.show(activity) { root ->
+            root.addView(MarsDialog.header(activity, "Текст сообщения", null))
+            root.addView(selectableText(activity, text))
+            root.addView(
+                MarsDialog.buttonRow(
+                    activity,
+                    MarsDialog.secondaryButton(activity, "Закрыть") { dialog?.dismiss() },
+                ),
+            )
+            emptyList()
+        }
+    }
+
+    /**
+     * Прокручиваемый блок с выделяемым текстом: длинный ответ не растягивает лист на
+     * несколько экранов и не ломает разметку (max-height, изолированный скролл).
+     */
+    private fun selectableText(context: Context, text: String): View {
+        val metrics = context.resources.displayMetrics
+        val maxHeight = (metrics.heightPixels * 0.45f).toInt()
+        val body = TextView(context).apply {
+            this.text = text
+            textSize = 13.5f
+            setTextColor(MarsTheme.TEXT)
+            setLineSpacing(0f, 1.2f)
+            setTextIsSelectable(true)
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(context, 12), dp(context, 12), dp(context, 12), dp(context, 12))
+            background = MarsTheme.card(context, MarsTheme.CODE_BG, radiusDp = 12, strokeColor = MarsTheme.BORDER_MUTED)
+        }
+        val scroll = android.widget.ScrollView(context).apply {
+            isFillViewport = true
+            isHorizontalScrollBarEnabled = false
+            addView(body, LinearLayout.LayoutParams(-1, -2))
+        }
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
+            addView(
+                scroll,
+                LinearLayout.LayoutParams(-1, maxHeight).apply { bottomMargin = dp(context, 12) },
+            )
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int = MarsTheme.dp(context, value)
+}

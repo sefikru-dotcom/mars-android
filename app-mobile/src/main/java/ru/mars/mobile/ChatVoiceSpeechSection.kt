@@ -129,8 +129,65 @@ internal fun ChatActivity.isVoiceSpeakingNow(): Boolean =
  */
 internal fun ChatActivity.currentVoiceUi(): VoiceDialogUi {
     val loopState = if (isVoiceLoopReady() && voiceLoop.isActive) voiceLoop.state else null
+    // Одиночная запись (обычный тап по микрофону) живёт ВНЕ цикла: без этой ветки кнопка
+    // оставалась тускло-серой всю запись, и человек не понимал, нажалась ли она вообще.
+    if (loopState == null) manualVoiceUi()?.let { return it }
     val phase = voicePresentation.phaseFor(loopState, isVoiceSpeakingNow())
     return voicePresentation.uiFor(phase, voiceIcons)
+}
+
+/** Подпись статусной строки, пока идёт одиночная запись: что делать прямо сейчас. */
+internal const val VOICE_MANUAL_LISTENING_LABEL = "Слушаю — говорите… (нажмите, чтобы отправить)"
+
+/** Подпись статусной строки, когда запись уже закрыта и текст распознаётся. */
+internal const val VOICE_MANUAL_THINKING_LABEL = "Запись завершена — распознаю речь…"
+
+/** TalkBack: действие тапа во время записи (закончить и отправить), а не только цвет. */
+internal const val VOICE_MANUAL_LISTENING_DESCRIPTION =
+    "Идёт запись голоса. Нажмите, чтобы закончить и отправить"
+
+/** TalkBack: микрофон больше не слушает — идёт распознавание. */
+internal const val VOICE_MANUAL_THINKING_DESCRIPTION = "Распознаю речь"
+
+/**
+ * Вид кнопки и статуса на время ОДИНОЧНОГО голосового ввода (`voiceSession`), когда
+ * непрерывный диалог (`voiceLoop`, включается долгим нажатием) не запущен.
+ *
+ * `null` — одиночной сессии нет, и видом владеет цикл либо обычная строка чата. Так
+ * вызывающая сторона отличает «голосом сейчас заняты» от «просто тишина»: иначе статус
+ * «Слушаю…» висел бы на экране и после отправки.
+ *
+ * Фазы переиспользуются те же, что у диалога: LISTENING — микрофон открыт (ярко-красная
+ * кнопка со «стопом»), THINKING — запись закрыта, идёт распознавание (иконка «…»). Человек
+ * видит один и тот же язык состояний и в одиночном вводе, и в hands-free.
+ */
+internal fun ChatActivity.manualVoiceUi(): VoiceDialogUi? {
+    val state = if (isVoiceSessionReady()) voiceSession.state else VoiceSessionController.State.IDLE
+    if (state == VoiceSessionController.State.LISTENING) {
+        return VoiceDialogUi(
+            phase = VoiceDialogPhase.LISTENING,
+            active = true,
+            // «Стоп» вместо микрофона: тап сейчас ЗАКАНЧИВАЕТ запись, и иконка это обещает.
+            iconRes = R.drawable.ic_stop,
+            label = VOICE_MANUAL_LISTENING_LABEL,
+            contentDescription = VOICE_MANUAL_LISTENING_DESCRIPTION,
+            stateDescription = "Слушаю",
+            showsStopAffordance = true,
+        )
+    }
+    // Сеть уже работает (или сессия успела уйти в PROCESSING) — микрофон закрыт, идёт текст.
+    if (state == VoiceSessionController.State.PROCESSING || voiceTranscribeJob?.isActive == true) {
+        return VoiceDialogUi(
+            phase = VoiceDialogPhase.THINKING,
+            active = true,
+            iconRes = voiceIcons.thinking,
+            label = VOICE_MANUAL_THINKING_LABEL,
+            contentDescription = VOICE_MANUAL_THINKING_DESCRIPTION,
+            stateDescription = "Распознаю речь",
+            showsStopAffordance = false,
+        )
+    }
+    return null
 }
 
 /** Подпись для статусной строки; `null` — режим выключен, строкой владеет чат. */
@@ -238,6 +295,9 @@ internal fun ChatActivity.beginStreamSpeech() {
     // Новый ход — новая квота на «Проверяю…» и сброс «ответ уже звучал»: иначе второй ход
     // молчал бы про инструменты, а финал первого глушил бы озвучку второго.
     voiceTurnSpeech.onTurnStarted()
+    // Индикация озвучки — тоже на ход: подмена голоса в прошлом ответе не должна запрещать
+    // сообщить о ней в новом.
+    lastStreamSpeechNotice = null
 }
 
 /**
@@ -279,6 +339,8 @@ internal fun ChatActivity.endStreamSpeech() {
 /** Ход отменён/прерван/экран ушёл: тишина немедленно, хвост ответа не догоняет. */
 internal fun ChatActivity.cancelStreamSpeech() {
     streamSpeech.cancel()
+    // Отменённый ход не досказал индикацию: следующий ответ начнётся с чистого листа.
+    lastStreamSpeechNotice = null
     if (!isStreamSpeechReady()) return
     streamingSpeech.stop()
     if (isVoiceOutputReady()) voiceOutput.setExternalSpeaking(false)
@@ -346,8 +408,105 @@ internal fun ChatActivity.speakMessage(text: String) {
 internal fun ChatActivity.latestAssistantAnswer(): String? =
     uiState.messages.lastOrNull { it.role == "assistant" }?.text
 
+/**
+ * Реплику произнёс РЕЗЕРВ вместо выбранного голоса — сказать об этом человеку.
+ *
+ * Зачем отдельная точка, а не `statusView.text = …` в каждом движке: событие приходит из
+ * трёх мест (облако не ответило, локальная модель не поднялась, звучит платформа), а
+ * показать его нужно одной строкой и одним словарём ([VoiceSubstitutionNotice]). Молчаливая
+ * подмена голоса — подтверждённый дефект приёмки: человек выбирал «Алису», слышал робота и
+ * считал, что выбор не работает.
+ *
+ * Потокобезопасно: колбэки движков приходят с потока корутины синтеза, поэтому показ
+ * перекладывается на главный поток. Освобождённый экран ничего не пишет — поздний колбэк
+ * уже не должен трогать вьюхи.
+ */
+internal fun ChatActivity.showVoiceSubstitution(substitution: VoiceSubstitution) {
+    val text = VoiceSubstitutionNotice.text(substitution)
+    runOnUiThread {
+        if (isFinishing || isDestroyed) return@runOnUiThread
+        // Движок мог отказать раньше, чем экран построил статусную строку.
+        if (!isStatusViewReady()) return@runOnUiThread
+        statusView.text = text
+    }
+}
+
+/**
+ * Выбранный ПЛАТНЫЙ голос не прозвучал — сказать, чем именно прочитана фраза.
+ *
+ * Отдельная точка, а не [showVoiceSubstitution]: здесь причина приходит кодом отказа
+ * платного клиента (`no_plusvibe_profile` — провайдер не заведён, `no_api_key` — нет ключа,
+ * `timeout`, `transport`), и текст выбирает [VoiceSubstitutionNotice.paidUnavailable].
+ * Без этого сообщения выбор «Алисы» при ненастроенном профиле выглядел бы как «выбор не
+ * работает»: фразу молча читал нейро-резерв.
+ *
+ * Потокобезопасно по тем же правилам: колбэк приходит с потока корутины синтеза, а
+ * освобождённый экран ничего не пишет.
+ */
+internal fun ChatActivity.showPaidVoiceUnavailable(reason: String?) {
+    val text = VoiceSubstitutionNotice.paidUnavailable(reason)
+    runOnUiThread {
+        if (isFinishing || isDestroyed) return@runOnUiThread
+        if (!isStatusViewReady()) return@runOnUiThread
+        statusView.text = text
+    }
+}
+
 internal fun ChatActivity.speakLastMessage() {
     uiState.messages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() }?.let {
         speakMessage(it.text)
+    }
+}
+
+// --- Индикация потоковой озвучки -------------------------------------------------------------
+
+/**
+ * Фразу потокового ответа прочитал Piper вместо выбранного голоса.
+ *
+ * Тот же текст, что у неразрывной озвучки ([StreamSpeechNotice.LOCAL_FALLBACK]): подмена
+ * голоса — одно событие, и человек не должен видеть две разные формулировки одного сбоя в
+ * двух чатах.
+ */
+internal fun ChatActivity.showStreamSpeechFallback() {
+    showStreamSpeechNotice(StreamSpeechNotice.LOCAL_FALLBACK)
+}
+
+/**
+ * Фразу не удалось озвучить: облако отказало и локального резерва не было.
+ *
+ * Отдельно от [showStreamSpeechPhraseFailed] намеренно: здесь причина — не код сервера, а
+ * отсутствие резерва (модель не скачана / движок не поднялся), и человеку важно понять, что
+ * дело не в сети, а в том, что локального голоса на устройстве пока нет.
+ */
+internal fun ChatActivity.showStreamSpeechLocalFailure() {
+    showStreamSpeechNotice(StreamSpeechNotice.LOCAL_FAILED)
+}
+
+/** Фраза пропущена по конкретной причине отказа очереди — сказать об этом строкой статуса. */
+internal fun ChatActivity.showStreamSpeechPhraseFailed(reason: String) {
+    showStreamSpeechNotice(StreamSpeechNotice.phraseFailed(reason))
+}
+
+/**
+ * Показать событие потоковой озвучки один раз на ход.
+ *
+ * Почему с дедупликацией: при отказе обоих каналов очередь сообщает о КАЖДОЙ фразе, и без
+ * этого строка статуса переписывалась бы десятки раз одним и тем же текстом (а на длинном
+ * ответе — до конца хода, выдавливая подсказку фазы). Запоминается последний показанный
+ * текст; сбрасывается в [beginStreamSpeech]/[cancelStreamSpeech] — новый ход снова имеет
+ * право рассказать о подмене.
+ *
+ * Потокобезопасно: колбэки клиента синтеза приходят с потока корутины, поэтому показ
+ * перекладывается на главный поток; освобождённый экран ничего не пишет.
+ */
+private fun ChatActivity.showStreamSpeechNotice(text: String) {
+    if (text.isBlank()) return
+    runOnUiThread {
+        if (isFinishing || isDestroyed) return@runOnUiThread
+        // Экран мог ещё не построить статусную строку (движок отказал на старте).
+        if (!isStatusViewReady()) return@runOnUiThread
+        if (lastStreamSpeechNotice == text) return@runOnUiThread
+        lastStreamSpeechNotice = text
+        statusView.text = text
     }
 }

@@ -10,19 +10,39 @@ import ru.mars.network.repository.ServerTtsVoiceProfile
 import ru.mars.network.repository.ServerTtsVoices
 
 /**
- * Политика голоса: естественный Svetlana — основной, piper irina — только резерв.
+ * Политика голоса: основной голос — первый в цепочке, piper irina — только резерв.
  *
  * Требование Стефа: «естественный голос Svetlana — явный voice profile, irina fallback если
  * installed, не навязывать irina вместо желанного веб-голоса». Отсюда два главных теста:
  * порядок кандидатов и то, что `429`/`401` НЕ понижают профиль (иначе первая же очередь фраз
  * навсегда переключила бы диалог на локальный голос).
+ *
+ * Порядок в этих тестах задаётся ЦЕПОЧКОЙ БЕСПЛАТНЫХ голосов ([edgeChain]): основной голос
+ * приложения теперь платный PlusVibe, и смешивать «кто звучит по умолчанию» с «как понижаются
+ * бесплатные голоса» значило бы ломать проверку «после Светланы идёт Дмитрий» появлением
+ * платного профиля. Сам факт «основной первым» проверяется отдельным тестом.
  */
 class SpeechVoiceProfileSelectorTest {
 
     private var now = 1_000_000L
 
+    /**
+     * Цепочка понижения для тестов: три edge-голоса, платный Оникс и локальный резерв.
+     *
+     * Боевой каталог ([ServerTtsVoices.VOICE_DIALOG]) начинается с платной «Алисы» — её
+     * собственный отказ здесь не моделируется, потому что он не про порядок бесплатных
+     * голосов, а про маршрут платного канала.
+     */
+    private fun edgeChain(): List<ServerTtsVoiceProfile> = listOf(
+        ServerTtsVoices.NATURAL_SVETLANA,
+        ServerTtsVoices.NATURAL_DMITRY,
+        ServerTtsVoices.NATURAL_AVA,
+        ServerTtsVoices.PLUSVIBE_ONYX,
+        ServerTtsVoices.LOCAL_IRINA,
+    )
+
     private fun selector(
-        profiles: List<ServerTtsVoiceProfile> = ServerTtsVoices.VOICE_DIALOG,
+        profiles: List<ServerTtsVoiceProfile> = edgeChain(),
         localVoice: SpeechVoiceProfileSelector.LocalVoiceAvailability =
             SpeechVoiceProfileSelector.LocalVoiceAvailability.UNVERIFIED,
     ) = SpeechVoiceProfileSelector(
@@ -34,32 +54,66 @@ class SpeechVoiceProfileSelectorTest {
     )
 
     @Test
+    fun `product catalog starts with the paid primary voice`() {
+        // Боевой порядок: первый кандидат — основной голос приложения (PlusVibe Alice),
+        // и он же DEFAULT_VOICE. Это и есть «PlusVibe — основной голос».
+        val current = selector(profiles = ServerTtsVoices.VOICE_DIALOG).current()!!
+
+        assertEquals(ServerTtsVoices.PLUSVIBE_ALICE.id, current.id)
+        assertEquals(ServerTtsVoices.DEFAULT_VOICE, current)
+        assertEquals("plusvibe", current.engine)
+        assertEquals("Alice", current.voice)
+        assertEquals("elevenlabs-v4-tts", current.model)
+    }
+
+    @Test
     fun `natural svetlana is chosen first`() {
         val current = selector().current()!!
 
         assertEquals("natural-svetlana", current.id)
         assertEquals("edge", current.engine)
         assertEquals("ru-RU-SvetlanaNeural", current.voice)
-        assertEquals("+10%", current.rate)
+        assertEquals("+8%", current.rate)
     }
 
     @Test
-    fun `irina is the second candidate and is not forced over svetlana`() {
+    fun `irina is the last candidate and is not forced over the web voices`() {
         val candidates = selector().candidates()
 
-        assertEquals(listOf("natural-svetlana", "local-irina"), candidates.map { it.id })
-        assertEquals("piper", candidates[1].engine)
-        assertEquals("ru_RU-irina-medium", candidates[1].voice)
+        assertEquals(
+            listOf(
+                "natural-svetlana",
+                "natural-dmitry",
+                "natural-ava",
+                "plusvibe-onyx",
+                "local-irina",
+            ),
+            candidates.map { it.id },
+        )
+        assertEquals("piper", candidates.last().engine)
+        assertEquals("ru_RU-irina-medium", candidates.last().voice)
     }
 
     @Test
     fun `not installed local voice is never offered`() {
         val selector = selector(localVoice = SpeechVoiceProfileSelector.LocalVoiceAvailability.ABSENT)
 
-        assertEquals(listOf("natural-svetlana"), selector.candidates().map { it.id })
+        assertEquals(
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "plusvibe-onyx"),
+            selector.candidates().map { it.id },
+        )
 
         selector.setLocalVoiceInstalled(true)
-        assertEquals(listOf("natural-svetlana", "local-irina"), selector.candidates().map { it.id })
+        assertEquals(
+            listOf(
+                "natural-svetlana",
+                "natural-dmitry",
+                "natural-ava",
+                "plusvibe-onyx",
+                "local-irina",
+            ),
+            selector.candidates().map { it.id },
+        )
     }
 
     @Test
@@ -72,7 +126,16 @@ class SpeechVoiceProfileSelectorTest {
             SpeechVoiceProfileSelector.LocalVoiceAvailability.UNVERIFIED,
             selector.localVoiceAvailability,
         )
-        assertEquals(listOf("natural-svetlana", "local-irina"), selector.candidates().map { it.id })
+        assertEquals(
+            listOf(
+                "natural-svetlana",
+                "natural-dmitry",
+                "natural-ava",
+                "plusvibe-onyx",
+                "local-irina",
+            ),
+            selector.candidates().map { it.id },
+        )
 
         // Сервер отдал аудио — теперь это факт.
         selector.onAudio(ServerTtsVoices.LOCAL_IRINA)
@@ -98,7 +161,10 @@ class SpeechVoiceProfileSelectorTest {
         )
         // Даже после истечения паузы отсутствующий голос не предлагается: это факт, не таймаут.
         now += 10_000_000L
-        assertEquals(listOf("natural-svetlana"), selector.candidates().map { it.id })
+        assertEquals(
+            listOf("natural-svetlana", "natural-dmitry", "natural-ava", "plusvibe-onyx"),
+            selector.candidates().map { it.id },
+        )
     }
 
     @Test
@@ -152,11 +218,11 @@ class SpeechVoiceProfileSelectorTest {
         val demoted = selector.onUnavailable(natural, ServerTtsResult.Unavailable("http_400", 400))
 
         assertTrue(demoted)
-        assertEquals("local-irina", selector.current()!!.id)
+        assertEquals("natural-dmitry", selector.current()!!.id)
 
-        // Ровно до истечения долгого кулдауна irina остаётся, после — снова Svetlana.
+        // Ровно до истечения долгого кулдауна второй сетевой голос остаётся, после — снова Svetlana.
         now += 599_999L
-        assertEquals("local-irina", selector.current()!!.id)
+        assertEquals("natural-dmitry", selector.current()!!.id)
         now += 2L
         assertEquals("natural-svetlana", selector.current()!!.id)
     }
@@ -166,7 +232,7 @@ class SpeechVoiceProfileSelectorTest {
         val selector = selector()
 
         selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("transport"))
-        assertEquals("local-irina", selector.current()!!.id)
+        assertEquals("natural-dmitry", selector.current()!!.id)
 
         now += SpeechVoiceProfileSelector.DEFAULT_TRANSIENT_COOLDOWN_MS + 1
         assertEquals("natural-svetlana", selector.current()!!.id)
@@ -186,20 +252,23 @@ class SpeechVoiceProfileSelectorTest {
     }
 
     @Test
-    fun `both profiles unavailable means no candidate - caller falls back to system tts`() {
+    fun `all profiles unavailable means no candidate - caller falls back to system tts`() {
         val selector = selector()
         selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("http_404", 404))
+        selector.onUnavailable(ServerTtsVoices.NATURAL_DMITRY, ServerTtsResult.Unavailable("http_404", 404))
+        selector.onUnavailable(ServerTtsVoices.NATURAL_AVA, ServerTtsResult.Unavailable("http_404", 404))
+        selector.onUnavailable(ServerTtsVoices.PLUSVIBE_ONYX, ServerTtsResult.Unavailable("http_404", 404))
         selector.onUnavailable(ServerTtsVoices.LOCAL_IRINA, ServerTtsResult.Unavailable("http_404", 404))
 
         assertTrue(selector.candidates().isEmpty())
-        assertNull("третий голос не выдумывается", selector.current())
+        assertNull("ещё один голос не выдумывается", selector.current())
     }
 
     @Test
     fun `reset restores the natural voice`() {
         val selector = selector()
         selector.onUnavailable(ServerTtsVoices.NATURAL_SVETLANA, ServerTtsResult.Unavailable("http_404", 404))
-        assertEquals("local-irina", selector.current()!!.id)
+        assertEquals("natural-dmitry", selector.current()!!.id)
 
         selector.reset()
 
@@ -218,7 +287,7 @@ class SpeechVoiceProfileSelectorTest {
         assertEquals("natural-svetlana", failure.profileId)
         assertEquals("server_error", failure.reason)
         assertEquals(503, failure.httpCode)
-        assertEquals("local-irina", selector.current()!!.id)
+        assertEquals("natural-dmitry", selector.current()!!.id)
     }
 
     @Test

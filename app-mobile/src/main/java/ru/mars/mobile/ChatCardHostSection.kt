@@ -52,6 +52,10 @@ internal fun ChatActivity.createCardRendererHost(): ChatMessageCardRenderer.Host
             this@createCardRendererHost.copyMessage(text)
         }
 
+        override fun replyToMessage(message: ChatMessage) {
+            this@createCardRendererHost.performMessageAction(MessageActionKind.QUOTE, message)
+        }
+
         override fun speakMessage(text: String) {
             this@createCardRendererHost.speakMessage(text)
         }

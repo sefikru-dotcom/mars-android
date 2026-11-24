@@ -20,6 +20,7 @@ enum class NavTarget {
     KANBAN,
     INSIGHTS,
     SPACES,
+    LOCAL,
     SETTINGS,
 }
 
@@ -44,6 +45,8 @@ enum class NavTarget {
  */
 enum class AppDestination(val key: String, val title: String) {
     CHAT("chat", "Чат"),
+    // Локальный чат — сразу за серверным: это второй режим того же действия.
+    LOCAL("local", "Локально"),
     TASKS("tasks", "Задачи"),
     KANBAN("kanban", "Канбан"),
     SCHEDULER("scheduler", "Планировщик"),
@@ -71,6 +74,7 @@ enum class AppDestination(val key: String, val title: String) {
         SKILLS -> NavTarget.SKILLS
         ANALYTICS -> NavTarget.INSIGHTS
         SPACES -> NavTarget.SPACES
+        LOCAL -> NavTarget.LOCAL
         SETTINGS -> NavTarget.SETTINGS
     }
 

@@ -122,6 +122,9 @@ internal fun ChatActivity.updateControls() {
     sendButton.imageTintList = ColorStateList.valueOf(MarsTheme.TEXT_STRONG)
     // Доступность: подпись кнопки соответствует ДЕЙСТВИЮ клика (stop/send), а не иконке.
     sendButton.contentDescription = ChatA11yPolicy.sendButtonDescription(active)
+    // Фон — тёмный ореол в ОБЕИХ фазах: звезда никогда не заливается ярко-красным кругом.
+    // В фазе ответа ореол плотнее и с акцентным кольцом ([MarsTheme.sendHaloBackground]).
+    sendButton.background = MarsTheme.sendHaloBackground(this, stopping = active)
     updateContextIndicator()
     updateLiveRunPlate()
     updateQuotePlate()

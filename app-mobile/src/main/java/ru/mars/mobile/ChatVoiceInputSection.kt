@@ -115,7 +115,7 @@ internal fun ChatActivity.startVoiceInput() {
         transcribing = voiceTranscribeJob?.isActive == true,
     )) {
         // Идёт распознавание уже записанного звука — второй записи не начинаем.
-        VoiceMicTapAction.IGNORE -> statusView.text = VOICE_TRANSCRIBING_STATUS
+        VoiceMicTapAction.IGNORE -> statusView.text = VOICE_MANUAL_THINKING_LABEL
         // Перебивание: звук глохнет сразу, ход НЕ отменяется (агент продолжает работу).
         VoiceMicTapAction.STOP_SPEECH -> bargeIn()
         VoiceMicTapAction.STOP_UTTERANCE -> {
@@ -164,7 +164,7 @@ internal fun ChatActivity.beginVoiceRecording() {
 internal fun ChatActivity.stopVoiceInputAndTranscribe() {
     // Распознавание уже идёт (в том числе начатое авто-стопом): второй раз не запускаем.
     if (voiceTranscribeJob?.isActive == true) {
-        statusView.text = VOICE_TRANSCRIBING_STATUS
+        statusView.text = VOICE_MANUAL_THINKING_LABEL
         return
     }
     voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -178,6 +178,9 @@ internal fun ChatActivity.stopVoiceInputAndTranscribe() {
         return
     }
     transcribeVoiceRecording(recording)
+    // Кнопка уходит из «Слушаю» в «Распознаю» сразу: микрофон уже закрыт, и держать красный
+    // «стоп» до первого ответа сети значило бы обещать запись, которой нет.
+    renderVoiceButton()
 }
 
 /**
@@ -191,7 +194,13 @@ internal fun ChatActivity.onVoiceAutoStopped(recording: Recording) {
     if (isFinishing || isDestroyed) return
     if (voiceSession.state != VoiceSessionController.State.LISTENING) return
     if (voiceTranscribeJob?.isActive == true) return
+    // Детектор тишины сам закрыл запись: момент «микрофон перестал слушать» человек должен
+    // почувствовать рукой и увидеть строкой статуса, а не догадываться, почему тишина.
+    voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    statusView.text = VOICE_MANUAL_THINKING_LABEL
     transcribeVoiceRecording(recording)
+    // Красная кнопка со «стопом» гаснет и меняет иконку на «…» тем же кадром.
+    renderVoiceButton()
 }
 
 /** Состояния цикла → строка статуса. Вызывается с главного потока. */
@@ -623,7 +632,8 @@ internal fun ChatActivity.transcribeVoiceRecording(recording: Recording) {
         voiceSession.onError(VOICE_NO_CREDENTIAL_STATUS)
         return
     }
-    statusView.text = VOICE_TRANSCRIBING_STATUS
+    // Микрофон уже закрыт, идёт распознавание — это и есть состояние «кнопка больше не слушает».
+    statusView.text = VOICE_MANUAL_THINKING_LABEL
     voiceTranscribeJob = lifecycleScope.launch {
         // credentialProvider обязателен: голый ChatRepository() отдал бы
         // Failure("No device credential"), не дойдя до сети.

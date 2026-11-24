@@ -72,18 +72,21 @@ class ContextRingView(context: Context) : View(context) {
 
     /**
      * Отрисовка по решению [ContextBudgetPolicy.pill]: процент, цвет порога,
-     * «Сжатие…» (дуга полная, в центре многоточие), невидимая пилюля — пусто.
+     * «Сжатие…» (дуга полная, в центре многоточие).
+     *
+     * Кольцо НИКОГДА не скрывается: оно живёт в кнопке-капсуле окна контекста внизу
+     * композера, и его исчезновение уносило бы с экрана сам вход в окно (пункт 3
+     * владельца). Пока замера нет — нейтральное кольцо с честным «0» (паритет с WebUI),
+     * а не пустое место.
      */
     fun render(pill: ContextPillView) {
-        if (!pill.visible) {
-            visibility = GONE
-            return
-        }
         visibility = VISIBLE
         val tone = when (pill.level) {
             ContextBudgetLevel.CRITICAL -> MarsTheme.STATUS_ERROR
             ContextBudgetLevel.WARNING -> MarsTheme.STATUS_WARNING
-            ContextBudgetLevel.NORMAL, null -> MarsTheme.STATUS_ONLINE
+            ContextBudgetLevel.NORMAL -> MarsTheme.STATUS_ONLINE
+            // Замера ещё нет: кольцо нейтральное, но на месте — кнопка контекста жива.
+            null -> MarsTheme.TEXT_MUTED
         }
         valuePaint.color = tone
         labelPaint.color = tone
@@ -96,9 +99,9 @@ class ContextRingView(context: Context) : View(context) {
             label = percent.toString()
         } else {
             fraction = 0f
-            label = null
+            label = "0"
         }
-        contentDescription = pill.contentDescription
+        contentDescription = pill.contentDescription ?: UNMEASURED_DESCRIPTION
         invalidate()
     }
 
@@ -131,5 +134,8 @@ class ContextRingView(context: Context) : View(context) {
         const val STROKE_SVG = 3f
         const val CENTER_SVG = 7.5f
         const val LABEL_SP = 8f
+
+        /** Описание нейтрального кольца, пока замера нет (кольцо видно всегда). */
+        const val UNMEASURED_DESCRIPTION = "Заполнение контекста ещё не измерено"
     }
 }

@@ -309,7 +309,7 @@ internal fun ChatActivity.buildDaySeparator(timestampMillis: Long): TextView = T
     text = MessageTimePolicy.dayLabel(timestampMillis, System.currentTimeMillis())
     textSize = 10.5f
     setTextColor(MarsTheme.TEXT_MUTED)
-    background = MarsTheme.pill(this@buildDaySeparator, MarsTheme.SURFACE_1, strokeColor = MarsTheme.BORDER_SUBTLE)
+    background = MarsTheme.pill(this@buildDaySeparator, MarsTheme.GLASS_CHIP, strokeColor = MarsTheme.BORDER_SUBTLE)
     setPadding(dp(10), dp(3), dp(10), dp(3))
     gravity = Gravity.CENTER
 }

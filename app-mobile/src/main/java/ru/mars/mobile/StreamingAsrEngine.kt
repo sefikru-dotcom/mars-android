@@ -218,6 +218,14 @@ class StreamingAsrEngine(
         }
     }
 
+    /**
+     * Новая реплика: свежий стрим.
+     *
+     * Подушка тишины (lead-in) в стрим здесь НЕ подаётся намеренно: её кладёт сам бэкенд
+     * ([SherpaAsrBackend.newStream]) — это свойство нативной модели (её sample rate и размер
+     * окна фич), а не движка. Так подушка не может удвоиться, не влияет на JVM-тесты с
+     * фейковым [AsrBackend] и остаётся в одном месте.
+     */
     private fun beginUtteranceLocked() {
         val b = backendOrCreate()
         b.newStream(config.hotwords)

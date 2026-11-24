@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Виджет «Марс — Панель управления и последний чат» (4x2, масштабируется 4x1..4x3).
+
+    Разметка собрана ТОЛЬКО из view, которые умеет RemoteViews (LinearLayout,
+    TextView, ImageView, ImageButton, View): всё остальное лаунчер молча выбросит.
+
+    Четыре полосы сверху вниз — четыре разных вопроса, на которые человек отвечает
+    с домашнего экрана, не открывая приложение:
+
+      1. ШАПКА: планета, «МАРС», пилюля текущей модели/режима (`widget_mars_model_badge`),
+         время последнего обновления и «Диалоги». Пилюля — тот же стеклянный чип, что и
+         нижняя полоса: она называет то, что реально отвечает, а не украшает шапку.
+      2. КОНТЕКСТ (`widget_mars_dialog`): имя последнего диалога и две строки последнего
+         ответа. Тап открывает ИМЕННО этот диалог — в его родном чате (серверном или
+         локальном), это решает провайдер по состоянию, а не разметка.
+      3. КОМПОЗЕР: капсула «Спросить Марс…» (клавиатура), микрофон (сразу диктовка),
+         живой голос Орба (полноэкранный разговор) и звезда нового чистого чата
+         в тёмном рубиновом ореоле.
+      4. ИНСТРУМЕНТЫ: четыре стеклянные пилюли в один тап — «Локально», «Задачи»,
+         «Память», «Музыка». Строгий обсидиановый стиль: единственный цвет — 8% белого
+         стекла и рубиновая грань карточки, никаких пёстрых заливок.
+
+    Высоты подобраны под ТРИ ячейки домашнего экрана (180dp в appwidget-provider):
+    четыре полосы физически не помещаются в две. Неподвижные строки занимают
+    12 (padding) + 20 (шапка) + 5 (линия) + 34 (композер) + 32 (пилюли) = 103dp,
+    остальное забирает блок диалога: он объявлен `0dp` + `layout_weight="1"`, поэтому
+    при сжатии виджета ужимается ПРЕВЬЮ, а не нижняя полоса действий. До этой правки
+    блок был `wrap_content`: сумма детей (~154dp) превышала окно хоста, и последняя
+    строка — «Быстрые инструменты» — уезжала за границу и не рисовалась вовсе.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_mars_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_mars_bg"
+    android:orientation="vertical"
+    android:paddingStart="10dp"
+    android:paddingTop="6dp"
+    android:paddingEnd="10dp"
+    android:paddingBottom="6dp">
+
+    <!-- ================= 1. Шапка: бренд, модель, время, диалоги ====================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:id="@+id/widget_mars_planet"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:contentDescription="@string/widget_mars_label"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_mars" />
+
+        <TextView
+            android:id="@+id/widget_mars_brand"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:letterSpacing="0.18"
+            android:maxLines="1"
+            android:text="@string/widget_mars_label"
+            android:textColor="@color/mars_accent_text"
+            android:textSize="10.5sp"
+            android:textStyle="bold" />
+
+        <!-- Пилюля модели/режима: «Claude Haiku 5.5», «gemini-3.8-flash» или «Локально». -->
+        <TextView
+            android:id="@+id/widget_mars_model_badge"
+            android:layout_width="wrap_content"
+            android:layout_height="20dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:maxWidth="104dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:text="@string/widget_mars_model_default"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10sp" />
+
+        <TextView
+            android:id="@+id/widget_mars_updated"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:gravity="end|center_vertical"
+            android:maxLines="1"
+            android:textColor="@color/mars_muted"
+            android:textSize="10sp" />
+
+        <TextView
+            android:id="@+id/widget_mars_sessions"
+            android:layout_width="wrap_content"
+            android:layout_height="20dp"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:gravity="center"
+            android:maxLines="1"
+            android:paddingStart="9dp"
+            android:paddingEnd="9dp"
+            android:text="@string/widget_mars_sessions"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10.5sp" />
+
+    </LinearLayout>
+
+    <!-- ============ 2. Блок последнего диалога: тап открывает именно его ============== -->
+    <!-- Гибкая строка: забирает всё, что осталось после шапки, линии, композера и пилюль.
+         Так дефицит высоты съедает превью ответа, а не кнопки действий. -->
+    <LinearLayout
+        android:id="@+id/widget_mars_dialog"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="3dp"
+        android:orientation="vertical">
+
+        <!-- Имя последнего активного диалога. -->
+        <TextView
+            android:id="@+id/widget_mars_session_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/widget_mars_state_default_title"
+            android:textColor="@color/mars_text_strong"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <!-- Превью последнего ответа агента: ровно две строки, дальше многоточие. -->
+        <TextView
+            android:id="@+id/widget_mars_snippet"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="1dp"
+            android:ellipsize="end"
+            android:lineSpacingExtra="0dp"
+            android:maxLines="2"
+            android:text="@string/widget_mars_state_default_snippet"
+            android:textColor="@color/mars_muted_on_glass"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+
+    <!-- Тонкая рубиновая линия: разделяет «состояние» и «действия» без второй карточки. -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="2dp"
+        android:layout_marginBottom="2dp"
+        android:background="@color/mars_accent_bg" />
+
+    <!-- ============= 3. Композер: ввод, диктовка, живой голос, новый чат ============== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_mars_input"
+            android:layout_width="0dp"
+            android:layout_height="34dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_input_pill"
+            android:ellipsize="end"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/widget_mars_compose_hint"
+            android:textColor="@color/mars_muted"
+            android:textSize="12sp" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_mic"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/widget_mars_action_btn"
+            android:contentDescription="@string/widget_mars_action_voice"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_mic"
+            android:tint="@color/mars_text_em" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_voice_mode"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginStart="5dp"
+            android:background="@drawable/widget_mars_action_btn"
+            android:contentDescription="@string/widget_mars_action_voice_mode"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_volume"
+            android:tint="@color/mars_text_em" />
+
+        <ImageButton
+            android:id="@+id/widget_mars_star"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginStart="5dp"
+            android:background="@drawable/widget_mars_star_btn"
+            android:contentDescription="@string/widget_mars_action_new_chat"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_send"
+            android:tint="@color/mars_accent_text" />
+
+    </LinearLayout>
+
+    <!-- ============ 4. Быстрые инструменты: четыре раздела в один тап ================= -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:baselineAligned="false"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_mars_chip_local"
+            android:layout_width="0dp"
+            android:layout_height="28dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="@string/widget_mars_chip_local"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10.5sp" />
+
+        <TextView
+            android:id="@+id/widget_mars_chip_tasks"
+            android:layout_width="0dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="@string/widget_mars_chip_tasks"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10.5sp" />
+
+        <TextView
+            android:id="@+id/widget_mars_chip_memory"
+            android:layout_width="0dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="@string/widget_mars_chip_memory"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10.5sp" />
+
+        <TextView
+            android:id="@+id/widget_mars_chip_music"
+            android:layout_width="0dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_mars_chip_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="@string/widget_mars_chip_music"
+            android:textColor="@color/mars_text_em"
+            android:textSize="10.5sp" />
+
+    </LinearLayout>
+
+</LinearLayout>

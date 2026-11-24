@@ -276,3 +276,83 @@ class SpeechQueue(
 - лимитер `api/tts` 2 с заменяется серверным продолжением; клиент уже терпит `429` одним повтором;
 - общий серверный нормализатор и `voice_mode` в `session.ready` читаются терпимо: появление
   ключей не требует выпуска клиента.
+
+## 5. PlusVibe — основной голос (18.11.2026)
+
+Живые замеры: `plusvibe-tts-live-20261118.md` в корне workspace. Ниже — как это легло в код.
+
+### 5.1 Маршрут платного синтеза: АСИНХРОННЫЙ
+
+`POST {root}/api/media/generate` → `GET {root}/api/media/jobs/{id}` → скачивание `resultUrls[0]`.
+
+- `root` — база провайдера без сегмента `/v1` (`PlusVibeMediaTtsClient.mediaRoot`);
+- `POST` может блокироваться 4–32 с: `readTimeout 180 с`, `callTimeout 200 с`;
+- `resultUrls` — публичные ссылки: ключ при скачивании НЕ отправляется;
+- `max_price_rub` уходит всегда (предохранитель, отказ бесплатный — `422 media_max_price_exceeded`);
+- текст режет клиент (`preparePrompt`, 4096 знаков по границе слова) — котировка длину не проверяет;
+- отмена корутины = `Call.cancel()`: перебивание не ждёт шаг опроса.
+
+Синхронный `POST /v1/audio/speech` (`OpenAiSpeechTtsClient`) оставлен ТОЛЬКО как эталон контракта
+и подмена в тестах: в живом замере 3 из 10 вызовов вернули обрезанный фрагмент фразы.
+
+### 5.2 Голоса
+
+`ServerTtsVoices.VOICE_DIALOG` = `plusvibe-alice` (ОСНОВНОЙ, ElevenLabs turbo, ≈4,9 ₽/мин),
+`natural-svetlana`, `natural-dmitry`, `natural-ava`, `plusvibe-onyx` (gpt-4o-mini-tts, ≈0,06 ₽/мин),
+`local-irina`. `ServerTtsVoices.DEFAULT_VOICE` = `plusvibe-alice` — он звучит, когда `voiceId == null`.
+
+Модель синтеза — поле профиля (`ServerTtsVoiceProfile.model`): голос `Alice` существует только
+внутри `elevenlabs-v4-tts`, `onyx` — внутри `gpt-4o-mini-tts`.
+
+### 5.3 Цепочка деградации (оба чата)
+
+```
+облако (PlusVibe → edge → /api/tts) → Piper (единый OfflineVoice) → платформа (объявленная подмена)
+```
+
+- `ServerTtsSpeechEngine(fallback = piper, lastResort = system, fallbackChannel = OFFLINE)`:
+  Piper не звучит, пока модель не скачана — поэтому платформа остаётся последним резервом;
+- `PreferOfflineEngine(offline = piper, fallback = serverTtsEngine)` в ОБОИХ чатах: выбран
+  локальный голос — говорит Piper, выбран сетевой — облако, отказ облака → Piper;
+- **единый Piper** — `ru.mars.mobile.tts.OfflineVoice` (один порт и один прогрев на процесс).
+  Экраны создают движки с `releasePort = false` / `ownsOfflinePort = false` и НЕ освобождают
+  порт в `onDestroy`: иначе закрытие одного чата гасило бы голос другого.
+
+### 5.4 Подмена голоса — обязательное событие
+
+`VoiceSubstitution(spoken, reason)` → `VoiceSubstitutionNotice.text(...)` → статусная строка:
+
+| Прозвучало | Текст |
+|---|---|
+| `OFFLINE` | «Облачный голос не ответил — читаю локальным голосом (Piper)» |
+| `CLOUD` | «Локальный голос не поднялся — читаю облачным голосом» |
+| `SYSTEM` | «Облачный голос недоступен, локальной модели нет — читаю системным голосом» |
+
+Серверный чат: `ChatActivity.showVoiceSubstitution` (движок + обёртка). Локальный чат:
+`LocalVoiceController(onVoiceSubstituted=…)` → `LocalVoiceButton` → `presenter.setNotice`.
+
+### 5.5 Какой профиль считается PlusVibe
+
+Платный голос уходит НЕ на сервер Марса, поэтому адрес и ключ обязаны принадлежать одному
+профилю PlusVibe — и именно НАСТРОЕННОМУ, а не активному.
+
+- `PlusVibeTtsProfile.select(state)` — политика выбора: активный профиль, если он сам PlusVibe,
+  иначе первый профиль PlusVibe в порядке хранения. Активный провайдер другого вендора
+  (Yeta, прокси) на выбор не влияет;
+- провайдер узнаётся по РЕГИСТРИРУЕМОМУ домену (`plusvibeapi.ru`, `api.plusvibe.ai`).
+  Подстрока в пути (`https://yeta.example/plusvibe`) и поддомен чужого домена
+  (`plusvibe.yeta.example`) PlusVibe не считаются — ключ туда не поедет;
+- `PlusVibeTtsAccess` собирает пару «адрес + ключ» ОДНИМ чтением профиля, `PlusVibeTtsClient`
+  присваивает её одним действием: ключ одного профиля не может уехать на адрес другого;
+- профиля нет — `no_plusvibe_profile`, ключа нет — `no_api_key`. Оба случая возвращаются ДО
+  сети, а не превращаются в запрос на первый попавшийся хост;
+- отказ платного голоса объявляется человеку (`onPaidUnavailable` в обоих чатах): фразу
+  прочитал нейро-резерв, и «Алиса» не звучала — это видно строкой статуса
+  (`VoiceSubstitutionNotice.paidUnavailable`).
+
+### 5.6 Незакрытые стыки
+
+- потоковая очередь фраз (`SpeechQueue`) НЕ имеет Piper-резерва: отказ облака на этом пути
+  пока пропускает фразу без звука и без события подмены;
+- локального кеша аудио нет (`resultsExpireAt` = 5 суток): каждая реплика синтезируется заново;
+- тембр ElevenLabs `Alice` проверен только обратным распознаванием, не на слух.

@@ -73,4 +73,89 @@ class PushTapRoutingTest {
         assertNull(PushTapRouting.sessionIdFromUrl("  "))
         assertNull(PushTapRouting.sessionIdFromUrl("mars://chat/session/   "))
     }
+
+    // --- tag-адрес сервера (`hermes-<sid>`) ---------------------------------------------
+
+    @Test
+    fun `session is recovered from the server tag`() {
+        // Сервер метит push диалога тегом `hermes-<sid>` (api/push_fcm.py): тег
+        // приходит даже тогда, когда в data нет ни session_id, ни url.
+        assertEquals("s-91", PushTapRouting.sessionIdFromTag("hermes-s-91"))
+        assertEquals("s-91", PushTapRouting.sessionIdFromTag("  hermes-s-91  "))
+    }
+
+    @Test
+    fun `test push tag is not an address`() {
+        // Тап по «проверке связи» не должен открывать несуществующий диалог.
+        assertNull(PushTapRouting.sessionIdFromTag("hermes-push-test"))
+    }
+
+    @Test
+    fun `tag without a usable tail yields no session`() {
+        assertNull(PushTapRouting.sessionIdFromTag("hermes-"))
+        assertNull(PushTapRouting.sessionIdFromTag("hermes-   "))
+        // Пробел и `/` в хвосте — склейка, а не id диалога.
+        assertNull(PushTapRouting.sessionIdFromTag("hermes-s 91"))
+        assertNull(PushTapRouting.sessionIdFromTag("hermes-a/b"))
+        // Чужой тег (например, тег хода/уведомления) адресатом не является.
+        assertNull(PushTapRouting.sessionIdFromTag("run-7"))
+        assertNull(PushTapRouting.sessionIdFromTag(null))
+        assertNull(PushTapRouting.sessionIdFromTag("   "))
+    }
+
+    // --- универсальный разбор интента ---------------------------------------------------
+
+    @Test
+    fun `extract prefers the explicit extra over every raw key`() {
+        assertEquals(
+            "explicit",
+            PushTapRouting.extractSessionId(
+                explicitExtra = "explicit",
+                sessionId = "sid",
+                url = "session/from-url",
+                tag = "hermes-from-tag",
+            ),
+        )
+    }
+
+    @Test
+    fun `extract falls back through session id, url and tag in order`() {
+        assertEquals(
+            "sid",
+            PushTapRouting.extractSessionId(
+                sessionId = "  sid  ",
+                url = "session/from-url",
+                tag = "hermes-from-tag",
+            ),
+        )
+        assertEquals(
+            "from-url",
+            PushTapRouting.extractSessionId(url = "session/from-url", tag = "hermes-from-tag"),
+        )
+        assertEquals("from-tag", PushTapRouting.extractSessionId(tag = "hermes-from-tag"))
+    }
+
+    @Test
+    fun `extract treats blank sources as absent`() {
+        // Пустой explicit extra не «перекрывает» рабочий url: иначе чат
+        // открывался бы по пустому ключу вместо адреса из payload.
+        assertEquals(
+            "from-url",
+            PushTapRouting.extractSessionId(
+                explicitExtra = "   ",
+                sessionId = "",
+                url = "mars://chat/session/from-url",
+                tag = "hermes-from-tag",
+            ),
+        )
+        assertNull(PushTapRouting.extractSessionId())
+        assertNull(
+            PushTapRouting.extractSessionId(
+                explicitExtra = "  ",
+                sessionId = "",
+                url = null,
+                tag = "hermes-push-test",
+            ),
+        )
+    }
 }

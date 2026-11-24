@@ -23,6 +23,9 @@ import ru.mars.network.model.PushNotificationSpec
  * - `notification_id` (если прислан числом) используется как есть; иначе id
  *   детерминированно выводится из tag → session_id → title+body, чтобы повтор
  *   того же события заменял прежнее уведомление.
+ * - адресат (`sessionId`) берётся из `session_id`, иначе из `url`
+ *   (`session/<sid>`), иначе из `tag` (`hermes-<sid>`) — сервер шлёт адрес
+ *   именно в таком виде, без отдельного ключа сессии.
  */
 object PushMessagePolicy {
 
@@ -81,17 +84,30 @@ object PushMessagePolicy {
         val kind = data[KEY_KIND]?.trim()?.lowercase().orEmpty()
         val channel = if (kind in HIGH_PRIORITY_KINDS) CHANNEL_CHAT else CHANNEL_GENERAL
 
+        val url = data[KEY_URL]?.trim()?.takeIf { it.isNotEmpty() }
+        val tag = data[KEY_TAG]?.trim()?.takeIf { it.isNotEmpty() }
+        // Адресат события, а не только поле `session_id`: сервер присылает
+        // {"url": "session/<sid>", "tag": "hermes-<sid>"} без отдельного ключа
+        // сессии. Пока spec.sessionId оставался null, foreground-уведомление
+        // теряло кнопку «Ответить» (PushReplyPolicy.canReply) и открывало новый
+        // чат вместо диалога, о котором сообщает.
+        val sessionId = PushTapRouting.extractSessionId(
+            sessionId = data[KEY_SESSION_ID],
+            url = url,
+            tag = tag,
+        )
+
         val notificationId = data[KEY_NOTIFICATION_ID]?.trim()?.toIntOrNull()
             ?: deriveNotificationId(data[KEY_TAG], data[KEY_SESSION_ID], title, body)
 
         return PushNotificationSpec(
             title = title ?: DEFAULT_TITLE,
             body = body.orEmpty(),
-            url = data[KEY_URL]?.trim()?.takeIf { it.isNotEmpty() },
-            tag = data[KEY_TAG]?.trim()?.takeIf { it.isNotEmpty() },
+            url = url,
+            tag = tag,
             channel = channel,
             notificationId = notificationId,
-            sessionId = data[KEY_SESSION_ID]?.trim()?.takeIf { it.isNotEmpty() },
+            sessionId = sessionId,
             kind = kind.takeIf { it.isNotEmpty() },
         )
     }

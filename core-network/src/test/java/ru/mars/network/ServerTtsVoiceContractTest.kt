@@ -5,11 +5,14 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ru.mars.network.model.ConsumedDeviceCredential
+import ru.mars.network.repository.OpenAiSpeechTtsClient
 import ru.mars.network.repository.ServerTtsContract
+import ru.mars.network.repository.ServerTtsPrefetchKeys
 import ru.mars.network.repository.ServerTtsRepository
 import ru.mars.network.repository.ServerTtsResult
 import ru.mars.network.repository.ServerTtsRetryPolicy
@@ -40,17 +43,86 @@ class ServerTtsVoiceContractTest {
     // --- профили --------------------------------------------------------------------------
 
     @Test
-    fun `natural svetlana is first in the voice dialog policy`() {
+    fun `plusvibe alice is the primary voice and svetlana is the first free fallback`() {
         assertEquals(
-            listOf("natural-svetlana", "local-irina"),
+            listOf(
+                "plusvibe-alice",
+                "natural-svetlana",
+                "natural-dmitry",
+                "natural-ava",
+                "plusvibe-onyx",
+                "plusvibe-larisa",
+                "plusvibe-kate",
+                "local-irina",
+            ),
             ServerTtsVoices.VOICE_DIALOG.map { it.id },
         )
-        val natural = ServerTtsVoices.VOICE_DIALOG.first()
-        assertTrue("естественный голос обязан быть помечен natural", natural.natural)
-        assertEquals("edge", natural.engine)
-        assertEquals("ru-RU-SvetlanaNeural", natural.voice)
-        assertEquals("+10%", natural.rate)
-        assertTrue("edge требует сети", natural.needsNetwork)
+        // Основной голос — платный PlusVibe: он идёт первым в переборе и он же дефолт.
+        val primary = ServerTtsVoices.VOICE_DIALOG.first()
+        assertTrue("основной голос обязан быть помечен natural", primary.natural)
+        assertEquals("plusvibe", primary.engine)
+        assertEquals("Alice", primary.voice)
+        assertEquals("elevenlabs-v4-tts", primary.model)
+        assertTrue("платный голос требует сети", primary.needsNetwork)
+        assertEquals(primary, ServerTtsVoices.DEFAULT_VOICE)
+
+        // Светлана остаётся первым БЕСПЛАТНЫМ голосом: если ключа провайдера нет, звучит она.
+        val svetlana = ServerTtsVoices.NATURAL_SVETLANA
+        assertEquals("edge", svetlana.engine)
+        assertEquals("ru-RU-SvetlanaNeural", svetlana.voice)
+        assertEquals("+8%", svetlana.rate)
+        assertEquals("+0Hz", svetlana.pitch)
+        assertEquals(1, ServerTtsVoices.VOICE_DIALOG.indexOf(svetlana))
+    }
+
+    @Test
+    fun `plusvibe onyx is the cheap paid profile and sits before the local reserve`() {
+        val onyx = ServerTtsVoices.byId("plusvibe-onyx")!!
+
+        // engine = "openai" — исторический маршрут платного канала, а не поле запроса /api/tts.
+        assertEquals("openai", onyx.engine)
+        assertEquals("onyx", onyx.voice)
+        // Модель живёт в профиле: голос `onyx` существует только внутри gpt-4o-mini-tts.
+        assertEquals("gpt-4o-mini-tts", onyx.model)
+        assertEquals("+5%", onyx.rate)
+        assertEquals("+0Hz", onyx.pitch)
+        assertTrue("платный голос — нейро-голос, а не резерв", onyx.natural)
+        assertTrue(onyx.needsNetwork)
+        assertFalse(onyx.isLocal)
+        // Перед локальным резервом и после основного PlusVibe и трёх edge-голосов.
+        assertEquals(4, ServerTtsVoices.VOICE_DIALOG.indexOf(onyx))
+        assertEquals(ServerTtsVoices.LOCAL_IRINA, ServerTtsVoices.VOICE_DIALOG.last())
+    }
+
+    @Test
+    fun `natural ava is the third distinct web voice`() {
+        val ava = ServerTtsVoices.byId("natural-ava")!!
+
+        assertEquals("edge", ava.engine)
+        assertEquals("en-US-AvaMultilingualNeural", ava.voice)
+        assertEquals("+5%", ava.rate)
+        assertTrue(ava.natural)
+        assertTrue(ava.needsNetwork)
+        // Семь сетевых профилей (четыре платных PlusVibe + три edge), восьмой — локальный резерв.
+        assertEquals(7, ServerTtsVoices.VOICE_DIALOG.count { it.needsNetwork })
+        assertEquals(
+            ServerTtsVoices.VOICE_DIALOG.map { it.voice }.distinct().size,
+            ServerTtsVoices.VOICE_DIALOG.size,
+        )
+    }
+
+    @Test
+    fun `natural dmitry is the second edge voice and still needs the network`() {
+        val dmitry = ServerTtsVoices.byId("natural-dmitry")!!
+
+        assertEquals("edge", dmitry.engine)
+        assertEquals("ru-RU-DmitryNeural", dmitry.voice)
+        assertEquals("+5%", dmitry.rate)
+        assertTrue("Dmitry — голос веба, а не резерв", dmitry.natural)
+        assertTrue("edge требует сети", dmitry.needsNetwork)
+        assertFalse(dmitry.isLocal)
+        // Третий в списке: перед ним основной PlusVibe и Светлана.
+        assertEquals(dmitry, ServerTtsVoices.VOICE_DIALOG[2])
     }
 
     @Test
@@ -71,13 +143,76 @@ class ServerTtsVoiceContractTest {
         assertNull(ServerTtsVoices.byId(null))
     }
 
+    // --- русские голоса из библиотеки провайдера ------------------------------------------
+    //
+    // Требование: в локальном чате должны быть РУССКИЕ тембры, а не британская `Alice`.
+    // Русские голоса у ElevenLabs живут только в библиотеке (`opts.voice_id`), поэтому
+    // профиль обязан нести id, а не имя из перечисления 21 голоса. Звучание на слух НЕ
+    // проверялось: здесь фиксируется контракт, а не качество.
+
+    @Test
+    fun `russian library voices travel by voice id and never by name`() {
+        val larisa = ServerTtsVoices.byId("plusvibe-larisa")!!
+        val kate = ServerTtsVoices.byId("plusvibe-kate")!!
+
+        assertEquals(ServerTtsVoices.LIBRARY_VOICE_LARISA, larisa.voiceId)
+        assertEquals("AB9XsbSA4eLG12t2myjN", larisa.voiceId)
+        assertEquals(ServerTtsVoices.LIBRARY_VOICE_KATE, kate.voiceId)
+        assertEquals("7G0NvIkWRnU0Dqjgz13p", kate.voiceId)
+        // Имя — только подпись: в перечислении 21 голоса таких имён нет.
+        assertEquals("Larisa", larisa.voice)
+        assertEquals("Kate", kate.voice)
+        // Модель и маршрут те же, что у основного платного голоса: media-контракт, не /api/tts.
+        assertEquals("elevenlabs-v4-tts", larisa.model)
+        assertEquals("plusvibe", larisa.engine)
+        assertEquals("plusvibe", kate.engine)
+        assertTrue(larisa.natural)
+        assertTrue(kate.natural)
+        // Платные и сетевые: бесплатным резервом они быть не могут.
+        assertFalse(larisa.isLocal)
+        assertTrue(larisa.needsNetwork)
+    }
+
+    @Test
+    fun `library voice carries a wait budget so a hung job does not silence the phrase`() {
+        val larisa = ServerTtsVoices.PLUSVIBE_LARISA
+
+        // Живой дефект канала: задача с `voice_id` не завершается вовсе. Бюджет обязан быть
+        // и обязан быть заметно меньше транспортного потолка клиента, иначе реплика молчит.
+        assertEquals(ServerTtsVoices.LIBRARY_VOICE_WAIT_BUDGET_MS, larisa.waitBudgetMs)
+        assertTrue(
+            "бюджет обязан быть короче транспортного потолка (90 с), иначе он бесполезен",
+            larisa.waitBudgetMs!! < 90_000L,
+        )
+        // Именованные голоса бюджета НЕ получают: их медленный, но живой ответ обрывать
+        // нельзя — это была бы двойная оплата за ту же фразу.
+        assertNull(ServerTtsVoices.PLUSVIBE_ALICE.waitBudgetMs)
+        assertNull(ServerTtsVoices.PLUSVIBE_ONYX.waitBudgetMs)
+        // Библиотечный голос никогда не становится дефолтом: он платный и пока нестабилен.
+        assertFalse(ServerTtsVoices.DEFAULT_VOICE === larisa)
+        assertEquals(ServerTtsVoices.PLUSVIBE_ALICE, ServerTtsVoices.DEFAULT_VOICE)
+    }
+
+    @Test
+    fun `library profile log tag prints the id that actually travels`() {
+        // В логе должно быть видно то, что уехало в запрос: имени `Larisa` в контракте нет.
+        assertEquals(
+            "plusvibe-larisa(plusvibe/AB9XsbSA4eLG12t2myjN)",
+            ServerTtsVoices.PLUSVIBE_LARISA.logTag,
+        )
+        assertEquals(
+            "plusvibe-alice(plusvibe/Alice)",
+            ServerTtsVoices.PLUSVIBE_ALICE.logTag,
+        )
+    }
+
     @Test
     fun `body carries engine and voice together`() {
         val request = ServerTtsSpeechRequest.of("привет", ServerTtsVoices.NATURAL_SVETLANA)
         val body = ServerTtsContract.buildBody(request)
 
         assertEquals(
-            "{\"text\":\"привет\",\"engine\":\"edge\",\"voice\":\"ru-RU-SvetlanaNeural\",\"rate\":\"+10%\"}",
+            "{\"text\":\"привет\",\"engine\":\"edge\",\"voice\":\"ru-RU-SvetlanaNeural\",\"rate\":\"+8%\",\"pitch\":\"+0Hz\"}",
             body,
         )
     }
@@ -321,5 +456,149 @@ class ServerTtsVoiceContractTest {
         val profile: ServerTtsVoiceProfile = ServerTtsVoices.NATURAL_SVETLANA
         assertEquals("natural-svetlana(edge/ru-RU-SvetlanaNeural)", profile.logTag)
         assertFalse(profile.logTag.contains("token"))
+    }
+
+    // --- Кэш предсинтеза: голос обязан входить в ключ ---------------------------------------
+    //
+    // Дефект: кэш индексировался ОДНИМ текстом, поэтому смена голоса посреди ответа оставляла
+    // остаток фраз прежним голосом. Проверяется чистая функция ключа — то есть ровно то, от
+    // чего зависит «фраза другого голоса не будет отдана как своя».
+
+    @Test
+    fun `prefetch key is bound to the voice that synthesized the phrase`() {
+        val dmitry = ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_DMITRY.id, "фраза")
+        val svetlana = ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_SVETLANA.id, "фраза")
+
+        assertNotEquals("фраза одного голоса не может быть отдана другому", dmitry, svetlana)
+        // Тот же голос и тот же текст — тот же ключ: повтор фразы (эхо, «Проверить») берёт
+        // готовое аудио, а не платит за второй синтез.
+        assertEquals(dmitry, ServerTtsPrefetchKeys.of(ServerTtsVoices.NATURAL_DMITRY.id, "фраза"))
+    }
+
+    @Test
+    fun `prefetch key does not collide when a voice id is glued to a text`() {
+        // Без разделителя `("a", "bc")` и `("ab", "c")` дали бы одну строку "abc".
+        assertNotEquals(
+            ServerTtsPrefetchKeys.of("a", "bc"),
+            ServerTtsPrefetchKeys.of("ab", "c"),
+        )
+    }
+
+    @Test
+    fun `no chosen voice is its own key and not the empty id`() {
+        val web = ServerTtsPrefetchKeys.of(null, "текст")
+
+        // «Как в вебе» — это ВЫБОР по умолчанию, а не отсутствие голоса: он не должен
+        // совпадать с ключом явно выбранного профиля.
+        assertNotEquals(web, ServerTtsPrefetchKeys.of(ServerTtsVoices.PLUSVIBE_ALICE.id, "текст"))
+        // Пустой id — то же самое, что «не выбрано»: два разных написания одного состояния.
+        assertEquals(web, ServerTtsPrefetchKeys.of("   ", "текст"))
+    }
+
+    // --- Платный облачный синтез: OpenAI-совместимый /v1/audio/speech ----------------------
+    //
+    // Контракт провайдера (проверен живым запросом к PlusVibe): модель `gpt-4o-mini-tts`,
+    // тело `model`/`input`/`voice`/`response_format`/`speed`(/`instructions`), ответ — mp3
+    // байтами. Без ключа запрос НЕ отправляется: иначе это 401 и лишняя пауза в речи.
+
+    @Test
+    fun `openai speech posts the contract body to audio speech with the provider key`() {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setHeader("Content-Type", "audio/mpeg")
+                    .setBody(okio.Buffer().write(byteArrayOf(1, 2, 3, 4))),
+            )
+            val client = OpenAiSpeechTtsClient(
+                baseUrlProvider = { server.url("/v1").toString() },
+                apiKeyProvider = { "sk-test" },
+            )
+
+            val result = runBlocking { client.synthesize("привет, Марс", "onyx", speed = 1.2f) }
+
+            assertTrue("200 с mp3 обязан дать аудио", result is ServerTtsResult.Audio)
+            assertEquals("audio/mpeg", (result as ServerTtsResult.Audio).contentType)
+            val request = server.takeRequest()
+            assertEquals("/v1/audio/speech", request.path)
+            assertEquals("Bearer sk-test", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body, body.contains("\"model\":\"gpt-4o-mini-tts\""))
+            assertTrue(body, body.contains("\"input\":\"привет, Марс\""))
+            assertTrue(body, body.contains("\"voice\":\"onyx\""))
+            assertTrue(body, body.contains("\"response_format\":\"mp3\""))
+            assertTrue(body, body.contains("\"speed\":1.2"))
+            assertTrue("манера чтения уезжает полем instructions", body.contains("\"instructions\":"))
+        }
+    }
+
+    @Test
+    fun `openai speech without a key never touches the network`() {
+        MockWebServer().use { server ->
+            val client = OpenAiSpeechTtsClient(
+                baseUrlProvider = { server.url("/v1").toString() },
+                apiKeyProvider = { "  " },
+            )
+
+            val result = runBlocking { client.synthesize("привет", "onyx") }
+
+            val unavailable = result as ServerTtsResult.Unavailable
+            assertEquals(OpenAiSpeechTtsClient.REASON_NO_KEY, unavailable.reason)
+            // Ключа нет — запрос гарантированно 401, поэтому он не отправляется вовсе.
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `openai speech maps a provider error to unavailable instead of throwing`() {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setResponseCode(400)
+                    .setHeader("Content-Type", "application/json")
+                    .setBody("{\"error\":\"The requested speech model is unavailable\"}"),
+            )
+            val client = OpenAiSpeechTtsClient(
+                baseUrlProvider = { server.url("/v1").toString() },
+                apiKeyProvider = { "sk-test" },
+            )
+
+            val result = runBlocking { client.synthesize("привет", "onyx") }
+
+            val unavailable = result as ServerTtsResult.Unavailable
+            assertEquals("http_400", unavailable.reason)
+            assertEquals(400, unavailable.httpCode)
+        }
+    }
+
+    @Test
+    fun `openai speech treats a 200 without bytes as unavailable`() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "audio/mpeg"))
+            val client = OpenAiSpeechTtsClient(
+                baseUrlProvider = { server.url("/v1").toString() },
+                apiKeyProvider = { "sk-test" },
+            )
+
+            val result = runBlocking { client.synthesize("привет", "onyx") }
+
+            assertEquals(
+                OpenAiSpeechTtsClient.REASON_EMPTY_AUDIO,
+                (result as ServerTtsResult.Unavailable).reason,
+            )
+        }
+    }
+
+    @Test
+    fun `openai speech clamps speed and drops empty instructions`() {
+        // Провайдер принимает 0.25..4.0: 9 и 0.01 — это 400 invalid speed, а причина отказа
+        // стала бы неотличима от зависания апстрима.
+        val fast = OpenAiSpeechTtsClient.buildBody("т", "onyx", speed = 9f, instructions = null)
+        assertTrue(fast, fast.contains("\"speed\":4.0"))
+        assertFalse("пустая манера чтения не уходит полем", fast.contains("instructions"))
+
+        val slow = OpenAiSpeechTtsClient.buildBody("т", "onyx", speed = 0.01f)
+        assertTrue(slow, slow.contains("\"speed\":0.25"))
+
+        val nan = OpenAiSpeechTtsClient.buildBody("т", "onyx", speed = Float.NaN)
+        assertTrue(nan, nan.contains("\"speed\":1.0"))
     }
 }

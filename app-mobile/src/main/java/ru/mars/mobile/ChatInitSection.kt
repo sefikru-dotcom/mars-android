@@ -47,6 +47,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.mars.mobile.offline.OfflineStores
+import ru.mars.mobile.widget.MarsQuickWidgetProvider
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy
+import ru.mars.mobile.widget.MarsWidgetActionsPolicy.WidgetAction
 import ru.mars.network.cache.SessionOfflineCache
 import ru.mars.network.credential.AndroidKeyStoreCredentialStore
 import ru.mars.network.model.ActiveTurnInfo
@@ -172,10 +175,10 @@ internal fun ChatActivity.initializeVoiceStack() {
                 runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
             },
         )
-        // Серверный TTS с прозрачным фолбэком на системный: контроллер видит один движок
-        // (serverTtsEngine), платформенный speechEngine остаётся путём деградации. Маршрут
-        // `/api/tts` открыт device-токену (`api/auth.py:121`), поэтому фолбэк — страховка на
-        // транспортные сбои и `429`, а не обход серверного запрета.
+        // Серверный TTS с прозрачным фолбэком на ЛОКАЛЬНУЮ модель: контроллер видит один
+        // движок (serverTtsEngine), платформенный speechEngine остаётся последним путём
+        // деградации. Маршрут `/api/tts` открыт device-токену (`api/auth.py:121`), поэтому
+        // фолбэк — страховка на транспортные сбои и `429`, а не обход серверного запрета.
         serverTtsPlayback = AndroidServerTtsPlayback(
             context = this,
             // Серверное аудио доиграло — тот же сигнал, что и у системного TTS.
@@ -183,25 +186,87 @@ internal fun ChatActivity.initializeVoiceStack() {
                 runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
             },
         )
+        // Платный голос — РЕАЛЬНЫЙ синтез PlusVibe по асинхронному контракту
+        // (`POST /api/media/generate` → поллинг задачи → скачивание). Адрес и ключ берутся у
+        // НАСТРОЕННОГО профиля PlusVibe, а не у активного: человек настраивает провайдера один
+        // раз, но активным у него может быть любой другой OpenAI-совместимый адрес, и ключ
+        // PlusVibe на чужой хост уходить не должен. Профиля нет — клиент отвечает «недоступно»
+        // (`no_plusvibe_profile`), и это видно человеку, а не превращается в тихую подмену.
+        val paidVoiceStore = ru.mars.mobile.LocalProviderPrefsStore(this)
+        val paidVoiceClient = PlusVibeTtsAccess(paidVoiceStore).client()
         // Одно знание о голосе на экран: и обычная озвучка ответа, и потоковая фразовая
         // идут через ОДИН селектор профилей. Раньше у них были разные экземпляры, и
         // успех/отказ piper в одном пути не был виден другому: каждая половина заново
         // проверяла один и тот же мёртвый профиль и заново получала 503.
         val voiceSelector = SpeechVoiceProfileSelector()
+        // ЕДИНЫЙ офлайн-резерв процесса ([OfflineVoice]): тот же порт, что у локального чата
+        // и у фонового сервиса. Второй экземпляр означал бы второй `AudioTrack` и два голоса
+        // одновременно. Порт не готов, пока модель не скачана — тогда резервом остаётся
+        // платформа, и подмена объявляется человеку (см. onVoiceSubstituted ниже).
+        //
+        // Порт нужен ДВУМ путям: движку готовой реплики (он говорит через порт) и потоковой
+        // очереди (ей нужны WAV-байты, чтобы порядок фраз держал её собственный плеер).
+        // Поэтому он берётся один раз и передаётся обоим — второй `OfflineVoice.port` был бы
+        // тем же объектом, но читался бы как «два резерва».
+        val offlinePort = ru.mars.mobile.tts.OfflineVoice.port(this)
+        val piperEngine: OfflineTtsSpeechEngine? = offlinePort
+            ?.let { port ->
+                OfflineTtsSpeechEngine(
+                    context = this,
+                    port = port,
+                    onSpeakingChanged = { speaking ->
+                        // Конец речи Piper — тот же сигнал, что у платформы и сервера:
+                        // иначе hands-free-цикл остался бы в SPEAKING навсегда.
+                        if (!speaking) {
+                            runOnUiThread { if (isVoiceOutputReady()) voiceOutput.notifySpeakingFinished() }
+                        }
+                    },
+                    // Порт принадлежит процессу: экран его не освобождает.
+                    releasePort = false,
+                )
+            }
+        // Прогрев в фоне: скачивание 21 МиБ не должно ждать первого «Озвучить».
+        lifecycleScope.launch { runCatching { ru.mars.mobile.tts.OfflineVoice.prepare(this@initializeVoiceStack) } }
         serverTtsEngine = ServerTtsSpeechEngine(
-            fallback = speechEngine,
+            fallback = piperEngine ?: speechEngine,
             client = RepositoryServerTtsClient(
                 baseUrl = ChatActivity.BASE_URL,
                 credentialProvider = { store.read() },
                 selector = voiceSelector,
+                // Темп берётся на КАЖДУЮ реплику: человек меняет его в шторке посреди
+                // диалога, и снимок, сделанный при сборке клиента, применился бы только
+                // после перезапуска экрана.
+                prosodyProvider = { voiceProsody },
+                paidClient = paidVoiceClient,
+                // Платный голос не прозвучал, и фразу прочитал нейро-резерв: молчаливая
+                // подмена запрещена — человек видит, что «Алиса» не зазвучала и почему.
+                onPaidUnavailable = { reason -> showPaidVoiceUnavailable(reason) },
             ),
             playback = serverTtsPlayback,
             scope = lifecycleScope,
             // Платформенного TTS нет, а серверное аудио зазвучало — вывод снова возможен.
             onServerAudioAvailable = { runOnUiThread { voiceOutput.onEngineReady(true) } },
+            // ЧЕМ именно заменён выбранный голос — знает только вызывающий.
+            fallbackChannel = if (piperEngine != null) VoiceChannel.OFFLINE else VoiceChannel.SYSTEM,
+            // Piper физически не звучит, пока модель не скачана (первый запуск). Последний
+            // резерв — платформа, и о нём человек узнаёт тем же событием подмены.
+            lastResort = if (piperEngine != null) speechEngine else null,
+            onVoiceSubstituted = { substitution -> showVoiceSubstitution(substitution) },
         )
+        // Выбор голоса (облако ↔ Piper) — одна модель: выбран локальный голос — говорит
+        // Piper, выбран сетевой — облако, а при его отказе фраза уходит Piper, а не роботу.
+        // Без этой обёртки «Озвучка: локальная модель» в серверном чате оставалась бы
+        // нерабочей: серверный движок всегда начинал с облака.
         voiceOutput = VoiceOutputController(
-            engine = serverTtsEngine,
+            engine = if (piperEngine != null) {
+                PreferOfflineEngine(
+                    offline = piperEngine,
+                    fallback = serverTtsEngine,
+                    onVoiceSubstituted = { substitution -> showVoiceSubstitution(substitution) },
+                )
+            } else {
+                serverTtsEngine
+            },
             autoSpeakInitially = voiceOutputPrefs.getBoolean(KEY_AUTO_SPEAK, false),
             onAutoSpeakChanged = { enabled -> voiceOutputPrefs.edit().putBoolean(KEY_AUTO_SPEAK, enabled).apply() },
         )
@@ -211,10 +276,29 @@ internal fun ChatActivity.initializeVoiceStack() {
         // serverTtsPlayback ей не годится.
         streamingSpeech = StreamingSpeechController.forAndroid(
             context = this,
-            client = RepositoryServerTtsClient(
-                baseUrl = ChatActivity.BASE_URL,
-                credentialProvider = { store.read() },
-                selector = voiceSelector,
+            // Резерв Piper для ПОТОКОВОЙ озвучки: очередь берёт байты, поэтому облачный отказ
+            // (429 лимитера, таймаут, битый поток) больше не даёт дырку посреди ответа —
+            // фразу читает локальная модель, а очередь продолжает держать порядок. Без модели
+            // на устройстве резерва нет, и отказ честно объявляется человеку.
+            client = ru.mars.mobile.tts.PiperFallbackTtsClient(
+                server = RepositoryServerTtsClient(
+                    baseUrl = ChatActivity.BASE_URL,
+                    credentialProvider = { store.read() },
+                    selector = voiceSelector,
+                    // Темп берётся на КАЖДУЮ реплику: человек меняет его в шторке посреди
+                    // диалога, и снимок, сделанный при сборке клиента, применился бы только
+                    // после перезапуска экрана.
+                    prosodyProvider = { voiceProsody },
+                    paidClient = paidVoiceClient,
+                    // Та же честность, что и у неразрывной озвучки: платный голос не
+                    // прозвучал — потоковая очередь тоже говорит об этом, а не подменяет
+                    // «Алису» Дмитрием молча.
+                    onPaidUnavailable = { reason -> showPaidVoiceUnavailable(reason) },
+                ),
+                piper = offlinePort,
+                // Подмена голоса и пропущенная фраза — события, о которых человек узнаёт.
+                onLocalFallback = { runOnUiThread { showStreamSpeechFallback() } },
+                onLocalFailure = { runOnUiThread { showStreamSpeechLocalFailure() } },
             ),
             scope = lifecycleScope,
             onFirstAudio = { runOnUiThread { onStreamSpeechStarted() } },
@@ -222,6 +306,9 @@ internal fun ChatActivity.initializeVoiceStack() {
             // Фраза реально пошла в динамик: цикл получает точный эталон эха именно для неё,
             // а не «весь ответ целиком» (будущий текст ещё не звучал).
             onPhraseStarted = { text -> runOnUiThread { onStreamSpeechPhraseStarted(text) } },
+            // Фраза не прозвучала вовсе: причина уходит в статус строкой, а не в лог.
+            // Без этого ответ «терял» кусок молча — неотличимо от забывчивости модели.
+            onPhraseFailed = { _, reason -> runOnUiThread { showStreamSpeechPhraseFailed(reason) } },
         )
         speechEngineInitResult?.let { available ->
             speechEngineInitResult = null
@@ -289,21 +376,40 @@ internal fun ChatActivity.initializeVoiceStack() {
         // Voice-input state machine: guards the capture session, delivers haptic feedback on
         // start/finish and routes results into the composer. Pure logic lives in the controller.
         voiceSession = VoiceSessionController(object : VoiceSessionController.Listener {
+            /**
+             * КАЖДЫЙ переход IDLE → LISTENING → PROCESSING → IDLE/ERROR обновляет строку
+             * статуса И кнопку микрофона одним вызовом [setStatus] (он же зовёт
+             * [renderVoiceButton]). Раньше одиночная запись не отражалась на кнопке вовсе:
+             * человек нажимал микрофон и не видел, что запись пошла, а подсказка «Слушаю…»
+             * затиралась первым же обычным статусом чата.
+             */
+            override fun onStateChanged(state: VoiceSessionController.State) {
+                setStatus()
+            }
+
             override fun onListeningStarted() {
+                // Микрофон открылся: тактильный отклик + ярко-красная кнопка со «стопом» и
+                // подсказка «Слушаю — говорите…» тем же кадром (setStatus рисует оба).
                 voiceBtn?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                statusView.text = VOICE_LISTENING_STATUS
+                setStatus()
             }
 
             override fun onResult(text: String) {
                 // O7: диктовка — действие пользователя, а не программная перезапись.
                 setComposerTextProgrammatically(text, TextApplyOrigin.VOICE_INPUT)
                 input.setSelection(text.length)
+                // Распознавание доехало: короткий отклик подтверждает, что текст уже в поле
+                // (кнопка к этому моменту гаснет — микрофон больше не слушает).
+                voiceBtn?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 // The user explicitly spoke — arm reading of this turn's completed answer.
                 voiceOutput.armSpeakNextAnswer()
             }
 
             override fun onError(message: String) {
+                // Причина (пустая запись, отказ сети, нет привязки) остаётся на виду, а кнопка
+                // уже погашена переходом в ERROR: «красная, хотя микрофон закрыт» не бывает.
                 statusView.text = message
+                renderVoiceButton()
             }
         })
 }
@@ -423,12 +529,19 @@ internal fun ChatActivity.resumeChat() {
             workspaceSelection.reloadFromStorage()
             updateWorkspaceButton()
         }
+        // Виджет: возврат на экран — состояние могло измениться, пока экран был в фоне
+        // (другой экран приложения, переименование диалога, сжатие контекста).
+        syncWidgetState()
 }
 
 /** Уход в фон: черновик, стоп озвучки, стоп hands-free. */
 internal fun ChatActivity.pauseChat() {
         // Черновик текущего диалога сохраняется до потери фокуса/пересоздания экрана.
         persistComposerDraft()
+        // Виджет рабочего стола: уход в фон — точка, где последний ответ агента уже точно
+        // лежит в транскрипте, а обновление виджета не стоит ничего живому стриму
+        // (на каждом SSE-кадре это был бы IPC в процесс лаунчера).
+        syncWidgetState()
         // Экран скрыт: озвучка останавливается и в фоне ответы не читаются.
         if (isVoiceOutputReady()) voiceOutput.onPause()
         /*
@@ -454,3 +567,102 @@ internal fun ChatActivity.handleVoicePermissionResult(requestCode: Int, grantRes
     }
     if (granted) beginVoiceRecording() else statusView.text = VOICE_PERMISSION_DENIED_STATUS
 }
+
+// --- Виджеты рабочего стола (волна 17) -------------------------------------------------------
+
+/**
+ * Действие виджета, с которым открыли экран чата.
+ *
+ * Контракт extra — [MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION] (чистая JVM-политика):
+ * `compose` — фокус в поле ввода и клавиатура, `voice` — сразу диктовка, `new_chat` —
+ * чистый диалог. Виджет и экран живут в РАЗНЫХ процессах (лаунчер / приложение), поэтому
+ * значение приходит строкой из интента, а не вызовом метода, и маршрутизируется здесь
+ * единственной точкой.
+ *
+ * Порядок важен: для `new_chat` сначала сбрасывается диалог ([startNewChat]), и только
+ * потом поднимается клавиатура — иначе фокус достался бы полю, которое следующий же кадр
+ * очистит, и человек увидел бы, что клавиатура «мигнула и пропала».
+ */
+internal fun ChatActivity.applyWidgetAction(rawAction: String?) {
+    when (MarsWidgetActionsPolicy.actionFor(rawAction)) {
+        WidgetAction.NEW_CHAT -> {
+            startNewChat()
+            focusComposerFromWidget()
+        }
+        WidgetAction.COMPOSE -> focusComposerFromWidget()
+        // Голос: запуск записи — после того как поле ввода реально построено и получило
+        // фокус (startVoiceInput читает состояние микрофона и пишет в поле распознанный
+        // текст). post() гарантирует, что это произойдёт уже на готовом экране.
+        WidgetAction.VOICE -> if (isInputReady()) {
+            input.post {
+                if (isFinishing || isDestroyed) return@post
+                startVoiceInput()
+            }
+        }
+        WidgetAction.NONE -> Unit
+    }
+}
+
+/**
+ * Прочитать действие виджета из интента и СРАЗУ его снять.
+ *
+ * Одноразовость — не косметика: интент переживает пересоздание экрана (поворот, смена
+ * темы, возврат из фона), и оставленный `new_chat` сработал бы повторно, стерев открытый
+ * диалог. Плюс `removeExtra` не даёт повторно применить действие, если интент пришёл
+ * ещё раз тем же объектом (onNewIntent).
+ */
+internal fun ChatActivity.consumeWidgetAction(): String? {
+    val action = intent?.getStringExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION) ?: return null
+    intent?.removeExtra(MarsWidgetActionsPolicy.EXTRA_WIDGET_ACTION)
+    return action
+}
+
+/**
+ * Фокус в поле ввода + клавиатура (`SHOW_IMPLICIT`).
+ *
+ * `showSoftInput` вызывается из `post`: сразу после `startActivity` окно ещё не имеет
+ * фокуса, и запрос IME молча теряется — человек тапает «Спросить Марс…» и не видит
+ * клавиатуры. Отложенный вызов выполняется уже после первого layout'а.
+ */
+internal fun ChatActivity.focusComposerFromWidget() {
+    if (!isInputReady()) return
+    input.requestFocus()
+    input.post {
+        if (isFinishing || isDestroyed) return@post
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return@post
+        imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+    }
+}
+
+/**
+ * Сохранить живое состояние для виджета рабочего стола и перерисовать его.
+ *
+ * Пишем ровно то, что виджет показывает: адресат тапа (sessionId), имя диалога и последний
+ * ответ агента. Вызывается из точек, где состояние экрана действительно изменилось —
+ * смена диалога, конец хода, уход экрана в фон, — а НЕ на каждом SSE-кадре: обновление
+ * виджета это IPC в процесс лаунчера, и вызов на токен стоил бы дороже самого стрима.
+ */
+internal fun ChatActivity.syncWidgetState() {
+    if (isFinishing || isDestroyed) return
+    // Выход из авторизации: подпись последнего диалога не должна пережить logout —
+    // виджет на домашнем экране видит любой, кто взял телефон в руки.
+    if (isCredentialStoreReady() && store.read() == null) {
+        MarsQuickWidgetProvider.publishState(this, sessionId = null, sessionTitle = null, lastSnippet = null)
+        return
+    }
+    val sessionId = currentSessionId
+    // Имя: живой заголовок шапки (SSE-кадр `title`), иначе строка списка диалогов — у
+    // только что открытого чата заголовок может прийти позже первого кадра.
+    val title = uiState.sessionTitle?.takeIf { it.isNotBlank() }
+        ?: sessionId?.let { id -> uiState.sessions.firstOrNull { it.id == id }?.title }
+    val modelLabel = runCatching { modelSelection.buttonLabel() }.getOrNull()
+    MarsQuickWidgetProvider.publishState(
+        context = this,
+        sessionId = sessionId,
+        sessionTitle = title,
+        lastSnippet = if (isMessagesReady()) uiState.lastAssistantText() else "",
+        modelLabel = modelLabel,
+        isLocal = false,
+    )
+}
+

@@ -3,10 +3,10 @@ package ru.mars.mobile
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.method.LinkMovementMethod
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextPaint
+import android.text.method.LinkMovementMethod
 import android.text.style.*
 import android.view.Gravity
 import android.view.View
@@ -58,11 +58,15 @@ object ChatMarkdownRenderer {
                 is MarkdownUnit.Line -> {
                     val line = unit.line
                     val tv = TextView(context).apply {
-                        movementMethod = LinkMovementMethod.getInstance()
+                        // Движок выделения ставит сам setTextIsSelectable(true) — уже ПОСЛЕ
+                        // текста (см. ниже): голый LinkMovementMethod здесь блокировал
+                        // выделение ползунками, а setText(...) после setTextIsSelectable
+                        // сбрасывает MovementMethod.
                         setTextColor(if (user) MarsTheme.TEXT_STRONG else MarsTheme.TEXT)
                         textSize = 15f
-                        setPadding(0, dp(2), 0, dp(2))
-                        setLineSpacing(dp(2).toFloat(), 1f)
+                        // Воздух между абзацами: раньше строки склеивались в сплошное полотно.
+                        setPadding(0, dp(3), 0, dp(3))
+                        setLineSpacing(dp(3).toFloat(), 1.08f)
                     }
                     val ssb = SpannableStringBuilder()
                     // Флаги построения: цитата добавляется обёрткой (бар + текст),
@@ -160,8 +164,12 @@ object ChatMarkdownRenderer {
                             )
                         }
                     }
+                    val hasLinks = ssb.getSpans(0, ssb.length, ClickableSpan::class.java).isNotEmpty()
                     tv.text = ssb
                     if (skipTv) continue
+                    // Нативное выделение строки/слова ползунками Android с системной
+                    // плашкой «Копировать / Выбрать всё» (см. enableSelection).
+                    tv.enableSelection(hasLinks)
                     if (quoteLine) {
                         parent.addView(quoteRow(context, tv))
                     } else {
@@ -203,14 +211,18 @@ object ChatMarkdownRenderer {
                     }
                     bar.addView(copyCodeBtn, LinearLayout.LayoutParams(dp(28), dp(28)))
                     box.addView(bar)
+                    // Код тоже выделяется построчно/пословно: setTextIsSelectable — после
+                    // присвоения text, highlightColor — рубиновый полупрозрачный ACCENT_BG.
+                    val codeText = TextView(context).apply {
+                        text = view.visibleCode
+                        setTextColor(MarsTheme.TEXT)
+                        typeface = Typeface.MONOSPACE
+                        textSize = 13f
+                        setPadding(0, dp(4), dp(16), dp(8))
+                        enableSelection(hasLinks = false)
+                    }
                     box.addView(HorizontalScrollView(context).apply {
-                        addView(TextView(context).apply {
-                            text = view.visibleCode
-                            setTextColor(MarsTheme.TEXT)
-                            typeface = Typeface.MONOSPACE
-                            textSize = 13f
-                            setPadding(0, dp(4), dp(16), dp(8))
-                        })
+                        addView(codeText)
                     })
                     // Long listings are collapsed by default; the toggle flips the state.
                     val toggleLabel = view.toggleLabel
@@ -255,10 +267,12 @@ object ChatMarkdownRenderer {
                         TableRow(context).apply {
                             if (header) setBackgroundColor(MarsTheme.SURFACE_SUBTLE)
                             cells.forEach { spans ->
+                                val cellText = SpannableStringBuilder()
+                                appendInlineSpans(cellText, spans, openImage, openUrl)
                                 val cell = TextView(context).apply {
-                                    movementMethod = LinkMovementMethod.getInstance()
+                                    text = cellText
                                     textSize = 13f
-                                    setLineSpacing(dp(2).toFloat(), 1f)
+                                    setLineSpacing(dp(2).toFloat(), 1.08f)
                                     setPadding(dp(12), dp(8), dp(12), dp(8))
                                     if (header) {
                                         setTextColor(MarsTheme.TEXT_STRONG)
@@ -266,9 +280,11 @@ object ChatMarkdownRenderer {
                                     } else {
                                         setTextColor(MarsTheme.TEXT)
                                     }
-                                    val cellText = SpannableStringBuilder()
-                                    appendInlineSpans(cellText, spans, openImage, openUrl)
-                                    text = cellText
+                                    // Ячейку можно выделить и скопировать отдельно:
+                                    // setTextIsSelectable — строго после text (см. enableSelection).
+                                    enableSelection(
+                                        cellText.getSpans(0, cellText.length, ClickableSpan::class.java).isNotEmpty()
+                                    )
                                 }
                                 addView(cell)
                             }
@@ -281,6 +297,28 @@ object ChatMarkdownRenderer {
             }
         }
         state.units = units
+    }
+
+    /**
+     * Нативное выделение текста ползунками + рабочие ссылки.
+     *
+     * Порядок жёсткий и проверен по AOSP [android.widget.TextView]:
+     * 1) `setText` при `isTextSelectable` сам ставит ArrowKeyMovementMethod, поэтому любой
+     *    `text = …` ПОСЛЕ настройки выделения сбрасывает MovementMethod — сначала текст;
+     * 2) `setTextIsSelectable(true)` включает выделение ползунками, долгое нажатие на
+     *    слово/строку и системную плашку «Копировать / Выбрать всё»;
+     * 3) если в строке есть [ClickableSpan]-ссылки, MovementMethod возвращается на
+     *    LinkMovementMethod: встроенная ветка TextView.onTouchEvent, открывающая ссылку
+     *    по тапу, работает только при `mAutoLinkMask != 0`, а ссылки у нас — спаны.
+     *    Выделению это не мешает: `Editor.mSelectionControllerEnabled` зависит от
+     *    `isTextSelectable()`, а не от MovementMethod.
+     *
+     * Подсветка выделения — рубиновый полупрозрачный [MarsTheme.ACCENT_BG].
+     */
+    private fun TextView.enableSelection(hasLinks: Boolean) {
+        setTextIsSelectable(true)
+        highlightColor = MarsTheme.ACCENT_BG
+        if (hasLinks) movementMethod = LinkMovementMethod.getInstance()
     }
 
     /**

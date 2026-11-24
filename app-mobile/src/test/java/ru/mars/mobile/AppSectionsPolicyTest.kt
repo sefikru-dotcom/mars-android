@@ -17,7 +17,7 @@ class AppSectionsPolicyTest {
         assertEquals(AppDestination.entries, AppSectionsPolicy.sections)
         assertEquals(AppDestination.CHAT, AppSectionsPolicy.sections.first())
         assertEquals(AppDestination.SETTINGS, AppSectionsPolicy.sections.last())
-        assertEquals(11, AppSectionsPolicy.sections.size)
+        assertEquals(12, AppSectionsPolicy.sections.size)
     }
 
     @Test
