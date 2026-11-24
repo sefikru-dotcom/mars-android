@@ -2,6 +2,7 @@ package ru.mars.mobile
 
 import android.content.res.ColorStateList
 import android.view.Gravity
+import android.view.View
 import android.widget.ImageButton
 import android.widget.TextView
 import androidx.lifecycle.lifecycleScope
@@ -34,7 +35,7 @@ internal fun MusicActivity.loadFavorites() {
                     setPadding(0, dp(32), 0, dp(32))
                 })
             } else {
-                showTracks(favs)
+                showTracks(favs, header = favoritesShareRow())
             }
         }.onFailure {
             tracks = emptyList()
@@ -42,6 +43,26 @@ internal fun MusicActivity.loadFavorites() {
             showStatus("Избранное недоступно")
         }
     }
+}
+
+/**
+ * Строка «Поделиться избранным» над списком: экспорт в m3u8 через системный шаринг
+ * ([shareFavoritesM3u8]). Показывается только при непустом избранном — делиться нечем
+ * значит и кнопка не нужна.
+ */
+internal fun MusicActivity.favoritesShareRow(): View = TextView(this).apply {
+    text = getString(R.string.music_favorites_share)
+    textSize = 13f
+    setTextColor(MarsTheme.ACCENT_TEXT)
+    typeface = android.graphics.Typeface.DEFAULT_BOLD
+    gravity = Gravity.CENTER
+    setPadding(dp(14), dp(10), dp(14), dp(10))
+    background = MarsTheme.button(this@favoritesShareRow, MarsTheme.ACCENT_BG, 10, MarsTheme.ACCENT)
+    isClickable = true
+    isFocusable = true
+    contentDescription = getString(R.string.music_favorites_share)
+    setOnClickListener { shareFavoritesM3u8() }
+    layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }
 }
 
 /** Prefetches favorite ids so hearts render filled on the charts/search rows. */
