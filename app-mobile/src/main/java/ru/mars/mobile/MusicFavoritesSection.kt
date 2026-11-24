@@ -62,7 +62,6 @@ internal fun MusicActivity.favoritesShareRow(): View = TextView(this).apply {
     isFocusable = true
     contentDescription = getString(R.string.music_favorites_share)
     setOnClickListener { shareFavoritesM3u8() }
-    layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }
 }
 
 /** Prefetches favorite ids so hearts render filled on the charts/search rows. */
