@@ -204,6 +204,13 @@ class OfflineTtsModel(
      *   не опознан как int8-модель либо ФС не дала удалить.
      */
     fun purgeLegacyModel(): Boolean {
+        // Валидность id проверяется ДО вопроса «существует ли путь»: с id вида `../evil`
+        // путь идёт через несуществующий каталог, и на Linux/Android `exists()` вернёт false —
+        // ранний `return true` отвечал бы «удалено успешно» на недопустимый id.
+        if (!isAcceptableLegacyId(legacy.id)) {
+            log("legacy tts id is not acceptable, keeping: ${legacy.id}")
+            return false
+        }
         val dir = legacyModelDir
         if (!dir.exists()) return true
         if (!isLegacyModelDir(dir)) {
@@ -218,6 +225,11 @@ class OfflineTtsModel(
         }
         return removed
     }
+
+    /** Id старой модели допустим: непустой, без разделителей и `..`, и не имя текущей модели. */
+    private fun isAcceptableLegacyId(id: String): Boolean =
+        id.isNotBlank() && id != OfflineTtsManifest.MODEL_ID &&
+            !id.contains('/') && !id.contains('\\') && !id.contains("..")
 
     /**
      * Каталог — это именно та int8-модель, которую ставили прежние версии.
@@ -236,8 +248,7 @@ class OfflineTtsModel(
      */
     private fun isLegacyModelDir(dir: File): Boolean {
         val id = legacy.id
-        if (id.isBlank() || id == OfflineTtsManifest.MODEL_ID) return false
-        if (id.contains('/') || id.contains('\\') || id.contains("..")) return false
+        if (!isAcceptableLegacyId(id)) return false
         if (!dir.isDirectory) return false
         if (Files.isSymbolicLink(dir.toPath())) return false
 
