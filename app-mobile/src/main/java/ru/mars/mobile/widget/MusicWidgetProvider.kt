@@ -1,5 +1,6 @@
 package ru.mars.mobile.widget
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
@@ -239,6 +240,9 @@ internal object MusicWidgetHost {
         )
 
     /** Тап по обложке/тексту открывает сам экран музыки. */
+    // TAP_INTENT_FLAGS mirrors Intent.FLAG_ACTIVITY_* (framework-free policy, JVM-testable);
+    // suppressed exactly like MarsMusicService.buildNotification does for the same constant.
+    @SuppressLint("WrongConstant")
     private fun openPlayerIntent(context: Context): PendingIntent =
         PendingIntent.getActivity(
             context,

@@ -30,6 +30,7 @@
     строка — «Быстрые инструменты» — уезжала за границу и не рисовалась вовсе.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/widget_mars_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -151,13 +152,18 @@
 
     </LinearLayout>
 
-    <!-- Тонкая рубиновая линия: разделяет «состояние» и «действия» без второй карточки. -->
-    <View
+    <!-- Тонкая рубиновая линия: разделяет «состояние» и «действия» без второй карточки.
+         ImageView, а не View: голый View не входит в набор классов RemoteViews — лаунчер
+         не надует виджет. Линию рисует src, contentDescription пуст: разделитель не озвучивается. -->
+    <ImageView
         android:layout_width="match_parent"
         android:layout_height="1dp"
         android:layout_marginTop="2dp"
         android:layout_marginBottom="2dp"
-        android:background="@color/mars_accent_bg" />
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@color/mars_accent_bg"
+        tools:ignore="ContentDescription" />
 
     <!-- ============= 3. Композер: ввод, диктовка, живой голос, новый чат ============== -->
     <LinearLayout
@@ -192,7 +198,8 @@
             android:padding="8dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_mic"
-            android:tint="@color/mars_text_em" />
+            android:tint="@color/mars_text_em"
+        tools:ignore="UseAppTint" />
 
         <ImageButton
             android:id="@+id/widget_mars_voice_mode"
@@ -204,7 +211,8 @@
             android:padding="8dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_volume"
-            android:tint="@color/mars_text_em" />
+            android:tint="@color/mars_text_em"
+        tools:ignore="UseAppTint" />
 
         <ImageButton
             android:id="@+id/widget_mars_star"
@@ -216,7 +224,8 @@
             android:padding="8dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_send"
-            android:tint="@color/mars_accent_text" />
+            android:tint="@color/mars_accent_text"
+        tools:ignore="UseAppTint" />
 
     </LinearLayout>
 

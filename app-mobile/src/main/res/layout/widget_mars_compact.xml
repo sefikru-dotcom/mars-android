@@ -17,6 +17,7 @@
     кнопка не уезжает за границу.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/widget_compact_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -63,7 +64,8 @@
         android:padding="7dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_mic"
-        android:tint="@color/mars_text_em" />
+        android:tint="@color/mars_text_em"
+        tools:ignore="UseAppTint" />
 
     <!-- Живой разговор с Орбом: тап открывает полноэкранный голосовой режим сразу. -->
     <ImageButton
@@ -76,7 +78,8 @@
         android:padding="7dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_volume"
-        android:tint="@color/mars_text_em" />
+        android:tint="@color/mars_text_em"
+        tools:ignore="UseAppTint" />
 
     <ImageButton
         android:id="@+id/widget_compact_star"
@@ -88,6 +91,7 @@
         android:padding="7dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_send"
-        android:tint="@color/mars_accent_text" />
+        android:tint="@color/mars_accent_text"
+        tools:ignore="UseAppTint" />
 
 </LinearLayout>
